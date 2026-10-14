@@ -480,7 +480,7 @@ WHERE t.server_id = $1;";
     /// requires every swallowing catch there to record a failure, which is right for a read that leaves a fact empty and
     /// wrong for one that falls back to a read that is whole.</para>
     /// </summary>
-    public static async Task<List<DateOnly>> ReadBuiltDaysAsync(
+    public static async Task<List<PlanRegressionDaily.BuiltDay>> ReadBuiltDaysAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction? transaction,
         int serverId,
@@ -490,7 +490,7 @@ WHERE t.server_id = $1;";
         Func<Exception, bool> isExpectedAbandon,
         CancellationToken cancellationToken)
     {
-        var days = new List<DateOnly>();
+        var days = new List<PlanRegressionDaily.BuiltDay>();
         try
         {
             await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
@@ -499,7 +499,8 @@ WHERE t.server_id = $1;";
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                days.Add(reader.GetFieldValue<DateOnly>(0));
+                days.Add(new PlanRegressionDaily.BuiltDay(
+                    reader.GetFieldValue<DateOnly>(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1)));
             }
 
             return days;
@@ -510,7 +511,7 @@ WHERE t.server_id = $1;";
                 ex,
                 "PLAN_REGRESSION built-days read failed for server {ServerId}; reading the interval table on its exact bounds",
                 serverId);
-            return new List<DateOnly>();
+            return new List<PlanRegressionDaily.BuiltDay>();
         }
     }
 

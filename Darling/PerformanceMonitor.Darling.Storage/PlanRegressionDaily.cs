@@ -55,10 +55,23 @@ public static class PlanRegressionDaily
     /// for T-16 has its first execution on T-17).</summary>
     public const int MarkLateWindowDays = WindowDays + 2;
 
+    /// <summary>The open days (newer than <see cref="ClosedDayLagDays"/>) are built too, as partial days (#5812): a build covers
+    /// the rows whose <c>first_execution_time</c> is below its watermark, <c>built_through</c>, which is this many hours before
+    /// the current hour by the store's clock. It sits one hour under the bound of V184's trigger (one hour before the current
+    /// hour), so a write whose transaction began up to an hour before a build still marks the day it changes, and the
+    /// interval that has just ended, which the collector still writes, stays above the watermark and in the live half.</summary>
+    public const int PartialWatermarkLagHours = 2;
+
+    /// <summary>The newest day the builder builds, in days after today: tomorrow, so a row of a server whose clock runs ahead,
+    /// dated tomorrow with a first execution below the watermark, is in a built day and the live half of the read can start at
+    /// the watermark (#5812). An interval spans at most a day, so no row dated later can start below it.</summary>
+    public const int NewestBuiltDayAhead = 1;
+
     /// <summary>
     /// Builds one closed day of one server's totals: the plan-level aggregate PLAN_REGRESSION's
     /// <c>plan_agg</c> step computes, summed rather than divided so days recombine exactly. $1 server_id (integer),
-    /// $2 the day D (date), $3 D + 1 day (timestamp), $4 D - 1 day (timestamp). Returns the number of rows inserted,
+    /// $2 the day D (date), $3 D + 1 day (timestamp), $4 D - 1 day (timestamp), $5 the watermark (timestamp, the
+    /// <c>built_through</c> the build is stamped with: D + 1 day for a whole day, less for a partial one, #5812). Returns the number of rows inserted,
     /// which the builder records as <c>source_rows</c>. The caller deletes the day's rows first, in the same
     /// transaction (the unique index would refuse a second build of a day).
     ///
@@ -96,6 +109,7 @@ WITH built AS
     WHERE l.server_id = $1::integer
     AND   l.first_execution_time >= $4::timestamp
     AND   l.first_execution_time < $3::timestamp
+    AND   l.first_execution_time < $5::timestamp
     AND   l.last_execution_time >= $2::date
     AND   l.last_execution_time < $3::timestamp
     AND   l.collection_time >= $4::timestamp
@@ -130,22 +144,25 @@ VALUES ($1::integer, $2::date)
 ON CONFLICT (server_id, day) DO NOTHING;";
 
     /// <summary>The day's <c>late_seq</c> as the builder sees it before it aggregates: the value the build is stamped with
-    /// (<c>built_seq</c>), so a late apply that lands during the build leaves the day invalid and it is rebuilt. $1 server_id,
-    /// $2 day.</summary>
-    public const string SeqSql = @"
-SELECT late_seq
+    /// (<c>built_seq</c>), so a late apply that lands during the build leaves the day invalid and it is rebuilt, and the build's
+    /// watermark (#5812): D + 1 day, or <see cref="PartialWatermarkLagHours"/> before the current hour by the store's own
+    /// clock when that is earlier, so the trigger's bound and this one read one clock. $1 server_id, $2 day.</summary>
+    public static readonly string SeqSql = $@"
+SELECT late_seq,
+       LEAST(($2::date + 1)::timestamp, date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PartialWatermarkLagHours} hours')
 FROM collect.plan_regression_daily_built
 WHERE server_id = $1::integer
 AND   day = $2::date;";
 
     /// <summary>Stamps a finished build. $1 server_id, $2 day, $3 the <c>late_seq</c> read before the build
     /// (<c>built_seq</c>), $4 built_at, $5 the rows inserted (<c>source_rows</c>). The day is valid for a reader exactly while
-    /// <c>built_seq = late_seq</c>.</summary>
+    /// <c>built_seq = late_seq</c>. $6 the watermark the build covered (<c>built_through</c>, #5812).</summary>
     public const string MarkBuiltSql = @"
 UPDATE collect.plan_regression_daily_built
 SET built_seq = $3::bigint,
     built_at = $4::timestamp,
-    source_rows = $5::bigint
+    source_rows = $5::bigint,
+    built_through = $6::timestamp
 WHERE server_id = $1::integer
 AND   day = $2::date;";
 
@@ -167,10 +184,11 @@ SELECT pg_try_advisory_xact_lock(hashtextextended('plan_regression_daily:' || $1
     /// interval table's coverage claim reaches the whole day, which is <c>day &gt;= filled_since::date + 1</c>: the first day
     /// after the one <c>filled_since</c> falls in, because that day may be only partly covered. The fact runs this first, in
     /// the same REPEATABLE READ transaction as the daily read, so both see one snapshot of the built days and of the totals;
-    /// an empty or failed answer sends the read to the exact-bound statement unchanged.
+    /// an empty or failed answer sends the read to the exact-bound statement unchanged. The second column is the day's
+    /// watermark (#5812): NULL for a build made before V184, which built closed days only and so covers the whole day.
     /// </summary>
     public const string BuiltDaysSql = @"
-SELECT b.day
+SELECT b.day, b.built_through
 FROM collect.plan_regression_daily_built AS b
 JOIN collect.query_store_interval_latest_coverage AS c
   ON c.server_id = b.server_id
@@ -185,9 +203,10 @@ ORDER BY b.day;";
     /// day or a long outage, gets back the days nearest the window's open end first). $1 now (timestamp), $2 the cap. Servers are the enabled ones with an interval
     /// coverage claim and no pending batch: a pending batch means some raw rows are not yet applied, so the day's totals
     /// could not be trusted. A server's days start the day after its <c>filled_since</c>, since the table cannot speak for
-    /// earlier days. Days run from <see cref="WindowDays"/> back through <see cref="ClosedDayLagDays"/> back (a day is
-    /// closed when <c>D &lt;= T - 3</c>). A day is due when it has no stamped build (<c>built_seq</c> NULL) or its
-    /// <c>late_seq</c> has moved since the stamp.
+    /// earlier days. Days run from <see cref="WindowDays"/> back through <see cref="NewestBuiltDayAhead"/> ahead: the closed
+    /// days and, since #5812, the open ones as partial days. A day is due when it has no stamped build (<c>built_seq</c> NULL),
+    /// its <c>late_seq</c> has moved since the stamp, or its watermark is below the one a build would stamp now (an open
+    /// day is rebuilt at every hourly tick until its watermark reaches its end).
     /// </summary>
     public static readonly string PlanSql = $@"
 SELECT s.server_id, d.day
@@ -202,12 +221,14 @@ FROM
 CROSS JOIN LATERAL
 (
     SELECT g::date AS day
-    FROM generate_series(($1::timestamp::date - {WindowDays})::timestamp, ($1::timestamp::date - {ClosedDayLagDays})::timestamp, interval '1 day') AS g
+    FROM generate_series(($1::timestamp::date - {WindowDays})::timestamp, ($1::timestamp::date + {NewestBuiltDayAhead})::timestamp, interval '1 day') AS g
 ) AS d
 LEFT JOIN collect.plan_regression_daily_built AS b
   ON b.server_id = s.server_id AND b.day = d.day
 WHERE d.day >= s.filled_since::date + 1
-AND   (b.built_seq IS NULL OR b.built_seq <> b.late_seq)
+AND   (b.built_seq IS NULL
+       OR b.built_seq <> b.late_seq
+       OR b.built_through < LEAST((d.day + 1)::timestamp, date_trunc('hour', $1::timestamp) - interval '{PartialWatermarkLagHours} hours'))
 ORDER BY d.day DESC, s.server_id
 LIMIT $2::integer;";
 
@@ -240,6 +261,16 @@ RETURNING server_id, day;";
 DELETE FROM collect.plan_regression_daily
 WHERE server_id = $1::integer
 AND   day = $2::date;";
+
+    /// <summary>One valid built day as the read sees it (#5812): its totals cover the day's rows whose
+    /// <c>first_execution_time</c> is below <paramref name="Through"/>. NULL (a build made before V184) is the whole day.</summary>
+    public readonly record struct BuiltDay(DateOnly Day, DateTime? Through)
+    {
+        /// <summary>The watermark with NULL read as the whole day: the next midnight, above every first execution of a row
+        /// of the day.</summary>
+        public DateTime ThroughOrDayEnd =>
+            DateTime.SpecifyKind(Through ?? Day.AddDays(1).ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+    }
 
     /// <summary>One planned build.</summary>
     public readonly record struct Build(int ServerId, DateOnly Day);
@@ -337,10 +368,19 @@ AND   day = $2::date;";
         }
 
         long seq;
+        DateTime builtThrough;
         await using (var read = new NpgsqlCommand(SeqSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             AddServerDay(read, serverId, day);
-            seq = Convert.ToInt64(await read.ExecuteScalarAsync(cancellationToken));
+            await using var seqReader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await seqReader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    $"The built row for server {serverId} day {day:yyyy-MM-dd} is gone, so the build is rolled back.");
+            }
+
+            seq = seqReader.GetInt64(0);
+            builtThrough = seqReader.GetDateTime(1);
         }
 
         if (afterSeqRead is not null)
@@ -362,6 +402,7 @@ AND   day = $2::date;";
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(dayStart.AddDays(1)) });
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(dayStart.AddDays(-1)) });
+            insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(builtThrough) });
             sourceRows = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken));
         }
 
@@ -371,6 +412,7 @@ AND   day = $2::date;";
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = seq });
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sourceRows });
+            mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(builtThrough) });
 
             /* The built row is made before the transaction (see EnsureBuiltSql), so a second service's cleanup can remove it
                in between, for a server that was just disabled. Then the stamp updates nothing, and committing would leave

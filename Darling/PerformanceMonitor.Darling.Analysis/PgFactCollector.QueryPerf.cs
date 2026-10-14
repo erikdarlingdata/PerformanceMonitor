@@ -469,7 +469,8 @@ WITH plan_agg AS
     /// <see cref="PlanRegressionTableSql"/> with its <c>plan_agg</c> replaced by the sum of two reads, so everything from
     /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/> and cannot drift. $1 server_id, $2 M, $3 the
     /// built days (<see cref="PlanRegressionDaily.BuiltDaysSql"/>, date[]), $4 the live floor and $5 M - 1 day, both
-    /// timestamps (see <see cref="PlanRegressionLiveFloor"/>).
+    /// timestamps (see <see cref="PlanRegressionLiveFloor"/>), $6 each built day's watermark (timestamp[], aligned with $3; the
+    /// next midnight for a whole day, #5812).
     ///
     /// <para><b>The window edge moves in whole days.</b> This read's edge is M, the start of the day the exact edge falls
     /// in, for both halves; the exact-bound read it replaces cut mid-day. It is the same function of the same snapshots
@@ -536,7 +537,15 @@ WITH plan_agg AS
         AND   l.last_execution_time >= $2::timestamp
         AND   l.collection_time >= $5::timestamp
         AND   l.first_execution_time >= $4::timestamp
-        AND   l.last_execution_time::date <> ALL($3::date[])
+        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
+        -- (an open day is built partially; a whole day's watermark is its next midnight), so the live half is the rest.
+        AND   NOT EXISTS
+              (
+                  SELECT 1
+                  FROM unnest($3::date[], $6::timestamp[]) AS b (day, through)
+                  WHERE b.day = l.last_execution_time::date
+                  AND   l.first_execution_time < b.through
+              )
         GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
     ) AS u
     GROUP BY database_name, query_id, plan_id, replica_role
@@ -556,16 +565,37 @@ WITH plan_agg AS
     /// start built up to some last one, the floor sits one day below the day after it, so a read still sees whatever
     /// comes after the built days (a skewed server's future-dated rows).
     /// </summary>
-    internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays)
+    internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays) =>
+        PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays.Select(d => new PlanRegressionDaily.BuiltDay(d, null)).ToList());
+
+    /// <summary>
+    /// The live floor with partial days (#5812): the lower of one day below the first day from <paramref name="windowFloor"/>
+    /// on that is not built, and the lowest watermark of a built day before it that is partial. The builder builds through
+    /// tomorrow, so on a store that is current the first unbuilt day is the day after tomorrow and the floor is today's
+    /// watermark: the live half reads the last two or three hours of first executions, not the open days.
+    /// </summary>
+    internal static DateTime PlanRegressionLiveFloorWithWatermarks(DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays)
     {
-        var built = new HashSet<DateOnly>(builtDays);
-        var day = DateOnly.FromDateTime(windowFloor);
-        while (built.Contains(day))
+        var through = new Dictionary<DateOnly, DateTime>();
+        foreach (var b in builtDays)
         {
-            day = day.AddDays(1);
+            through[b.Day] = b.ThroughOrDayEnd;
         }
 
-        return DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue).AddDays(-1), DateTimeKind.Unspecified);
+        var cursor = DateOnly.FromDateTime(windowFloor);
+        var floor = DateTime.MaxValue;
+        while (through.TryGetValue(cursor, out var t))
+        {
+            if (t < cursor.AddDays(1).ToDateTime(TimeOnly.MinValue) && t < floor)
+            {
+                floor = t;
+            }
+
+            cursor = cursor.AddDays(1);
+        }
+
+        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue).AddDays(-1);
+        return DateTime.SpecifyKind(unbuilt < floor ? unbuilt : floor, DateTimeKind.Unspecified);
     }
 
     /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
@@ -747,7 +777,7 @@ ORDER BY c.regression_factor DESC";
                not swallowed. */
             var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
             var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
-            var builtDays = new List<DateOnly>();
+            var builtDays = new List<PlanRegressionDaily.BuiltDay>();
             if (readsTable)
             {
                 /* One REPEATABLE READ READ ONLY transaction for the built-days read and the daily read: both see the same
@@ -787,10 +817,15 @@ ORDER BY c.regression_factor DESC";
                 cmd.Parameters.Add(new NpgsqlParameter
                 {
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
-                    Value = builtDays.ToArray()
+                    Value = builtDays.Select(b => b.Day).ToArray()
                 });
-                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloor(windowFloor, builtDays));
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays));
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
+                cmd.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp,
+                    Value = builtDays.Select(b => b.ThroughOrDayEnd).ToArray()
+                });
             }
             else
             {
@@ -815,7 +850,7 @@ ORDER BY c.regression_factor DESC";
                the read (the input check, the cut, the fact) still runs on every pass. */
             var readStartedUtc = DateTime.UtcNow;
             var shape = context.ReusePlanRegressionCandidates
-                ? PlanRegressionCandidateCache.ShapeOf(cmd, readsDays ? 5 : readsTable ? 4 : 3, windowFloor, builtDays)
+                ? PlanRegressionCandidateCache.ShapeOf(cmd, readsDays ? 5 : readsTable ? 4 : 3, windowFloor, builtDays.Select(b => b.Day).ToList())
                 : null;
             var reused = shape is null
                 ? null

@@ -1223,6 +1223,35 @@ ALTER TABLE collect.read_latency
     ADD COLUMN IF NOT EXISTS distinct_callers integer NOT NULL DEFAULT 0;";
 
     /// <summary>
+    /// V184 (#5812): the open days of <c>collect.plan_regression_daily</c> are built too, as partial days.
+    /// <c>collect.plan_regression_daily_built</c> gains <c>built_through</c>, the <c>first_execution_time</c> the build covered
+    /// (exclusive): a day's totals are its rows (by <c>last_execution_time</c>) whose first execution is below it. NULL is a
+    /// build made before this rung, which only ever built closed days, so NULL reads as the whole day and no built day is
+    /// invalidated. The watermark is on <c>first_execution_time</c> because it is part of an interval row's identity and never
+    /// moves when the row is updated, so a row is on one side of it for its whole life (its <c>last_execution_time</c> moves
+    /// while the interval runs), and because the interval table is partitioned and indexed on it, so the live half of the read
+    /// touches only the rows after the watermark.
+    ///
+    /// <para><b>The trigger now marks the open days.</b> Its upper bound moves from yesterday's midnight to one hour before the
+    /// current hour, so a row written with a first execution below that marks its days (the #5631 validity rule, unchanged:
+    /// a day is read from its totals only while <c>built_seq = late_seq</c>). The builder's watermark is two hours before the
+    /// current hour by the store's own clock, one hour under the trigger's, so a write whose transaction began up to an hour
+    /// before a build still marks the day it could change. Steady collection does not fire it: the collector writes the
+    /// intervals still running and the one that just ended, whose first executions are at or after the trigger's bound.</para>
+    /// </summary>
+    private const string V184Sql = @"
+ALTER TABLE collect.plan_regression_daily_built
+    ADD COLUMN IF NOT EXISTS built_through timestamp;
+
+DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;
+CREATE TRIGGER trg_plan_regression_daily_late
+    AFTER INSERT OR UPDATE ON collect.query_store_interval_latest
+    FOR EACH ROW
+    WHEN (NEW.first_execution_time < date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '1 hour'
+          AND NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days')
+    EXECUTE FUNCTION collect.plan_regression_daily_mark_late();";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1517,6 +1546,7 @@ $rung$;";
         new Migration(181, "notification-route-scope", V181Sql),
         new Migration(182, "read-latency-capacity-fields", V182Sql),
         new Migration(183, "read-caller", V183Sql),
+        new Migration(184, "plan-regression-partial-days", V184Sql),
     };
 
     /// <summary>

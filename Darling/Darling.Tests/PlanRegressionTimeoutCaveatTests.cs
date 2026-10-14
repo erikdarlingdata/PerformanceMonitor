@@ -40,7 +40,7 @@ public sealed class PlanRegressionTimeoutCaveatTests
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalLatest.cs"));
 
         var fact = Slice(source, "private async Task CollectPlanRegressionFactsAsync(", "public const string ProcedureStatsSql");
-        var builtDays = Slice(storage, "public static async Task<List<DateOnly>> ReadBuiltDaysAsync(", "private readonly ConcurrentDictionary<int, byte> _coverageEnsured");
+        var builtDays = Slice(storage, "public static async Task<List<PlanRegressionDaily.BuiltDay>> ReadBuiltDaysAsync(", "private readonly ConcurrentDictionary<int, byte> _coverageEnsured");
 
         /* The fact's own read carries the deadline, and the built-days read is handed it (it builds its command in the
            storage helper, from the storage tenant's own SQL constant). */
