@@ -115,7 +115,42 @@ public sealed record InvestigationReportSubmission(
     string RootCause,
     bool RootCauseFound,
     string? Summary,
+    string EvidenceJson,
+    string? ProposedNote = null);
+
+/// <summary>What a lease renewal answered (#5632 Phase A, a claim made with the caller's own claim id).</summary>
+/// <param name="Renewed">True when the claim still held a live lease and the lease moved on.</param>
+/// <param name="LeaseUntilUtc">The new lease end, capped at the request's expiry; null when not renewed.</param>
+public sealed record InvestigationRenewResult(bool Renewed, DateTime? LeaseUntilUtc);
+
+/// <summary>One stored report as <see cref="InvestigationRequestStore.ReadReportsAsync"/> reads it.</summary>
+public sealed record InvestigationReportRow(
+    Guid RequestId,
+    short ReportFormat,
+    string AgentId,
+    DateTime SubmittedAtUtc,
+    string Verdict,
+    string RootCause,
+    bool RootCauseFound,
+    string? Summary,
     string EvidenceJson);
+
+/// <summary>One journal row as <see cref="InvestigationRequestStore.ReadReportsAsync"/> reads it.</summary>
+public sealed record InvestigationJournalRow(
+    DateTime EventTimeUtc,
+    Guid? RequestId,
+    int? ServerId,
+    string Event,
+    string Actor,
+    string? Reason,
+    string? DetailJson);
+
+/// <summary>What <see cref="InvestigationRequestStore.ReadReportsAsync"/> read; <see cref="Brief"/> only for one request.</summary>
+public sealed record InvestigationReportsRead(
+    IReadOnlyList<InvestigationRequestRow> Requests,
+    IReadOnlyList<InvestigationReportRow> Reports,
+    IReadOnlyList<InvestigationJournalRow> Journal,
+    string? Brief);
 
 /// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.</summary>
 public sealed record InvestigationRequestRow(
@@ -299,6 +334,76 @@ FROM (
 WHERE ($2::text IS NULL OR s.effective_state = $2)
 ORDER BY s.opened_at DESC, s.request_id
 LIMIT $5";
+
+    /* #5632 Phase A, L6: a claim made with the caller's own claim id renews its lease, capped at the request's expiry. */
+    internal const string RenewSql = @"
+UPDATE config.investigation_requests
+SET lease_until = least($3 + make_interval(mins => lease_minutes), expires_at)
+WHERE request_id = $1
+  AND claim_id = $2
+  AND state = 'claimed'
+  AND lease_until >= $3
+  AND expires_at > $3
+RETURNING lease_until";
+
+    internal const string ClaimHolderSql = @"
+SELECT claimed_by
+FROM config.investigation_requests
+WHERE request_id = $1
+  AND claim_id = $2";
+
+    /* get_notification_routes: each route's use, the requests it opened in the last hour and day (the limits' windows). */
+    internal const string RouteUseSql = @"
+SELECT route_id,
+       count(*) FILTER (WHERE opened_at > $1 - interval '1 hour'),
+       count(*)
+FROM config.investigation_requests
+WHERE opened_at > $1 - interval '1 day'
+GROUP BY route_id";
+
+    internal const string RefusalServerSql = @"
+SELECT server_id
+FROM config.investigation_requests
+WHERE request_id = $1";
+
+    /* The note an agent proposes with its report: pending until a person approves it. It carries the request's server,
+       story path and first alert, so an approved note reaches the next brief of the same story. */
+    internal const string ProposedNoteSql = @"
+INSERT INTO config.investigation_notes (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id)
+SELECT r.server_id, r.story_path_hash, r.first_dedup_key, r.first_metric, $2, $3, r.request_id
+FROM config.investigation_requests AS r
+WHERE r.request_id = $1";
+
+    internal const string ReportsRequestsSql = @"
+SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.last_alert_at,
+       r.alert_count,
+       CASE
+           WHEN r.state IN ('open', 'claimed') AND r.expires_at <= $1 THEN 'expired'
+           WHEN r.state = 'claimed' AND r.lease_until < $1 AND r.claim_count >= 3 THEN 'expired'
+           WHEN r.state = 'open' AND r.claim_count >= 3 THEN 'expired'
+           WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
+           ELSE r.state
+       END AS effective_state,
+       r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief::text
+FROM config.investigation_requests AS r
+WHERE ($2::uuid IS NULL OR r.request_id = $2)
+  AND ($3::integer IS NULL OR r.server_id = $3)
+  AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
+ORDER BY r.opened_at DESC, r.request_id
+LIMIT $5";
+
+    internal const string ReportsSql = @"
+SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence::text
+FROM config.investigation_reports
+WHERE request_id = ANY($1)
+ORDER BY submitted_at DESC";
+
+    internal const string ReportsJournalSql = @"
+SELECT event_time, request_id, server_id, event, actor, reason, detail::text
+FROM config.investigation_journal
+WHERE request_id = ANY($1)
+ORDER BY event_time DESC, journal_id DESC
+LIMIT $2";
 
     internal const string SweepLapsedSql = @"
 INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, once_key)
@@ -611,11 +716,161 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             P(report.RequestId), P(report.ReportFormat), P(report.AgentId), P(report.ClaimId), P(now), P(report.Verdict),
             P(report.RootCause), P(report.RootCauseFound), PNullable(report.Summary), P(report.EvidenceJson), P(serverId),
             PNullable(metric), PNullable(dedupKey), PNullable(story));
+        if (!string.IsNullOrWhiteSpace(report.ProposedNote))
+        {
+            await ExecAsync(connection, transaction, ProposedNoteSql, cancellationToken,
+                P(report.RequestId), P(report.ProposedNote), P(actor));
+        }
+
         await ExecAsync(connection, transaction, ReportedSql, cancellationToken, P(report.RequestId), P(now));
         await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return InvestigationSubmitOutcome.Reported;
+    }
+
+    /// <summary>
+    /// Renews the lease of <paramref name="claimId"/> on <paramref name="requestId"/> (#5632 Phase A): only while that claim
+    /// holds the request with a live lease, by the route's lease length, never past the request's expiry. Not renewed (a
+    /// lapsed lease, a newer claim, a reported or expired request): the caller claims afresh.
+    /// </summary>
+    public async Task<InvestigationRenewResult> RenewAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, RenewSql, P(requestId), P(claimId), P(Now()));
+        var lease = await command.ExecuteScalarAsync(cancellationToken);
+        return lease is DateTime until
+            ? new InvestigationRenewResult(true, DateTime.SpecifyKind(until, DateTimeKind.Utc))
+            : new InvestigationRenewResult(false, null);
+    }
+
+    /// <summary>The agent that holds <paramref name="claimId"/> on <paramref name="requestId"/>, or null when that claim
+    /// does not hold it (the submit then answers lease_lost or not_found from the store). Writes nothing.</summary>
+    public async Task<string?> ClaimHolderAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, ClaimHolderSql, P(requestId), P(claimId));
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    /// <summary>Each route's requests opened in the last hour and the last day, by route id; a route that opened none is
+    /// absent. Writes nothing.</summary>
+    public async Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>> RouteUseAsync(CancellationToken cancellationToken = default)
+    {
+        var use = new Dictionary<int, (int LastHour, int LastDay)>();
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, RouteUseSql, P(Now()));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            use[reader.GetInt32(0)] = ((int)reader.GetInt64(1), (int)reader.GetInt64(2));
+        }
+
+        return use;
+    }
+
+    /// <summary>
+    /// Journals a refusal the tool layer decided (an invalid report, an action proposal at Level 1, an unsupported format)
+    /// once per request, operation and reason (#5632 review ruling). An unknown request id is journaled once per hour per
+    /// reason, as the store's own refusals are. An agent id over <see cref="MaxAgentIdLength"/> characters is not journaled.
+    /// </summary>
+    public async Task RecordRefusalAsync(Guid requestId, string agentId, string operation, string reason, string? detailJson,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(operation);
+        ArgumentException.ThrowIfNullOrEmpty(reason);
+        if (string.IsNullOrEmpty(agentId) || agentId.Length > MaxAgentIdLength)
+        {
+            return;
+        }
+
+        var now = Now();
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        int? serverId = null;
+        await using (var command = Command(connection, transaction, RefusalServerSql, P(requestId)))
+        {
+            if (await command.ExecuteScalarAsync(cancellationToken) is int server)
+            {
+                serverId = server;
+            }
+        }
+
+        var onceKey = serverId is null
+            ? string.Create(CultureInfo.InvariantCulture, $"refused:{operation}:not_found:{reason}:{now:yyyy-MM-ddTHH}")
+            : "refused:" + operation + ":" + requestId.ToString() + ":" + reason;
+        await JournalAsync(connection, transaction, now, serverId is null ? null : requestId, null, serverId, "refused",
+            "agent:" + agentId, operation + ":" + reason, detailJson, onceKey, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads requests with their reports and journal (#5632 Phase A, <c>get_investigation_reports</c>): one request by id
+    /// (then its stored brief too), or the requests opened since <paramref name="sinceUtc"/>, optionally on one server. The
+    /// state is computed as <see cref="ListAsync"/> computes it. Writes nothing.
+    /// </summary>
+    public async Task<InvestigationReportsRead> ReadReportsAsync(Guid? requestId, int? serverId, DateTime sinceUtc, int limit,
+        int journalLimit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(journalLimit, 1);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var requests = new List<InvestigationRequestRow>();
+        string? brief = null;
+        await using (var command = Command(connection, null, ReportsRequestsSql,
+            P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                requests.Add(new InvestigationRequestRow(
+                    reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
+                    reader.GetString(5), reader.GetFieldValue<DateTime>(6), reader.GetFieldValue<DateTime>(7), reader.GetInt32(8),
+                    reader.GetString(9), reader.GetFieldValue<DateTime>(10), reader.GetFieldValue<DateTime>(11),
+                    reader.IsDBNull(12) ? null : reader.GetString(12),
+                    reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
+                    reader.GetInt32(14),
+                    reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15)));
+                if (requestId is not null && !reader.IsDBNull(16))
+                {
+                    brief = reader.GetString(16);
+                }
+            }
+        }
+
+        var ids = requests.Select(r => r.RequestId).ToArray();
+        var reports = new List<InvestigationReportRow>();
+        var journal = new List<InvestigationJournalRow>();
+        if (ids.Length == 0)
+        {
+            return new InvestigationReportsRead(requests, reports, journal, brief);
+        }
+
+        await using (var command = Command(connection, null, ReportsSql, P(ids)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                reports.Add(new InvestigationReportRow(
+                    reader.GetGuid(0), reader.GetInt16(1), reader.GetString(2), reader.GetFieldValue<DateTime>(3), reader.GetString(4),
+                    reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
+            }
+        }
+
+        await using (var command = Command(connection, null, ReportsJournalSql, P(ids), P(journalLimit)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                journal.Add(new InvestigationJournalRow(
+                    reader.GetFieldValue<DateTime>(0), reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                    reader.IsDBNull(2) ? null : reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
+            }
+        }
+
+        return new InvestigationReportsRead(requests, reports, journal, brief);
     }
 
     /// <summary>

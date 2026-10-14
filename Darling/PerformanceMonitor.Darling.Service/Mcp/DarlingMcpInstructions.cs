@@ -91,24 +91,37 @@ internal static class DarlingMcpInstructions
         var writeCount = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var adminCount = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
 
+        /* #5632 Phase A: the investigation tools are a third set (ruling R2), never served with the writes, so each set
+           names its own count and switch, and the census names the conflict instead of an unexplained remainder. */
+        var investigationsServed = served.Any(DarlingMcpWritePolicy.IsInvestigation);
+        var investigationCount = catalog.Count(DarlingMcpWritePolicy.IsInvestigation);
+        var off = new List<string>();
+        if (!writesServed)
+            off.Add($"the write tools are off, so the {writeCount + adminCount} that change monitoring configuration are not served " +
+                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
+                    $"{adminCount} more)");
+        else if (!adminServed)
+            off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
+                    "monitored servers are not served");
+        if (!investigationsServed && investigationCount > 0)
+            off.Add(writesServed
+                ? $"the {investigationCount} investigation tools stay off while `{DarlingMcpWritePolicy.WritesSetting}` is on (one token " +
+                  "cannot tell an agent from a person)"
+                : $"`{DarlingMcpWritePolicy.InvestigationsSetting}` with a token adds the {investigationCount} investigation tools");
+
         string opening;
         if (count == total)
             opening = $"This server exposes {total} tools.";
-        else if (!writesServed)
-            opening = $"This server exposes {count} of its {total} tools: the write tools are off, so the {total - count} that change " +
-                      $"monitoring configuration are not served (`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount}, " +
-                      $"`{DarlingMcpWritePolicy.ServerAdminSetting}` {adminCount} more).";
-        else if (!adminServed)
-            opening = $"This server exposes {count} of its {total} tools: `{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so " +
-                      $"the {total - count} tools that add, edit and remove monitored servers are not served.";
+        else if (off.Count > 0)
+            opening = $"This server exposes {count} of its {total} tools: " + string.Join("; ", off) + ".";
         else
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
         var families = adminServed
-            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and onboarding tools"
+            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding and investigation tools"
             : writesServed
-                ? "Custom Views, custom-alert-rule, alert-tuning and server-tag tools"
-                : "the Custom Views and custom-alert-rule reads";
+                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and investigation tools"
+                : "the Custom Views, custom-alert-rule and investigation reads";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
@@ -122,9 +135,9 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 182 tools. 91 are the same names Lite exposes. The remaining 91 are unique to Darling: " +
-        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag " +
-        "and onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
+        "This server exposes 186 tools. 91 are the same names Lite exposes. The remaining 95 are unique to Darling: " +
+        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag, " +
+        "onboarding and investigation tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
     /// <summary>
