@@ -553,6 +553,76 @@ public sealed class RollupFloorCacheLiveTests
         Assert.Equal(0, factory.Provider.CountContaining(MinBucketStatement));
     }
 
+    /* #5818: a cached raw floor follows its table inside an unchanged oldest chunk. A DELETE of the oldest rows moves the
+       true floor later, and a row moved before the floor (a backdated write) moves it earlier, and neither changes the
+       chunk catalog. Before, both probes served the floor cached on the first one: later than the truth after the
+       backdated row, which made the trend reads call a quiet window unserved. An unchanged floor is checked, not re-read. */
+    [Fact]
+    public async Task ARawFloorFollowsADeleteAndABackdatedRow_InsideAnUnchangedOldestChunk()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5818 raw floor test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var now = SeedEnd();
+        var from = DateTime.SpecifyKind(now.Date.AddDays(-3), DateTimeKind.Unspecified);
+
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await PopulateStoreAsync(store.ConnectionString, from, now, deleteRawBefore: null, oneDayChunks: true, ct);
+        await using var connection = new NpgsqlConnection(store.ConnectionString);
+        await connection.OpenAsync(ct);
+        const string RawTruthSql = "SELECT min(collection_time) FROM collect.query_store_stats";
+        const string RawOldestChunkSql =
+            "SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats' ORDER BY range_start LIMIT 1";
+        var chunkBefore = await ScalarTextAsync(connection, RawOldestChunkSql, ct);
+        Assert.NotNull(chunkBefore);
+
+        var factory = new CommandCountingLoggerFactory();
+        await using var dataSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
+        var availability = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+
+        var first = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
+        Assert.Equal(from, first.RawOldestOf("query_store_stats"));
+        Assert.Equal(1, factory.Provider.CountContaining(ChunkedRawRead));
+
+        /* Unchanged: the check confirms the cached floor, and nothing is re-read. */
+        var unchanged = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        Assert.Equal(from, unchanged.RawOldestOf("query_store_stats"));
+        Assert.Equal(1, factory.Provider.CountContaining(ChunkedRawRead));
+
+        await using (var delete = new NpgsqlCommand("DELETE FROM collect.query_store_stats WHERE collection_time < $1", connection))
+        {
+            delete.Parameters.AddWithValue(from.AddHours(2));
+            await delete.ExecuteNonQueryAsync(ct);
+        }
+
+        var afterDelete = await ScalarInstantAsync(connection, RawTruthSql, ct);
+        Assert.Equal(from.AddHours(2), afterDelete);
+        Assert.Equal(chunkBefore, await ScalarTextAsync(connection, RawOldestChunkSql, ct));
+        var deleted = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        Assert.Equal(afterDelete, deleted.RawOldestOf("query_store_stats"));
+
+        await using (var backdate = new NpgsqlCommand(
+            "UPDATE collect.query_store_stats SET collection_time = $1 WHERE collection_time = (" + RawTruthSql + ")", connection))
+        {
+            backdate.Parameters.AddWithValue(from.AddMinutes(30));
+            await backdate.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(from.AddMinutes(30), await ScalarInstantAsync(connection, RawTruthSql, ct));
+        Assert.Equal(chunkBefore, await ScalarTextAsync(connection, RawOldestChunkSql, ct));
+        var backdated = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        Assert.Equal(from.AddMinutes(30), backdated.RawOldestOf("query_store_stats"));
+        Assert.Equal(3, factory.Provider.CountContaining(ChunkedRawRead));
+        Assert.Equal(3, factory.Provider.CountContaining(TimescaleSupport.RawFloorCheckMarker));
+    }
+
+    private static async Task<string?> ScalarTextAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
     /// <summary>The raw-floor read of query_store_stats, the one raw table this class's store fills.</summary>
     private const string ChunkedRawRead = "(SELECT min(collection_time) FROM collect.query_store_stats)";
 

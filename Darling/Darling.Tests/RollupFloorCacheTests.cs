@@ -204,6 +204,23 @@ public sealed class RollupFloorCacheTests
         }
     }
 
+    /* #5818: the per-probe check of cached raw floors. A floored table binds its floor as the next parameter and asks for
+       a row exactly there and none earlier; a table cached as empty asks for no row. No min() sort, and its own marker,
+       which does not contain the raw read's. */
+    [Fact]
+    public void RawFloorCheckSql_ChecksEachFloorAtItsOwnParameter_AndAnEmptyTableForNoRow()
+    {
+        var sql = TimescaleSupport.RawFloorCheckSql(new[] { "query_stats", "procedure_stats", "query_store_stats" }, new[] { true, false, true });
+        Assert.Equal(
+            "SELECT (EXISTS (SELECT 1 FROM collect.query_stats WHERE collection_time = $1) AND NOT EXISTS (SELECT 1 FROM collect.query_stats WHERE collection_time < $1)), "
+            + "(NOT EXISTS (SELECT 1 FROM collect.procedure_stats)), "
+            + "(EXISTS (SELECT 1 FROM collect.query_store_stats WHERE collection_time = $2) AND NOT EXISTS (SELECT 1 FROM collect.query_store_stats WHERE collection_time < $2)) "
+            + TimescaleSupport.RawFloorCheckMarker,
+            sql, StringComparer.Ordinal);
+        Assert.DoesNotContain("min(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(TimescaleSupport.RawFloorMarker, sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void RawFloorProbeSql_ReadsOneColumnPerTableItIsGiven_AndNoRollup()
     {

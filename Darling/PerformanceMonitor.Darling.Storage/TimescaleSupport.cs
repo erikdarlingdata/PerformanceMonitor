@@ -10547,6 +10547,34 @@ LEFT JOIN LATERAL (
             }
         }
 
+        /* #5818: a cached raw floor is checked on every probe, because its oldest chunk staying the same does not keep it
+           exact. A DELETE inside that chunk (a removed server's rows) or a row written before the floor into it (a
+           backdated insert, as the live trend tests do) moves the true oldest row without touching the catalog, and a
+           stale floor later than the truth makes RawReaches call a covered window unserved: the "quiet window" answer
+           became "recorded only since <floor>", and window_truncated came back true. Dev read min(collection_time) on
+           every probe, so it never served one. The check is one statement for every cached table, an exact-match probe
+           and a nothing-earlier probe at the floor (chunk exclusion and the compressed batches' min/max metadata keep
+           both to the oldest chunk and stop at the first row, so no sort), and only a table that fails it is re-read. */
+        var rawToCheck = RolledRawTables.Where(t => !rawMissing.Contains(t) && rawSnapshot.ContainsKey(t)).ToArray();
+        if (rawToCheck.Length > 0)
+        {
+            var moved = await RawFloorsThatMovedAsync(dataSource, rawToCheck, rawSnapshot, cancellationToken);
+            if (moved.Length > 0)
+            {
+                var reread = await ReadRawFloorsAsync(dataSource, moved, now, databaseOid, rawChunksNow, cancellationToken);
+                lock (cache.Lock)
+                {
+                    foreach (var (table, entry) in reread)
+                    {
+                        cache.Raw[table] = entry;
+                        rawSnapshot[table] = entry;
+                    }
+                }
+
+                rawMissing = rawMissing.Concat(moved).ToArray();
+            }
+        }
+
         var rawAged = RolledRawTables.Any(t => !rawMissing.Contains(t) && rawSnapshot.TryGetValue(t, out var entry) && now - entry.MeasuredAtUtc >= RollupFloorMaxReuse);
 
         var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
@@ -10970,6 +10998,25 @@ LEFT JOIN LATERAL (
     internal static string RawFloorProbeSql(IReadOnlyList<string> tables)
         => "SELECT " + string.Join(", ", tables.Select(t => $"(SELECT min(collection_time) FROM collect.{t})")) + " " + RawFloorMarker;
 
+    /// <summary>The fixed marker the raw-floor check (<see cref="RawFloorCheckSql"/>) carries (#5818).</summary>
+    internal const string RawFloorCheckMarker = "/* coverage-floor:raw-check */";
+
+    /// <summary>
+    /// #5818: is each cached raw floor still exact? One boolean per table, in order. A table whose cached floor is a
+    /// time (bound as the next <c>$n</c>, in order) holds when a row sits exactly there and none is earlier; a table
+    /// cached as empty (<paramref name="hasFloor"/> false) holds while it has no row. Each probe stops at the first row,
+    /// and chunk exclusion plus the compressed batches' min/max metadata keep it to the oldest chunk, so it never sorts
+    /// the way <c>min(collection_time)</c> can on a compressed chunk.
+    /// </summary>
+    internal static string RawFloorCheckSql(IReadOnlyList<string> tables, IReadOnlyList<bool> hasFloor)
+    {
+        var parameter = 0;
+        var columns = tables.Select((t, i) => hasFloor[i]
+            ? $"(EXISTS (SELECT 1 FROM collect.{t} WHERE collection_time = ${++parameter}) AND NOT EXISTS (SELECT 1 FROM collect.{t} WHERE collection_time < ${parameter}))"
+            : $"(NOT EXISTS (SELECT 1 FROM collect.{t}))");
+        return "SELECT " + string.Join(", ", columns) + " " + RawFloorCheckMarker;
+    }
+
     private static async Task<bool> RollupCatalogFloorHoldsAsync(NpgsqlDataSource dataSource, string view, DateTime rangeStart, CancellationToken cancellationToken)
     {
         try
@@ -11006,6 +11053,50 @@ LEFT JOIN LATERAL (
         }
 
         return chunkNow is null || !string.Equals(entry.ChunkName, chunkNow, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5818: the tables among <paramref name="tables"/> whose cached floor in <paramref name="cached"/> is no
+    /// longer exact (<see cref="RawFloorCheckSql"/>). A check that fails to run names every table, so each is re-read
+    /// rather than served a floor nobody confirmed.</summary>
+    private static async Task<string[]> RawFloorsThatMovedAsync(
+        NpgsqlDataSource dataSource, string[] tables, Dictionary<string, RawFloorCacheEntry> cached, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var floors = tables.Select(t => cached[t].Oldest).ToArray();
+            await using var command = dataSource.CreateCommand(RawFloorCheckSql(tables, floors.Select(f => f is not null).ToArray()));
+            command.CommandTimeout = JobCatalogReadTimeoutSeconds;
+            foreach (var floor in floors)
+            {
+                if (floor is DateTime f)
+                {
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(f, DateTimeKind.Unspecified) });
+                }
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return tables;
+            }
+
+            var moved = new List<string>();
+            for (var i = 0; i < tables.Length; i++)
+            {
+                if (!reader.GetBoolean(i))
+                {
+                    moved.Add(tables[i]);
+                }
+            }
+
+            return moved.ToArray();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Unconfirmed: re-read every checked table with min(collection_time), as a probe with no entry does. */
+            _ = ex;
+            return tables;
+        }
     }
 
     /// <summary>#5808: reads <paramref name="tables"/>' oldest rows, each stamped with its oldest chunk from
