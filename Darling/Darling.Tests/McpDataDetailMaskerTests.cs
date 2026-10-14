@@ -353,6 +353,8 @@ public sealed class McpDataDetailMaskerTests
     [InlineData("root_query")]
     [InlineData("worst_victim_query")]
     [InlineData("Process A")]
+    [InlineData("Process B")]
+    [InlineData("Process C")]
     [InlineData("Process D")]
     public void SweptStatementKeys_LiteralsReplaced_ThenWithheld(string key)
     {
