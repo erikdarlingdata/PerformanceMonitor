@@ -460,6 +460,11 @@ public sealed class NotificationRoutesLivePostgresTests
                 insert.Parameters.AddWithValue(true);
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value }); /* scope_server_id (V181, #5750) */
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value }); /* scope_tag_id */
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint, Value = DBNull.Value }); /* agent_level (V184, #5632) */
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentMaxPerHour });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentMaxPerDay });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentLeaseMinutes });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentExpiryMinutes });
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 
