@@ -761,6 +761,23 @@ A bring-your-own store needs one step after the service upgrades the store to V1
 
 Destinations are bearer secrets, so the `viewer` and `mcp` roles never read them: the table's generated `configured_channels` column says *which* channels a route sets, and the MCP surface can disable or delete a route (`set_notification_route_enabled` / `delete_notification_route`) but never author or re-point one. Routes hot-reload through the same `config_version` beacon as the parent row (the V131 trigger), so a change lands on the next firing with no restart.
 
+##### Hand an alert to your own agent (#5632)
+
+Darling ships no agent. It can hand an alert to one you run yourself, and that agent can only read and report.
+
+1. **Pick the alerts.** In the route dialog, set **Agent investigation** to `Investigate` on the routes whose alerts your agent should look at. `Off` stops it for that route's alerts; `Inherit` asks the next broader route. An analysis finding that pages also counts. A muted alert, a recovery, a scheduled report and a digest never open a request.
+2. **Requests, not alerts.** The alerts of one server and one alert family within 30 minutes join one investigation request. Each route has a limit per hour (20 by default) and per day (100 by default). Past it, no request opens and the journal says `limit_reached` once. A claim holds a request for a lease (15 minutes by default), a request expires after 4 hours by default, and it can be claimed 3 times.
+3. **Turn the tools on.** Set `mcp.allowInvestigations` to `true` with `mcp.allowWrites` off, and give MCP a bearer token (`network.encryptedToken` or `network.token`). With both settings on, the investigation tools stay off.
+4. **The agent's loop**, in this order:
+   - `list_investigation_requests`: the open requests.
+   - `claim_investigation_request`: takes one and returns its brief: the request, its alerts, the analysis findings, earlier reports (marked unreviewed), recent changes, approved notes, your environment profile, and the read tools to call next.
+   - The read tools the brief names, as many as it needs.
+   - `submit_investigation_report`: a verdict (`real`, `false_positive` or `needs_person`), the root cause, the evidence from the calls it made, a summary and, if it likes, a note. The note waits until a person approves it.
+   - `get_investigation_reports` reads the reports and the journal back.
+5. **Read the results.** The viewer's **Manage Investigations...** window (Settings > Notifications) shows each request, its brief, its report and its journal, and lets a person close a request, approve or reject a note, write a note, and set the environment profile. The web alert page has a read-only Investigations panel.
+
+What the agent cannot do: change a monitored server, call a write tool (they are off while investigations are on), propose an action (`action_proposals` is refused at this level), or put a note in front of a later brief without a person's approval. `mcp.dataDetail` masks the brief and every tool answer at the level you set. [`AGENTS.example.md`](AGENTS.example.md) is a starting point for your agent's instructions.
+
 ### mcp
 
 The embedded MCP server, over Streamable HTTP bound to `localhost` by default (see [Opt-in Network Endpoints (LAN)](#opt-in-network-endpoints-lan) to reach it — and the store — from the LAN). It exposes the same tool names Lite and the Dashboard expose, plus small Darling-only WRITE surfaces — Custom Views management, alert tuning, and server onboarding (see the last three bullets). The default path (`/`) serves every tool; a client that only needs the fact-finding path can point at `/core` instead, a fixed subset of about 70-90 tools reachable from `list_servers`, `get_fleet_overview`, `analyze_server` and `get_tool_guide` by following each finding's `next_tools`, served behind the exact same Host, token and CIDR checks as `/`:
@@ -836,7 +853,7 @@ The embedded MCP server, over Streamable HTTP bound to `localhost` by default (s
 | `enabled` | `false` | **Off by default** — a headless service does not open a local port unless you ask |
 | `port` | `5152` | Chosen so all three editions coexist on one machine (Dashboard 5150, Lite 5151) |
 | `allowInvestigations` | `false` | Serves `claim_investigation_request` and `submit_investigation_report` to your own agent (#5632). They write only investigation state. Served only with a bearer token (`network.encryptedToken` or `network.token`) and while `allowWrites` is off: one token cannot tell an agent from a person, so with both on they stay off and the start logs one Critical line. The reads `list_investigation_requests` and `get_investigation_reports` need no setting. |
-| `dataDetail` | `full` | How much collected text every MCP tool answer carries. `full` changes nothing. `maskLiterals` keeps query text but replaces its literal values (numbers, strings, parameter values) with `?`. `metadataOnly` holds back query text, plan XML and input buffers, and masks login and host names; object and database names, counts, durations, waits and times stay. An unknown value is read as `metadataOnly` |
+| `dataDetail` | `full` | How much collected text every MCP tool answer carries. `full` changes nothing. `maskLiterals` keeps query text but replaces its literal values (numbers, strings, parameter values) with `?`. `metadataOnly` holds back query text, plan XML and input buffers, and masks login and host names; object and database names, counts, durations, waits and times stay. An unknown value is read as `metadataOnly`. A tool's own status sentence (the `message` beside `status`, for example the step a `precondition` asks for) stays readable at both levels, with its literal values replaced. An investigation brief is composed at the same level (#5632) |
 
 Register with Claude Code:
 
