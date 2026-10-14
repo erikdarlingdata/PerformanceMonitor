@@ -464,11 +464,12 @@ public sealed class QueryStoreComposeStampTests
         behind[ProbeOrdinal + 5] = false;
         behind[ProbeOrdinal + 6] = false;
         behind[ProbeOrdinal + 7] = false;
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels sit above V173's, so a store missing V173 is missing them too; leaving
-           either true would map the store to that rung. */
+        /* V181's (#5750), V182's (#5506), V183's (#5793) and V184's (#5812) sentinels sit above V173's, so a store missing V173 is
+           missing them too; leaving any of them true would map the store to that rung. */
         behind[ProbeOrdinal + 8] = false;
         behind[ProbeOrdinal + 9] = false;
         behind[ProbeOrdinal + 10] = false;
+        behind[ProbeOrdinal + 11] = false;
         Assert.Equal(172, (int)method.Invoke(null, behind)!);
 
         /* Everything through V173's sentinel true and the newer one false maps to V173 itself. */
@@ -483,6 +484,7 @@ public sealed class QueryStoreComposeStampTests
         atThisRung[ProbeOrdinal + 8] = false;
         atThisRung[ProbeOrdinal + 9] = false;
         atThisRung[ProbeOrdinal + 10] = false;
+        atThisRung[ProbeOrdinal + 11] = false;
         Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var arm = viewer.IndexOf("if (hasQueryStoreComposeStamp)", StringComparison.Ordinal);

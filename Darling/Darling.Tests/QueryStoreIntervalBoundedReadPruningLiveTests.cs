@@ -252,18 +252,19 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         var fl = $"'{Lit(floor)}'::timestamp";
         return new[]
         {
-            /* The plan-regression daily build bounds first_execution_time on both ends: [D - 1 day, D + 1 day). */
+            /* The plan-regression daily build bounds first_execution_time on both ends: [D - 1 day, D + 1 day), and below its
+               watermark ($5, #5812), which for a whole day is D + 1 day. */
             new ReadCase(
-                "plan-regression daily build", PlanRegressionDaily.BuildDaySql, "integer, date, timestamp, timestamp",
-                $"1, '{Lit(day)}'::date, '{Lit(day.AddDays(1))}'::timestamp, '{Lit(day.AddDays(-1))}'::timestamp",
+                "plan-regression daily build", PlanRegressionDaily.BuildDaySql, "integer, date, timestamp, timestamp, timestamp",
+                $"1, '{Lit(day)}'::date, '{Lit(day.AddDays(1))}'::timestamp, '{Lit(day.AddDays(-1))}'::timestamp, '{Lit(day.AddDays(1))}'::timestamp",
                 new[] { new Bounds(day.AddDays(-1), day.AddDays(1).AddTicks(-1)) }),
             /* The collector and drill-down reads bound it below only, so they also reach the days ahead and DEFAULT. */
             new ReadCase(
                 "PLAN_REGRESSION fact, table read", PgFactCollector.PlanRegressionTableSql, "integer, timestamp, timestamp, timestamp",
                 $"1, {fl}, {fl}, {fl}", new[] { new Bounds(floor, null) }),
             new ReadCase(
-                "PLAN_REGRESSION fact, per-day read", PgFactCollector.PlanRegressionDailySql, "integer, timestamp, date[], timestamp, timestamp",
-                $"1, {fl}, ARRAY[]::date[], {fl}, {fl}", new[] { new Bounds(floor, null) }),
+                "PLAN_REGRESSION fact, per-day read", PgFactCollector.PlanRegressionDailySql, "integer, timestamp, date[], timestamp, timestamp, timestamp[]",
+                $"1, {fl}, ARRAY[]::date[], {fl}, {fl}, ARRAY[]::timestamp[]", new[] { new Bounds(floor, null) }),
             new ReadCase(
                 "regressed-queries drill-down", PgDrillDownCollector.RegressedQueriesTableSql,
                 "integer, timestamp, timestamp, timestamp, text[], bigint[], timestamp",

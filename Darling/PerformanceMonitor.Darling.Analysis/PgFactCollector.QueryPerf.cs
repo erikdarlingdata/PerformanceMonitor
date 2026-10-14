@@ -539,13 +539,9 @@ WITH plan_agg AS
         AND   l.first_execution_time >= $4::timestamp
         -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
         -- (an open day is built partially; a whole day's watermark is its next midnight), so the live half is the rest.
-        AND   NOT EXISTS
-              (
-                  SELECT 1
-                  FROM unnest($3::date[], $6::timestamp[]) AS b (day, through)
-                  WHERE b.day = l.last_execution_time::date
-                  AND   l.first_execution_time < b.through
-              )
+        -- A scalar lookup ($6 is aligned with $3; a day not built finds no watermark and keeps every row), so the test
+        -- stays a filter on the scan, as #5448's <> ALL($3) was, and adds no join whose strategy rests on an array estimate.
+        AND   l.first_execution_time >= COALESCE(($6::timestamp[])[array_position($3::date[], l.last_execution_time::date)], '-infinity'::timestamp)
         GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
     ) AS u
     GROUP BY database_name, query_id, plan_id, replica_role

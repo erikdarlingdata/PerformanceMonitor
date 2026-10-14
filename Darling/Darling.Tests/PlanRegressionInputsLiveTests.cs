@@ -713,6 +713,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $16, $8, $9, $10, $11, $12, $13, 
                 "collect.query_store_interval_latest",
                 "collect.query_store_interval_latest_coverage",
                 "collect.query_store_text",
+                /* #5812: the days the daily case built. Left behind, a rerun on the same database finds them valid under the
+                   next case's coverage claim, and the interval-table case reads the daily path. */
+                "collect.plan_regression_daily",
+                "collect.plan_regression_daily_built",
             })
             {
                 await using var cmd = new NpgsqlCommand("DELETE FROM " + table + " WHERE server_id = $1", connection) { CommandTimeout = LiveTimeoutSeconds };

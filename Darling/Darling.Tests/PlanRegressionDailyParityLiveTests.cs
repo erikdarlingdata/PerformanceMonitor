@@ -136,6 +136,27 @@ public sealed class PlanRegressionDailyParityLiveTests
         Assert.Equal(allDays, await BuiltDaysAsync(connection, ct));
         Assert.Equal(afterLate, await DailyRowsAsync(connection, ct));
 
+        /* ---- partial days (#5812): the builder builds an open day through a watermark on first_execution_time, and the
+           read takes that day's rows at or above it from the live half. Every row is counted once: below the watermark in
+           the day's totals, at or above it live. The empty days from the window's floor are built too, so the live floor
+           rises to the lowest watermark and the read is bounded the way it is on a current store. Day 2 is cut between its
+           seeded interval (12:00) and the late one (14:00); day 9 at 11:00, so its regressed plans' intervals are all live and
+           only the one that crossed midnight into it is in its totals; day 10 at its own midnight, so it holds only the interval that crossed into it from 23:40 the
+           day before. ---- */
+        var floorDays = Enumerable.Range(0, (T0 - WindowStart).Days).Select(i => DateOnly.FromDateTime(WindowStart.AddDays(i))).ToList();
+        foreach (var day in floorDays) await BuildDayAsync(connection, day, ct);
+        var cut2 = T0.AddDays(2).AddHours(13);
+        await BuildDayAsync(connection, allDays[2], ct, cut2);
+        await BuildDayAsync(connection, allDays[9], ct, T0.AddDays(9).AddHours(11));
+        await BuildDayAsync(connection, allDays[10], ct, T0.AddDays(10));
+        var partial = await BuiltDaysWithWatermarksAsync(connection, ct);
+        Assert.Equal(floorDays.Concat(allDays).ToList(), partial.Select(b => b.Day).ToList());
+        Assert.Equal(cut2, PgFactCollector.PlanRegressionLiveFloorWithWatermarks(PgFactCollector.PlanRegressionWindowFloor(WindowStart), partial));
+        Assert.Equal(afterLate, await DailyRowsAsync(connection, ct));
+
+        /* Not vacuous: read as whole days, the partial builds lose the rows above their watermarks (the late interval at
+           14:00 on day 2 among them). */
+        Assert.NotEqual(afterLate, await DailyRowsAsync(connection, ct, watermarksAsWholeDays: true));
     }
 
     /* ---------------------------------------------------------------------------------------------------------- */
@@ -295,9 +316,14 @@ public sealed class PlanRegressionDailyParityLiveTests
 
     /// <summary>The daily read, bound the way the collector binds it: the built days, the live floor from their watermarks,
     /// and the watermarks themselves ($6, #5812).</summary>
-    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct, bool watermarksAsWholeDays = false)
     {
         var days = await BuiltDaysWithWatermarksAsync(connection, ct);
+        if (watermarksAsWholeDays)
+        {
+            days = days.Select(b => new PlanRegressionDaily.BuiltDay(b.Day, null)).ToList();
+        }
+
         var floor = PgFactCollector.PlanRegressionWindowFloor(WindowStart);
         await using var command = new NpgsqlCommand(PgFactCollector.PlanRegressionDailySql, connection);
         command.Parameters.AddWithValue(ServerId);
@@ -310,10 +336,13 @@ public sealed class PlanRegressionDailyParityLiveTests
     }
 
     /// <summary>What the builder does for one day (the builder's tick, minus its lock and timeout): replace the day's rows, then
-    /// stamp the built row at the sequence read before the build.</summary>
-    private static async Task BuildDayAsync(NpgsqlConnection connection, DateOnly day, CancellationToken ct)
+    /// stamp the built row at the sequence read before the build. <paramref name="through"/> is the watermark ($5, #5812): the
+    /// next midnight for a whole day, as the builder stamps a day older than its watermark, or an hour inside the day for a
+    /// partial build of an open day.</summary>
+    private static async Task BuildDayAsync(NpgsqlConnection connection, DateOnly day, CancellationToken ct, DateTime? through = null)
     {
         var d = day.ToDateTime(TimeOnly.MinValue);
+        var watermark = through ?? d.AddDays(1);
         await ExecAsync(connection, "INSERT INTO collect.plan_regression_daily_built (server_id, day) VALUES (@s, @d) ON CONFLICT DO NOTHING",
             ct, ("d", d));
         long seq;
@@ -331,11 +360,13 @@ public sealed class PlanRegressionDailyParityLiveTests
             build.Parameters.AddWithValue(NpgsqlDbType.Date, day);
             build.Parameters.AddWithValue(NpgsqlDbType.Timestamp, d.AddDays(1));
             build.Parameters.AddWithValue(NpgsqlDbType.Timestamp, d.AddDays(-1));
+            build.Parameters.AddWithValue(NpgsqlDbType.Timestamp, watermark);
             await build.ExecuteScalarAsync(ct);
         }
 
-        await ExecAsync(connection, "UPDATE collect.plan_regression_daily_built SET built_seq = @q, built_at = @d, source_rows = 0 WHERE server_id = @s AND day = @d",
-            ct, ("d", d), ("q", seq));
+        await ExecAsync(connection,
+            "UPDATE collect.plan_regression_daily_built SET built_seq = @q, built_at = @d, source_rows = 0, built_through = @t WHERE server_id = @s AND day = @d",
+            ct, ("d", d), ("q", seq), ("t", watermark));
     }
 
     private static async Task<List<string>> RowsAsync(NpgsqlCommand command, CancellationToken ct)
