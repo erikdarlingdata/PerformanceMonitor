@@ -6451,13 +6451,6 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #5654: the external alert drain's loop, one pass every <see cref="s_externalAlertInterval"/> on its own task, beside
-    /// the command loop. While the service is paused a tick does nothing at all (no expiry, no reap, no claim, no send), the
-    /// same as every other alert family; rows that waited out a pause expire on the first pass after the resume. With the
-    /// master switch off a pass still expires and reaps but claims and sends nothing (the switch is read inside the drain).
-    /// A failed pass is logged and tried again on the next tick; only cancellation ends the loop.
-    /// </summary>
-    /// <summary>
     /// #5632 Phase A (ruling R4): every <see cref="s_investigationSweepInterval"/>, <see cref="InvestigationRequestStore.SweepAsync"/>
     /// expires lapsed leases and old requests. It honors the service pause as the external alert loop does, and a failed
     /// pass is logged and tried again next tick.
@@ -6499,6 +6492,13 @@ LIMIT 1";
         }
     }
 
+    /// <summary>
+    /// #5654: the external alert drain's loop, one pass every <see cref="s_externalAlertInterval"/> on its own task, beside
+    /// the command loop. While the service is paused a tick does nothing at all (no expiry, no reap, no claim, no send), the
+    /// same as every other alert family; rows that waited out a pause expire on the first pass after the resume. With the
+    /// master switch off a pass still expires and reaps but claims and sends nothing (the switch is read inside the drain).
+    /// A failed pass is logged and tried again on the next tick; only cancellation ends the loop.
+    /// </summary>
     private async Task RunExternalAlertLoopAsync(ExternalAlertDrain drain, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
