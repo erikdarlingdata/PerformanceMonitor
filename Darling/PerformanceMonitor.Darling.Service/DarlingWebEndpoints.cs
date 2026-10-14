@@ -2947,11 +2947,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// either way (the compose catalog's own measure keys, never the caller's free text).</summary>
     private const string ComposeUnknownRouteLabel = "compose:unknown";
 
-    /// <summary>#5506 part 3: the web answer to a refused read: 429, a <c>Retry-After</c> header, and <c>{"error": sentence}</c>,
-    /// which the page already shows (<c>wwwroot/js/util.js</c> reads <c>body.error</c>).</summary>
     /// <summary>#5506 part 3 (round 1, M3): the name <c>/api/ag</c> is admitted and recorded under, its MCP twin's.</summary>
     internal const string AgHealthRoute = "get_ag_health";
 
+    /// <summary>#5506 part 3: the web answer to a refused read: 429, a <c>Retry-After</c> header, and <c>{"error": sentence}</c>,
+    /// which the page already shows (<c>wwwroot/js/util.js</c> reads <c>body.error</c>).</summary>
     internal static IResult BusyResult(ReadAdmissionRefusal refusal) =>
         new RetryAfterResult(ErrorResult(refusal.Sentence, StatusCodes.Status429TooManyRequests), refusal.RetryAfterSeconds);
 

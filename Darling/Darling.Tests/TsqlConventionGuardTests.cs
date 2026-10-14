@@ -1468,6 +1468,13 @@ public sealed class TsqlConventionGuardTests
            `key.CredentialScope : string.Empty`). Neither arm holds a string literal, so no census reads a site of that
            kind here; the stranded text is not T-SQL and not a tempdb label. */
         "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs AwsRoleConfigurationFault",
+        /* #5506 part 3: an expression-bodied cacheability check whose chain of `is` patterns (`{ Count: 1 } content`,
+           `TextContentBlock { Meta: null, Annotations: null } text`) closes the walk's brace match early, stranding
+           the ternary's arms (`? text.Text : null`). Neither arm holds a string literal, so the stranded text is not
+           T-SQL and not a tempdb label; the only census that reads McpToolLatencyFilter.cs
+           (ReadAdmissionCoverageCensusTests) counts a ReadScope.Open( call in it by line, none of which falls in this
+           range. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/McpToolLatencyFilter.cs CacheableText",
         "Darling/PerformanceMonitor.Darling.Service/Targets/AwsRoleKey.cs ScopeOf",
         /* The long-query trace's database listing: an expression-bodied member whose body opens with a property
            pattern (`LongQueryTraceListOverrideForTests is { } listOverride`) before its ternary. The walk's brace
