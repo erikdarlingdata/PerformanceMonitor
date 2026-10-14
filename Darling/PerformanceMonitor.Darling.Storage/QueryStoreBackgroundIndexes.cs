@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The Query Store read indexes that are built in the background after the service is up rather than by a
-/// migration rung (#4605's BRIN, #4952's and #5507's btrees), and the one piece of machinery they share: the state read,
+/// migration rung (#4605's BRIN, #4952's, #5507's and #5807's btrees), and the one piece of machinery they share: the state read,
 /// the build-or-skip decision, the invalid-leftover drop, the build and the delayed start.
 ///
 /// <para><b>Why not a migration rung.</b> Migrations run in one transaction and block startup, and
@@ -69,6 +69,9 @@ public static class QueryStoreBackgroundIndexes
 
     /// <summary>Name of the btree that lets the per-day plan regression build range-scan <c>first_execution_time</c> on the latest table (#5507).</summary>
     public const string LatestServerFirstExecIndexName = "collect.ix_query_store_interval_latest_server_first_exec";
+
+    /// <summary>Name of the btree that lets the one-query history read seek its query on the wide table (#5807).</summary>
+    public const string WideDatabaseQueryFirstExecIndexName = "collect.ix_query_store_interval_wide_db_query_first_exec";
 
     /// <summary>What the ensure does about one index.</summary>
     public enum IndexAction
@@ -163,12 +166,46 @@ public static class QueryStoreBackgroundIndexes
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_latest_server_first_exec;",
         IndexDefinition: "(server_id, first_execution_time)");
 
+    /// <summary>
+    /// A btree on <c>collect.query_store_interval_wide (server_id, database_name, query_id, first_execution_time)</c>
+    /// (#5807), built per partition by the partitioned path (the table is day-partitioned since V171).
+    ///
+    /// <para><b>Why.</b> <c>get_query_store_query_history</c>'s table read (<c>DarlingMcpQueryStoreHistoryTools.HistoryTableSql</c>)
+    /// asks for ONE query: <c>server_id</c>, <c>database_name</c> and <c>query_id</c> by equality, <c>first_execution_time</c>
+    /// bounded both sides. In <c>ux_query_store_interval_wide</c> <c>query_id</c> is the fifth column, behind
+    /// <c>runtime_stats_interval_id</c> and <c>plan_id</c>, so that index narrows on the server and the database only and
+    /// the read tests <c>query_id</c> on every entry the database has in the window; <see cref="WideServerFirstExec"/>
+    /// narrows on the server and the time range only. Either way the read's cost tracks the database's row count, not the
+    /// query's (25.5 s on one call on a large store). This index puts the three equalities first and the bound last, so the
+    /// read is one range per partition its bound reaches, holding only that query's rows.</para>
+    ///
+    /// <para><b>Why not reorder the unique key.</b> The upsert's ON CONFLICT names the key's columns, not its order, so a
+    /// reordered unique index would serve too, but changing it means building a second unique index of all eight columns
+    /// (about three times this index's size on the live test's rows), swapping it in as the arbiter while the writer runs,
+    /// and dropping the first: a larger build and a riskier step than adding this four-column index.</para>
+    ///
+    /// <para><b>HOT.</b> All four columns are part of the upsert's identity (<c>QueryStoreIntervalWide.IdentityColumns</c>),
+    /// so <c>ON CONFLICT ... DO UPDATE</c> rewrites none of them and an update stays heap-only; the HOT census in
+    /// <c>QueryStoreIntervalWideBrinIndexLiveTests</c> covers every spec in <see cref="All"/>.</para>
+    ///
+    /// <para><b>Until it is built</b> the read is unchanged: the statement names no index, so the planner keeps its
+    /// old plan on a store that lacks this one.</para>
+    /// </summary>
+    public static readonly IndexSpec WideDatabaseQueryFirstExec = new(
+        WideDatabaseQueryFirstExecIndexName,
+        "collect.query_store_interval_wide",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_wide_db_query_first_exec "
+        + "ON collect.query_store_interval_wide (server_id, database_name, query_id, first_execution_time);",
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_db_query_first_exec;",
+        IndexDefinition: "(server_id, database_name, query_id, first_execution_time)");
+
     /// <summary>Every background index, in the order the one delayed task ensures them.</summary>
     public static readonly IReadOnlyList<IndexSpec> All = new[]
     {
         QueryStoreIntervalWideBrinIndex.Spec,
         WideServerFirstExec,
         LatestServerFirstExec,
+        WideDatabaseQueryFirstExec,
     };
 
     /* One read of everything the decision needs. The names are bound, never interpolated. */
@@ -456,7 +493,8 @@ ORDER BY c.relname;";
     /// timeout is an error here (the delayed task logs it and the next start retries).
     /// </summary>
     internal static async Task EnsurePartitionedAsync(
-        NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task>? beforeLeafBuild = null)
     {
         if (string.IsNullOrEmpty(spec.IndexDefinition))
         {
@@ -500,37 +538,56 @@ ORDER BY c.relname;";
                 throw new InvalidOperationException($"The leaf index name {childName} is longer than 63 characters.");
             }
 
-            var childQualified = $"{indexSchema}.{childName}";
-            bool? childValid = null;
-            await using (var probe = new NpgsqlCommand(
-                "SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
+            if (beforeLeafBuild is not null)
             {
-                probe.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = childQualified });
-                if (await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is bool valid)
+                await beforeLeafBuild(leaf, cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                var childQualified = $"{indexSchema}.{childName}";
+                bool? childValid = null;
+                await using (var probe = new NpgsqlCommand(
+                    "SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
                 {
-                    childValid = valid;
+                    probe.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = childQualified });
+                    if (await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is bool valid)
+                    {
+                        childValid = valid;
+                    }
                 }
-            }
 
-            if (childValid == false)
+                if (childValid == false)
+                {
+                    logger.LogWarning(
+                        "Query Store index {Index} exists but is INVALID (an interrupted build); dropping it and rebuilding.", childQualified);
+                    await using var drop = new NpgsqlCommand($"DROP INDEX CONCURRENTLY IF EXISTS {childQualified};", connection) { CommandTimeout = BuildTimeoutSeconds };
+                    await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    childValid = null;
+                }
+
+                if (childValid is null)
+                {
+                    await using var build = new NpgsqlCommand(
+                        $"CREATE INDEX CONCURRENTLY IF NOT EXISTS {childName} ON {leaf} {spec.IndexDefinition};", connection) { CommandTimeout = BuildTimeoutSeconds };
+                    await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await ExecuteInLockTimeoutAsync(
+                    connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};", cancellationToken).ConfigureAwait(false);
+                built++;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
-                logger.LogWarning(
-                    "Query Store index {Index} exists but is INVALID (an interrupted build); dropping it and rebuilding.", childQualified);
-                await using var drop = new NpgsqlCommand($"DROP INDEX CONCURRENTLY IF EXISTS {childQualified};", connection) { CommandTimeout = BuildTimeoutSeconds };
-                await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                childValid = null;
+                /* #5807: retention dropped this leaf between the leaf list and its build or ATTACH (the oldest leaf is built
+                   first and is the next one retention drops). Its index went with it; the others still need theirs, and the
+                   delayed task does not run this again until the next start, so skip the leaf instead of ending the spec.
+                   When the skipped leaf was the last unattached one, no further ATTACH runs and the parent index stays INVALID
+                   until the next hourly create-ahead attaches a new leaf; the leaf indexes still serve the scans. */
+                logger.LogInformation(
+                    "Query Store index {Index}: leaf {Leaf} was dropped by retention before its index was built; skipping it.",
+                    spec.IndexName, leaf);
             }
-
-            if (childValid is null)
-            {
-                await using var build = new NpgsqlCommand(
-                    $"CREATE INDEX CONCURRENTLY IF NOT EXISTS {childName} ON {leaf} {spec.IndexDefinition};", connection) { CommandTimeout = BuildTimeoutSeconds };
-                await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            await ExecuteInLockTimeoutAsync(
-                connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};", cancellationToken).ConfigureAwait(false);
-            built++;
         }
 
         bool parentValid;

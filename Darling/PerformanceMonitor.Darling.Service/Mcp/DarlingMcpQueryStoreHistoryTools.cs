@@ -104,6 +104,11 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     /// walk the server's newer rows; it drops a row only for a monitored-server clock more than the slack (twelve hours)
     /// ahead of the service's, or a collection cycle longer than that
     /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary). A static readonly because the interval literal is derived from a TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.
+    /// <para><b>Index (#5807).</b> The three equalities and the <c>first_execution_time</c> range are exactly the key of
+    /// <see cref="QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExec"/>, so each partition the bound reaches is one
+    /// range scan over this query's rows; <c>collection_time</c> and the order are applied to those rows only. Keep every
+    /// predicate on the bare column (no cast or expression on it), or the planner can no longer take that index or prune
+    /// on the bound. A store that has not built the index yet reads through the older ones, as before.</para>
     /// </summary>
     internal static readonly string HistoryTableSql = $$"""
         SELECT plan_id, collection_time, execution_count,
