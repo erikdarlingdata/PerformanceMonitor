@@ -153,7 +153,9 @@ public sealed class StatementFilterBlockingReadsLiveTests
         {
             sb.Append("<process id=\"processpad").Append(i).Append("\" spid=\"").Append(100 + i % 900).Append("\" status=\"suspended\" currentdbname=\"").Append(Db).Append("\" loginname=\"" + StatementFilterCensus.LoginCanary + "\">")
               .Append("<executionStack><frame procname=\"adhoc\" line=\"1\">SELECT canary_pad_ssf FROM dbo.pad WHERE id = @c</frame></executionStack>")
-              .Append("<inputbuf>SELECT canary_pad_ssf FROM dbo.pad WHERE id = @c</inputbuf></process>");
+              /* #5632 (R3): the first pad's input buffer holds the census literals, so the keyed census reaches inputbuf. */
+              .Append("<inputbuf>").Append(i == 0 ? StatementFilterCensus.MaskStatement : "SELECT canary_pad_ssf FROM dbo.pad WHERE id = @c")
+              .Append("</inputbuf></process>");
         }
 
         sb.Append("</process-list><resource-list><keylock objectname=\"").Append(Db).Append(".dbo.t\"><owner-list><owner id=\"process2b\" mode=\"X\"/></owner-list>")
@@ -209,7 +211,7 @@ VALUES ($1, $2, $3, $4, $5, 12000, 62, 61, 0, 0, 'suspended', $6, $7, $8, $9)",
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-                CollectionIdGenerator.Next(), t.AddSeconds(5), ServerId, ServerName, Db, t, "process1a", StatementScrubCanary.CanaryStatement, DeadlockGraph(0));
+                CollectionIdGenerator.Next(), t.AddSeconds(5), ServerId, ServerName, Db, t, "process1a", StatementScrubCanary.CanaryStatement, DeadlockGraph(1));
 
             /* row 20 */
             await DarlingMcpTestData.ExecAsync(connection, ct, @"

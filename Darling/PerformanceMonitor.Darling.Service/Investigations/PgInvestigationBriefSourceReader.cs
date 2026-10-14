@@ -100,8 +100,12 @@ WHERE p.scope_server_id = $1
    OR p.scope_tag_id IN (SELECT tm.tag_id FROM config.server_tag_map AS tm WHERE tm.server_id = $1)
 ORDER BY CASE WHEN p.scope_server_id IS NOT NULL THEN 0 WHEN p.scope_tag_id IS NOT NULL THEN 1 ELSE 2 END, p.profile_id";
 
-    /* Mute rules for this server or every server, analysis mutes for this server or every server, and plan-force
-       actions on this server, newest first. Times in these tables are naive UTC. */
+    /* Mute rules for this server or every server, analysis mutes for this server or every server, plan-force actions on
+       this server, and each monitoring service host that started inside the window with the version it runs, newest first.
+       Times in the first three tables are naive UTC; config.service_version's are timestamptz, read as naive UTC.
+       #5632: config.service_version keeps one row per host (the version and start of its latest run), so a start inside
+       the window is all it can give: an upgrade shows as a start on the new version, and the version before is not kept.
+       Alert thresholds give nothing here: config_alert_settings keeps no change time. */
     internal const string ChangesSql = @"
 SELECT at, kind, text, pattern
 FROM (
@@ -128,6 +132,12 @@ FROM (
     FROM collect.plan_force_actions AS pf
     WHERE pf.server_id = $1
       AND pf.action_time >= $3
+    UNION ALL
+    SELECT sv.process_started_at AT TIME ZONE 'UTC', 'service_version',
+           concat_ws(' ', 'monitoring service on', sv.service_host, 'started running version', sv.product_version),
+           NULL
+    FROM config.service_version AS sv
+    WHERE sv.process_started_at AT TIME ZONE 'UTC' >= $3
 ) AS c
 ORDER BY at DESC
 LIMIT $4";
