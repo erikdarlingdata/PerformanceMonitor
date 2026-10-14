@@ -206,7 +206,8 @@ public sealed class ReadCallerTests
         Assert.Equal(ReadLatencyAccumulator.MaxDistinctCallers + 250, row.Count);
 
         /* The guide says the count is capped, so a reader who sees exactly the cap knows it is a floor (#5793 review). */
-        var description = typeof(DarlingMcpReadLatencyTools).GetMethod(nameof(DarlingMcpReadLatencyTools.GetReadLatency))!
+        var description = typeof(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpReadLatencyTools)
+            .GetMethod(nameof(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpReadLatencyTools.GetReadLatency))!
             .GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
         var cap = ReadLatencyAccumulator.MaxDistinctCallers.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
         Assert.Contains($"At most {cap} are counted per hour; {cap} means at least that many.", description, StringComparison.Ordinal);

@@ -149,9 +149,10 @@ public class ComposeClientTimeoutAttributionTests
     [Fact]
     public void TheComposeRunRoute_PassesTheHeadroomAndTheRemapFlag()
     {
-        var call = CallArguments(WebCode(), "await RunComposedPanelAsync(postgres, body, context.RequestAborted");
+        /* The call wraps onto a second line for the caller argument (#5793), so whitespace runs are compared as one space. */
+        var call = Regex.Replace(CallArguments(WebCode(), "await RunComposedPanelAsync(postgres, body, context.RequestAborted"), @"\s+", " ");
 
-        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true", call);
+        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true, caller: WebReadCaller(context)", call);
     }
 
     [Fact]

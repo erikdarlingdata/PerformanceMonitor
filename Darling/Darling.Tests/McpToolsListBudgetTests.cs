@@ -264,7 +264,9 @@ public sealed class McpToolsListBudgetTests
     /* #5750 F10: re-measured at the head of the shared branch: 198,844 bytes, so the 198,869 above no longer holds (the head text changed
        since it was measured). Constant set to the measured value. */
     /* #5793: get_read_latency's head names distinct_callers (512 -> 590 bytes) and get_slow_reads' head names caller (356 -> 460
-       bytes), each in one sentence that also says it holds no personal data. The measured total went 198,844 -> 198,998 bytes. */
+       bytes), each in one sentence that also says it holds no personal data: +182 bytes. Measured on the branch merged with dev
+       (98ab5ff98): 198,816 bytes with the two sentences taken out, 198,998 with them. The 198,844 above is not this tree's
+       measured base. Constant set to the measured value. */
     private const int TotalCeilingBytes = 198_998;
 
 
