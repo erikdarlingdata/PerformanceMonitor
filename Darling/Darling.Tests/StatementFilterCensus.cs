@@ -105,6 +105,8 @@ internal static class StatementFilterCensus
 
         var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
+        // #5632: the mcp.dataDetail level the host serves, as the service registers it; FilterThroughHostAsync sets it per call.
+        builder.Services.AddSingleton(new McpDataDetailSetting(McpDataDetail.Full));
         if (gcf is bool pinned)
         {
             builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(pinned));
@@ -138,18 +140,23 @@ internal static class StatementFilterCensus
     }
 
     /// <summary>Sends <paramref name="rawToolText"/> through the host's registered filters as a tool's result and
-    /// returns what a client would receive.</summary>
+    /// returns what a client would receive. <paramref name="dataDetail"/> is the <c>mcp.dataDetail</c> level the host
+    /// serves for this call (#5632), set back to <c>full</c> afterwards; one host serves one call at a time here.</summary>
     public static async Task<(string Text, bool IsError)> FilterThroughHostAsync(
-        TestServer server, string rawToolText, bool isError = false, string path = "/")
+        TestServer server, string rawToolText, bool isError = false, string path = "/",
+        McpDataDetail dataDetail = McpDataDetail.Full)
     {
         string key = Guid.NewGuid().ToString("N");
         s_payloads[key] = (rawToolText, isError);
+        var setting = server.Services.GetRequiredService<McpDataDetailSetting>();
+        setting.Mode = dataDetail;
         try
         {
             return await CallRealToolAsync(server, ProbeName, new JsonObject { ["key"] = key }, path);
         }
         finally
         {
+            setting.Mode = McpDataDetail.Full;
             s_payloads.TryRemove(key, out _);
         }
     }

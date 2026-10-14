@@ -379,6 +379,26 @@ public sealed class McpDataDetailMaskerTests
     }
 
     [Fact]
+    public async System.Threading.Tasks.Task RealHost_MasksAToolAnswerAtTheLevelItServes()
+    {
+        using var server = await StatementFilterCensus.BuildHostAsync();
+        const string raw = "{\"query_text\":\"SELECT a FROM dbo.t WHERE b = 731900417\",\"login_name\":\"login-canary-dd\"}";
+
+        var (full, _) = await StatementFilterCensus.FilterThroughHostAsync(server, raw);
+        Assert.Contains("731900417", full, StringComparison.Ordinal);
+
+        var (masked, maskedError) = await StatementFilterCensus.FilterThroughHostAsync(server, raw, dataDetail: McpDataDetail.MaskLiterals);
+        Assert.False(maskedError);
+        Assert.DoesNotContain("731900417", masked, StringComparison.Ordinal);
+        Assert.Contains("login-canary-dd", masked, StringComparison.Ordinal);
+
+        var (meta, _) = await StatementFilterCensus.FilterThroughHostAsync(server, raw, dataDetail: McpDataDetail.MetadataOnly);
+        Assert.DoesNotContain("731900417", meta, StringComparison.Ordinal);
+        Assert.DoesNotContain("login-canary-dd", meta, StringComparison.Ordinal);
+        Assert.Contains("login#1", meta, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void HostRegistersTheFilterJustOutsideTheStatementFilter()
     {
         string source = System.IO.File.ReadAllText(System.IO.Path.Combine(
