@@ -1445,12 +1445,22 @@ public sealed class TsqlConventionGuardTests
         "PerformanceMonitor.Collectors/PgIndexBloatCoverage.cs Tally",
         "PerformanceMonitor.Collectors/StallWaitProbe.cs TriggerElapsedFor",
         "PerformanceMonitor.Collectors/StallWaitProbe.cs FitsUnderBudget",
+        /* #5632 Phase A: an expression-bodied field-name lookup whose property pattern (`name is { Length: > 0 }`) closes
+           the walk's brace match early, stranding the ternary's arms (`? cls : McpDataDetailClass.Kept`). Neither arm
+           holds a string literal, so the stranded text is not T-SQL and not a tempdb label, and no census reads
+           McpDataDetailKeys.cs. */
+        "PerformanceMonitor.Common/Mcp/McpDataDetailKeys.cs Classify",
         "PerformanceMonitor.Common/SystemHealthParser.cs GbFromBytes",
         "PerformanceMonitor.Common/SystemHealthParser.cs GbFromKb",
         /* #4452: the same expression-bodied one-liner shape as GbFromBytes/GbFromKb just above — it strands
            only its own numeric literals (1048576, the rounding precision), not T-SQL or a tempdb label, so
            no census reads a site of that kind here. */
         "PerformanceMonitor.Common/SystemHealthParser.cs MbFromBytes",
+        /* #5632 Phase A: an expression-bodied route matcher whose property pattern (`AnalysisCategory is { } category`)
+           closes the walk's brace match early, stranding the rest of its `&&` chain (the TryGetAnalysisCategory call
+           and the OrdinalIgnoreCase comparison). None of it holds a string literal, so the stranded text is not T-SQL
+           and not a tempdb label, and no census reads NotificationRoute.cs. */
+        "PerformanceMonitor.Notifications/NotificationRoute.cs MatchesCategory",
         "PerformanceMonitor.Notifications/WebhookAlertService.cs DeriveResourceDatabase",
         /* #5654: an expression-bodied title helper whose conditional strands only its own interpolated format string,
            not T-SQL or a tempdb label, so no census reads a site of that kind here. */
@@ -1482,6 +1492,11 @@ public sealed class TsqlConventionGuardTests
            census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/DarlingManagedPostgres.cs ShouldFallBackToHeaderOnly",
         "Darling/PerformanceMonitor.Darling.Service/HypotheticalIndexRequest.cs IsComplete",
+        /* #5632 Phase A: the brief composer's expression-bodied number formatter, whose property pattern (`value is { } v`)
+           closes the walk's brace match early, stranding the ternary's arms (`JsonValue.Create(Math.Round(v, 2))`,
+           `null`). Neither arm holds a string literal, so the stranded text is not T-SQL and not a tempdb label, and no
+           census reads InvestigationBriefComposer.cs. */
+        "Darling/PerformanceMonitor.Darling.Service/Investigations/InvestigationBriefComposer.cs Number",
         /* #4214: an expression-bodied one-liner, same shape as the pairs elsewhere in this list — it strands
            only its own ternary, not T-SQL or a tempdb label, so no census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs ComputeEffectiveMemoryLimitBytes",
