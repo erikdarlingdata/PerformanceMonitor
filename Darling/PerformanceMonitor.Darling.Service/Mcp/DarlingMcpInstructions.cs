@@ -57,7 +57,9 @@ internal static class DarlingMcpInstructions
     private static string Compose(DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true)
     {
         var section = DarlingPeerDirectory.InstructionsSection(peers);
-        if (section.Length == 0 && ReferenceEquals(census, CatalogCensus) && muteServed)
+        // The fast path returns the fixed text when the served census equals the catalog census, the mute tool is
+        // served, and there are no peers. The census is compared by value: ToolCensus builds a new string on each call.
+        if (section.Length == 0 && census == CatalogCensus && muteServed)
             return Text;
 
         /* #5789 correction: the Workflow line names the mute write as its last step. With the writes off that tool
