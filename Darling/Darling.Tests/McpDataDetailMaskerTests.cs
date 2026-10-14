@@ -627,6 +627,56 @@ public sealed class McpDataDetailMaskerTests
         Assert.Same(clean, McpDataDetailMasker.ForAnswer(McpDataDetail.MaskLiterals).Answer(clean));
     }
 
+    /* #5632 review L5: a precondition sentence appends the monitored server's own words, which quote the monitoring login
+       in double quotes (SQL Server 916, PostgreSQL's user "...") and a [CLIENT: ...] address; MaskLiterals keeps quoted
+       and bracketed text as identifiers. Under metadataOnly they are numbered with the answer's own numbering (the row's
+       login and the sentence's are one login#1), masked and never withheld; under maskLiterals they are kept. */
+    private static string EnvelopeWith(string message) =>
+        new JsonObject
+        {
+            ["status"] = "precondition",
+            ["message"] = message,
+            ["rows"] = new JsonArray(new JsonObject { ["login_name"] = "CORP\\svc_pm", ["host_name"] = "10.20.30.40" }),
+        }.ToJsonString();
+
+    [Fact]
+    public void EnvelopeMessage_UnderMetadataOnly_NumbersTheSqlServer916PrincipalAndTheClient_WithTheAnswersNumbering()
+    {
+        string answer = EnvelopeWith("The Query Store read was refused. The server said: The server principal \"CORP\\svc_pm\" "
+            + "is not able to access the database \"Sales\" under the current security context. [CLIENT: 10.20.30.40]");
+
+        var masked = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Answer(answer))!.AsObject();
+        string envelope = masked["message"]!.GetValue<string>();
+
+        Assert.NotEqual(Withheld, envelope);
+        Assert.Contains("The server principal \"login#1\" is not able to access the database \"Sales\"", envelope, StringComparison.Ordinal);
+        Assert.EndsWith("[CLIENT: host#1]", envelope, StringComparison.Ordinal);
+        Assert.DoesNotContain("svc_pm", envelope, StringComparison.Ordinal);
+        Assert.DoesNotContain("10.20.30.40", envelope, StringComparison.Ordinal);
+        Assert.Equal("login#1", masked["rows"]![0]!["login_name"]!.GetValue<string>());
+        Assert.Equal("host#1", masked["rows"]![0]!["host_name"]!.GetValue<string>());
+
+        var kept = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MaskLiterals).Answer(answer))!["message"]!.GetValue<string>();
+        Assert.Contains("\"CORP\\svc_pm\"", kept, StringComparison.Ordinal);
+        Assert.Contains("[CLIENT: 10.20.30.40]", kept, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EnvelopeMessage_UnderMetadataOnly_NumbersAPostgresUser_AndKeepsAPredefinedRole()
+    {
+        string answer = EnvelopeWith("pg_stat_statements is unreadable. The server said: password authentication failed for "
+            + "user \"monitor\"; permission denied: must be a member of ROLE \"pg_read_all_stats\" or role \"ops_admin\".");
+
+        string envelope = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Answer(answer))!["message"]!
+            .GetValue<string>();
+
+        /* login#1 is the row's CORP\svc_pm, masked first; the sentence's names follow in order. */
+        Assert.Contains("for user \"login#2\";", envelope, StringComparison.Ordinal);
+        Assert.Contains("ROLE \"pg_read_all_stats\" or role \"login#3\".", envelope, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitor", envelope, StringComparison.Ordinal);
+        Assert.DoesNotContain("ops_admin", envelope, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async System.Threading.Tasks.Task RealHost_KeepsTheEnvelopeMessage_UnderMetadataOnly()
     {

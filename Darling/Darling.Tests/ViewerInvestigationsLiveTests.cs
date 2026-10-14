@@ -99,6 +99,17 @@ FROM config.investigation_notes WHERE note_id = {written}", ct));
 
             await viewer.SaveInvestigationProfileAsync(7, null, "  ", "tester", ct);
             Assert.DoesNotContain(await viewer.GetInvestigationProfilesAsync(ct), p => p.ScopeServerId == 7);
+            await viewer.SaveInvestigationProfileAsync(7, null, "", "tester", ct);
+
+            /* #5632 review L2: every save and the blank save are journaled in order (request NULL, server = the scope's
+               server, NULL for the fleet and a tag); the second blank save removed nothing and journals nothing. */
+            Assert.Equal(
+                "profile_saved||fleet profile;profile_saved|7|server 7 profile;profile_saved||tag 3 profile;"
+                + "profile_saved||fleet profile;profile_removed|7|server 7 profile",
+                await ScalarAsync(owner, @"
+SELECT string_agg(event || '|' || coalesce(server_id::text, '') || '|' || reason, ';' ORDER BY journal_id)
+FROM config.investigation_journal
+WHERE event LIKE 'profile%' AND request_id IS NULL AND actor = 'person:tester'", ct));
         });
     }
 

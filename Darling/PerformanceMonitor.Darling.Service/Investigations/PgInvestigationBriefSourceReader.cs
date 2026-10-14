@@ -82,13 +82,17 @@ WHERE rp.server_id = $1
 ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
+    /* The server's notes AND the fleet's (server_id NULL): the viewer's note scope offers "Fleet (every server)", and a
+       fleet note no brief read was an approved note no agent would ever see (#5632 review L3). A note has no tag scope
+       (no tag column; the viewer's note scope lists only the fleet and servers). The server's own notes sort first, so
+       fleet notes never crowd them out of the ten. */
     internal const string NotesSql = @"
 SELECT author, decided_by, expires_at, note_text
 FROM config.investigation_notes
-WHERE server_id = $1
+WHERE (server_id = $1 OR server_id IS NULL)
   AND state = 'approved'
   AND expires_at > $2
-ORDER BY coalesce(decided_at, created_at) DESC
+ORDER BY (server_id IS NULL), coalesce(decided_at, created_at) DESC
 LIMIT 10";
 
     internal const string ProfilesSql = @"

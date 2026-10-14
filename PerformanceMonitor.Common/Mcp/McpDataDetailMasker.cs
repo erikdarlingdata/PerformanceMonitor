@@ -96,7 +96,8 @@ public sealed class McpDataDetailMasker
     /// <c>message</c> (the top-level <c>message</c> of an object that also carries a top-level string <c>status</c>) is
     /// Darling's own sentence the operator must read: a <c>precondition</c> names the fix, an <c>unavailable</c> says
     /// what is missing. It is masked as free text under both levels (its literals and digits replaced) and never
-    /// withheld. Every other field, a <c>message</c> key inside a result row included, is masked by
+    /// withheld; under <c>metadataOnly</c> the logins and client hosts it quotes are also numbered
+    /// (<see cref="NumberEnvelopeNames"/>). Every other field, a <c>message</c> key inside a result row included, is masked by
     /// <see cref="Json(string, bool)"/> as before. The SAME instance when nothing changed.
     /// </summary>
     public string Answer(string output)
@@ -110,13 +111,45 @@ public sealed class McpDataDetailMasker
         string maskedRest = Json(rest);
         if (string.Equals(maskedRest, Refusal, StringComparison.Ordinal)) return Refusal;
 
-        string maskedMessage = IsOwnPlaceholder(message!) ? message! : MaskLiterals(message!);
+        string maskedMessage = IsOwnPlaceholder(message!) ? message! : MaskLiterals(NumberEnvelopeNames(message!));
         if (ReferenceEquals(maskedRest, rest) && string.Equals(maskedMessage, message, StringComparison.Ordinal)) return output;
 
         JsonObject masked = JsonNode.Parse(maskedRest)!.AsObject();
         masked["message"] = maskedMessage;
         return masked.ToJsonString(McpHelpers.JsonOptions);
     }
+
+    /// <summary>
+    /// Under <c>metadataOnly</c>, the logins and client hosts a status sentence quotes, numbered with this answer's
+    /// <c>login#n</c> and <c>host#n</c> (#5632 review L5). <see cref="MaskLiterals"/> keeps double-quoted and bracketed
+    /// text as identifiers, and a <c>precondition</c> sentence appends the monitored server's own words (SQL Server 916:
+    /// <c>The server principal "DOMAIN\login" is not able to access the database "db"</c>; PostgreSQL:
+    /// <c>... for user "monitor"</c>), so the double-quoted name after <c>principal</c>, <c>user</c>, <c>login</c> or
+    /// <c>role</c> becomes a login number and a <c>[CLIENT: ...]</c> address a host number. A PostgreSQL predefined role
+    /// (<c>pg_</c> prefix, which no created role may carry) is the grant the sentence names, not a login, and is kept.
+    /// The sentence is masked, never withheld. Under <c>maskLiterals</c> logins and hosts are kept, as everywhere.
+    /// </summary>
+    private string NumberEnvelopeNames(string message)
+    {
+        if (_mode != McpDataDetail.MetadataOnly) return message;
+        string text = s_envelopeQuotedLogin.Replace(message, m =>
+        {
+            string name = m.Groups["name"].Value.Replace("\"\"", "\"", StringComparison.Ordinal);
+            return name.StartsWith("pg_", StringComparison.Ordinal)
+                ? m.Value
+                : m.Groups["lead"].Value + "\"" + Numbered(_logins, "login#", name) + "\"";
+        });
+        return s_envelopeClient.Replace(text, m =>
+            m.Groups["lead"].Value + Numbered(_hosts, "host#", m.Groups["host"].Value.Trim()) + "]");
+    }
+
+    private static readonly Regex s_envelopeQuotedLogin = new(
+        @"(?<lead>\b(?:principal|user|login|role)\s+)""(?<name>(?:[^""]|"""")*)""",
+        RegexOptions.NonBacktracking | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_envelopeClient = new(
+        @"(?<lead>\[CLIENT:\s*)(?<host>[^\]]*)\]",
+        RegexOptions.NonBacktracking | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>True when <paramref name="output"/> is a JSON object whose top level carries a string <c>status</c>
     /// and a string <c>message</c>: the status envelope.</summary>

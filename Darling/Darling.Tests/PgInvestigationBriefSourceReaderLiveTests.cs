@@ -105,7 +105,9 @@ VALUES ('lc-host', '9.9.9', $1, now())", Now.AddHours(-1));
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO config.investigation_notes (server_id, note_text, author, state, expires_at)
 VALUES ($1, 'the nightly load blocks for a minute', 'ops', 'approved', $2),
-       ($1, 'a pending note the brief must not carry', 'ops', 'pending', $2)", ServerId, Now.AddDays(30));
+       ($1, 'a pending note the brief must not carry', 'ops', 'pending', $2),
+       (NULL, 'a fleet note every brief carries', 'ops', 'approved', $2),
+       ($1 + 1, 'another server''s note the brief must not carry', 'ops', 'approved', $2)", ServerId, Now.AddDays(30));
 
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VALUES ($1, 'production order entry')",
@@ -138,8 +140,11 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
             Assert.Contains("9.9.9", start.Text, StringComparison.Ordinal);
             Assert.Equal(Now.AddHours(-1), DateTime.SpecifyKind(start.AtUtc, DateTimeKind.Utc));
 
-            var note = Assert.Single(sources.Notes);
-            Assert.Equal("the nightly load blocks for a minute", note.Text);
+            /* #5632 review L3: the server's note, then the fleet's (server_id NULL); another server's and a pending note
+               stay out. */
+            Assert.Equal(
+                new[] { "the nightly load blocks for a minute", "a fleet note every brief carries" },
+                sources.Notes.Select(n => n.Text).ToArray());
             var profile = Assert.Single(sources.Profiles);
             Assert.Equal("server", profile.Scope);
 

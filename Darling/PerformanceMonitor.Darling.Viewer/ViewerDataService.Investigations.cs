@@ -421,7 +421,11 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
 
     /// <summary>
     /// Saves the environment profile of one scope: the fleet (both null), one server or one tag. One row per scope; a
-    /// blank text removes the scope's profile. <c>modified_by</c> is <c>person:&lt;login&gt;</c>.
+    /// blank text removes the scope's profile. <c>modified_by</c> is <c>person:&lt;login&gt;</c>. The write and its journal
+    /// row (<c>profile_saved</c>, or <c>profile_removed</c> when a blank save removed a profile; request NULL, server = the
+    /// scope's server or NULL for the fleet and tag scopes, reason naming the scope) run in one transaction, as close,
+    /// decide and note write do: the profile goes into every brief of its scope, so a change to what agents are told
+    /// leaves a trace (#5632 review L2). A blank save on a scope with no profile changes nothing and journals nothing.
     /// </summary>
     public async Task SaveInvestigationProfileAsync(
         int? scopeServerId, int? scopeTagId, string? profileText, string login, CancellationToken cancellationToken = default)
@@ -433,18 +437,37 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         }
 
         var blank = string.IsNullOrWhiteSpace(profileText);
-        await using var command = _dataSource.CreateCommand(blank ? InvestigationProfileDeleteSql : InvestigationProfileUpsertSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        AddNullableInt(command, scopeServerId);
-        AddNullableInt(command, scopeTagId);
-        if (!blank)
+        var actor = InvestigationPersonActor(login);
+        await InTransactionAsync(async (connection, transaction) =>
         {
-            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = profileText!.Trim() });
-            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = InvestigationPersonActor(login) });
-        }
+            await using var command = new NpgsqlCommand(
+                blank ? InvestigationProfileDeleteSql : InvestigationProfileUpsertSql, connection, transaction);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            AddNullableInt(command, scopeServerId);
+            AddNullableInt(command, scopeTagId);
+            if (!blank)
+            {
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = profileText!.Trim() });
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = actor });
+            }
 
-        await ExecuteWriteAsync(command, cancellationToken);
+            var changed = await command.ExecuteNonQueryAsync(cancellationToken);
+            if (changed > 0)
+            {
+                await JournalAsync(connection, transaction, null, scopeServerId, blank ? "profile_removed" : "profile_saved",
+                    actor, InvestigationProfileScopeReason(scopeServerId, scopeTagId), cancellationToken);
+            }
+
+            return changed;
+        }, cancellationToken);
     }
+
+    /// <summary>The journal reason of a profile change, naming its scope: <c>fleet profile</c>, <c>server 7 profile</c> or
+    /// <c>tag 3 profile</c>.</summary>
+    public static string InvestigationProfileScopeReason(int? scopeServerId, int? scopeTagId) =>
+        scopeServerId is { } server ? string.Create(CultureInfo.InvariantCulture, $"server {server} profile")
+        : scopeTagId is { } tag ? string.Create(CultureInfo.InvariantCulture, $"tag {tag} profile")
+        : "fleet profile";
 
     /// <summary>The login the actor names: not blank, at most 128 characters.</summary>
     public static string? ValidateInvestigationLogin(string? login) =>
