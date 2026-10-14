@@ -810,25 +810,43 @@ ORDER BY c.regression_factor DESC";
 
             /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
                and a second command cannot run while this reader is open. */
-            var candidates = new List<PlanRegressionCandidate>();
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            /* #5812: a current pass reuses the candidates of a fresh read of the same shape, so the 14-day plan_agg read
+               runs once per server per PlanRegressionCandidateCache.RefreshAfter instead of on every pass. Everything below
+               the read (the input check, the cut, the fact) still runs on every pass. */
+            var readStartedUtc = DateTime.UtcNow;
+            var shape = context.ReusePlanRegressionCandidates
+                ? PlanRegressionCandidateCache.ShapeOf(cmd, readsDays ? 5 : readsTable ? 4 : 3, windowFloor, builtDays)
+                : null;
+            var reused = shape is null
+                ? null
+                : PlanRegressionCache.TryGet(StoreIdentity, context.ServerId, shape, context.TimeRangeEnd, readStartedUtc);
+            var candidates = reused is null ? new List<PlanRegressionCandidate>() : new List<PlanRegressionCandidate>(reused);
+            if (reused is null)
             {
-                while (await reader.ReadAsync(context.CancellationToken))
+                using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
                 {
-                    candidates.Add(new PlanRegressionCandidate(
-                        DatabaseName: reader.GetString(8),
-                        QueryId: ToInt64(reader.GetValue(0)),
-                        LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
-                        LatestIsForced: !reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3)),
-                        ForceFailures: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
-                        BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
-                        Factor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
-                        BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
-                        LatestPlanId: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
-                        BestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
-                        StatementText: reader.IsDBNull(12) ? null : reader.GetString(12),
-                        LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
-                        BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
+                    while (await reader.ReadAsync(context.CancellationToken))
+                    {
+                        candidates.Add(new PlanRegressionCandidate(
+                            DatabaseName: reader.GetString(8),
+                            QueryId: ToInt64(reader.GetValue(0)),
+                            LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
+                            LatestIsForced: !reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3)),
+                            ForceFailures: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
+                            BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
+                            Factor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                            BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
+                            LatestPlanId: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
+                            BestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
+                            StatementText: reader.IsDBNull(12) ? null : reader.GetString(12),
+                            LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                            BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
+                    }
+                }
+
+                if (shape is not null && PlanRegressionCandidateCache.IsCurrent(context.TimeRangeEnd, readStartedUtc))
+                {
+                    PlanRegressionCache.Store(StoreIdentity, context.ServerId, shape, readStartedUtc, candidates);
                 }
             }
 
@@ -1010,7 +1028,7 @@ ORDER BY c.regression_factor DESC";
     internal const int PlanRegressionMaxOffenders = 20;
 
     /// <summary>One row of the PLAN_REGRESSION read, with the keys to the two plans and the statement text (#5630).</summary>
-    private sealed record PlanRegressionCandidate(
+    internal sealed record PlanRegressionCandidate(
         string DatabaseName,
         long QueryId,
         double LatestCpu,

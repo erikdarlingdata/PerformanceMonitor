@@ -256,8 +256,8 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             Assert.Equal(new DateOnly(2026, 3, 6), plan.Where(b => b.ServerId == 4).Min(b => b.Day));
             Assert.Equal(new DateOnly(2026, 3, 17), plan.Where(b => b.ServerId == 4).Max(b => b.Day));
 
-            /* Oldest day first, then server. */
-            Assert.Equal(plan.OrderBy(b => b.Day).ThenBy(b => b.ServerId).ToList(), plan.ToList());
+            /* Newest day first, then server (#5812: a store that is behind rebuilds the days nearest today first). */
+            Assert.Equal(plan.OrderByDescending(b => b.Day).ThenBy(b => b.ServerId).ToList(), plan.ToList());
         });
     }
 
