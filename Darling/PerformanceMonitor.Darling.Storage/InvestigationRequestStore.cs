@@ -130,8 +130,9 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);
 /// test can move the clock.
 ///
 /// <para><b>Open or join is one transaction.</b> It takes a transaction-scoped advisory lock on the server and family, so two
-/// alerts of one incident cannot both open a request; joins an open or claimed request of that server and family when the
-/// alert falls inside its 30-minute window or carries a dedup key already on it; and otherwise takes
+/// alerts of one incident cannot both open a request; joins an open or claimed request of that server and family only while
+/// the request is inside its 30-minute window (opened at most 30 minutes ago, and the alert at most 30 minutes after the
+/// request's first); and otherwise takes
 /// <c>pg_advisory_xact_lock(5632, route_id)</c> over the count of the route's requests and the INSERT (ruling R6), so two
 /// families of one route cannot both pass the limit. At a limit it journals <c>limit_reached</c> once per route per hour
 /// (the journal's <c>once_key</c>) and opens nothing. Joins never count toward a limit.</para>
@@ -167,9 +168,8 @@ WHERE r.server_id = $1
   AND r.family = $2
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
-  AND (   $4 <= r.window_until
-       OR EXISTS (SELECT 1 FROM config.investigation_request_alerts AS a
-                  WHERE a.request_id = r.request_id AND a.dedup_key = ANY($5)))
+  AND r.opened_at >= $3 - interval '30 minutes'
+  AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
 LIMIT 1";
 
@@ -310,6 +310,16 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// Opens a request for <paramref name="alert"/>, joins it to an open or claimed request of the same server and family,
     /// or refuses at the route's limit, in one transaction. See the class remarks for the locks.
     /// </summary>
+    /// <remarks>
+    /// <para><b>The join is bounded by the window</b> (#5632 review round 1, M2): an alert joins only a request whose state is
+    /// <c>open</c> or <c>claimed</c> and that opened at most <see cref="GroupingWindow"/> ago. A dedup key never decides a join:
+    /// the send path's key falls back to the constant <c>{server}:{metric}</c> for an alert with no incidents, so a key arm
+    /// would join every later alert of that metric for the request's whole life, after its brief was composed. The keys are
+    /// recorded as the request's alert rows only.</para>
+    /// <para><b>A reported or closed request is final.</b> A later alert of the same server and family opens a NEW request,
+    /// even inside the same 30 minutes, and that request counts against the route's hourly and daily limits. This is
+    /// intended: the agent's report answered the alerts it was briefed on, and a condition that fires again is a new question.</para>
+    /// </remarks>
     public async Task<InvestigationOpenResult> OpenOrJoinAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(alert);
@@ -324,7 +334,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         Guid? joinId = null;
         await using (var find = Command(connection, transaction, FindJoinSql,
-                         P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(keys)))
+                         P(alert.ServerId), P(alert.Family), P(now), P(alertTime)))
         {
             var found = await find.ExecuteScalarAsync(cancellationToken);
             if (found is Guid id)

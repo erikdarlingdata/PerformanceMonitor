@@ -21,7 +21,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// The dispatch hook of Level 1 investigations (#5632 Phase A, plan v2 section 4, ruling R1): after an alert's history row is
 /// written, it resolves the alert's agent route and hands the alert to <see cref="InvestigationRequestStore.OpenOrJoinAsync"/>,
-/// which opens a request, joins the alert to an open one of the same server and family, or refuses at the route's limit.
+/// which opens a request, joins the alert to an open or claimed one of the same server and family opened within the last
+/// 30 minutes, or refuses at the route's limit.
 ///
 /// <para><b>Where it is called.</b> Three places write an alert row that can start an investigation, and each calls
 /// <see cref="DispatchAsync"/> once per row, after <c>RecordAlertAsync</c>, so the pages go out first and a store wait never
@@ -38,7 +39,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>The link.</b> The request's alert row carries the history row's own <see cref="AlertHistoryRecord.AlertTimeUtc"/>
 /// (the store writes that instant into <c>config_alert_log.alert_time</c>), its server and metric, and the PagerDuty-style
 /// dedup key the send path derives (<see cref="WebhookAlertService.DerivePagerDutyDedupKeyForSend"/>) followed by every
-/// incident's own dedup key, so a request names the exact alert rows it grew from.</para>
+/// incident's own dedup key, so a request names the exact alert rows it grew from. The keys are the link only: they never
+/// decide a join (#5632 review round 1, M2), since the send path's key is the constant <c>{server}:{metric}</c> for an alert
+/// with no incidents.</para>
 ///
 /// <para><b>The brief is not composed here.</b> It is built when an agent claims the request
 /// (<see cref="InvestigationRequestStore.SetBriefAsync"/> needs the claim id), so the dispatcher leaves <c>brief</c> NULL.</para>

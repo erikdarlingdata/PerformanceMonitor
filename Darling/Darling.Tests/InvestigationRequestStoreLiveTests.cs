@@ -22,7 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The investigation store's operations on a live store (#5632 Phase A, rulings R4 and R6): alerts of one server and family
-/// group within the 30-minute window and by a known dedup key; the hourly limit opens nothing and journals
+/// group within the 30-minute window, never by a dedup key alone; the hourly limit opens nothing and journals
 /// <c>limit_reached</c> once; two concurrent claims have one winner; a superseded claim's report is refused as
 /// <c>lease_lost</c>; a late report under a lapsed or expired lease is accepted until a newer claim; the list computes the
 /// state without writing; and the sweep expires without reopening.
@@ -44,7 +44,7 @@ public sealed class InvestigationRequestStoreLiveTests
         new(requestId, claimId, "agent-a", 1, "real", "a long blocking chain", true, "summary", "[{\"tool\":\"get_blocking\"}]");
 
     [Fact]
-    public async Task AlertsGroup_WithinTheWindow_AndByAKnownKey_AndOpenAnotherPastIt()
+    public async Task AlertsGroup_WithinTheWindow_AndAKnownKeyPastItOpensAnother()
     {
         await RunAsync(async (store, connection, ct) =>
         {
@@ -52,28 +52,70 @@ public sealed class InvestigationRequestStoreLiveTests
             Assert.Equal(InvestigationOpenOutcome.Opened, first.Outcome);
 
             /* Same server and family, inside 30 minutes, two incident keys: joins, a row per key. */
-            var second = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(20), keys: new[] { "key-2", "key-3" }), ct);
+            _now = T0.AddMinutes(20);
+            var second = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { "key-2", "key-3" }), ct);
             Assert.Equal(InvestigationOpenOutcome.Joined, second.Outcome);
             Assert.Equal(first.RequestId, second.RequestId);
 
             /* Another family on the same server opens its own. */
-            var other = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(21), family: "resources"), ct);
+            _now = T0.AddMinutes(21);
+            var other = await store.OpenOrJoinAsync(Alert(_now, family: "resources"), ct);
             Assert.Equal(InvestigationOpenOutcome.Opened, other.Outcome);
 
-            /* Past the window with a key already on the request: joins late. */
-            var late = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(50), keys: new[] { "key-3" }), ct);
-            Assert.Equal(first.RequestId, late.RequestId);
+            /* Past the window with a key already on the request: a key never decides a join (#5632 review M2), so it opens
+               another. */
+            _now = T0.AddMinutes(50);
+            var late = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { "key-3" }), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, late.Outcome);
+            Assert.NotEqual(first.RequestId, late.RequestId);
 
-            /* Past the window with a new key: opens another. */
-            var past = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(51), keys: new[] { "key-9" }), ct);
-            Assert.Equal(InvestigationOpenOutcome.Opened, past.Outcome);
-            Assert.NotEqual(first.RequestId, past.RequestId);
+            /* Inside the new request's window with a new key: joins it, not the first. */
+            _now = T0.AddMinutes(51);
+            var next = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { "key-9" }), ct);
+            Assert.Equal(late.RequestId, next.RequestId);
 
-            Assert.Equal("3|4", await ScalarAsync(connection, $@"
+            Assert.Equal("2|3", await ScalarAsync(connection, $@"
 SELECT alert_count || '|' || (SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{first.RequestId}')
 FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct));
             Assert.Equal("2", await ScalarAsync(connection,
                 "SELECT count(*) FROM config.investigation_journal WHERE event = 'joined'", ct));
+        });
+    }
+
+    /// <summary>The join is bounded by the window even for a request still claimed (#5632 review round 1, M2): the
+    /// constant <c>{server}:{metric}</c> key every alert of a metric carries joins nothing on its own. An alert 29 minutes
+    /// after the request opened joins it; one 31 minutes after opens a new request, though the first is still claimed.
+    /// A reported request is final: a later alert inside its window opens a new one.</summary>
+    [Fact]
+    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlertAt31MinutesOpensANewOne_AndAReportedOneIsFinal()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            const string Fallback = "7:Blocking";
+            var first = (await store.OpenOrJoinAsync(Alert(T0, keys: new[] { Fallback }), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(first, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, claim.Outcome);
+
+            _now = T0.AddMinutes(29);
+            var joined = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, joined.Outcome);
+            Assert.Equal(first, joined.RequestId);
+
+            _now = T0.AddMinutes(31);
+            var opened = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, opened.Outcome);
+            Assert.NotEqual(first, opened.RequestId);
+            Assert.Equal("claimed", await ScalarAsync(connection,
+                $"SELECT state FROM config.investigation_requests WHERE request_id = '{first}'", ct));
+
+            /* Report the second; an alert two minutes later, inside its window, opens a third. */
+            var second = opened.RequestId!.Value;
+            var secondClaim = await store.ClaimAsync(second, "agent-a", ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(second, secondClaim.ClaimId!.Value), ct));
+            _now = T0.AddMinutes(33);
+            var third = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, third.Outcome);
+            Assert.NotEqual(second, third.RequestId);
         });
     }
 
