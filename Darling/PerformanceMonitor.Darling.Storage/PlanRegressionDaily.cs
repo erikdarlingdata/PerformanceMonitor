@@ -181,7 +181,8 @@ AND   b.day >= c.filled_since::date + 1
 ORDER BY b.day;";
 
     /// <summary>
-    /// The builds due now, oldest day first. $1 now (timestamp), $2 the cap. Servers are the enabled ones with an interval
+    /// The builds due now, newest day first (#5812: a store that is behind, after a migration that invalidated every built
+    /// day or a long outage, gets back the days nearest the window's open end first). $1 now (timestamp), $2 the cap. Servers are the enabled ones with an interval
     /// coverage claim and no pending batch: a pending batch means some raw rows are not yet applied, so the day's totals
     /// could not be trusted. A server's days start the day after its <c>filled_since</c>, since the table cannot speak for
     /// earlier days. Days run from <see cref="WindowDays"/> back through <see cref="ClosedDayLagDays"/> back (a day is
@@ -207,7 +208,7 @@ LEFT JOIN collect.plan_regression_daily_built AS b
   ON b.server_id = s.server_id AND b.day = d.day
 WHERE d.day >= s.filled_since::date + 1
 AND   (b.built_seq IS NULL OR b.built_seq <> b.late_seq)
-ORDER BY d.day, s.server_id
+ORDER BY d.day DESC, s.server_id
 LIMIT $2::integer;";
 
     /// <summary>
@@ -248,7 +249,7 @@ AND   day = $2::date;";
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
-    /// <summary>The builds due at <paramref name="nowUtc"/>, oldest day first, at most <see cref="MaxBuildsPerTick"/>.</summary>
+    /// <summary>The builds due at <paramref name="nowUtc"/>, newest day first, at most <see cref="MaxBuildsPerTick"/>.</summary>
     public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
         NpgsqlConnection connection, DateTime nowUtc, CancellationToken cancellationToken)
     {
@@ -394,7 +395,7 @@ AND   day = $2::date;";
 
     /// <summary>
     /// One maintenance tick, the hourly store-maintenance tick's seventh tenant (#5448): remove expired days, plan, then build
-    /// each item in its own transaction, oldest day first. A build that fails is logged as a WARNING (naming the server and
+    /// each item in its own transaction, newest day first. A build that fails is logged as a WARNING (naming the server and
     /// day) and the loop goes on: the day stays live for readers and the next tick plans it again. Once
     /// <see cref="MaxTickDuration"/> has passed no further build starts, and the planned items left are reported as deferred.
     /// </summary>

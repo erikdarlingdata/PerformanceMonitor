@@ -1,0 +1,241 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using NpgsqlTypes;
+using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// The reuse rule of the PLAN_REGRESSION candidate cache (#5812), pinned without a store: a current pass of the same
+/// shape reuses a read younger than the refresh period, and nothing else does.
+/// </summary>
+public sealed class PlanRegressionCandidateReuseRuleTests
+{
+    private static readonly DateTime Now = new(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
+
+    private static PgFactCollector.PlanRegressionCandidateCache.Entry EntryAt(DateTime readAt, string shape = "s") =>
+        new(shape, readAt, Array.Empty<PgFactCollector.PlanRegressionCandidate>());
+
+    [Fact]
+    public void ACurrentPassOfTheSameShape_ReusesAReadYoungerThanTheRefreshPeriod()
+    {
+        var entry = EntryAt(Now.AddMinutes(-30));
+        Assert.True(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "s", Now, Now));
+        Assert.True(PgFactCollector.PlanRegressionCandidateCache.CanReuse(
+            EntryAt(Now - PgFactCollector.PlanRegressionCandidateCache.RefreshAfter + TimeSpan.FromSeconds(1)), "s", Now, Now));
+    }
+
+    [Fact]
+    public void AReadAsOldAsTheRefreshPeriod_IsReadAgain()
+    {
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(
+            EntryAt(Now - PgFactCollector.PlanRegressionCandidateCache.RefreshAfter), "s", Now, Now));
+    }
+
+    [Fact]
+    public void AnotherShape_NoEntry_APastAsOf_OrAReadFromTheFuture_IsReadLive()
+    {
+        var entry = EntryAt(Now.AddMinutes(-30));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "other", Now, Now));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(null, "s", Now, Now));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "s", Now.AddHours(-1), Now));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(EntryAt(Now.AddMinutes(1)), "s", Now, Now));
+    }
+
+    [Fact]
+    public void TheShape_CarriesTheWindowDay_TheBuiltDays_AndTheScopeValues_ButNotTheTimeBounds()
+    {
+        static NpgsqlCommand Command(DateTime bound, string scope)
+        {
+            var cmd = new NpgsqlCommand("SELECT 1");
+            cmd.Parameters.AddWithValue(7);
+            cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, bound);
+            cmd.Parameters.AddWithValue(new[] { scope });
+            return cmd;
+        }
+
+        var floor = new DateTime(2026, 9, 30);
+        var days = new List<DateOnly> { new(2026, 10, 1), new(2026, 10, 2) };
+        var a = PgFactCollector.PlanRegressionCandidateCache.ShapeOf(Command(Now, "db1"), 2, floor, days);
+        var b = PgFactCollector.PlanRegressionCandidateCache.ShapeOf(Command(Now.AddMinutes(30), "db1"), 2, floor, days);
+        Assert.Equal(a, b);
+        Assert.NotEqual(a, PgFactCollector.PlanRegressionCandidateCache.ShapeOf(Command(Now, "db2"), 2, floor, days));
+        Assert.NotEqual(a, PgFactCollector.PlanRegressionCandidateCache.ShapeOf(Command(Now, "db1"), 2, floor.AddDays(1), days));
+        Assert.NotEqual(a, PgFactCollector.PlanRegressionCandidateCache.ShapeOf(Command(Now, "db1"), 2, floor, days.Take(1).ToList()));
+    }
+}
+
+/// <summary>
+/// The PLAN_REGRESSION candidate reuse through the real collector on a scratch store (#5812). A regression is seeded and
+/// the window's closed days are built; a current pass reads it and fills the cache. Then the costly plan's rows are
+/// deleted from the interval table and the day totals: a second current pass still reports the regression, which it can
+/// only do without reading either table, while a pass that may not reuse (a past <c>as_of</c>) reads live and finds none.
+/// A built day turning stale changes the read's shape, so the next current pass reads live too.
+/// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to
+   CREATE and DROP its own database through ScratchPostgres and then works entirely inside it. */
+public sealed class PlanRegressionCandidateReuseLiveTests
+{
+    private const int ServerId = -5812001;
+    private const string ServerName = "CandidateReuseSrv";
+
+    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task ASecondCurrentPass_ReusesTheRead_AndAPassThatMayNotReuse_ReadsLive()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 reuse test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (start, end) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var cache = new PgFactCollector.PlanRegressionCandidateCache();
+
+        var first = NewContext(start, end, reuse: true);
+        var firstFact = (await Collector(postgres, cache).CollectFactsAsync(first)).Single(f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(0, cache.Hits);
+        Assert.Equal(1, cache.Misses);
+        Assert.NotNull(first.PlanRegressionWindowStart);
+
+        /* The regression's costly plan is gone from both tables the read can take it from. */
+        await ExecAsync(connection, $"DELETE FROM collect.query_store_interval_latest WHERE server_id = {ServerId} AND plan_id = 12", ct);
+        await ExecAsync(connection, $"DELETE FROM collect.plan_regression_daily WHERE server_id = {ServerId} AND plan_id = 12", ct);
+
+        var second = NewContext(start, end.AddSeconds(1), reuse: true);
+        var secondFact = (await Collector(postgres, cache).CollectFactsAsync(second)).Single(f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(1, cache.Hits);
+        Assert.Equal(firstFact.Value, secondFact.Value);
+        Assert.Equal(firstFact.Metadata["offender_count"], secondFact.Metadata["offender_count"]);
+        Assert.Equal(first.PlanRegressionWindowStart, second.PlanRegressionWindowStart);
+        Assert.Equal(first.PlanRegressionOffenders, second.PlanRegressionOffenders);
+
+        /* A pass that may not reuse reads the store as it is now: the regression is gone. It neither reads nor fills the cache. */
+        var live = NewContext(start, end, reuse: false);
+        Assert.DoesNotContain(await Collector(postgres, cache).CollectFactsAsync(live), f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(1, cache.Hits);
+        Assert.Equal(1, cache.Misses);
+    }
+
+    [Fact]
+    public async Task ABuiltDayTurningStale_ChangesTheShape_SoTheNextCurrentPassReadsLive()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 reuse test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (start, end) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var cache = new PgFactCollector.PlanRegressionCandidateCache();
+
+        Assert.Contains(await Collector(postgres, cache).CollectFactsAsync(NewContext(start, end, reuse: true)), f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(1, cache.Misses);
+
+        await ExecAsync(connection, $"UPDATE collect.plan_regression_daily_built SET late_seq = late_seq + 1 WHERE server_id = {ServerId} AND day = (SELECT max(day) FROM collect.plan_regression_daily_built WHERE server_id = {ServerId})", ct);
+        await ExecAsync(connection, $"DELETE FROM collect.query_store_interval_latest WHERE server_id = {ServerId} AND plan_id = 12", ct);
+
+        Assert.DoesNotContain(await Collector(postgres, cache).CollectFactsAsync(NewContext(start, end, reuse: true)), f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(0, cache.Hits);
+        Assert.Equal(2, cache.Misses);
+    }
+
+    private static PgFactCollector Collector(NpgsqlDataSource postgres, PgFactCollector.PlanRegressionCandidateCache cache) =>
+        new(postgres) { PlanRegressionCache = cache };
+
+    private static AnalysisContext NewContext(DateTime periodStart, DateTime periodEnd, bool reuse) => new()
+    {
+        ServerId = ServerId,
+        ServerName = ServerName,
+        TimeRangeStart = periodStart,
+        TimeRangeEnd = periodEnd,
+        ServerUtcOffset = TimeSpan.Zero,
+        ReusePlanRegressionCandidates = reuse,
+    };
+
+    /// <summary>One query with a cheap plan five days before the pass window and a 10x costlier one in it, an old steady
+    /// query, a coverage claim below the window, and the window's closed days built (the seed of
+    /// <c>PlanRegressionBuiltDaysFallbackLiveTests</c>).</summary>
+    private static async Task<(DateTime Start, DateTime End)> SeedAndBuildAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var end = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
+        var start = end.AddHours(-4);
+        var windowDay = start.Date;
+
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
+        await InsertIntervalAsync(connection, queryId: 1, planId: 11, "0xCHEAP", cpuUs: 20_000, execs: 100, firstExec: start.AddDays(-5).AddHours(-1), ct);
+        await InsertIntervalAsync(connection, queryId: 1, planId: 12, "0xCOSTLY", cpuUs: 200_000, execs: 100, firstExec: end.AddHours(-1), ct);
+        await InsertIntervalAsync(connection, queryId: 2, planId: 21, "0xSTEADY", cpuUs: 2000, execs: 100, firstExec: start.AddDays(-16), ct);
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late", ct);
+
+        await using (var coverage = new NpgsqlCommand(
+            "INSERT INTO collect.query_store_interval_latest_coverage (server_id, filled_since, applied_through) VALUES ($1, $2, $2) "
+            + "ON CONFLICT (server_id) DO UPDATE SET filled_since = EXCLUDED.filled_since", connection))
+        {
+            coverage.Parameters.AddWithValue(ServerId);
+            coverage.Parameters.AddWithValue(NpgsqlDbType.Timestamp, now.Date.AddDays(-40));
+            await coverage.ExecuteNonQueryAsync(ct);
+        }
+
+        for (var d = -PgFactCollector.PlanRegressionWindowDays; d <= -3; d++)
+        {
+            await PlanRegressionDaily.BuildDayAsync(connection, ServerId, DateOnly.FromDateTime(windowDay.AddDays(d)), now, ct);
+        }
+
+        return (start, end);
+    }
+
+    private static async Task InsertIntervalAsync(
+        NpgsqlConnection connection, long queryId, long planId, string planHash, long cpuUs, long execs, DateTime firstExec, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_interval_latest
+(
+    server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+    collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+    last_execution_time, is_forced_plan, force_failure_count
+)
+VALUES ($1, 'reusedb', $2, $3, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, false, 0)", connection);
+        cmd.Parameters.AddWithValue(ServerId);
+        cmd.Parameters.AddWithValue(queryId);
+        cmd.Parameters.AddWithValue(planId);
+        cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, firstExec);
+        cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, firstExec.AddMinutes(35));
+        cmd.Parameters.AddWithValue(planHash);
+        cmd.Parameters.AddWithValue("qh" + queryId);
+        cmd.Parameters.AddWithValue(execs);
+        cmd.Parameters.AddWithValue(cpuUs);
+        cmd.Parameters.AddWithValue(cpuUs * 3);
+        cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, firstExec.AddMinutes(30));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        await command.ExecuteNonQueryAsync(ct);
+    }
+}

@@ -381,6 +381,8 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            /* #5812: a current pass may reuse fresh PLAN_REGRESSION candidates; a past as_of reads live. */
+            ReusePlanRegressionCandidates = asOfUtc is null,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once
@@ -813,6 +815,9 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            /* #5812: get_analysis_facts with no as_of answers PLAN_REGRESSION from the candidates the last current pass
+               read while they are fresh; a past as_of reads live. */
+            ReusePlanRegressionCandidates = asOfUtc is null,
             CancellationToken = cancellationToken
         };
 
