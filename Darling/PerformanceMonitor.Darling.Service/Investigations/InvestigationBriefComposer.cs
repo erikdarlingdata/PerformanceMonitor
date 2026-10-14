@@ -25,10 +25,12 @@ public interface IInvestigationBriefSourceReader
 /// (labeled <c>unreviewed</c> and <c>self_attributed</c>), and recent monitoring-side changes.
 ///
 /// <para><b>Masking.</b> Every field passes <see cref="McpDataDetailMasker"/> at the configured <c>mcp.dataDetail</c>
-/// level before it is measured: alert context through <see cref="McpDataDetailMasker.MaskField"/> by its label, send
-/// errors through <see cref="McpDataDetailMasker.MaskErrorText"/>, and the text an agent or a person wrote (earlier
-/// reports, notes, the profile, a finding's story) through <see cref="McpDataDetailMasker.MaskJson"/> with
-/// <c>freeText</c>. Under <c>full</c> nothing changes. The brief names the level it was composed under.</para>
+/// level before it is measured, through ONE masker per brief (<see cref="McpDataDetailMasker.ForAnswer"/>), so a login
+/// or host carries one number across the whole brief: alert context by its label, send errors as error text, every
+/// structured field by its key (so the kept fields stay: categories, times, names, verdicts, hashes, counts), and only
+/// the text an agent or a person wrote or engine prose that can quote collected text (an earlier report's root cause and
+/// summary, a note, the profile, a change's text, a finding's story) as free text. Under <c>full</c> nothing changes.
+/// The brief names the level it was composed under.</para>
 ///
 /// <para><b>Budget.</b> At most <see cref="TotalCharCap"/> characters (about 6,000 tokens). Each string is cut at
 /// <see cref="FieldCharCap"/>; each section has its own cap; sections are filled in priority order (alerts, findings,
@@ -126,20 +128,22 @@ public sealed class InvestigationBriefComposer
         ArgumentNullException.ThrowIfNull(sources);
         var request = sources.Request;
         var cut = new CutCounter();
+        // One masker for the whole brief: one login#n and host#n numbering across every alert, note and field.
+        var masker = McpDataDetailMasker.ForAnswer(mode);
 
         var items = new Dictionary<string, List<JsonObject>>(StringComparer.Ordinal)
         {
-            ["alerts"] = sources.Alerts.Select(a => AlertNode(a, mode, cut)).ToList(),
-            ["findings"] = sources.Findings.Select(f => FindingNode(f, mode, cut)).ToList(),
+            ["alerts"] = sources.Alerts.Select(a => AlertNode(a, masker, cut)).ToList(),
+            ["findings"] = sources.Findings.Select(f => FindingNode(f, masker, cut)).ToList(),
             ["next_calls"] = NextCalls(request, sources.Findings).Select(c => NextCallNode(c, cut)).ToList(),
-            ["notes"] = sources.Notes.Select(n => NoteNode(n, mode, cut)).ToList(),
-            ["environment_profile"] = sources.Profiles.Select(p => FreeText(new JsonObject
+            ["notes"] = sources.Notes.Select(n => NoteNode(n, masker, cut)).ToList(),
+            ["environment_profile"] = sources.Profiles.Select(p => Masked(new JsonObject
             {
                 ["scope"] = p.Scope,
-                ["text"] = p.Text,
-            }, mode, cut)).ToList(),
-            ["earlier_reports"] = sources.EarlierReports.Select(r => EarlierReportNode(r, mode, cut)).ToList(),
-            ["recent_changes"] = sources.RecentChanges.Select(c => ChangeNode(c, mode, cut)).ToList(),
+                ["text"] = null,
+            }, masker, cut, ("text", p.Text))).ToList(),
+            ["earlier_reports"] = sources.EarlierReports.Select(r => EarlierReportNode(r, masker, cut)).ToList(),
+            ["recent_changes"] = sources.RecentChanges.Select(c => ChangeNode(c, masker, cut)).ToList(),
         };
 
         var word = McpDataDetailModes.Word(mode);
@@ -263,7 +267,7 @@ public sealed class InvestigationBriefComposer
         return calls;
     }
 
-    private static JsonObject AlertNode(InvestigationBriefAlert alert, McpDataDetail mode, CutCounter cut)
+    private static JsonObject AlertNode(InvestigationBriefAlert alert, McpDataDetailMasker masker, CutCounter cut)
     {
         var context = new JsonArray();
         foreach (var item in alert.Context)
@@ -274,7 +278,7 @@ public sealed class InvestigationBriefComposer
                 var key = label;
                 for (var n = 2; fields.ContainsKey(key); n++)
                     key = label + " (" + n.ToString(CultureInfo.InvariantCulture) + ")";
-                fields[key] = cut.Cap(McpDataDetailMasker.MaskField(label, value, mode));
+                fields[key] = cut.Cap(masker.Field(label, value));
             }
 
             context.Add(new JsonObject { ["heading"] = cut.Cap(item.Heading), ["fields"] = fields });
@@ -287,13 +291,13 @@ public sealed class InvestigationBriefComposer
             ["current_value"] = Number(alert.CurrentValue),
             ["threshold_value"] = Number(alert.ThresholdValue),
             ["muted"] = alert.Muted,
-            ["detail_text"] = cut.Cap(McpDataDetailMasker.MaskField("detail_text", alert.DetailText, mode)),
-            ["send_error"] = alert.SendError is null ? null : cut.Cap(McpDataDetailMasker.MaskErrorText(alert.SendError, mode)),
+            ["detail_text"] = cut.Cap(masker.Field("detail_text", alert.DetailText)),
+            ["send_error"] = alert.SendError is null ? null : cut.Cap(masker.ErrorText(alert.SendError)),
             ["context"] = context,
         };
     }
 
-    private static JsonObject FindingNode(InvestigationBriefFinding finding, McpDataDetail mode, CutCounter cut)
+    private static JsonObject FindingNode(InvestigationBriefFinding finding, McpDataDetailMasker masker, CutCounter cut)
     {
         JsonObject? remediation = null;
         if (finding.Remediation is { } r)
@@ -315,20 +319,21 @@ public sealed class InvestigationBriefComposer
             remediation = new JsonObject { ["verb"] = r.Verb, ["guidance"] = r.Guidance, ["targets"] = targets };
         }
 
-        // The story is engine prose that can quote collected text: masked as free text, like an earlier report.
-        return FreeText(new JsonObject
+        // The story is engine prose that can quote collected text: masked as free text, like an earlier report. The
+        // rest (hash, category, headline, times, counts, the remediation verdict) is masked by key, so it is kept.
+        return Masked(new JsonObject
         {
             ["story_path_hash"] = finding.StoryPathHash,
             ["category"] = finding.Category,
             ["headline"] = finding.Headline,
-            ["story"] = finding.StoryText,
+            ["story"] = null,
             ["root_fact"] = new JsonObject { ["key"] = finding.RootFactKey, ["value"] = Number(finding.RootFactValue) },
             ["severity"] = Math.Round(finding.Severity, 2),
             ["confidence"] = Math.Round(finding.Confidence, 2),
             ["analysis_time"] = Time(finding.AnalysisTimeUtc),
             ["occurrences"] = finding.Occurrences,
             ["remediation"] = remediation,
-        }, mode, cut);
+        }, masker, cut, ("story", finding.StoryText));
     }
 
     private static JsonObject NextCallNode(InvestigationNextCall call, CutCounter cut)
@@ -339,51 +344,65 @@ public sealed class InvestigationBriefComposer
         return new JsonObject { ["tool"] = call.Tool, ["arguments"] = arguments, ["why"] = cut.Cap(call.Why) };
     }
 
-    private static JsonObject NoteNode(InvestigationBriefNote note, McpDataDetail mode, CutCounter cut) =>
-        FreeText(new JsonObject
+    private static JsonObject NoteNode(InvestigationBriefNote note, McpDataDetailMasker masker, CutCounter cut) =>
+        Masked(new JsonObject
         {
-            ["author"] = McpDataDetailMasker.MaskField("login_name", note.Author, mode),
-            ["decided_by"] = McpDataDetailMasker.MaskField("login_name", note.DecidedBy, mode),
+            ["author"] = masker.Field("login_name", note.Author),
+            ["decided_by"] = masker.Field("login_name", note.DecidedBy),
             ["expires_at"] = Time(note.ExpiresAtUtc),
-            ["text"] = note.Text,
-        }, mode, cut);
+            ["text"] = null,
+        }, masker, cut, ("text", note.Text));
 
-    private static JsonObject EarlierReportNode(InvestigationEarlierReport report, McpDataDetail mode, CutCounter cut)
+    private static JsonObject EarlierReportNode(InvestigationEarlierReport report, McpDataDetailMasker masker, CutCounter cut)
     {
-        var node = FreeText(new JsonObject
+        var node = Masked(new JsonObject
         {
             ["request_id"] = report.RequestId.ToString(),
             ["submitted_at"] = Time(report.SubmittedAtUtc),
             ["agent_id"] = report.AgentId,
             ["verdict"] = report.Verdict,
-            ["root_cause"] = report.RootCause,
+            ["root_cause"] = null,
             ["root_cause_found"] = report.RootCauseFound,
-            ["summary"] = report.Summary,
-        }, mode, cut);
+            ["summary"] = null,
+        }, masker, cut, ("root_cause", report.RootCause), ("summary", report.Summary));
         node["labels"] = new JsonArray(EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
         return node;
     }
 
-    private static JsonObject ChangeNode(InvestigationRecentChange change, McpDataDetail mode, CutCounter cut) =>
-        FreeText(new JsonObject
+    private static JsonObject ChangeNode(InvestigationRecentChange change, McpDataDetailMasker masker, CutCounter cut) =>
+        Masked(new JsonObject
         {
             ["at"] = Time(change.AtUtc),
             ["kind"] = change.Kind,
-            ["text"] = change.Text,
+            ["text"] = null,
             ["query_text_pattern"] = change.Pattern,
-        }, mode, cut);
+        }, masker, cut, ("text", change.Text));
 
-    /// <summary>Masks <paramref name="node"/> as text a person or an agent wrote: keyed fields by the table, every other
-    /// string with its literals replaced, then each string cut at <see cref="FieldCharCap"/>. Under <c>full</c> only the cut applies.</summary>
-    private static JsonObject FreeText(JsonObject node, McpDataDetail mode, CutCounter cut)
+    /// <summary>
+    /// Masks <paramref name="node"/>'s structured fields by key through the field table (#5632 R3), so the kept fields
+    /// stay at every level: category, times, database and object names, verdicts, hashes, counts. Only
+    /// <paramref name="freeText"/>, the text a person or an agent wrote or engine prose that can quote collected text,
+    /// is masked as free text (<see cref="McpDataDetailMasker.FreeText"/>) and set in place of its <c>null</c>
+    /// placeholder. Then each string is cut at <see cref="FieldCharCap"/>. Under <c>full</c> only the cut applies.
+    /// </summary>
+    private static JsonObject Masked(
+        JsonObject node, McpDataDetailMasker masker, CutCounter cut, params (string Key, string? Text)[] freeText)
     {
         JsonObject result = node;
-        if (mode != McpDataDetail.Full)
+        var json = node.ToJsonString();
+        var masked = masker.Json(json);
+        if (!ReferenceEquals(masked, json))
         {
-            var json = node.ToJsonString();
-            var masked = McpDataDetailMasker.MaskJson(json, mode, freeText: true);
-            if (!ReferenceEquals(masked, json))
-                result = JsonNode.Parse(masked) as JsonObject ?? new JsonObject { ["withheld"] = McpDataDetailMasker.Refusal };
+            result = !string.Equals(masked, McpDataDetailMasker.Refusal, StringComparison.Ordinal)
+                && JsonNode.Parse(masked) is JsonObject parsed
+                    ? parsed
+                    : new JsonObject { ["withheld"] = McpDataDetailMasker.Refusal };
+        }
+
+        if (!result.ContainsKey("withheld"))
+        {
+            foreach (var (key, text) in freeText)
+                result[key] = masker.FreeText(text);
         }
 
         // Cut AFTER masking, so a cut never splits a literal the masker has to see whole.

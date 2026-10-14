@@ -288,6 +288,83 @@ public sealed class InvestigationBriefComposerTests
         Assert.Equal("SQLPROD01", (string?)brief["request"]!["server"]);
     }
 
+    /* ---- review round 1 (M1): structured fields are kept, only free text is masked ---- */
+
+    [Theory]
+    [InlineData(McpDataDetail.MaskLiterals)]
+    [InlineData(McpDataDetail.MetadataOnly)]
+    public void StructuredFields_AreKept_OnlyTheNarrativeIsMasked(McpDataDetail mode)
+    {
+        // A hash and a time that start with digits: a literal pass over them would garble both.
+        var finding = new InvestigationBriefFinding("9f8e7d6c5b4a", "blocking", "Lock waits from a long transaction",
+            "A scan WHERE id = " + LiteralCanary + " held the lock", "LCK_M_X", 1234.567, 0.81234, 0.6, Now.AddMinutes(-5), 4,
+            new InvestigationBriefRemediation("force_plan", "Review the blockers before forcing.", new[]
+            {
+                new InvestigationBriefRemediationTarget("SalesDb", 42, 7, false, new[] { "parameter_sensitivity_cofired" }, "2 plans in 24 hours"),
+            }),
+            Array.Empty<InvestigationNextCall>());
+        var json = InvestigationBriefComposer.Compose(Sources(findings: new[] { finding }), mode, Now);
+        var brief = JsonNode.Parse(json)!.AsObject();
+
+        var f = brief["findings"]![0]!;
+        Assert.Equal("blocking", (string?)f["category"]);
+        Assert.Equal("2026-10-14T11:55:00.000000Z", (string?)f["analysis_time"]);
+        Assert.Equal("9f8e7d6c5b4a", (string?)f["story_path_hash"]);
+        Assert.Equal("Lock waits from a long transaction", (string?)f["headline"]);
+        Assert.Equal("force_plan", (string?)f["remediation"]!["verb"]);
+        Assert.Equal("Review the blockers before forcing.", (string?)f["remediation"]!["guidance"]);
+        Assert.Equal("SalesDb", (string?)f["remediation"]!["targets"]![0]!["database"]);
+        Assert.Equal("parameter_sensitivity_cofired", (string?)f["remediation"]!["targets"]![0]!["blockers"]![0]);
+        Assert.Equal("2 plans in 24 hours", (string?)f["remediation"]!["targets"]![0]!["state_note"]);
+        Assert.Equal(4, (int?)f["occurrences"]);
+
+        var story = (string?)f["story"];
+        Assert.DoesNotContain(LiteralCanary, story, StringComparison.Ordinal);
+        if (mode == McpDataDetail.MetadataOnly)
+            Assert.Equal(McpDataDetailMasker.WithheldText, story);
+        else
+            Assert.Equal("A scan WHERE id = ? held the lock", story);
+
+        // The earlier report's verdict and time, the note's expiry, the profile's scope and the change's kind stay.
+        Assert.Equal("known_cause", (string?)brief["earlier_reports"]![0]!["verdict"]);
+        Assert.Equal("agent-a", (string?)brief["earlier_reports"]![0]!["agent_id"]);
+        Assert.Equal("2026-10-14T02:00:00.000000Z", (string?)brief["earlier_reports"]![0]!["submitted_at"]);
+        Assert.Equal("2026-11-13T12:00:00.000000Z", (string?)brief["notes"]![0]!["expires_at"]);
+        Assert.Equal("server", (string?)brief["environment_profile"]![0]!["scope"]);
+        Assert.Equal("mute_rule", (string?)brief["recent_changes"]![0]!["kind"]);
+        Assert.DoesNotContain(LiteralCanary, json, StringComparison.Ordinal);
+    }
+
+    /* ---- review round 1 (L1): one login and host numbering per brief ---- */
+
+    [Fact]
+    public void MetadataOnly_NumbersEachLoginOnceAcrossTheWholeBrief()
+    {
+        var other = new InvestigationBriefAlert(Now.AddMinutes(-10), "Blocking", 12.5, 5, false, "Blocking detected", null,
+            new[]
+            {
+                new InvestigationBriefContextItem("Blocked", new[]
+                {
+                    new KeyValuePair<string, string>("Login", "other_login_5632"),
+                    new KeyValuePair<string, string>("Excluded Logins", "other_login_5632, " + LoginCanary),
+                }),
+            });
+        var sources = Sources(alerts: new[] { Alert(Now.AddMinutes(-20)), other });
+        var json = InvestigationBriefComposer.Compose(sources, McpDataDetail.MetadataOnly, Now);
+        var brief = JsonNode.Parse(json)!.AsObject();
+
+        Assert.DoesNotContain(LoginCanary, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("other_login_5632", json, StringComparison.Ordinal);
+        var canary = (string?)brief["alerts"]![0]!["context"]![0]!["fields"]!["Login"];
+        var otherFields = brief["alerts"]![1]!["context"]![0]!["fields"]!;
+        var otherLogin = (string?)otherFields["Login"];
+        Assert.StartsWith("login#", canary, StringComparison.Ordinal);
+        Assert.StartsWith("login#", otherLogin, StringComparison.Ordinal);
+        Assert.NotEqual(canary, otherLogin);
+        Assert.Equal(otherLogin + ", " + canary, (string?)otherFields["Excluded Logins"]);
+        Assert.Equal(canary, (string?)brief["notes"]![0]!["author"]);
+    }
+
     /* ---- the async entry ---- */
 
     [Fact]
