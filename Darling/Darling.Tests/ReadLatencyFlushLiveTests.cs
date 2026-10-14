@@ -278,6 +278,44 @@ public sealed class ReadLatencyFlushLiveTests
         Assert.Contains("recent_route", routes);
     }
 
+    /// <summary>#5506 (V182): the window band is written as part of the key, max_in_flight folds by MAX and wait_total_ms
+    /// by addition when a second flush lands in the same hour, and two bands of one route are two rows.</summary>
+    [Fact]
+    public async Task FlushWritesTheBandInFlightAndWait_AndASecondFlushFoldsThem()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the V182 capacity-field flush pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var metricTime = new DateTime(2026, 1, 1, 7, 0, 0, DateTimeKind.Utc);
+        var first = new ReadLatencyAccumulator();
+        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.OneDay, 4, 30);
+        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 9_000, ReadWindowBand.SevenDays, 1, 0);
+        await first.FlushAsync(connection, metricTime, logger: null, ct);
+
+        var second = new ReadLatencyAccumulator();
+        second.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 200, ReadWindowBand.OneDay, 2, 12);
+        await second.FlushAsync(connection, metricTime, logger: null, ct);
+
+        using var read = new NpgsqlCommand(
+            "SELECT window_band, run_count, max_in_flight, wait_total_ms FROM collect.read_latency ORDER BY window_band", connection);
+        await using var reader = await read.ExecuteReaderAsync(ct);
+        var rows = new System.Collections.Generic.List<(string Band, int Runs, int MaxInFlight, long Wait)>();
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add((reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt64(3)));
+        }
+
+        Assert.Equal(new[] { ("24h", 2, 4, 42L), ("7d", 1, 1, 0L) }, rows);
+    }
+
     [Fact]
     public async Task AFlushWithNothingRecorded_WritesNoRows()
     {

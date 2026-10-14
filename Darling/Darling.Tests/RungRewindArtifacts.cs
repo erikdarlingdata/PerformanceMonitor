@@ -90,4 +90,29 @@ internal static class RungRewindArtifacts
             connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    /// <summary>
+    /// V182 (#5506): the window band, in-flight and connection-wait columns of <c>collect.read_latency</c> (the band is the probe's
+    /// newest sentinel) and the two slow-read columns. Dropping the band drops the key that names it, so the V181 key is put back.
+    /// Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV182SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS collect.read_latency
+    DROP COLUMN IF EXISTS window_band,
+    DROP COLUMN IF EXISTS max_in_flight,
+    DROP COLUMN IF EXISTS wait_total_ms;
+DO $$
+BEGIN
+    IF to_regclass('collect.read_latency') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'collect.read_latency'::regclass AND contype = 'p') THEN
+        ALTER TABLE collect.read_latency ADD PRIMARY KEY (metric_time, surface, route, outcome);
+    END IF;
+END $$;
+ALTER TABLE IF EXISTS collect.slow_reads
+    DROP COLUMN IF EXISTS in_flight,
+    DROP COLUMN IF EXISTS wait_ms;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
 }

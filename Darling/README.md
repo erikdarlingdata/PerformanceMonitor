@@ -292,6 +292,7 @@ A rollback restores the install files, not the store ([#5773](https://github.com
 An older build ignores what those migrations added, so it can read some newer data differently. The list below names each migration that changes what an older build reads, and what to do before you roll back past it. A migration not listed here has no known effect on what an older build reads.
 
 - **V181**: an older build reads a notification route scoped to a server or a tag ([#5750](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5750)) as fleet-wide. A route meant for one server then sends the alerts of every server. A scoped route for every metric (`*`) matches nothing, so its alerts go to the default destinations. Disable or delete every scoped route in the Notification Routes window before you roll back to a build older than V181.
+- **V182**: an older build cannot write its hourly read-latency rows ([#5506](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5506)). V182 adds the window band to the table's key, and the older build's write names the old key, so each hour's write fails with a warning in the service log and that hour's read latency is not recorded. Collection and every other read are not affected. Nothing needs to be done before you roll back; recording resumes when a build at V182 or later runs again.
 
 #### Upgrading from a build that predates the script
 

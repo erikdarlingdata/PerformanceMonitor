@@ -41,7 +41,9 @@ internal sealed record SlowReadRecord(
     int StatementCount,
     bool StatementsTruncated,
     string? ErrorClass,
-    long? RowCount = null);
+    long? RowCount = null,
+    int? InFlight = null,
+    long? WaitMs = null);
 
 /// <summary>
 /// The slow-read record's write path (#5097). The three recorders (the MCP tool filter, the <c>/api/read/*</c> loop
@@ -77,8 +79,8 @@ public sealed class SlowReadLog
     internal const string InsertSql = @"
 INSERT INTO collect.slow_reads
 (read_time, surface, route, outcome, total_ms, server_id, window_start, window_end, arguments, arguments_truncated,
- source, source_reason, statements, statement_count, statements_truncated, error_class, row_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);";
+ source, source_reason, statements, statement_count, statements_truncated, error_class, row_count, in_flight, wait_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19);";
 
     internal const string PurgeSql = @"
 DELETE FROM collect.slow_reads WHERE read_time < $1;";
@@ -213,7 +215,9 @@ WHERE slow_read_id IN
             scope.StatementTotal,
             statementsTruncated,
             errorClass,
-            scope.Rows);
+            scope.Rows,
+            scope.InFlightAtStart,
+            scope.WaitMs);
     }
 
     /// <summary>The arguments as stored, one policy for every surface: the server name replaced by its id, the window
@@ -491,6 +495,8 @@ WHERE slow_read_id IN
                 insert.Parameters.AddWithValue(record.StatementsTruncated);
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.ErrorClass ?? DBNull.Value });
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)record.RowCount ?? DBNull.Value });
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)record.InFlight ?? DBNull.Value });
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)record.WaitMs ?? DBNull.Value });
                 await insert.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
             }
 

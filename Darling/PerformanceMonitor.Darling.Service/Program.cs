@@ -578,6 +578,9 @@ builder.Services.AddSingleton<SlowReadLog>();
 /* #5097: the per-statement timing listener for reads; samples only inside a ReadScope that asked for capture. */
 ReadStatementCapture.Register();
 
+/* #5506: the connection-wait listener for reads; records only inside a ReadScope. */
+ReadConnectionWait.Register();
+
 builder.Services.AddHostedService<DarlingWorker>();
 
 /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on

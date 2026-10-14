@@ -50,7 +50,10 @@ internal static class DarlingReadLatencyReader
         long[] BucketCounts,
         long Timeouts,
         long Fallbacks,
-        long GateFailures)
+        long GateFailures,
+        string WindowBand = ReadWindowBand.None,
+        int MaxInFlight = 0,
+        long WaitTotalMs = 0)
     {
         /// <summary>Zero when nothing ran, matching how <c>get_collector_cost</c> reports its average.</summary>
         public long MeanMs => RunCount > 0 ? TotalMs / RunCount : 0;
@@ -71,7 +74,7 @@ internal static class DarlingReadLatencyReader
         var sql = $@"
 WITH windowed AS
 (
-    SELECT surface, route, outcome, run_count, total_ms, max_ms, bucket_counts
+    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms
     FROM collect.read_latency
     WHERE metric_time >= $1{surfaceFilter}{routeFilter}
 ),
@@ -80,32 +83,36 @@ totals AS
     SELECT
         surface,
         route,
+        window_band,
         sum(run_count)                                        AS run_count,
         sum(total_ms)                                         AS total_ms,
         max(max_ms)                                           AS max_ms,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'timeout'), 0) AS timeouts,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'fallback_raw'), 0) AS fallbacks,
-        coalesce(sum(run_count) FILTER (WHERE outcome = 'gate_failed'), 0) AS gate_failures
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'gate_failed'), 0) AS gate_failures,
+        max(max_in_flight)                                    AS max_in_flight,
+        sum(wait_total_ms)                                    AS wait_total_ms
     FROM windowed
-    GROUP BY surface, route
+    GROUP BY surface, route, window_band
 ),
 buckets AS
 (
-    SELECT surface, route, b.ord, sum(b.bucket_count)::bigint AS bucket_count
+    SELECT surface, route, window_band, b.ord, sum(b.bucket_count)::bigint AS bucket_count
     FROM windowed
     CROSS JOIN LATERAL unnest(windowed.bucket_counts) WITH ORDINALITY AS b(bucket_count, ord)
-    GROUP BY surface, route, b.ord
+    GROUP BY surface, route, window_band, b.ord
 ),
 bucket_arrays AS
 (
-    SELECT surface, route, array_agg(bucket_count ORDER BY ord) AS bucket_counts
+    SELECT surface, route, window_band, array_agg(bucket_count ORDER BY ord) AS bucket_counts
     FROM buckets
-    GROUP BY surface, route
+    GROUP BY surface, route, window_band
 )
-SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts, t.fallbacks, t.gate_failures
+SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts, t.fallbacks, t.gate_failures,
+       t.window_band, t.max_in_flight, t.wait_total_ms::bigint
 FROM totals AS t
-JOIN bucket_arrays AS ba ON ba.surface = t.surface AND ba.route = t.route
-ORDER BY t.surface, t.route";
+JOIN bucket_arrays AS ba ON ba.surface = t.surface AND ba.route = t.route AND ba.window_band = t.window_band
+ORDER BY t.surface, t.route, t.window_band";
 
         var rows = new List<ReadLatencyRow>();
         await using var command = postgres.CreateCommand(sql);
@@ -132,7 +139,10 @@ ORDER BY t.surface, t.route";
                 (long[])reader.GetValue(5),
                 reader.GetInt64(6),
                 reader.GetInt64(7),
-                reader.GetInt64(8)));
+                reader.GetInt64(8),
+                reader.GetString(9),
+                reader.GetInt32(10),
+                reader.GetInt64(11)));
         }
 
         return rows;

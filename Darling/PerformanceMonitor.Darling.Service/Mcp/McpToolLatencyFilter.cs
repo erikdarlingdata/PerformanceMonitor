@@ -83,18 +83,19 @@ public sealed class McpToolLatencyFilter
             var stopwatch = Stopwatch.StartNew();
             using var readScope = ReadScope.Open(_logger);
             readScope.Scope.CaptureStatements = true;
+            var windowBand = WindowBandOf(request);
             try
             {
                 var result = await next(request, cancellationToken);
                 var outcome = ReadScope.Resolve(ClassifyResult(result, cancellationToken), readScope.Fallback);
-                Record(toolName, outcome, stopwatch.ElapsedMilliseconds);
+                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope);
                 OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome));
                 return result;
             }
             catch (Exception ex)
             {
                 var outcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, cancellationToken), readScope.Fallback);
-                Record(toolName, outcome, stopwatch.ElapsedMilliseconds);
+                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope);
                 OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, SlowReadLog.ErrorClassOf(ex));
                 throw;
             }
@@ -147,11 +148,33 @@ public sealed class McpToolLatencyFilter
         _slowReads.Offer(scope, ReadSurface.Mcp, toolName, outcome, elapsedMs, arguments, errorClass, _logger);
     }
 
-    private void Record(string toolName, ReadOutcome outcome, long elapsedMs)
+    /// <summary>The window band of the call (#5506): the window arguments the caller sent, else the defaults the matched
+    /// tool declares in its input schema. Never throws; a call it cannot read records <c>none</c>.</summary>
+    private string WindowBandOf(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
     {
         try
         {
-            _readLatency.Record(ReadSurface.Mcp, toolName, outcome, elapsedMs);
+            var tool = request.MatchedPrimitive as ModelContextProtocol.Server.McpServerTool;
+            if (tool is null && request.Params?.Name is { Length: > 0 } name
+                && request.Server?.ServerOptions?.ToolCollection is { } tools && tools.TryGetPrimitive(name, out var found))
+            {
+                tool = found;
+            }
+
+            return ReadWindowBand.OfToolCall(request.Params?.Arguments, tool?.ProtocolTool.InputSchema);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "The window band of MCP tool {Tool} was not read.", request.Params?.Name);
+            return ReadWindowBand.None;
+        }
+    }
+
+    private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope)
+    {
+        try
+        {
+            _readLatency.Record(ReadSurface.Mcp, toolName, outcome, elapsedMs, windowBand, scope.InFlightAtStart, scope.WaitMs);
         }
         catch (Exception ex)
         {

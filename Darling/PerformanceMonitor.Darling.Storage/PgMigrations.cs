@@ -1161,6 +1161,51 @@ CREATE TRIGGER trg_bump_server_tag_map
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
+    /// V182 (#5506) — what a capacity question needs from the read record. <c>collect.read_latency</c> gains
+    /// <c>window_band</c> (the width of the window the read asked for: <c>1h</c>, <c>24h</c>, <c>7d</c>, <c>7d+</c>, or
+    /// <c>none</c> for a read with no window), <c>max_in_flight</c> (the most reads already in progress on the service when a
+    /// read of the key started, in the hour) and <c>wait_total_ms</c> (the time the key's reads waited for a store connection,
+    /// apart from their run time). The band joins the primary key, so a 1-hour read and a 7-day read of one route no longer
+    /// share a histogram. <c>collect.slow_reads</c> gains the nullable <c>in_flight</c> and <c>wait_ms</c> for each slow read.
+    ///
+    /// <para>Rows stored before this rung keep their counts: each gets <c>window_band = 'none'</c>, <c>max_in_flight = 0</c>
+    /// and <c>wait_total_ms = 0</c> from the column defaults, and their old key is still unique under the new one. The primary
+    /// key (V148's <c>read_latency_pkey</c>) is dropped and re-added only while it does not yet name <c>window_band</c>, so a
+    /// second run does nothing. The table
+    /// holds at most 90 days of hourly rows per surface, route and outcome, so the index rebuild is small. <b>No Lite
+    /// twin:</b> Lite records no read latency.</para>
+    /// </summary>
+    private const string V182Sql = @"
+ALTER TABLE collect.read_latency
+    ADD COLUMN IF NOT EXISTS window_band text NOT NULL DEFAULT 'none',
+    ADD COLUMN IF NOT EXISTS max_in_flight integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS wait_total_ms bigint NOT NULL DEFAULT 0;
+
+DO $$
+BEGIN
+    IF NOT EXISTS
+       (
+           SELECT 1
+           FROM pg_constraint AS c
+           JOIN pg_attribute AS a
+             ON a.attrelid = c.conrelid
+            AND a.attnum = ANY (c.conkey)
+           WHERE c.conrelid = 'collect.read_latency'::regclass
+           AND   c.contype = 'p'
+           AND   a.attname = 'window_band'
+       )
+    THEN
+        ALTER TABLE collect.read_latency DROP CONSTRAINT IF EXISTS read_latency_pkey;
+        ALTER TABLE collect.read_latency
+            ADD CONSTRAINT read_latency_pkey PRIMARY KEY (metric_time, surface, route, outcome, window_band);
+    END IF;
+END $$;
+
+ALTER TABLE collect.slow_reads
+    ADD COLUMN IF NOT EXISTS in_flight integer,
+    ADD COLUMN IF NOT EXISTS wait_ms bigint;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1453,6 +1498,7 @@ $rung$;";
         new Migration(179, "client-timeouts-alert", V179Sql),
         new Migration(180, "external-alerts", V180Sql),
         new Migration(181, "notification-route-scope", V181Sql),
+        new Migration(182, "read-latency-capacity-fields", V182Sql),
     };
 
     /// <summary>

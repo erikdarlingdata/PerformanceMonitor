@@ -50,7 +50,8 @@ public sealed class NotificationRouteScopeRungTests
         Assert.Equal("notification-route-scope", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(RungVersion, PgMigrations.Scripts[^1].Version);
+        /* V182 (#5506) took the top of the ladder; this rung stays registered below it. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(PgMigrations.Scripts.Select(s => s.Version).Distinct().OrderBy(v => v), PgMigrations.Scripts.Select(s => s.Version));
     }
 
@@ -88,8 +89,9 @@ public sealed class NotificationRouteScopeRungTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasNotificationRouteScope", parameters[^1].Name);
-        Assert.Equal("hasExternalAlerts", parameters[^2].Name);
+        var index = Array.FindIndex(parameters, p => p.Name == "hasNotificationRouteScope");
+        Assert.True(index > 0, "the V181 sentinel is a parameter of MapProbedSchemaVersion");
+        Assert.Equal("hasExternalAlerts", parameters[index - 1].Name);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({parameters.Length - 1})", viewer, StringComparison.Ordinal);
@@ -97,10 +99,18 @@ public sealed class NotificationRouteScopeRungTests
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
 
-        var behind = (object[])all.Clone();
-        behind[^1] = false;
+        /* A store whose newest sentinel is this rung's maps to it; one without it maps to the rung below. */
+        var atThisRung = (object[])all.Clone();
+        for (var i = index + 1; i < atThisRung.Length; i++)
+        {
+            atThisRung[i] = false;
+        }
+
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
+
+        var behind = (object[])atThisRung.Clone();
+        behind[index] = false;
         Assert.Equal(180, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasNotificationRouteScope)", StringComparison.Ordinal);
@@ -170,6 +180,7 @@ public sealed class NotificationRouteScopeRungTests
         try
         {
             /* A store one rung behind: V181's columns gone, a legacy fleet-wide row and a legacy unscoped '*' row stored. */
+            await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 181", ct);
             await ExecAsync(connection,

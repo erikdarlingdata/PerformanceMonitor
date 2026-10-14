@@ -652,6 +652,7 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
         }
 
         /* V181 (#5750): the route scope columns are above V170 too (the probe newest sentinel). */
+        await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
         /* V173 (#5582): the stamp-grain rollup and its triggers are above V170 too; RewindTableAsync dropped the triggers, the tables go here. */
         /* V180 (#5654): the registry of the services that raise alerts is above V170 too (the probe's newest sentinel); its two dependants go with it. */

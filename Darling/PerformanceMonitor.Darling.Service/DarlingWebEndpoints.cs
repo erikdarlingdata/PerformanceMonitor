@@ -460,7 +460,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                     var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
-                    RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds);
+                    RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
                     OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
@@ -474,7 +474,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
                     : ReadOutcome.Ok;
                 var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
-                RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds);
+                RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
                 OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
                     resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
 
@@ -2687,11 +2687,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
     /// caller-supplied text). Never throws into the request: swallowed and logged at Debug, exactly like the
     /// compose path's own recording.</summary>
-    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs)
+    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, ReadScope scope)
     {
         try
         {
-            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs);
+            /* #5506: the band of the window the page asked for (hours, hours_back or days_back on the query string); a
+               request that sends none records none. */
+            var band = ReadWindowBand.Of(ReadWindowBand.HoursOf(key => First(context, key)));
+            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs);
         }
         catch (Exception ex)
         {
@@ -2803,7 +2806,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                                 : ReadOutcome.Error;
 
             var resolved = ReadScope.Resolve(readOutcome, noted);
-            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, resolved, elapsedMs);
+            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, resolved, elapsedMs, ComposeWindowBand(body),
+                scope?.InFlightAtStart ?? 0, scope?.WaitMs ?? 0);
 
             /* #5097: a slow or failed run also becomes a slow-read row. The panel body is the arguments. */
             if (scope is not null && recorder?.SlowReads is { } slowReads && slowReads.ShouldRecord(resolved, elapsedMs))
@@ -2818,6 +2822,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             recorder?.Logger?.LogDebug(ex, "Read-latency recording failed for a composed-panel run.");
         }
+    }
+
+    /// <summary>The window band of a composed-panel run (#5506): the windowStart/windowEnd pair when both parse, else the
+    /// body's hours, else the default window the runner reads (<see cref="DefaultComposeHours"/>).</summary>
+    internal static string ComposeWindowBand(JsonObject body)
+    {
+        if (ComposeSpec.TryParseUtcInstant(body["windowStart"], out var start) && ComposeSpec.TryParseUtcInstant(body["windowEnd"], out var end))
+        {
+            return ReadWindowBand.Of(start, end);
+        }
+
+        return ReadWindowBand.Of(body["hours"] is JsonValue hoursValue && hoursValue.TryGetValue<int>(out var hours) ? hours : DefaultComposeHours);
     }
 
     /// <summary>The compile-and-run body <see cref="RunComposedPanelAsync"/> wraps with latency recording --
@@ -3344,7 +3360,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>
-    private const int DefaultComposeHours = 24;
+    internal const int DefaultComposeHours = 24;
 
     /* The absolute-instant parser lives in ComposeSpec.TryParseUtcInstant (#2735): the run path's
        windowStart/windowEnd and a stored cell range's windowStart/windowEnd are the SAME vocabulary, so

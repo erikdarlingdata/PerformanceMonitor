@@ -109,22 +109,32 @@ public sealed class ReadLatencyAccumulator
         public long Count;
         public long TotalMs;
         public long MaxMs;
+        public int MaxInFlight;
+        public long WaitTotalMs;
         public readonly long[] BucketCounts = new long[s_bucketCount];
     }
 
-    private readonly ConcurrentDictionary<(ReadSurface Surface, string Route, ReadOutcome Outcome), Bucket> _buckets = new();
+    /* #5506: the window band is part of the key, so a 1-hour read and a 7-day read of one route keep separate histograms. */
+    private readonly ConcurrentDictionary<(ReadSurface Surface, string Route, ReadOutcome Outcome, string WindowBand), Bucket> _buckets = new();
 
     /// <summary>Record one finished read. Thread-safe: web and compose reads run concurrently. <paramref
     /// name="route"/> is never the caller's free text — every call site passes a bounded-cardinality label
     /// (the <c>/api/read/&lt;name&gt;</c> tool name, or a fixed panel/view-kind label for compose).</summary>
     public void Record(ReadSurface surface, string route, ReadOutcome outcome, long elapsedMs)
+        => Record(surface, route, outcome, elapsedMs, ReadWindowBand.None, 0, 0);
+
+    /// <summary>Records one read (#5506): its window band (<see cref="ReadWindowBand"/>), how many other reads were in
+    /// progress when it started (the key keeps the hour's maximum) and the time it waited for a store connection (the key
+    /// keeps the hour's sum).</summary>
+    internal void Record(ReadSurface surface, string route, ReadOutcome outcome, long elapsedMs, string? windowBand, int inFlightAtStart, long waitMs)
     {
         if (string.IsNullOrEmpty(route))
         {
             return;
         }
 
-        var bucket = _buckets.GetOrAdd((surface, route, outcome), static _ => new Bucket());
+        var band = string.IsNullOrEmpty(windowBand) ? ReadWindowBand.None : windowBand;
+        var bucket = _buckets.GetOrAdd((surface, route, outcome, band), static _ => new Bucket());
         var clampedMs = Math.Max(elapsedMs, 0);
         var bucketIndex = BucketIndexFor(clampedMs);
 
@@ -137,6 +147,11 @@ public sealed class ReadLatencyAccumulator
                 bucket.MaxMs = clampedMs;
             }
             bucket.BucketCounts[bucketIndex]++;
+            if (inFlightAtStart > bucket.MaxInFlight)
+            {
+                bucket.MaxInFlight = inFlightAtStart;
+            }
+            bucket.WaitTotalMs += Math.Max(waitMs, 0);
         }
     }
 
@@ -157,7 +172,8 @@ public sealed class ReadLatencyAccumulator
     }
 
     internal sealed record DrainedLatency(
-        ReadSurface Surface, string Route, ReadOutcome Outcome, long Count, long TotalMs, long MaxMs, long[] BucketCounts);
+        ReadSurface Surface, string Route, ReadOutcome Outcome, long Count, long TotalMs, long MaxMs, long[] BucketCounts,
+        string WindowBand = ReadWindowBand.None, int MaxInFlight = 0, long WaitTotalMs = 0);
 
     /// <summary>Drain every accumulated bucket and RESET the window (<c>TryRemove</c>), so the next hour
     /// starts clean and an hour with no reads writes nothing — exactly <see cref="CollectorCostAccumulator.Drain"/>'s
@@ -178,7 +194,7 @@ public sealed class ReadLatencyAccumulator
             {
                 rows.Add(new DrainedLatency(
                     key.Surface, key.Route, key.Outcome, bucket.Count, bucket.TotalMs, bucket.MaxMs,
-                    (long[])bucket.BucketCounts.Clone()));
+                    (long[])bucket.BucketCounts.Clone(), key.WindowBand, bucket.MaxInFlight, bucket.WaitTotalMs));
             }
         }
 
@@ -206,14 +222,16 @@ public sealed class ReadLatencyAccumulator
     private const string InsertSql = @"
 INSERT INTO collect.read_latency
 (
-    metric_time, surface, route, outcome,
-    run_count, total_ms, max_ms, bucket_counts
+    metric_time, surface, route, outcome, window_band,
+    run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (metric_time, surface, route, outcome) DO UPDATE SET
+VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8, $10, $11)
+ON CONFLICT (metric_time, surface, route, outcome, window_band) DO UPDATE SET
     run_count = collect.read_latency.run_count + EXCLUDED.run_count,
     total_ms = collect.read_latency.total_ms + EXCLUDED.total_ms,
     max_ms = GREATEST(collect.read_latency.max_ms, EXCLUDED.max_ms),
+    max_in_flight = GREATEST(collect.read_latency.max_in_flight, EXCLUDED.max_in_flight),
+    wait_total_ms = collect.read_latency.wait_total_ms + EXCLUDED.wait_total_ms,
     bucket_counts = (
         SELECT array_agg(a + b ORDER BY ord)
         FROM unnest(collect.read_latency.bucket_counts) WITH ORDINALITY AS x(a, ord)
@@ -239,6 +257,9 @@ WHERE metric_time < $1";
             insert.Parameters.AddWithValue(row.TotalMs);
             insert.Parameters.AddWithValue(row.MaxMs);
             insert.Parameters.AddWithValue(row.BucketCounts);
+            insert.Parameters.AddWithValue(row.WindowBand);
+            insert.Parameters.AddWithValue(row.MaxInFlight);
+            insert.Parameters.AddWithValue(row.WaitTotalMs);
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -246,6 +267,6 @@ WHERE metric_time < $1";
         retention.Parameters.AddWithValue(metricTimeUtc.AddDays(-RetentionDays));
         await retention.ExecuteNonQueryAsync(cancellationToken);
 
-        logger?.LogDebug("read_latency flush wrote {Rows} surface+route+outcome rows", drained.Count);
+        logger?.LogDebug("read_latency flush wrote {Rows} surface+route+outcome+band rows", drained.Count);
     }
 }

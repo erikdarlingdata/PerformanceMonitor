@@ -49,15 +49,15 @@ public sealed class DarlingMcpReadLatencyTools
         "Gets the monitoring tool's OWN read-latency history — which of the web dashboard's or MCP server's own "
         + "reads is really slow, and how often it times out; no server_name. Sums the stored hourly histograms "
         + "over the window and answers p50/p95/p99 as bucket UPPER-BOUND estimates (never an interpolation), "
-        + "plus count, mean, max and timeouts, per (surface, route). Sorted p95 desc. Optional surface "
+        + "plus count, mean, max and timeouts, per (surface, route, window band: 1h, 24h, 7d, 7d+ or none). Sorted p95 desc. Optional surface "
         + "(web/compose/mcp) and route filter. Empty means no read recorded in the window, not a failure. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history — how long the web dashboard's `/api/read/*` "
         + "reads, the composed-panel runner and every MCP tool call take. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "
-        + "records every finished read into an in-process histogram keyed by (surface, route, outcome) and "
+        + "records every finished read into an in-process histogram keyed by (surface, route, outcome, window band) and "
         + "flushes an hourly aggregate: run count, total and max duration in ms, and a fixed log-scale bucket "
         + "histogram (about 24 bounds, 10 ms to 120 s, plus an overflow bucket for anything past 120 s). This "
-        + "tool sums those hourly rows over the window per (surface, route) — run_count and total_ms by "
+        + "tool sums those hourly rows over the window per (surface, route, window_band) — run_count and total_ms by "
         + "addition, max_ms by MAX, and the bucket histogram ELEMENT-WISE (bucket 1 across every hour summed "
         + "together, bucket 2 across every hour summed together, and so on) — and computes p50/p95/p99 from "
         + "the SUMMED histogram. Every percentile here is a BUCKET UPPER BOUND, never an interpolated exact "
@@ -70,7 +70,11 @@ public sealed class DarlingMcpReadLatencyTools
         + "and were answered from raw (outcome fallback_raw); gate_failures is the run_count of reads whose "
         + "source decision itself faulted, so they read raw without one (outcome gate_failed). Both are counted "
         + "inside count and the percentiles, and a fallback that then timed out counts as a timeout, not a "
-        + "fallback. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
+        + "fallback. window_band is the width of the window the read asked for: 1h (up to 1 hour), 24h (over 1 hour up to 24), "
+        + "7d (over 24 hours up to 7 days), 7d+ (longer), or none (the read asked for no window). "
+        + "max_in_flight is the most other reads already running on the service when one of these reads started. "
+        + "wait_total_ms is the summed part of these reads' time spent waiting for a store connection rather than running. "
+        + "Rows stored before schema V182 read as band none with 0 for both. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
         + "window/filter, which on a fresh store, or one below schema V148, is the expected answer — not a "
         + "sign anything is broken. The page is capped at limit rows or the shared ~32 KB response budget, whichever cuts first: "
@@ -108,7 +112,7 @@ public sealed class DarlingMcpReadLatencyTools
                     "empty",
                     $"No read recorded in the last {hours} hour(s)" +
                     (string.IsNullOrWhiteSpace(surface) && string.IsNullOrWhiteSpace(route) ? "" : " for that filter") +
-                    ". The service records an hourly histogram per (surface, route, outcome); a store before " +
+                    ". The service records an hourly histogram per (surface, route, outcome, window band); a store before " +
                     "schema V148, or a quiet window, has no row.");
             }
 
@@ -132,12 +136,14 @@ public sealed class DarlingMcpReadLatencyTools
             .ThenByDescending(x => x.Row.RunCount)
             .ThenBy(x => x.Row.Surface, StringComparer.Ordinal)
             .ThenBy(x => x.Row.Route, StringComparer.Ordinal)
+            .ThenBy(x => x.Row.WindowBand, StringComparer.Ordinal)
             .ToArray();
 
             var shaped = projected.Select(x => (object)new
             {
                 surface = x.Row.Surface,
                 route = x.Row.Route,
+                window_band = x.Row.WindowBand,
                 count = x.Row.RunCount,
                 mean_ms = x.Row.MeanMs,
                 max_ms = x.Row.MaxMs,
@@ -150,6 +156,8 @@ public sealed class DarlingMcpReadLatencyTools
                 timeouts = x.Row.Timeouts,
                 fallbacks = x.Row.Fallbacks,
                 gate_failures = x.Row.GateFailures,
+                max_in_flight = x.Row.MaxInFlight,
+                wait_total_ms = x.Row.WaitTotalMs,
             }).ToArray();
 
             return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes);

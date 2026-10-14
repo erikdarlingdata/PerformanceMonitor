@@ -234,6 +234,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "routes table holds a handful of operator-written rows (zero is the ordinary state), so the scan is "
             + "instant and touches no data an earlier rung created beyond that table. It does not move the lock-wait floor."),
         new(
+            182,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... PRIMARY KEY on collect.read_latency (#5506, created V148) builds the new five-column key "
+            + "over the stored rows. The table holds one row per hour per surface, route and outcome that was read, kept "
+            + "90 days: at most a few hundred thousand narrow rows, so the build takes about a second. The three ADD "
+            + "COLUMNs carry constant defaults and rewrite nothing. It does not move the lock-wait floor."),
+        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "

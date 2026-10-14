@@ -67,11 +67,46 @@ internal sealed class ReadScope
     private string? _sourceReason;
     private long _rows = -1;
     private int _serverId = -1;
+    private long _waitTicks;
 
-    private ReadScope(ILogger? logger)
+    /* #5506: the reads in progress on the service right now. Only an outermost scope counts, so a composed panel the MCP
+       run_custom_view_panel tool runs (a scope inside the tool's scope) is one read, not two. */
+    private static int s_inFlight;
+
+    private ReadScope(ILogger? logger, ReadScope? parent, int inFlightAtStart)
     {
         Logger = logger;
         StartedUtc = DateTime.UtcNow;
+        _parent = parent;
+        InFlightAtStart = inFlightAtStart;
+    }
+
+    private readonly ReadScope? _parent;
+
+    /// <summary>The reads in progress on the service right now (#5506).</summary>
+    internal static int InFlight => Volatile.Read(ref s_inFlight);
+
+    /// <summary>How many other reads were already in progress on the service when this read started (#5506). A nested
+    /// scope carries its outermost scope's count.</summary>
+    internal int InFlightAtStart { get; }
+
+    /// <summary>The time this read waited for a store connection, in milliseconds, apart from its run time (#5506): the
+    /// pool's queue wait plus the time to open a new physical connection, summed over every connection the read took.
+    /// <see cref="ReadConnectionWait"/> adds it.</summary>
+    internal long WaitMs => (long)(Interlocked.Read(ref _waitTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+
+    /// <summary>Adds connection wait to this scope and every scope it is nested in.</summary>
+    internal void AddWait(long stopwatchTicks)
+    {
+        if (stopwatchTicks <= 0)
+        {
+            return;
+        }
+
+        for (var scope = this; scope is not null; scope = scope._parent)
+        {
+            Interlocked.Add(ref scope._waitTicks, stopwatchTicks);
+        }
     }
 
     /// <summary>When the scope opened.</summary>
@@ -172,9 +207,11 @@ internal sealed class ReadScope
     internal static Opened Open(ILogger? logger)
     {
         var previous = s_current.Value;
-        var scope = new ReadScope(logger);
+        var counted = previous is null;
+        var inFlightAtStart = counted ? Interlocked.Increment(ref s_inFlight) - 1 : previous!.InFlightAtStart;
+        var scope = new ReadScope(logger, previous, inFlightAtStart);
         s_current.Value = scope;
-        return new Opened(scope, previous);
+        return new Opened(scope, previous, counted);
     }
 
     /// <summary>Notes a fallback and logs it: a Warning through the scope's logger (the exception object, never
@@ -269,11 +306,13 @@ internal sealed class ReadScope
     internal readonly struct Opened : IDisposable
     {
         private readonly ReadScope? _previous;
+        private readonly bool _counted;
 
-        internal Opened(ReadScope scope, ReadScope? previous)
+        internal Opened(ReadScope scope, ReadScope? previous, bool counted)
         {
             Scope = scope;
             _previous = previous;
+            _counted = counted;
         }
 
         /// <summary>The scope this handle opened.</summary>
@@ -282,6 +321,13 @@ internal sealed class ReadScope
         /// <summary>The fallback noted into <see cref="Scope"/>.</summary>
         internal ReadFallback? Fallback => Scope.Fallback;
 
-        public void Dispose() => s_current.Value = _previous;
+        public void Dispose()
+        {
+            s_current.Value = _previous;
+            if (_counted)
+            {
+                Interlocked.Decrement(ref s_inFlight);
+            }
+        }
     }
 }

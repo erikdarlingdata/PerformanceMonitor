@@ -56,7 +56,9 @@ public sealed class DarlingMcpSlowReadTools
         + "statements in the order they ran (50 at most, statements_truncated says more ran). A statement's ms runs until "
         + "its reader CLOSES, so it includes row streaming and the caller's time between rows, not only server time; a "
         + "statement's rows stays null (the driver reports no returned-row count). The read's own rows is recorded only by "
-        + "reads that count them, as get_query_store_top does, and is null otherwise. A statement label is the product's own SQL "
+        + "reads that count them, as get_query_store_top does, and is null otherwise. in_flight is how many other reads were "
+        + "already running on the service when this read started, and wait_ms is the part of total_ms it spent waiting for a store "
+        + "connection rather than running; both are null on rows stored before schema V182. A statement label is the product's own SQL "
         + "text with a short hash; parameter values are never stored. summary counts reads per (surface, route, outcome) "
         + "over the window and the filters, so it covers more than the page. reads is newest first, then newest id; the "
         + "page is capped at limit rows or the ~32 KB response budget, whichever cuts first, and truncated says either "
@@ -185,6 +187,8 @@ public sealed class DarlingMcpSlowReadTools
             source_reason = r.SourceReason,
             error_class = r.ErrorClass,
             rows = r.RowCount,
+            in_flight = r.InFlight,
+            wait_ms = r.WaitMs,
             statement_count = r.StatementCount,
             statements_truncated = r.StatementsTruncated,
             statements_omitted = omitted,
