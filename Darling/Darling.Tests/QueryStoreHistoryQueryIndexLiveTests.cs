@@ -222,6 +222,56 @@ CROSS JOIN LATERAL generate_series(1, d.queries) AS q;", ct);
         Assert.Equal(rowsBefore, await RowsAsync(connection, ct));
     }
 
+    /* #5807 review L2: leaves build oldest first and retention drops the oldest next. A drop that lands between the leaf list
+       and a leaf's build used to throw 42P01 out of the whole spec, leaving the newer leaves unindexed and the parent INVALID. */
+    [Fact]
+    public async Task ALeafRetentionDropsBetweenTheLeafListAndItsBuild_IsSkipped_AndTheNewerLeavesAttachAndTheParentEndsValid()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedAsync(connection, ct);
+
+        var dropped = new List<string>();
+        var logger = new CapturingLogger();
+        await QueryStoreBackgroundIndexes.EnsurePartitionedAsync(
+            connection, QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExec, logger, ct,
+            async (leaf, token) =>
+            {
+                /* The oldest day leaf (the DEFAULT partition sorts before the day leaves and is built first). */
+                if (dropped.Count == 0 && leaf.Contains("_p2026", StringComparison.Ordinal))
+                {
+                    dropped.Add(leaf);
+                    await ExecAsync(connection, $"DROP TABLE {leaf}", token);
+                }
+            });
+
+        Assert.Single(dropped);
+        Assert.Single(logger.Lines, line => line.Contains(dropped[0], StringComparison.Ordinal));
+        Assert.True((bool)(await ScalarAsync(connection,
+            $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExecIndexName}'::regclass", ct))!);
+
+        /* Every leaf that is left has its child attached. */
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, $@"
+SELECT count(*) FROM pg_partition_tree('{Wide.Parent}'::regclass) AS t
+WHERE t.isleaf AND NOT EXISTS (SELECT 1 FROM pg_inherits AS ih JOIN pg_index AS ci ON ci.indexrelid = ih.inhrelid
+                               WHERE ih.inhparent = '{QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExecIndexName}'::regclass AND ci.indrelid = t.relid)", ct), CultureInfo.InvariantCulture));
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<string> Lines { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Lines.Add(formatter(state, exception));
+    }
+
     private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };

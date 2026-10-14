@@ -493,7 +493,8 @@ ORDER BY c.relname;";
     /// timeout is an error here (the delayed task logs it and the next start retries).
     /// </summary>
     internal static async Task EnsurePartitionedAsync(
-        NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task>? beforeLeafBuild = null)
     {
         if (string.IsNullOrEmpty(spec.IndexDefinition))
         {
@@ -537,37 +538,54 @@ ORDER BY c.relname;";
                 throw new InvalidOperationException($"The leaf index name {childName} is longer than 63 characters.");
             }
 
-            var childQualified = $"{indexSchema}.{childName}";
-            bool? childValid = null;
-            await using (var probe = new NpgsqlCommand(
-                "SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
+            if (beforeLeafBuild is not null)
             {
-                probe.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = childQualified });
-                if (await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is bool valid)
+                await beforeLeafBuild(leaf, cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                var childQualified = $"{indexSchema}.{childName}";
+                bool? childValid = null;
+                await using (var probe = new NpgsqlCommand(
+                    "SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
                 {
-                    childValid = valid;
+                    probe.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = childQualified });
+                    if (await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is bool valid)
+                    {
+                        childValid = valid;
+                    }
                 }
-            }
 
-            if (childValid == false)
+                if (childValid == false)
+                {
+                    logger.LogWarning(
+                        "Query Store index {Index} exists but is INVALID (an interrupted build); dropping it and rebuilding.", childQualified);
+                    await using var drop = new NpgsqlCommand($"DROP INDEX CONCURRENTLY IF EXISTS {childQualified};", connection) { CommandTimeout = BuildTimeoutSeconds };
+                    await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    childValid = null;
+                }
+
+                if (childValid is null)
+                {
+                    await using var build = new NpgsqlCommand(
+                        $"CREATE INDEX CONCURRENTLY IF NOT EXISTS {childName} ON {leaf} {spec.IndexDefinition};", connection) { CommandTimeout = BuildTimeoutSeconds };
+                    await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await ExecuteInLockTimeoutAsync(
+                    connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};", cancellationToken).ConfigureAwait(false);
+                built++;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
-                logger.LogWarning(
-                    "Query Store index {Index} exists but is INVALID (an interrupted build); dropping it and rebuilding.", childQualified);
-                await using var drop = new NpgsqlCommand($"DROP INDEX CONCURRENTLY IF EXISTS {childQualified};", connection) { CommandTimeout = BuildTimeoutSeconds };
-                await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                childValid = null;
+                /* #5807: retention dropped this leaf between the leaf list and its build or ATTACH (the oldest leaf is built
+                   first and is the next one retention drops). Its index went with it; the others still need theirs, and the
+                   delayed task does not run this again until the next start, so skip the leaf instead of ending the spec. */
+                logger.LogInformation(
+                    "Query Store index {Index}: leaf {Leaf} was dropped by retention before its index was built; skipping it.",
+                    spec.IndexName, leaf);
             }
-
-            if (childValid is null)
-            {
-                await using var build = new NpgsqlCommand(
-                    $"CREATE INDEX CONCURRENTLY IF NOT EXISTS {childName} ON {leaf} {spec.IndexDefinition};", connection) { CommandTimeout = BuildTimeoutSeconds };
-                await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            await ExecuteInLockTimeoutAsync(
-                connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};", cancellationToken).ConfigureAwait(false);
-            built++;
         }
 
         bool parentValid;
