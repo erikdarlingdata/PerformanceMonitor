@@ -261,4 +261,144 @@ internal static class StatementFilterCensus
             XDocument.Parse(filteredPlan).Descendants(),
             e => (string?)e.Attribute("ParameterCompiledValue") == "N'param-canary-ssf'");
     }
+
+    // ── the keyed mcp.dataDetail census (#5632, R3) ──
+
+    /// <summary>A string literal the census plants: unquoted, because a quote is escaped in JSON and XML.</summary>
+    public const string LiteralCanary = "zq-lit-5632";
+
+    /// <summary>A NUMERIC literal the census plants: its digits.</summary>
+    public const string NumericCanary = "86753091";
+
+    /// <summary>A login the census plants.</summary>
+    public const string LoginCanary = "zq_login_5632";
+
+    /// <summary>A client host name the census plants.</summary>
+    public const string HostCanary = "zq-host-5632";
+
+    /// <summary>A statement the statement filter keeps, holding both literal canaries: what <c>maskLiterals</c> must
+    /// mask and <c>metadataOnly</c> must withhold.</summary>
+    public const string MaskStatement =
+        "SELECT zq_census_col FROM dbo.t WHERE c = N'" + LiteralCanary + "' AND n = " + NumericCanary;
+
+    /// <summary>The literal canaries: the two above plus the literals the statement-filter harness already plants in
+    /// statements it keeps (a plan's <c>ParameterCompiledValue</c> and a plan warning's predicate).</summary>
+    public static readonly string[] LiteralCanaries = { LiteralCanary, NumericCanary, "param-canary-ssf", "kept-predicate-ssf" };
+
+    /// <summary>Every canary the census looks for.</summary>
+    public static readonly string[] AllCanaries = LiteralCanaries.Concat(new[] { LoginCanary, HostCanary }).ToArray();
+
+    /// <summary>
+    /// The keyed census of one read (#5632, R3): <paramref name="raw"/> (the read's answer, the control) goes through
+    /// the host's registered filters under <c>maskLiterals</c> and under <c>metadataOnly</c>, and any field of the
+    /// answer that still carries a planted canary fails the test with the tool and the field named: a JSON key, an
+    /// alert context label's value, or an XML element or attribute inside a value. A literal canary may survive
+    /// neither level; a login or host canary may not survive <c>metadataOnly</c>. A field that fails belongs in
+    /// <see cref="McpDataDetailKeys"/> (as statement, parameter value, login or host). Returns the canaries the raw
+    /// answer held, so a class can prove its plants reached the output.
+    /// </summary>
+    public static async Task<IReadOnlySet<string>> AssertKeyedMaskingAsync(TestServer server, string tool, string raw)
+    {
+        var planted = AllCanaries.Where(c => raw.Contains(c, StringComparison.Ordinal)).ToHashSet(StringComparer.Ordinal);
+        if (planted.Count == 0) return planted;
+
+        foreach (var mode in new[] { McpDataDetail.MaskLiterals, McpDataDetail.MetadataOnly })
+        {
+            var (filtered, _) = await FilterThroughHostAsync(server, raw, dataDetail: mode);
+            var watched = mode == McpDataDetail.MetadataOnly
+                ? planted.ToArray()
+                : planted.Where(c => LiteralCanaries.Contains(c, StringComparer.Ordinal)).ToArray();
+            var leaks = new List<string>();
+            FindLeaks(filtered, "(answer)", watched, leaks);
+            Assert.True(leaks.Count == 0,
+                $"{tool} under mcp.dataDetail={mode}: {string.Join("; ", leaks)}. "
+                + "List each field in McpDataDetailKeys (statement, parameter value, login or host).");
+        }
+
+        return planted;
+    }
+
+    /// <summary>The control for a class: the union of what its reads' raw answers held covers every canary it
+    /// planted.</summary>
+    public static void AssertPlanted(IEnumerable<string> found, params string[] expected)
+    {
+        var have = found.ToHashSet(StringComparer.Ordinal);
+        foreach (string canary in expected)
+        {
+            Assert.True(have.Contains(canary), $"No raw answer held the canary {canary}: the plant did not reach a tool.");
+        }
+    }
+
+    private static void FindLeaks(string text, string path, string[] canaries, List<string> leaks)
+    {
+        string? hit = canaries.FirstOrDefault(c => text.Contains(c, StringComparison.Ordinal));
+        if (hit is null) return;
+
+        string trimmed = text.TrimStart();
+        if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
+        {
+            JsonNode? node = null;
+            try { node = JsonNode.Parse(text); } catch (JsonException) { }
+            if (node is not null)
+            {
+                FindLeaks(node, path, canaries, leaks);
+                return;
+            }
+        }
+
+        if (trimmed.StartsWith('<'))
+        {
+            XDocument? doc = null;
+            try { doc = XDocument.Parse(text); } catch (System.Xml.XmlException) { }
+            if (doc?.Root is { } root)
+            {
+                foreach (var element in root.DescendantsAndSelf())
+                {
+                    foreach (var attribute in element.Attributes())
+                    {
+                        string? a = canaries.FirstOrDefault(c => attribute.Value.Contains(c, StringComparison.Ordinal));
+                        if (a is not null) leaks.Add($"{path} <{element.Name.LocalName} {attribute.Name.LocalName}=> carries '{a}'");
+                    }
+
+                    foreach (var textNode in element.Nodes().OfType<XText>())
+                    {
+                        string? t = canaries.FirstOrDefault(c => textNode.Value.Contains(c, StringComparison.Ordinal));
+                        if (t is not null) leaks.Add($"{path} <{element.Name.LocalName}> text carries '{t}'");
+                    }
+                }
+
+                return;
+            }
+        }
+
+        leaks.Add($"key '{path}' carries '{hit}'");
+    }
+
+    private static void FindLeaks(JsonNode node, string path, string[] canaries, List<string> leaks)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                // An alert context field ({"label": ..., "value": ...}) is keyed by its label, as the masker reads it.
+                string? label = obj["label"] is JsonValue lv && lv.TryGetValue(out string? l) ? l : null;
+                foreach (var (key, child) in obj)
+                {
+                    if (child is null) continue;
+                    string childPath = label is not null && key == "value" ? $"label '{label}'" : key;
+                    FindLeaks(child, childPath, canaries, leaks);
+                }
+
+                break;
+            case JsonArray array:
+                foreach (var child in array)
+                {
+                    if (child is not null) FindLeaks(child, path, canaries, leaks);
+                }
+
+                break;
+            case JsonValue value:
+                FindLeaks(value.TryGetValue(out string? sv) ? sv : value.ToJsonString(), path, canaries, leaks);
+                break;
+        }
+    }
 }

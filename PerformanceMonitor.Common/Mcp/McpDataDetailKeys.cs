@@ -90,6 +90,8 @@ public static class McpDataDetailKeys
             "Process A", "Process B", "Process C", "Process D",
             // Mute-rule patterns.
             "query_text_pattern", "query_pattern", "text_pattern", "pattern", "sql_text_pattern",
+            // get_mute_rules (Darling and Lite): the rule's one-line match summary, which quotes its query pattern.
+            "match_summary",
             // Error text.
             "error_message", "message_text", "last_error", "last_error_truncated", "last_message", "error",
             "errors",

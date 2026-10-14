@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -47,7 +48,9 @@ public sealed class StatementFilterAnalysisReadsLiveTests : IDisposable
 
     public void Dispose() => Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", null);
 
-    private static async Task AssertFilteredAsync(TestServer server, string label, string raw)
+    /// <summary>The statement filter's census, then the keyed mcp.dataDetail census (#5632, R3); returns the census
+    /// canaries the raw answer held.</summary>
+    private static async Task<IReadOnlySet<string>> AssertFilteredAsync(TestServer server, string label, string raw)
     {
         try
         {
@@ -55,6 +58,7 @@ public sealed class StatementFilterAnalysisReadsLiveTests : IDisposable
             var (filtered, isError) = await StatementFilterCensus.FilterThroughHostAsync(server, raw);
             Assert.False(isError);
             StatementFilterCensus.AssertFilteredWithholdsTheCanary(raw, filtered);
+            return await StatementFilterCensus.AssertKeyedMaskingAsync(server, label, raw);
         }
         catch (Exception ex) when (ex is not Xunit.Sdk.XunitException || !ex.Message.StartsWith(label, StringComparison.Ordinal))
         {
@@ -84,7 +88,8 @@ public sealed class StatementFilterAnalysisReadsLiveTests : IDisposable
         {
             ["top_queries"] = new System.Text.Json.Nodes.JsonArray(
                 new System.Text.Json.Nodes.JsonObject { ["query_text"] = StatementScrubCanary.CanaryStatement, ["executions"] = 5 },
-                new System.Text.Json.Nodes.JsonObject { ["query_text"] = StatementScrubCanary.PlainStatement, ["executions"] = 7 }),
+                new System.Text.Json.Nodes.JsonObject { ["query_text"] = StatementScrubCanary.PlainStatement, ["executions"] = 7 },
+                new System.Text.Json.Nodes.JsonObject { ["query_text"] = StatementFilterCensus.MaskStatement, ["executions"] = 9 }),
         }.ToJsonString();
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO analysis_findings
@@ -105,8 +110,10 @@ INSERT INTO config_alert_log
      alert_sent, notification_type, send_error, muted, dismissed, detail_text, context_json)
 VALUES ($1, $2, $3, 'High CPU', 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $4, $5)",
             DarlingMcpTestData.Naive(now), ServerId, ServerName,
-            "Top statement: " + StatementScrubCanary.CanaryStatement,
-            "{\"queries\":[{\"query_text\":\"" + StatementScrubCanary.CanaryStatement + "\"}]}");
+            "Top statement: " + StatementScrubCanary.CanaryStatement + " Next: " + StatementFilterCensus.MaskStatement,
+            "{\"queries\":[{\"query_text\":\"" + StatementScrubCanary.CanaryStatement + "\"},{\"query_text\":\""
+                + StatementFilterCensus.MaskStatement + "\",\"login_name\":\"" + StatementFilterCensus.LoginCanary
+                + "\",\"host_name\":\"" + StatementFilterCensus.HostCanary + "\"}]}");
 
         /* Row 27: a mute rule whose pattern is the statement text. */
         await new PgMuteRuleStore(postgres).InsertAsync(new MuteRule
@@ -117,17 +124,29 @@ VALUES ($1, $2, $3, 'High CPU', 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $4, $5)
             Reason = "census " + StatementScrubCanary.PlainStatement,
         });
 
+        /* #5632 (R3): a mute rule whose pattern holds the census literal. */
+        await new PgMuteRuleStore(postgres).InsertAsync(new MuteRule
+        {
+            Id = "ssf-mute-2",
+            ServerName = ServerName,
+            QueryTextPattern = "%" + StatementFilterCensus.LiteralCanary + "%",
+            Reason = "census",
+        });
+
         using var server = await StatementFilterCensus.BuildHostAsync();
 
         var findings = await DarlingMcpTools.GetAnalysisFindings(
             new DarlingAnalysisService(postgres), postgres, ServerName, hours_back: 24, include_drilldown: true, as_of: null, cancellationToken: ct);
-        await AssertFilteredAsync(server, "get_analysis_findings", findings);
+        var found = new List<string>(await AssertFilteredAsync(server, "get_analysis_findings", findings));
 
         var history = await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, 24, 50, null, false, ct);
-        await AssertFilteredAsync(server, "get_alert_history", history);
+        found.AddRange(await AssertFilteredAsync(server, "get_alert_history", history));
 
         var rules = await DarlingMcpAlertTools.GetMuteRules(postgres, true, ct);
-        await AssertFilteredAsync(server, "get_mute_rules", rules);
+        var muteFound = await AssertFilteredAsync(server, "get_mute_rules", rules);
+        found.AddRange(muteFound);
+        StatementFilterCensus.AssertPlanted(muteFound, StatementFilterCensus.LiteralCanary);
+        StatementFilterCensus.AssertPlanted(found, StatementFilterCensus.LiteralCanary, StatementFilterCensus.NumericCanary);
     }
 
     /// <summary>Rows 28 to 30: the three tools answer from fact keys, numbers, object names and sweep check results. A
