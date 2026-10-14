@@ -139,7 +139,7 @@ public static class McpDataDetailKeys
         new[] { Normalize("Excluded Logins") }.ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>True when the field named <paramref name="name"/> holds a comma-joined list of logins or hosts.</summary>
-    public static bool IsCommaList(string? name) => name is { Length: > 0 } && s_commaLists.Contains(Normalize(name));
+    public static bool IsCommaList(string? name) => !string.IsNullOrEmpty(name) && s_commaLists.Contains(Normalize(name));
 
     /// <summary>Lower case with <c>_</c>, <c>-</c>, <c>.</c> and white space removed.</summary>
     public static string Normalize(string name)
