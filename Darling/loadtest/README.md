@@ -170,7 +170,14 @@ Each copy reads its source partition again. That is the price of a run that can 
 
     The step prints those lines for the last 2 hours (`-Hours` sets the window). It also prints `hourly_total_ms`, the sum of the newest run of each job. A job that fails writes no line, so the total leaves it out. So the step also prints a line that names each job with no line in the window. Then it prints the daily retention purge from the collection log, and the TimescaleDB aggregate refresh and compression jobs. Those jobs do not read the Query Store interval tables, so we expect their times to stay the same at each N.
 
-    The compression step copies one closed day of `collect.query_store_interval_wide` into a compressed TimescaleDB hypertable. It prints the size and the time of a one-day scan for the plain partition and for the compressed copy. The default day is yesterday in UTC. Use `-Day yyyy-MM-dd` for another day.
+    The compression step copies one closed day of `collect.query_store_interval_wide` into a TimescaleDB hypertable. Then it compresses the copy in two shapes, one after the other. It prints four rows, each with its size and the time of a one-day scan:
+
+    - `plain day partition`: the day as the store holds it now.
+    - `hypertable, uncompressed`: the copy before compression.
+    - `compressed, store shape`: segmented by `server_id`, with no order setting, so TimescaleDB orders by `first_execution_time` descending. The store compresses its other tables this way (`TimescaleSupport.EnableCompressionSql`).
+    - `compressed, candidate`: segmented by `server_id, database_name` and ordered by `first_execution_time`. The store uses this shape nowhere.
+
+    The copy has the same indexes and fillfactor as the day partition. Each row shows the data and the indexes apart, and then their total, so the sizes compare like with like. The default day is yesterday in UTC. Use `-Day yyyy-MM-dd` for another day.
 
 ### What each step compares with
 
@@ -181,6 +188,10 @@ Each copy reads its source partition again. That is the price of a run that can 
 | Hourly work | `hourly_total_ms` from the Jobs step must stay well under one hour. It is the time of the three Query Store builders and the convergence pass on one tick. A `deferred` count above 0 on tick after tick is a backlog that does not clear, and fails the limit. |
 | Daily purge | The newest `data_retention` run must finish without an error. |
 | Writes | The Query Store collector's `max_duration_ms` must stay under its collection interval. |
+
+The reads through MCP and the web dashboard ask for one real server (`-ServerName`). The inflate adds no rows to that server. It adds other servers. So those reads see N only through deeper indexes and more partitions, and they can stay under 5 s at each N.
+
+A Custom Views panel with no server filter reads the rows of every server, the synthetic ones too, so its time grows with the rows. A flat time on a one-server read means that this read does not grow with N. It does not mean that the store has room for N times the servers.
 
 ## What to record
 
@@ -197,7 +208,7 @@ Also record the host: vCPUs, RAM, disk type, and the PostgreSQL and TimescaleDB 
 
 Post one table, with one row for each N, and the step tables under it. `source_servers` is the value that the inflate script prints:
 
-| N | Servers in the store (N x source_servers) | Query Store tables | Slowest 1-day read (ms) | Slowest 7-day read (ms) | Custom Views panel (ms) | Hourly work total (ms) | Query Store write, max (ms) | Wide day: plain, compressed | 1-day scan: plain, compressed (ms) | Every limit met |
+| N | Servers in the store (N x source_servers) | Query Store tables | Slowest 1-day read (ms) | Slowest 7-day read (ms) | Custom Views panel (ms) | Hourly work total (ms) | Query Store write, max (ms) | Wide day with indexes: plain, store shape, candidate | 1-day scan: plain, store shape, candidate (ms) | Every limit met |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 1 | | | | | | | | | | |
 | 2 | | | | | | | | | | |

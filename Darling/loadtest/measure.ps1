@@ -18,8 +18,8 @@
                    the Query Store partition upkeep, read from the service log (-ServiceLog); the daily retention
                    purge from the collection log; and the TimescaleDB aggregate refresh and compression jobs.
       Writes       (c) The Query Store collectors' write time per cycle, from the collection log and get_collector_cost.
-      Compression  (d) One closed day of the wide table in a compressed hypertable: size and scan time, plain and
-                   compressed.
+      Compression  (d) One closed day of the wide table in a compressed hypertable: size (data and indexes) and scan
+                   time, plain, uncompressed, and compressed in the store's shape and in the candidate shape.
 
     Run it against a COPY. Never point it at a store that monitors production servers.
 

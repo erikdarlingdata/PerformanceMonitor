@@ -30,6 +30,8 @@ We have a daily figure only for the Query Store interval tables. These tables ar
 
 The Query Store interval tables are plain PostgreSQL tables, partitioned by day. TimescaleDB compression does not apply to them, so all of their rows stay uncompressed.
 
+The load test's compression step compresses a copy of one day of the wide table, in two shapes, and measures the size. The store shape is segmented by `server_id` and ordered by time descending, as the store compresses its other tables. The candidate is segmented by `server_id, database_name` and ordered by `first_execution_time`. Both sizes count the indexes, as the plain size does. This guide has no figures from that step yet.
+
 ## The retention horizons behind these numbers
 
 The sizes above assume the default retention horizons. If you change a horizon, the size per server changes with it. The [Retention](../Darling/README.md#retention) section of the Darling README is the full list.
@@ -62,7 +64,7 @@ With TimescaleDB, the service compresses each 1-day chunk when it is older than 
 
 The tables below use these rules:
 
-- RAM: the uncompressed chunk size per server times the server count, rounded up to a common size. This is the cautious rule above. Store A runs at about 150% of RAM and keeps up, so 64 GB works for 43 servers. We have not run store A on a smaller host, so 64 GB is the one size that we know works, not a proven minimum.
+- RAM: the uncompressed chunk size per server times the server count, rounded up to a common size. This is the cautious rule above. The chunk sizes are in GiB and the RAM sizes are in GB. 1 GiB is 1.074 GB, so we turn the sum into GB before we round it up. Store A runs at about 150% of RAM and keeps up, so 64 GB works for 43 servers. We have not run store A on a smaller host, so 64 GB is the one size that we know works, not a proven minimum.
 - The RAM rule counts only the TimescaleDB chunks. It leaves out the Query Store interval tables, about 3.5 GiB per server, which are never compressed. [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) expects them to matter less for RAM than the chunks. But this guide expects the reads on those tables to reach their limits first, so the load test measures them.
 - Disk: the size per server times the server count, plus 50% for growth, vacuum and the temporary space of the compression jobs.
 - vCPUs: one vCPU for each 5.4 servers, which is store A's ratio (43 servers on 8 vCPUs). At the top of each row that gives 3.7, 8.3, 16.7 and 27.8 vCPUs. We round them to 4, 8, 16 and 32. The last one is rounded up, to be cautious.
@@ -75,8 +77,8 @@ Only the store A row is measured. The other rows are estimates from these rules.
 |---|---|---|---|---|
 | 1 to 20 | 4 | 64 GB | 300 GiB | Estimate: 20 x 2.1 GiB = 42 GiB uncompressed, 20 x 10 GiB x 1.5 = 300 GiB |
 | 21 to 45 | 8 | 64 GB works, 128 GB recommended | 700 GiB | Measured on store A (43 servers, 8 vCPUs, 64 GB). 64 GB is the size we ran, not a proven minimum. 45 x 2.1 GiB = 95 GiB uncompressed |
-| 46 to 90 | 16 | 192 GB | 1.4 TiB | Estimate: 90 x 2.1 GiB = 189 GiB uncompressed, 90 x 10 GiB x 1.5 = 1,350 GiB |
-| 91 to 150 | 32 | 320 GB | 2.2 TiB | Estimate: 150 / 5.4 = 27.8 vCPUs, rounded up to 32. 150 x 2.1 GiB = 315 GiB uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
+| 46 to 90 | 16 | 256 GB | 1.4 TiB | Estimate: 90 x 2.1 GiB = 189 GiB (203 GB) uncompressed, 90 x 10 GiB x 1.5 = 1,350 GiB |
+| 91 to 150 | 32 | 384 GB | 2.2 TiB | Estimate: 150 / 5.4 = 27.8 vCPUs, rounded up to 32. 150 x 2.1 GiB = 315 GiB (338 GB) uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
 
 Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are not tested. We expect the day-scan reads on the Query Store tables to get slower as you add servers. The load test will measure how much slower.
 
