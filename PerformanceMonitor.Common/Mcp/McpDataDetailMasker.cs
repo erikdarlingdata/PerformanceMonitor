@@ -12,6 +12,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
 
@@ -256,6 +257,8 @@ public sealed class McpDataDetailMasker
     {
         if (string.IsNullOrEmpty(text)) return text;
 
+        text = MaskUnquotedErrorValues(text);
+
         StringBuilder? sb = null;
         int copied = 0;
         int i = 0;
@@ -323,6 +326,39 @@ public sealed class McpDataDetailMasker
         if (sb is null) return text;
         sb.Append(text, copied, text.Length - copied);
         return sb.ToString();
+    }
+
+    /// <summary>A PostgreSQL error DETAIL's key, <c>Key (col)=(value) already exists.</c> and its foreign-key and
+    /// exclusion-constraint forms: the value is printed UNQUOTED, so the quoted-literal scan below misses a string in it.
+    /// Matched by its <c>(cols)=(values)</c> shape, which every message catalogue keeps, and the value list ends at the
+    /// first <c>)</c> that is followed by white space, a period, a comma or the end of a line (#5632).</summary>
+    private static readonly Regex s_pgKeyValue = new(
+        @"(\((?:[^()\r\n]|\([^()\r\n]*\))*\)=\()([^\r\n]*?)(\)(?:[\s.,;]|$))",
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Multiline);
+
+    /// <summary>A NOT NULL or CHECK failure's DETAIL, <c>Failing row contains (v1, v2, ...).</c>: the whole row,
+    /// unquoted, to the last <c>)</c> on its line (#5632).</summary>
+    private static readonly Regex s_pgFailingRow = new(
+        @"(Failing row contains \()([^\r\n]*)(\))",
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+
+    /// <summary><paramref name="text"/> with the unquoted values of a PostgreSQL error DETAIL replaced by
+    /// <c>?</c>: the <c>Key (col)=(value)</c> of a unique, foreign-key or exclusion violation and the row of a
+    /// <c>Failing row contains (...)</c>. The column names are kept. The SAME instance comes back when neither is
+    /// present.</summary>
+    private static string MaskUnquotedErrorValues(string text)
+    {
+        if (text.Contains(")=(", StringComparison.Ordinal))
+        {
+            text = s_pgKeyValue.Replace(text, "$1" + ReplacedValue + "$3");
+        }
+
+        if (text.Contains("Failing row contains (", StringComparison.Ordinal))
+        {
+            text = s_pgFailingRow.Replace(text, "$1" + ReplacedValue + "$3");
+        }
+
+        return text;
     }
 
     /// <summary>The index just past the quote that closes the one at <paramref name="start"/>; a doubled quote is

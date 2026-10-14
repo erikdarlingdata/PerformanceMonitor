@@ -93,6 +93,13 @@ public static class McpDataDetailKeys
             // Error text.
             "error_message", "message_text", "last_error", "last_error_truncated", "last_message", "error",
             "errors",
+            // Free text that can quote collected text: the generic "message" key (a tool's status sentence, which can
+            // quote what the monitored server said) and the job-failure alert context label "Message" (the step's
+            // output, normalized to the same entry).
+            "message",
+            // Definitions: a custom alert rule's definition and an index's (a partial index's predicate holds its
+            // literals), from get_custom_alert_rule, get_pg_index_usage and the FinOps index analysis.
+            "definition", "index_definition", "original_index_definition",
         }),
         (McpDataDetailClass.ParameterValue, new[]
         {

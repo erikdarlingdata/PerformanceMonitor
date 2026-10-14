@@ -365,6 +365,69 @@ public sealed class McpDataDetailMaskerTests
         Assert.Equal(Withheld, Masked(json, McpDataDetail.MetadataOnly)[key]!.GetValue<string>());
     }
 
+    /* ---- #5632 wave 3 (LC): the field-table gaps the data-setting lane named ---- */
+
+    [Theory]
+    [InlineData("message")]
+    [InlineData("definition")]
+    [InlineData("index_definition")]
+    [InlineData("original_index_definition")]
+    public void FreeTextAndDefinitionKeys_LiteralsReplaced_ThenWithheld(string key)
+    {
+        string json = "{\"" + key + "\":\"CREATE INDEX ix ON dbo.t (c) WHERE region = N'zq-north' AND tier > 77\",\"status\":\"empty\"}";
+        Assert.Equal(
+            "CREATE INDEX ix ON dbo.t (c) WHERE region = N'?' AND tier > ?",
+            Masked(json, McpDataDetail.MaskLiterals)[key]!.GetValue<string>());
+        var meta = Masked(json, McpDataDetail.MetadataOnly);
+        Assert.Equal(Withheld, meta[key]!.GetValue<string>());
+        Assert.Equal("empty", meta["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void TheJobFailureMessageLabel_IsMaskedAsFreeText()
+    {
+        const string json = "{\"details\":[{\"heading\":\"Job failure\",\"fields\":["
+            + "{\"label\":\"Job\",\"value\":\"Nightly ETL\"},"
+            + "{\"label\":\"Message\",\"value\":\"Executed as user: CORP\\\\svc_etl. Cannot insert 'zq-acct-9' (77).\"}]}]}";
+        var fields = Masked(json, McpDataDetail.MaskLiterals)["details"]![0]!["fields"]!.AsArray();
+        Assert.Equal("Nightly ETL", fields[0]!["value"]!.GetValue<string>());
+        Assert.Equal("Executed as user: CORP\\svc_etl. Cannot insert '?' (?).", fields[1]!["value"]!.GetValue<string>());
+        var meta = Masked(json, McpDataDetail.MetadataOnly)["details"]![0]!["fields"]!.AsArray();
+        Assert.Equal("Nightly ETL", meta[0]!["value"]!.GetValue<string>());
+        Assert.Equal(Withheld, meta[1]!["value"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData(
+        "duplicate key value violates unique constraint \"uq_acct\"\nDETAIL: Key (account_code)=(zq-acct-9) already exists.",
+        "duplicate key value violates unique constraint \"uq_acct\"\nDETAIL: Key (account_code)=(?) already exists.")]
+    [InlineData(
+        "Key (tenant, code)=(77, zq-acct-9) is not present in table \"accounts\".",
+        "Key (tenant, code)=(?) is not present in table \"accounts\".")]
+    [InlineData(
+        "Key (lower(code))=(zq-acct-9) is still referenced from table \"orders\".",
+        "Key (lower(code))=(?) is still referenced from table \"orders\".")]
+    [InlineData(
+        "Key (room, during)=(7, [2026-01-01,2026-01-02)) conflicts with existing key (room, during)=(7, [2026-01-01,2026-01-03)).",
+        "Key (room, during)=(?) conflicts with existing key (room, during)=(?).")]
+    [InlineData(
+        "new row violates check constraint \"ck_amt\"\nDETAIL: Failing row contains (5, zq-acct-9, null).",
+        "new row violates check constraint \"ck_amt\"\nDETAIL: Failing row contains (?).")]
+    public void PostgresErrorDetail_UnquotedKeyAndRowValues_AreReplaced_AndTheColumnsKept(string error, string expected)
+    {
+        Assert.Equal(expected, McpDataDetailMasker.MaskErrorText(error, McpDataDetail.MaskLiterals));
+        Assert.Equal(Withheld, McpDataDetailMasker.MaskErrorText(error, McpDataDetail.MetadataOnly));
+        string json = new JsonObject { ["error_message"] = error }.ToJsonString();
+        Assert.Equal(expected, Masked(json, McpDataDetail.MaskLiterals)["error_message"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void MaskLiterals_WithNoPostgresDetail_ReturnsTheSameInstance()
+    {
+        const string text = "SELECT a FROM dbo.t WHERE b = @b";
+        Assert.Same(text, McpDataDetailMasker.MaskLiterals(text));
+    }
+
     [Fact]
     public void ReproScript_SniffedDeclareValues_Replaced_ThenWithheld()
     {
