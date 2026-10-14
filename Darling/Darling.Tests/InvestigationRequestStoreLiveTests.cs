@@ -25,7 +25,8 @@ namespace Darling.Tests;
 /// group within the 30-minute window, never by a dedup key alone; the hourly limit opens nothing and journals
 /// <c>limit_reached</c> once; two concurrent claims have one winner; a superseded claim's report is refused as
 /// <c>lease_lost</c>; a late report under a lapsed or expired lease is accepted until a newer claim; the list computes the
-/// state without writing; and the sweep expires without reopening.
+/// state without writing; the sweep expires without reopening; a release keeps its claim counted; and a long agent id and
+/// a full agent journal are refused.
 /// </summary>
 public sealed class InvestigationRequestStoreLiveTests
 {
@@ -260,6 +261,59 @@ FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
 SELECT r.state || '|' || r.claim_count || '|'
        || (SELECT count(*) FROM config.investigation_journal WHERE request_id = r.request_id AND event = 'claims_exhausted')
 FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
+        });
+    }
+
+    /// <summary>The store bounds what a token holder can write (#5632 review round 1, L3): an agent id over 64 characters
+    /// is refused before anything is read or written; a request takes at most 200 agent-written journal rows, after which
+    /// every agent call on it is refused and one <c>journal_capped</c> row records that; and claims of unknown ids journal
+    /// once per hour, not once per guessed id.</summary>
+    [Fact]
+    public async Task ALongAgentId_IsRefused_AndARequestsAgentJournal_IsCappedAt200_AndUnknownIdsJournalHourly()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var tooLong = new string('a', InvestigationRequestStore.MaxAgentIdLength + 1);
+            var longest = new string('b', InvestigationRequestStore.MaxAgentIdLength);
+            const string AgentRows = "SELECT count(*) FROM config.investigation_journal WHERE actor LIKE 'agent:%'";
+
+            var refused = await store.ClaimAsync(id, tooLong, ct);
+            Assert.Equal(InvestigationClaimOutcome.AgentIdTooLong, refused.Outcome);
+            Assert.Equal("agent_id_too_long", refused.Reason);
+            Assert.Equal("0", await ScalarAsync(connection, AgentRows, ct));
+
+            var claim = await store.ClaimAsync(id, longest, ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, claim.Outcome);
+            Assert.Equal(InvestigationSubmitOutcome.AgentIdTooLong,
+                await store.SubmitAsync(Report(id, claim.ClaimId!.Value) with { AgentId = tooLong }, ct));
+            Assert.Equal("1", await ScalarAsync(connection, AgentRows, ct));
+
+            /* 199 agent rows; one more refused submit under a guessed claim id is the 200th. */
+            await ExecAsync(connection, $@"
+INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason)
+SELECT '2026-10-14 12:00:00+00', '{id}', 7, 'refused', 'agent:seed', 'submit:lease_lost' FROM generate_series(1, 198)", ct);
+            Assert.Equal(InvestigationSubmitOutcome.LeaseLost, await store.SubmitAsync(Report(id, Guid.NewGuid()), ct));
+            Assert.Equal("200", await ScalarAsync(connection, AgentRows, ct));
+
+            /* The cap: every agent call on the request is refused, and journal_capped is written once. */
+            Assert.Equal(InvestigationSubmitOutcome.JournalCapped, await store.SubmitAsync(Report(id, Guid.NewGuid()), ct));
+            Assert.Equal(InvestigationSubmitOutcome.JournalCapped, await store.SubmitAsync(Report(id, claim.ClaimId!.Value), ct));
+            var capped = await store.ClaimAsync(id, "agent-b", ct);
+            Assert.Equal(InvestigationClaimOutcome.JournalCapped, capped.Outcome);
+            Assert.Equal("journal_capped", capped.Reason);
+            Assert.Equal("201|1", await ScalarAsync(connection, @"
+SELECT count(*) || '|' || count(*) FILTER (WHERE event = 'journal_capped')
+FROM config.investigation_journal WHERE actor LIKE 'agent:%'", ct));
+
+            /* Unknown ids: one not_found row per hour, whatever ids are guessed. */
+            Assert.Equal(InvestigationClaimOutcome.NotFound, (await store.ClaimAsync(Guid.NewGuid(), "agent-c", ct)).Outcome);
+            Assert.Equal(InvestigationClaimOutcome.NotFound, (await store.ClaimAsync(Guid.NewGuid(), "agent-c", ct)).Outcome);
+            Assert.Equal(InvestigationSubmitOutcome.NotFound, await store.SubmitAsync(Report(Guid.NewGuid(), Guid.NewGuid()), ct));
+            Assert.Equal(InvestigationSubmitOutcome.NotFound, await store.SubmitAsync(Report(Guid.NewGuid(), Guid.NewGuid()), ct));
+            Assert.Equal("1|1", await ScalarAsync(connection, @"
+SELECT count(*) FILTER (WHERE reason = 'claim:not_found') || '|' || count(*) FILTER (WHERE reason = 'submit:not_found')
+FROM config.investigation_journal", ct));
         });
     }
 

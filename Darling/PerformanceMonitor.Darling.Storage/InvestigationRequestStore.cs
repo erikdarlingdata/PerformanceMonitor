@@ -64,6 +64,14 @@ public enum InvestigationClaimOutcome
 
     /// <summary>No request has that id.</summary>
     NotFound,
+
+    /// <summary>The agent id is longer than <see cref="InvestigationRequestStore.MaxAgentIdLength"/> characters: nothing
+    /// was read or written.</summary>
+    AgentIdTooLong,
+
+    /// <summary>The request already holds <see cref="InvestigationRequestStore.MaxAgentJournalRows"/> journal rows
+    /// written by agents: the call is refused and one <c>journal_capped</c> row says so.</summary>
+    JournalCapped,
 }
 
 /// <summary>The result of a claim. The lease and claim count are set only when <see cref="Outcome"/> is Claimed.</summary>
@@ -87,6 +95,14 @@ public enum InvestigationSubmitOutcome
 
     /// <summary>No request has that id.</summary>
     NotFound,
+
+    /// <summary>The agent id is longer than <see cref="InvestigationRequestStore.MaxAgentIdLength"/> characters: nothing
+    /// was read or written.</summary>
+    AgentIdTooLong,
+
+    /// <summary>The request already holds <see cref="InvestigationRequestStore.MaxAgentJournalRows"/> journal rows
+    /// written by agents: the report is refused and one <c>journal_capped</c> row says so.</summary>
+    JournalCapped,
 }
 
 /// <summary>A report an agent returns under its claim. <see cref="EvidenceJson"/> is a JSON array of at least one item.</summary>
@@ -157,6 +173,15 @@ public sealed class InvestigationRequestStore
     /// <summary>The claims a request may take before it expires.</summary>
     public const int MaxClaims = 3;
 
+    /// <summary>The longest agent id a claim or a report may carry (#5632 review round 1, L3). It is written into
+    /// <c>claimed_by</c>, the journal's <c>actor</c> and the report, so the store refuses a longer one for every caller.</summary>
+    public const int MaxAgentIdLength = 64;
+
+    /// <summary>The journal rows agents may write on one request (#5632 review round 1, L3). A token holder could otherwise
+    /// add a row per guessed claim id, each kept 365 days. The next agent call on that request is refused, and one
+    /// <c>journal_capped</c> row records it.</summary>
+    public const int MaxAgentJournalRows = 200;
+
     internal const string GroupLockSql =
         "SELECT pg_advisory_xact_lock(hashtextextended('investigation:' || $1::text || ':' || $2, 5632))";
 
@@ -202,6 +227,12 @@ FROM unnest($5::text[]) AS k";
 INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
 ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
+
+    internal const string AgentJournalCountSql = @"
+SELECT count(*)
+FROM config.investigation_journal
+WHERE request_id = $1
+  AND actor LIKE 'agent:%'";
 
     internal const string ClaimSql = @"
 UPDATE config.investigation_requests
@@ -393,17 +424,30 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     /// <summary>
     /// Claims <paramref name="requestId"/> for <paramref name="agentId"/> under a new claim id with one conditional UPDATE.
-    /// When no row returns, one SELECT says why, and the refusal is journaled once per request and reason.
+    /// When no row returns, one SELECT says why, and the refusal is journaled once per request and reason (an unknown id
+    /// once per hour). An agent id over <see cref="MaxAgentIdLength"/> characters, or a request whose agent journal is full
+    /// (<see cref="MaxAgentJournalRows"/>), is refused first.
     /// </summary>
     public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(agentId);
+        if (agentId.Length > MaxAgentIdLength)
+        {
+            return new InvestigationClaimResult(InvestigationClaimOutcome.AgentIdTooLong, null, null, 0, "agent_id_too_long");
+        }
+
         var now = Now();
         var claimId = Guid.NewGuid();
         var actor = "agent:" + agentId;
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        if (await JournalCappedAsync(connection, transaction, now, requestId, actor, "claim", cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return new InvestigationClaimResult(InvestigationClaimOutcome.JournalCapped, null, null, 0, "journal_capped");
+        }
 
         await using (var claim = Command(connection, transaction, ClaimSql, P(requestId), P(agentId), P(claimId), P(now)))
         await using (var reader = await claim.ExecuteReaderAsync(cancellationToken))
@@ -452,9 +496,13 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
         }
 
-        /* A refusal for an unknown id names no request row, so its once key still carries the id it was asked for. */
+        /* A refusal for an unknown id names no request row, so no request's cap bounds it: it is journaled once per hour
+           (#5632 review round 1, L3), not once per guessed id. */
+        var onceKey = outcome == InvestigationClaimOutcome.NotFound
+            ? string.Create(CultureInfo.InvariantCulture, $"refused:claim:not_found:{now:yyyy-MM-ddTHH}")
+            : "refused:claim:" + requestId.ToString() + ":" + reason;
         await JournalAsync(connection, transaction, now, outcome == InvestigationClaimOutcome.NotFound ? null : requestId, null, server,
-            "refused", actor, "claim:" + reason, null, "refused:claim:" + requestId.ToString() + ":" + reason, cancellationToken);
+            "refused", actor, "claim:" + reason, null, onceKey, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new InvestigationClaimResult(outcome, null, null, count, reason);
     }
@@ -485,11 +533,19 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     /// <summary>
     /// Accepts the current claim's report while the request is claimed (lease live or lapsed) or expired under that claim,
-    /// until a newer claim supersedes it. A refusal is journaled once per request and reason.
+    /// until a newer claim supersedes it. A refusal is journaled once per request, claim and reason (an unknown id once per
+    /// hour). An agent id over <see cref="MaxAgentIdLength"/> characters, or a request whose agent journal is full
+    /// (<see cref="MaxAgentJournalRows"/>), is refused first.
     /// </summary>
     public async Task<InvestigationSubmitOutcome> SubmitAsync(InvestigationReportSubmission report, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
+        ArgumentException.ThrowIfNullOrEmpty(report.AgentId);
+        if (report.AgentId.Length > MaxAgentIdLength)
+        {
+            return InvestigationSubmitOutcome.AgentIdTooLong;
+        }
+
         var now = Now();
         var actor = "agent:" + report.AgentId;
 
@@ -514,6 +570,14 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
         }
 
+        /* After the row lock, so concurrent submits on one request count in turn. */
+        if (state is not null
+            && await JournalCappedAsync(connection, transaction, now, report.RequestId, actor, "submit", cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return InvestigationSubmitOutcome.JournalCapped;
+        }
+
         var outcome = state switch
         {
             null => InvestigationSubmitOutcome.NotFound,
@@ -533,9 +597,12 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 InvestigationSubmitOutcome.NotOpen => "closed",
                 _ => "lease_lost",
             };
+            /* An unknown id: once per hour, as for a claim. A known request's refusals are bounded by its agent cap. */
+            var onceKey = state is null
+                ? string.Create(CultureInfo.InvariantCulture, $"refused:submit:not_found:{now:yyyy-MM-ddTHH}")
+                : "refused:submit:" + report.RequestId.ToString() + ":" + report.ClaimId.ToString() + ":" + reason;
             await JournalAsync(connection, transaction, now, state is null ? null : report.RequestId, null, state is null ? null : serverId,
-                "refused", actor, "submit:" + reason, null,
-                "refused:submit:" + report.RequestId.ToString() + ":" + report.ClaimId.ToString() + ":" + reason, cancellationToken);
+                "refused", actor, "submit:" + reason, null, onceKey, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return outcome;
         }
@@ -614,6 +681,30 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         return ExecAsync(connection, transaction, AlertRowsSql, cancellationToken,
             P(requestId), P(alertTime), P(alert.ServerId), P(alert.MetricName),
             new NpgsqlParameter<string?[]> { TypedValue = rowKeys, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+    }
+
+    /// <summary>
+    /// True when <paramref name="requestId"/> already holds <see cref="MaxAgentJournalRows"/> rows written by agents; then
+    /// journals <c>journal_capped</c> once per request. A count, not a lock: concurrent claims can pass it together, so the
+    /// cap is exceeded by at most the calls in flight, each still journaled once by its own key.
+    /// </summary>
+    private async Task<bool> JournalCappedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        Guid requestId, string actor, string operation, CancellationToken cancellationToken)
+    {
+        long rows;
+        await using (var count = Command(connection, transaction, AgentJournalCountSql, P(requestId)))
+        {
+            rows = (long)(await count.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        if (rows < MaxAgentJournalRows)
+        {
+            return false;
+        }
+
+        await JournalAsync(connection, transaction, now, requestId, null, null, "journal_capped", actor, operation,
+            null, "journal_capped:" + requestId.ToString(), cancellationToken);
+        return true;
     }
 
     private Task<int> JournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now, Guid? requestId,
