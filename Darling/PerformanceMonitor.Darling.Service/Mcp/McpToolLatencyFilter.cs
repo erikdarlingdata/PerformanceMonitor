@@ -8,8 +8,9 @@
 
 using System;
 using System.Diagnostics;
-using System.Threading;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -91,11 +92,14 @@ public sealed class McpToolLatencyFilter
             if (string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
             {
                 ReadCaller.SetAmbientMcpCaller(caller);
+                var busyAnswer = new StrongBox<bool>();
+                s_busyAnswer.Value = busyAnswer;
                 var panelResult = await next(request, cancellationToken);
 
                 /* #5506 part 3: the shared runner admits the panel itself and answers a refusal with the busy envelope;
-                   the tool returns text, so the error flag is set here. */
-                if (IsBusyEnvelope(panelResult))
+                   the tool returns text, so the error flag is set here. The tool flags the refusal (round 1, L6): with GCF
+                   on, the text that comes back is the re-encoded wire, not the JSON envelope. */
+                if (busyAnswer.Value || IsBusyEnvelope(panelResult))
                 {
                     panelResult.IsError = true;
                 }
@@ -137,7 +141,7 @@ public sealed class McpToolLatencyFilter
            recorded elapsed time starts after admission (D1), so the read's own percentiles never hold queue time. */
         using var ticket = _admission is null || !ReadAdmission.IsAdmitted(toolName)
             ? ReadAdmissionTicket.Passed
-            : await _admission.AdmitAsync(ReadSurface.Mcp, toolName, windowBand, cancellationToken);
+            : await ReadScope.AdmitAsync(_admission, ReadSurface.Mcp, toolName, windowBand, cancellationToken);
         if (ticket.Refusal is { } refusal)
         {
             Record(toolName, ReadOutcome.Busy, ticket.QueueMs ?? 0, windowBand, scope, caller);
@@ -260,18 +264,72 @@ public sealed class McpToolLatencyFilter
         Content = [new TextContentBlock { Text = ReadAdmission.McpBusyText(refusal) }],
     };
 
-    /// <summary>Whether a result is the busy envelope (a composed panel the shared runner refused).</summary>
+    /* #5506 part 3 (round 1, L6): set by the run_custom_view_panel arm before the tool runs; the tool sets it when it
+       answers busy, so the arm needs no parse of a text GCF may have re-encoded. */
+    private static readonly AsyncLocal<StrongBox<bool>?> s_busyAnswer = new();
+
+    /// <summary>#5506 part 3 (round 1, L6): a tool notes that the text it returns is the busy envelope, so this filter sets
+    /// the error flag whatever form the text reaches it in. A no-op outside a call this filter wraps.</summary>
+    internal static void NoteBusyAnswer()
+    {
+        if (s_busyAnswer.Value is { } busy)
+        {
+            busy.Value = true;
+        }
+    }
+
+    /// <summary>The JSON form of a status envelope that GCF re-encoded (round 1, L6): <c>{"status", "message"}</c> from the
+    /// wire's top level, so the envelope checks below read the same words with GCF on or off. Text that is already JSON,
+    /// or that does not decode to an object with a <c>status</c> word, is returned as it was.</summary>
+    internal static string EnvelopeText(string text)
+    {
+        var first = text.AsSpan().TrimStart();
+        if (first.Length == 0 || first[0] == '{' || first[0] == '[')
+        {
+            return text;
+        }
+
+        try
+        {
+            if (BlackwellSystems.Gcf.Gcf.DecodeGeneric(text) is BlackwellSystems.Gcf.OrderedMap map
+                && map.TryGetValue("status", out var status) && status is string word)
+            {
+                var envelope = new JsonObject { ["status"] = word };
+                if (map.TryGetValue("message", out var message) && message is string sentence)
+                {
+                    envelope["message"] = sentence;
+                }
+
+                return envelope.ToJsonString();
+            }
+        }
+#pragma warning disable CA1031 // text that is not a GCF wire is simply not an envelope
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
+
+        return text;
+    }
+
+    /// <summary>Whether a result is the busy envelope (a composed panel the shared runner refused), as JSON or as the GCF
+    /// wire of one.</summary>
     internal static bool IsBusyEnvelope(CallToolResult result)
     {
-        if (result.Content is not { Count: 1 } content || content[0] is not TextContentBlock text
-            || !text.Text.StartsWith('{') || !text.Text.Contains("\"busy\"", StringComparison.Ordinal))
+        if (result.Content is not { Count: 1 } content || content[0] is not TextContentBlock block)
+        {
+            return false;
+        }
+
+        var text = EnvelopeText(block.Text);
+        if (!text.StartsWith('{') || !text.Contains("\"busy\"", StringComparison.Ordinal))
         {
             return false;
         }
 
         try
         {
-            return JsonNode.Parse(text.Text) is JsonObject body
+            return JsonNode.Parse(text) is JsonObject body
                 && body["status"] is JsonValue status && status.TryGetValue<string>(out var word) && word == ReadAdmission.BusyStatus;
         }
         catch (System.Text.Json.JsonException)
@@ -288,10 +346,12 @@ public sealed class McpToolLatencyFilter
     /// without a running server.</summary>
     internal static ReadOutcome ClassifyResult(CallToolResult result, System.Threading.CancellationToken cancellationToken)
     {
-        if (result.Content is { Count: 1 } content && content[0] is TextContentBlock text
-            && (result.IsError == true || McpHelpers.IsErrorEnvelope(text.Text)))
+        /* Round 1, L6: an envelope GCF re-encoded is read through its JSON form, so it is not counted as ok. */
+        if (result.Content is { Count: 1 } content && content[0] is TextContentBlock block
+            && EnvelopeText(block.Text) is var text
+            && (result.IsError == true || McpHelpers.IsErrorEnvelope(text)))
         {
-            return ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(text.Text), cancellationToken);
+            return ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(text), cancellationToken);
         }
 
         return result.IsError == true ? ReadOutcome.Error : ReadOutcome.Ok;

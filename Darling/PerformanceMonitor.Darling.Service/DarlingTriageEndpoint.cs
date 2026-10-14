@@ -623,7 +623,7 @@ internal static class DarlingTriageEndpoint
             using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, TriageRoute, ReadWindowBand.OneDay, context, readLatencyRecorder, readScope.Scope);
             if (ticket.Refusal is { } refusal)
             {
-                return DarlingWebEndpoints.BusyResult(context, refusal);
+                return DarlingWebEndpoints.BusyResult(refusal);
             }
 
             using var run = new DarlingWebEndpoints.WebRouteRun(readLatencyRecorder, TriageRoute, ReadWindowBand.OneDay, context, readScope.Scope);

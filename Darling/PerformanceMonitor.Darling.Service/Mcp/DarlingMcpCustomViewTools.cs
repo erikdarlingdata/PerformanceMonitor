@@ -290,14 +290,17 @@ public sealed class DarlingMcpCustomViewTools
                the same as the server's own 57014. */
             /* #5506 part 3 (D4): the request's token, so a client that leaves while the run waits for an admission slot
                leaves the queue. A refusal answers busy; the latency filter sets the error flag on it. */
-            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, cancellationToken, readLatency, remapClientTimeout: true);
+            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, cancellationToken, readLatency, remapClientTimeout: true,
+                cacheHost: ReadSurface.Mcp);
             if (outcome.Busy is { } busy)
             {
+                McpToolLatencyFilter.NoteBusyAnswer();
                 return ReadAdmission.McpBusyText(busy);
             }
 
+            /* #5506 part 3 (round 1, C1): the runner serialized the payload once, for this host; a cached answer is that text. */
             return outcome.Payload is not null
-                ? outcome.Payload.ToJsonString(McpHelpers.JsonOptions)
+                ? outcome.PayloadText ?? outcome.Payload.ToJsonString(McpHelpers.JsonOptions)
                 : Outcome(outcome.IsNotFound ? "not_found" : outcome.IsServerError ? "error" : "invalid", outcome.Error!);
         }
         catch (Exception ex)

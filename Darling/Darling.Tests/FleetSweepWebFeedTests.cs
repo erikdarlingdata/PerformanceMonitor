@@ -614,7 +614,7 @@ public sealed class FleetSweepWebFeedTests
 
         /* The seat: the wiring receives the service logger by parameter… */
         Assert.Contains(
-            "internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger)",
+            "internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger,",
             endpoints, StringComparison.Ordinal);
 
         /* …and no handler in the file writes through the app's cleared factory. Scanned as CODE
@@ -628,7 +628,7 @@ public sealed class FleetSweepWebFeedTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("builder.Logging.ClearProviders();", host, StringComparison.Ordinal);
         Assert.Contains(
-            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads);",
+            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission);",
             host, StringComparison.Ordinal);
     }
 

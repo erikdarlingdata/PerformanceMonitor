@@ -168,7 +168,8 @@ internal static class DarlingFleetSweepEndpoints
     /// the web path's copy of the MCP host's <c>AddSingleton&lt;ILogger&gt;(_logger)</c> fix (#3473
     /// review), by parameter rather than DI because these routes are mapped directly.</para>
     /// </summary>
-    internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger,
+        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null)
     {
         /* The timeline: runs inside the caller's span, newest first, each with its document embedded.
            Both bounds are computed HERE from the caller's knobs and handed to the store (#2506). */
@@ -184,9 +185,20 @@ internal static class DarlingFleetSweepEndpoints
             }
 
             var startUtc = endUtc.AddHours(-hours);
+            var sweepsBand = ReadWindowBand.Of(hours);
+            /* #5506 part 3 (round 1, M3): admitted, and recorded, under the MCP twin get_sweep_reports and its window band, like /api/fleet (D8). */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, SweepReportsRoute, sweepsBand, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return DarlingWebEndpoints.BusyResult(refusal);
+            }
+
+            using var run = new DarlingWebEndpoints.WebRouteRun(readLatencyRecorder, SweepReportsRoute, sweepsBand, context, readScope.Scope);
             var runs = await FleetSweepStore.GetSweepsBySpanAsync(
                 postgres, startUtc, endUtc, context.RequestAborted);
 
+            run.Complete(ReadOutcome.Ok);
             return JsonResult(FleetSweepPresentation.BuildTimelineNode(runs, startUtc, endUtc));
         });
 
@@ -199,10 +211,25 @@ internal static class DarlingFleetSweepEndpoints
                top-of-pipeline backstop (MapAll wires this route after it) now answers it — the loud shape is
                still a 500 (503 for a caught statement_timeout) the page renders red, never a 404 that reads
                as "no sweeps", because a store fault is never the null BuildDetailAsync sees on a genuine miss. */
+            /* #5506 part 3 (round 1, M3): admitted, and recorded, under the MCP twin get_sweep_reports and its window band, like /api/fleet (D8). */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, SweepReportsRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return DarlingWebEndpoints.BusyResult(refusal);
+            }
+
+            using var routeRun = new DarlingWebEndpoints.WebRouteRun(readLatencyRecorder, SweepReportsRoute, ReadWindowBand.None, context, readScope.Scope);
             var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
-            return run is null
-                ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
-                : JsonResult(await BuildDetailAsync(postgres, run, context));
+            if (run is null)
+            {
+                routeRun.Complete(ReadOutcome.Ok);
+                return SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound);
+            }
+
+            var document = await BuildDetailAsync(postgres, run, context);
+            routeRun.Complete(ReadOutcome.Ok);
+            return JsonResult(document);
         });
 
         /* One sweep in full, by id — the timeline click-through. 404 means genuinely absent (pruned
@@ -210,10 +237,25 @@ internal static class DarlingFleetSweepEndpoints
         app.MapGet("/api/sweeps/{id:long}", async (HttpContext context, long id) =>
         {
             /* #4283: no local catch — see /api/sweeps/latest's comment above. */
+            /* #5506 part 3 (round 1, M3): admitted, and recorded, under the MCP twin get_sweep_reports and its window band, like /api/fleet (D8). */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, SweepReportsRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return DarlingWebEndpoints.BusyResult(refusal);
+            }
+
+            using var routeRun = new DarlingWebEndpoints.WebRouteRun(readLatencyRecorder, SweepReportsRoute, ReadWindowBand.None, context, readScope.Scope);
             var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
-            return run is null
-                ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
-                : JsonResult(await BuildDetailAsync(postgres, run, context));
+            if (run is null)
+            {
+                routeRun.Complete(ReadOutcome.Ok);
+                return SweepError("Sweep not found.", StatusCodes.Status404NotFound);
+            }
+
+            var document = await BuildDetailAsync(postgres, run, context);
+            routeRun.Complete(ReadOutcome.Ok);
+            return JsonResult(document);
         });
 
         /* The watch-item worklist. Default = open + carried in ONE store read; ?state= narrows to a
@@ -227,14 +269,27 @@ internal static class DarlingFleetSweepEndpoints
                 return SweepError(error, StatusCodes.Status400BadRequest);
             }
 
+            /* #5506 part 3 (round 1, M3): admitted, and recorded, under the MCP twin get_sweep_reports and its window band, like /api/fleet (D8). */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, SweepReportsRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return DarlingWebEndpoints.BusyResult(refusal);
+            }
+
+            using var run = new DarlingWebEndpoints.WebRouteRun(readLatencyRecorder, SweepReportsRoute, ReadWindowBand.None, context, readScope.Scope);
             var items = state is null
                 ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, context.RequestAborted)
                 : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, state, context.RequestAborted);
 
             var names = await ReadWatchItemNamesAsync(postgres, items, logger, context.RequestAborted);
+            run.Complete(ReadOutcome.Ok);
             return JsonResult(FleetSweepPresentation.BuildWatchItemsNode(items, names));
         });
     }
+
+    /// <summary>The name the sweep routes are admitted and recorded under (#5506 part 3, round 1 M3): their MCP twin's.</summary>
+    internal const string SweepReportsRoute = "get_sweep_reports";
 
     /// <summary>One sweep's full document: the run plus its verdicts and — under master-off — the
     /// would-have-paged ledger, through the shared builders. THROWS on a store fault (#4315): the

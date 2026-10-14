@@ -42,8 +42,11 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 4, // the /api/read/{name} loop, RunComposedPanelAsync, /api/fleet and /api/alerts/test
-        ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the three dedicated routes record their own samples, #5506 part 3)
+        ["DarlingWebEndpoints.cs"] = 6, // the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test and /api/ag
+        ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the dedicated routes record their own samples, #5506 part 3)
+        ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
+        ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
+        ["DarlingServerDatabasesEndpoint.cs"] = 1, // the database picker (round 1, M3)
         ["McpToolLatencyFilter.cs"] = 1, // every MCP tool call but run_custom_view_panel
     };
 
@@ -72,7 +75,7 @@ public sealed class ReadAdmissionCoverageCensusTests
                    (CacheMissPath_RunsTheMethodThatAdmits). */
                 var window = string.Join("\n", lines.Skip(i + 1).Take(25));
                 if (!window.Contains("AdmitAsync(", StringComparison.Ordinal) && !window.Contains("AdmitWebRouteAsync(", StringComparison.Ordinal)
-                    && !window.Contains(".IsCached(", StringComparison.Ordinal))
+                    && !window.Contains(".IsCached(", StringComparison.Ordinal) && !window.Contains("cache.Join(key, ttl,", StringComparison.Ordinal))
                 {
                     offenders.Add($"{name}:{i + 1}");
                 }
@@ -87,13 +90,14 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// method admits it, so only a hit (or a caller that joins a read already admitted) skips admission.</summary>
     [Theory]
     [InlineData("Mcp/McpToolLatencyFilter.cs", "private async Task<CallToolResult> RunReadAsync(", "cache.Join(key, ttl, token => RunReadAsync(")]
-    [InlineData("DarlingWebEndpoints.cs", "async Task<WebReadAnswer> RunWebReadAsync()", "return RunWebReadAsync();")]
+    [InlineData("DarlingWebEndpoints.cs", "async Task<WebReadAnswer> RunWebReadAsync(HttpContext context)", "cache.Join(key, ttl, token => RunWebReadAsync(")]
+    [InlineData("DarlingWebEndpoints.cs", "private static async Task<ComposeRunOutcome> RunComposedPanelAdmittedAsync(", "token => RunComposedPanelAdmittedAsync(")]
     public void CacheMissPath_RunsTheMethodThatAdmits(string file, string method, string joinCall)
     {
         var source = File.ReadAllText(Path.Combine(ServiceDir, file));
         var at = source.IndexOf(method, StringComparison.Ordinal);
         Assert.True(at >= 0, $"{file} no longer declares {method}");
-        var body = source.Substring(at, Math.Min(2_000, source.Length - at));
+        var body = source.Substring(at, Math.Min(4_000, source.Length - at));
         Assert.Contains("AdmitAsync(", body, StringComparison.Ordinal);
         Assert.Contains(joinCall, source, StringComparison.Ordinal);
     }
@@ -125,7 +129,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         Assert.Contains("new McpToolLatencyFilter(hostReadLatency, readLatencyLogger, slowReads, readAdmission)", host, StringComparison.Ordinal);
 
         var filter = File.ReadAllText(Path.Combine(ServiceDir, "Mcp", "McpToolLatencyFilter.cs"));
-        Assert.Contains("_admission.AdmitAsync(ReadSurface.Mcp, toolName, windowBand, cancellationToken)", filter, StringComparison.Ordinal);
+        Assert.Contains("ReadScope.AdmitAsync(_admission, ReadSurface.Mcp, toolName, windowBand, cancellationToken)", filter, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -139,7 +143,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         var runner = web.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
         var core = web.IndexOf("RunComposedPanelCoreAsync(postgres, body,", runner, StringComparison.Ordinal);
         Assert.True(runner >= 0 && core > runner);
-        Assert.Contains("admission.AdmitAsync(ReadSurface.Compose, composeRoute, composeBand, cancellationToken)", web[runner..core], StringComparison.Ordinal);
+        Assert.Contains("ReadScope.AdmitAsync(admission, ReadSurface.Compose, composeRoute, composeBand, cancellationToken)", web[runner..core], StringComparison.Ordinal);
 
         /* D4: the MCP tool passes the request's token, so a client that leaves the queue leaves it. */
         var tool = File.ReadAllText(Path.Combine(ServiceDir, "Mcp", "DarlingMcpCustomViewTools.cs"));
@@ -154,6 +158,108 @@ public sealed class ReadAdmissionCoverageCensusTests
         Assert.Contains("AdmitWebRouteAsync(readAdmission, \"test_custom_alert_rule\"", web, StringComparison.Ordinal);
         var triage = File.ReadAllText(Path.Combine(ServiceDir, "DarlingTriageEndpoint.cs"));
         Assert.Contains("AdmitWebRouteAsync(readAdmission, TriageRoute", triage, StringComparison.Ordinal);
+        Assert.Contains("AdmitWebRouteAsync(readAdmission, AgHealthRoute", web, StringComparison.Ordinal);
+        Assert.Equal("get_ag_health", DarlingWebEndpoints.AgHealthRoute);
+        Assert.Equal("get_sweep_reports", DarlingFleetSweepEndpoints.SweepReportsRoute);
+        Assert.Equal("alert_notebook", AlertNotebookEndpoint.NotebookRoute);
+        Assert.Equal("server_databases", DarlingServerDatabasesEndpoint.AdmissionRoute);
+    }
+
+    /// <summary>
+    /// #5506 part 3 (round 1, M3): every route the service maps is either admitted or exempt with a reason. The scope census
+    /// above counts only routes that open a read scope, so a new route that reads the store without one would pass it; this
+    /// one fails until the new route is placed on one side or the other. Exempt: health, static answers, definition reads
+    /// (one config row, light by D8's "Simpler" rule) and writes.
+    /// </summary>
+    private static readonly Dictionary<string, string?> MappedRoutes = new(StringComparer.Ordinal)
+    {
+        ["GET \"/api/read/\" + name"] = null,
+        ["GET \"/api/fleet\""] = null,
+        ["GET \"/api/ag\""] = null,
+        ["GET \"/api/triage\""] = null,
+        ["GET \"/api/alert-notebook\""] = null,
+        ["GET \"/api/sweeps\""] = null,
+        ["GET \"/api/sweeps/latest\""] = null,
+        ["GET \"/api/sweeps/{id:long}\""] = null,
+        ["GET \"/api/sweeps/watch-items\""] = null,
+        ["GET Route"] = null, // the database picker, /api/server-databases
+        ["POST \"/api/compose/run\""] = null,
+        ["POST \"/api/alerts/test\""] = null,
+        ["GET \"/api/ping\""] = "health: answers without reading the store (D8)",
+        ["GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
+        ["GET \"/api/session\""] = "the seat's capability probe: reads no store",
+        ["GET \"/api/catalog\""] = "static: the composer's catalog, built in memory",
+        ["GET \"/api/alert-templates\""] = "static: the starter templates, built in memory",
+        ["GET \"/api/views\""] = "definition read: the saved views' summaries (config rows, light)",
+        ["GET \"/api/views/{id:long}\""] = "definition read: one saved view (one config row)",
+        ["GET \"/api/alerts\""] = "definition read: the custom alert rules (config rows, light)",
+        ["GET \"/api/alerts/{id:long}\""] = "definition read: one custom alert rule (one config row)",
+        ["GET \"/api/admin/servers/{id:int}\""] = "admin definition read: one registry row",
+        ["GET DarlingAdminServersReader.Route"] = "admin definition read: the server registry (config rows)",
+        ["POST \"/api/alerts/validate\""] = "validator: parses a rule definition, reads no collected data",
+        ["POST \"/api/views\""] = "write",
+        ["PUT \"/api/views/{id:long}\""] = "write",
+        ["DELETE \"/api/views/{id:long}\""] = "write",
+        ["POST \"/api/alerts\""] = "write",
+        ["PUT \"/api/alerts/{id:long}\""] = "write",
+        ["DELETE \"/api/alerts/{id:long}\""] = "write",
+        ["POST \"/api/mute-rules\""] = "write",
+        ["PATCH \"/api/mute-rules/{id}\""] = "write",
+        ["PUT \"/api/mute-rules/{id}/enabled\""] = "write",
+        ["DELETE \"/api/mute-rules/{id}\""] = "write",
+        ["POST \"/api/servers\""] = "admin write",
+        ["PATCH \"/api/servers/{id:int}\""] = "admin write",
+        ["POST \"/api/alert-history/dismiss\""] = "write",
+        ["POST \"/api/server-tags\""] = "write",
+        ["PATCH \"/api/server-tags/{id:int}\""] = "write",
+        ["DELETE \"/api/server-tags/{id:int}\""] = "write",
+        ["POST \"/api/server-tags/{id:int}/servers\""] = "write",
+        ["DELETE \"/api/server-tags/{id:int}/servers\""] = "write",
+    };
+
+    [Fact]
+    public void EveryMappedRoute_IsAdmittedOrExemptWithAReason()
+    {
+        var mapCall = new System.Text.RegularExpressions.Regex(@"\.Map(Get|Post|Put|Delete|Patch)\(\s*([^,]+?)\s*,");
+        var found = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var file in Directory.EnumerateFiles(ServiceDir, "*.cs", SearchOption.AllDirectories)
+                     .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                                 && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)))
+        {
+            var source = File.ReadAllText(file);
+            var matches = mapCall.Matches(source);
+            for (var i = 0; i < matches.Count; i++)
+            {
+                var match = matches[i];
+                var lineStart = source.LastIndexOf('\n', match.Index) + 1;
+                if (source.AsSpan(lineStart, match.Index - lineStart).TrimStart().StartsWith("//", StringComparison.Ordinal)
+                    || source.AsSpan(lineStart, match.Index - lineStart).TrimStart().StartsWith("*", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var key = match.Groups[1].Value.ToUpperInvariant() + " " + match.Groups[2].Value;
+                var end = i + 1 < matches.Count ? matches[i + 1].Index : source.Length;
+                found[key] = source.Substring(match.Index, end - match.Index);
+            }
+        }
+
+        Assert.Equal(MappedRoutes.Keys.OrderBy(k => k, StringComparer.Ordinal), found.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        foreach (var (route, reason) in MappedRoutes)
+        {
+            if (reason is null)
+            {
+                var handler = found[route];
+                Assert.True(handler.Contains("AdmitWebRouteAsync(", StringComparison.Ordinal)
+                    || handler.Contains("ReadScope.AdmitAsync(", StringComparison.Ordinal)
+                    || handler.Contains("RunComposedPanelAsync(", StringComparison.Ordinal),
+                    $"{route} is on the admitted roster but its handler does not admit");
+            }
+            else
+            {
+                Assert.False(string.IsNullOrWhiteSpace(reason));
+            }
+        }
     }
 }
 

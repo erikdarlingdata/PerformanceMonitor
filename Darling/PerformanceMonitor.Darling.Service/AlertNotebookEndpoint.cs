@@ -79,9 +79,26 @@ internal static partial class AlertNotebookEndpoint
     /// <summary>Maps <c>GET /api/alert-notebook</c>. Called once from <see cref="DarlingWebEndpoints.MapAll"/>,
     /// after the auth middleware like every sibling route.</summary>
     public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger)
+        => Map(app, postgres, analysis, logger, null, null);
+
+    /// <summary>The name the notebook is admitted and recorded under (#5506 part 3, round 1 M3): it has no MCP twin, so it
+    /// takes its own, as <c>/api/triage</c> takes <c>triage</c>.</summary>
+    internal const string NotebookRoute = "alert_notebook";
+
+    internal static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger,
+        ReadAdmission? readAdmission, ReadLatencyRecorder? readLatencyRecorder)
     {
         app.MapGet("/api/alert-notebook", async (HttpContext context) =>
         {
+            /* #5506 part 3 (round 1, M3): admitted, and recorded, under its own name (it has no MCP twin) and its window band, like /api/fleet (D8). */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, NotebookRoute, ReadWindowBand.OneDay, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return DarlingWebEndpoints.BusyResult(refusal);
+            }
+
+            using var run = new DarlingWebEndpoints.WebRouteRun(readLatencyRecorder, NotebookRoute, ReadWindowBand.OneDay, context, readScope.Scope);
             var serverQuery = Query(context, "server");
             var metric = Query(context, "metric");
             var dedup = Query(context, "dedup");
@@ -247,6 +264,7 @@ internal static partial class AlertNotebookEndpoint
             }
 
             /* #4348: the notebook's own body carries the alert row's text, so it is swept whole. */
+            run.Complete(ReadOutcome.Ok);
             return DarlingWebStatementSweep.JsonText(body, "/api/alert-notebook", logger, 0, context.RequestAborted);
         });
     }

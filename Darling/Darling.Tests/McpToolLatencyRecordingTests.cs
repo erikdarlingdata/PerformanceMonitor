@@ -113,11 +113,16 @@ public sealed class McpToolLatencyRecordingTests
     /// and <see cref="DarlingMcpHostService.ConfigurePipeline"/>, wired to <paramref name="readLatency"/> — the
     /// same construction <see cref="DarlingMcpHostGateLiveTests.BuildServer"/> uses, plus the test-only probe
     /// tool registered directly on <c>builder.Services</c> (never through production's tool registrations).</summary>
-    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, ReadAdmission? admission = null)
+    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, ReadAdmission? admission = null,
+        bool gcf = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
+        if (gcf)
+        {
+            builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(true));
+        }
 
         var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
@@ -556,5 +561,43 @@ public sealed class McpToolLatencyRecordingTests
         var sample = Assert.Single(readLatency.Drain(), d => d.Surface == ReadSurface.Compose);
         Assert.Equal(ReadOutcome.Busy, sample.Outcome);
         await ReleaseAsync(held);
+    }
+
+    /// <summary>#5506 part 3 (round 1, L6): with GCF on, the busy text a refused panel returns can reach the filter as the
+    /// re-encoded wire, not the JSON envelope. The tool flags the refusal, so the error flag is set either way, and the
+    /// envelope checks read a GCF wire through its JSON form.</summary>
+    [Fact]
+    public async Task RunCustomViewPanel_RefusedWithGcfOn_StillCarriesTheErrorFlag()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = HeavyAdmission(ReadSurface.Compose, "compose:unknown", "24h");
+        admission.SetTable(new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long> { [(ReadSurface.Compose, "compose:unknown", "24h")] = 5_000 });
+        using var server = await BuildServer(readLatency, admission: admission, gcf: true);
+        var held = await FillAsync(admission, ReadSurface.Compose, "compose:unknown", "24h");
+
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"spec\":\"{}\"}}}";
+        var (_, body) = await SendJsonRpcAsync(server, "/", requestBody);
+        Assert.Contains("\"isError\":true", body, StringComparison.Ordinal);
+        Assert.Contains("busy", body, StringComparison.Ordinal);
+        await ReleaseAsync(held);
+    }
+
+    [Fact]
+    public void AGcfWireOfABusyOrErrorEnvelope_IsReadAsTheEnvelope()
+    {
+        var busy = "{\"status\":\"busy\",\"message\":\"The service is running as many long reads as it allows (2), and 16 more are waiting.\",\"retry_after_seconds\":18}";
+        var error = PerformanceMonitor.Common.McpHelpers.FormatError("get_wait_stats", new InvalidOperationException("probe failed"));
+        foreach (var json in new[] { error })
+        {
+            /* Whatever GCF makes of the envelope (its wire, or the JSON when the wire is not smaller), it reads the same. */
+            var text = GcfOutput.TryEncode(json) ?? json;
+            var envelope = McpToolLatencyFilter.EnvelopeText(text);
+            Assert.StartsWith("{", envelope, StringComparison.Ordinal);
+            var result = new CallToolResult { Content = [new TextContentBlock { Text = text }] };
+            Assert.NotEqual(ReadOutcome.Ok, McpToolLatencyFilter.ClassifyResult(result, System.Threading.CancellationToken.None));
+        }
+
+        Assert.True(McpToolLatencyFilter.IsBusyEnvelope(new CallToolResult { Content = [new TextContentBlock { Text = GcfOutput.TryEncode(busy) ?? busy }] }));
+        Assert.Equal("not json", McpToolLatencyFilter.EnvelopeText("not json"));
     }
 }
