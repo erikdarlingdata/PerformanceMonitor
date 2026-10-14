@@ -85,6 +85,9 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>#5654: the external alert drain's cadence. A queued alert waits at most this long, plus its pass, for a send.</summary>
     private static readonly TimeSpan s_externalAlertInterval = TimeSpan.FromSeconds(15);
 
+    /// <summary>#5632 Phase A: the investigation expiry sweep's tick (ruling R4).</summary>
+    private static readonly TimeSpan s_investigationSweepInterval = TimeSpan.FromSeconds(60);
+
     /* The store disk-pressure self-alert's poll cadence (fleet-level, Stage 4). Disk fills slowly, and the
        check is one volume free-space read (a few file-system calls, no directory walk) plus one narrow
        store_metrics lookup, so 5 minutes is ample and cheap —
@@ -3343,6 +3346,19 @@ LIMIT 1";
             new PgMuteRuleStore(postgres), _loggerFactory.CreateLogger<MuteRuleService>());
         await LoadMuteRulesAsync(muteRuleService);
 
+        /* #5632 Phase A: Level 1 investigations. The dispatcher opens or joins a request after an alert row is written (the
+           deliverer and the finding sender below call it), and the sweep loop expires lapsed leases and old requests. Both
+           use a data source of their own whose connections carry a 5-second lock_timeout, so a held lock on the
+           investigation tables costs an alert pass at most that long and touches no other connection's settings. */
+        await using var investigationPostgres = NpgsqlDataSource.Create(
+            InvestigationDispatcher.WithLockTimeout(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(
+                        EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
+        var investigationStore = new InvestigationRequestStore(
+            investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
+        var investigationDispatcher = new InvestigationDispatcher(investigationStore, alertSettings, _logger);
+
         /* The shared record-and-send deliverer — hoisted so BOTH the shared alert engine and the Stage 4
            service self-alerts (DarlingSelfAlertEvaluator) fire through the SAME instance: identical
            email/webhook delivery, per-fingerprint delivery cooldown, and history-seeded restart replay. */
@@ -3364,7 +3380,8 @@ LIMIT 1";
                         .Find(s => s.Config.ServerId == id)
                         ?.Config.AlertDeliveryModeOverride;
                 }
-            });
+            },
+            investigationDispatcher: investigationDispatcher);
         var engine = BuildAlertEngine(config, servers, alertSettings, historyStore, muteRuleService, deliverer);
 
         /* Held for the PostgreSQL predictors, which deliver alongside the shared engine rather than
@@ -3515,7 +3532,7 @@ LIMIT 1";
            finding already passed the queue-time mute filter in PgFindingStore. */
         var muteReadStore = new PgFindingStore(postgres, _logger);
         var notificationService = new AnalysisNotificationService(
-            new DarlingFindingAlertSender(alertSettings, historyStore, webhookAlertService, _logger),
+            new DarlingFindingAlertSender(alertSettings, historyStore, webhookAlertService, _logger, investigationDispatcher),
             alertSettings,
             finding => finding.ServerId.ToString(CultureInfo.InvariantCulture),
             _loggerFactory.CreateLogger<AnalysisNotificationService>(),
@@ -3571,6 +3588,11 @@ LIMIT 1";
            loop, so collection, the custom alerts and the self alerts do not wait on a channel send or a store lock. The
            loop honors the service pause and the master switch itself. Awaited with the command loop at shutdown. */
         var externalAlertLoop = RunExternalAlertLoopAsync(externalAlertDrain, stoppingToken);
+
+        /* #5632 Phase A (ruling R4): the investigation expiry sweep, beside the external alert loop on its own 60-second
+           tick. It only expires: it journals a lapsed lease once per claim and moves a request past its expiry, or out of
+           claims, to expired. It never reopens a lease; a claim's own WHERE takes a lapsed lease over. */
+        var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, stoppingToken);
 
         /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
@@ -4331,6 +4353,16 @@ LIMIT 1";
         try
         {
             await externalAlertLoop;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
+        /* #5632 Phase A: the investigation sweep observes the same token. */
+        try
+        {
+            await investigationSweepLoop;
         }
         catch (OperationCanceledException)
         {
@@ -6425,6 +6457,48 @@ LIMIT 1";
     /// master switch off a pass still expires and reaps but claims and sends nothing (the switch is read inside the drain).
     /// A failed pass is logged and tried again on the next tick; only cancellation ends the loop.
     /// </summary>
+    /// <summary>
+    /// #5632 Phase A (ruling R4): every <see cref="s_investigationSweepInterval"/>, <see cref="InvestigationRequestStore.SweepAsync"/>
+    /// expires lapsed leases and old requests. It honors the service pause as the external alert loop does, and a failed
+    /// pass is logged and tried again next tick.
+    /// </summary>
+    private async Task RunInvestigationSweepLoopAsync(InvestigationRequestStore store, CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (ShouldRunCollection(_paused))
+            {
+                try
+                {
+                    var swept = await store.SweepAsync(stoppingToken);
+                    if (swept.LeasesLapsed > 0 || swept.Expired > 0)
+                    {
+                        _logger.LogInformation(
+                            "Investigation sweep: {Lapsed} lapsed lease(s) journaled, {Expired} request(s) expired",
+                            swept.LeasesLapsed, swept.Expired);
+                    }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Investigation sweep failed; it is tried again next pass");
+                }
+            }
+
+            try
+            {
+                await Task.Delay(s_investigationSweepInterval, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
     private async Task RunExternalAlertLoopAsync(ExternalAlertDrain drain, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)

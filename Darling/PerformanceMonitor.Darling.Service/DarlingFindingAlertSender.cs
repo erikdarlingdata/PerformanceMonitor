@@ -44,13 +44,18 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
     private readonly IAlertHistoryStore _historyStore;
     private readonly EmailSendCore _core;
     private readonly ILogger _logger;
+    private readonly InvestigationDispatcher? _investigations;
 
     public DarlingFindingAlertSender(
         IAlertSettings settings,
         IAlertHistoryStore historyStore,
         WebhookAlertService webhookAlertService,
-        ILogger logger)
+        ILogger logger,
+        InvestigationDispatcher? investigationDispatcher = null)
     {
+        /* #5632 Phase A: optional; null dispatches nothing. A single page and each held page the summary names open or
+           join an investigation request after their rows are written; a digest finding never does. */
+        _investigations = investigationDispatcher;
         _historyStore = historyStore ?? throw new ArgumentNullException(nameof(historyStore));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _core = new EmailSendCore(settings, historyStore, webhookAlertService, DarlingAlertDeliverer.Branding, logger);
@@ -86,13 +91,22 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
             var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
             foreach (var alert in named)
             {
-                await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                var record = new AlertHistoryRecord(
                     alert.ServerId, alert.ServerName, alert.MetricName,
                     alert.CurrentValue, alert.ThresholdValue,
                     alert.Severity, alert.NotifyThreshold,
                     delivery,
                     false, FindingSummary.RowDetailText(alert, named.Count),
-                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null));
+                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null)
+                {
+                    AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+                };
+                await _historyStore.RecordAlertAsync(record);
+                /* #5632 Phase A (ruling R1): each held page the summary names opens or joins a request, after its row. */
+                if (_investigations is not null)
+                {
+                    await _investigations.DispatchAsync(record, alert.Context);
+                }
             }
             return delivery;
         }
@@ -170,12 +184,22 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                detail pane render, and what the mute pre-fill parses. */
 
             string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
-            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+            var record = new AlertHistoryRecord(
                 alert.ServerId, alert.ServerName, alert.MetricName,
                 alert.CurrentValue, alert.ThresholdValue,
                 alert.Severity, alert.NotifyThreshold,
                 delivery,
-                false, alert.DetailText, contextJson));
+                false, alert.DetailText, contextJson)
+            {
+                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+            };
+            await _historyStore.RecordAlertAsync(record);
+            /* #5632 Phase A (ruling R1): a single page opens or joins an investigation request; a digest finding is a batch,
+               not an incident, and never does. */
+            if (alert.Route != FindingRoute.Digest && _investigations is not null)
+            {
+                await _investigations.DispatchAsync(record, context);
+            }
 
             return delivery;
         }
