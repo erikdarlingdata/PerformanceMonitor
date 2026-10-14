@@ -605,14 +605,19 @@ public sealed class DarlingMcpAlertTools
         "(scope_server_id) or to a tag and every tag under it (scope_tag_id); a route whose server or tag was deleted " +
         "stays, is orphaned = true, and matches nothing. Resolution order per channel: scope first (a route for the " +
         "alert's server, then one for a tag it is under, the deeper tag first, then a fleet-wide route), and inside a " +
-        "scope an enabled route matching the metric EXACTLY, then its FAMILY, then * (scoped routes only), then the parent; " +
+        "scope an enabled route matching the metric EXACTLY, then an analysis finding's CATEGORY (metric_match " +
+        "'Analysis: <category>', match_kind analysis_category: every finding of that category, whatever its hash), then its " +
+        "FAMILY, then * (scoped routes only), then the parent; " +
         "within a level the lowest route_id with a non-empty column wins. A recovery routes as its firing (Server Restored as Server " +
         "Unreachable), so a channel that saw the fire sees the clear. Routing sits AFTER the cooldown: it changes " +
         "where a post lands, never whether it is sent. Destination values (webhook URLs, the PagerDuty routing key) " +
         "are bearer secrets and are NOT reported — configured_channels lists which channels each route sets by " +
         "name; smtp_recipients is reported because an address list is not a secret. get_alert_history rows carry a " +
         "route field naming the family, the matched route_id and the delivered channels, so a misrouted post can " +
-        "be traced. Routes are authored in the Viewer's Settings window; here they can be disabled or deleted " +
+        "be traced. agent_level says whether a matching alert opens an investigation request for an agent (null " +
+        "inherits from a less specific route, 0 is off and stops the lookup, 1 investigates, within agent_max_per_hour " +
+        "and agent_max_per_day; Darling only, Lite has no agent channel); it never changes a destination. " +
+        "Routes are authored in the Viewer's Settings window; here they can be disabled or deleted " +
         "(set_notification_route_enabled / delete_notification_route).")]
     public static async Task<string> GetNotificationRoutes(
         NpgsqlDataSource postgres,
@@ -765,6 +770,13 @@ public sealed class DarlingMcpAlertTools
         expanded_server_count = r.ExpandedServerCount,
         orphaned = r.Orphaned,
         scope_unreadable = r.ScopeUnreadable,
+        /* #5632: the agent channel. agent_level null inherits, 0 is off and stops the lookup, 1 opens investigation requests;
+           the limits apply only where the level is 1. Darling only: Lite has no agent channel. */
+        agent_level = r.AgentLevel,
+        agent_max_per_hour = r.AgentMaxPerHour,
+        agent_max_per_day = r.AgentMaxPerDay,
+        agent_lease_minutes = r.AgentLeaseMinutes,
+        agent_expiry_minutes = r.AgentExpiryMinutes,
     };
 
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]

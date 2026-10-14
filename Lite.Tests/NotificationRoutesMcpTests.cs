@@ -308,7 +308,11 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         /* Darling has ONE route projection: get_notification_routes lists it and set_notification_route_enabled returns it. */
         var darling = DarlingRouteFields("internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new");
         Assert.NotEmpty(darling);
-        Assert.Equal(darling.OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
+        /* #5632: the agent channel is Darling's alone (Lite has no investigation requests), so its five fields are the one
+           named exception; every one of them must still be in Darling's projection. */
+        var darlingOnly = new[] { "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes" };
+        Assert.All(darlingOnly, f => Assert.Contains(f, darling));
+        Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
         var source = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs");
         Assert.Contains("routes = routes.Select(RoutePayload)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("routes.Select(r => new", source, StringComparison.Ordinal);
