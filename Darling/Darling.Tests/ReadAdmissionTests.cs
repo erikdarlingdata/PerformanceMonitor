@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.IO;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,7 +34,7 @@ public sealed class ReadAdmissionTests
         var admission = new ReadAdmission(time ?? TimeProvider.System, waitCap ?? ReadAdmission.DefaultWaitCap, null, limit);
         admission.SetTable(new Dictionary<(ReadSurface, string, string), long>
         {
-            [(ReadSurface.Mcp, HeavyRoute, ReadWindowBand.None)] = 2_000,
+            [(ReadSurface.Mcp, HeavyRoute, ReadWindowBand.None)] = 3_000,
             [(ReadSurface.Mcp, LightRoute, ReadWindowBand.SevenDays)] = 1_999,
         });
         return admission;
@@ -102,10 +103,10 @@ public sealed class ReadAdmissionTests
         Assert.Equal(2, refusal.Running);
         Assert.Equal(ReadAdmission.QueueLimit, refusal.Queued);
 
-        /* 18 reads ahead at a p90 of 2 s over a limit of 2: 18 seconds. */
-        Assert.Equal(18, refusal.RetryAfterSeconds);
+        /* 18 reads ahead at a p90 of 3 s over a limit of 2: 27 seconds. */
+        Assert.Equal(27, refusal.RetryAfterSeconds);
         Assert.Equal(
-            "The service is running as many long reads as it allows (2), and 16 more are waiting. Try again in about 18 seconds.",
+            "The service is running as many long reads as it allows (2), and 16 more are waiting. Try again in about 27 seconds.",
             refusal.Sentence);
         Assert.Equal(1, admission.Stats().Routes.Single().Rejected);
 
@@ -232,11 +233,11 @@ public sealed class ReadAdmissionTests
     }
 
     [Fact]
-    public void TheThreshold_Is2000MsOfP90_AndTheSurfacesKeepSeparateRows()
+    public void TheThreshold_IsAP90AboveTwoSeconds_AndTheSurfacesKeepSeparateRows()
     {
         var admission = Build(2);
         Assert.True(admission.IsHeavy(ReadSurface.Mcp, HeavyRoute, ReadWindowBand.None, out var heavyMs));
-        Assert.Equal(2_000, heavyMs);
+        Assert.Equal(3_000, heavyMs);
 
         /* Learned light at 1,999 ms beats the 7d prior. */
         Assert.False(admission.IsHeavy(ReadSurface.Mcp, LightRoute, ReadWindowBand.SevenDays, out _));
@@ -273,6 +274,90 @@ public sealed class ReadAdmissionTests
         Assert.Equal(4_800, table[(ReadSurface.Mcp, "split", "7d")]);
         Assert.True(table[(ReadSurface.Mcp, "mostly_fast", "7d")] < ReadAdmission.HeavyThresholdMs);
         Assert.False(table.ContainsKey((ReadSurface.Mcp, "bad_shape", "7d")));
+    }
+
+    [Fact]
+    public void BuildTable_AP90InThe1500To2000Bucket_StaysLight_AndTheNextBucketIsHeavy()
+    {
+        var bounds = ReadLatencyAccumulator.BucketUpperBoundsMs;
+        long[] Counts(int bucketMs, long slowCount)
+        {
+            var counts = new long[bounds.Length + 1];
+            counts[ReadLatencyAccumulator.BucketIndexFor(100)] = 100 - slowCount;
+            counts[ReadLatencyAccumulator.BucketIndexFor(bucketMs)] = slowCount;
+            return counts;
+        }
+
+        var table = ReadAdmission.BuildTable(new[]
+        {
+            /* 20 of 100 reads in (1,500, 2,000]: the p90 bucket's upper bound is 2,000, a real p90 of at most 2,000. */
+            (ReadSurface.Mcp, "in_2000_bucket", "7d", Counts(1_800, 20), 2_000L),
+            /* 20 of 100 reads in (2,000, 3,000]: the p90 is above 2,000. */
+            (ReadSurface.Mcp, "in_3000_bucket", "7d", Counts(2_500, 20), 3_000L),
+        });
+
+        Assert.Equal(2_000, table[(ReadSurface.Mcp, "in_2000_bucket", "7d")]);
+        Assert.Equal(3_000, table[(ReadSurface.Mcp, "in_3000_bucket", "7d")]);
+
+        var admission = Build(2);
+        admission.SetTable(table);
+        Assert.False(admission.IsHeavy(ReadSurface.Mcp, "in_2000_bucket", "7d", out _));
+        Assert.True(admission.IsHeavy(ReadSurface.Mcp, "in_3000_bucket", "7d", out _));
+    }
+
+    [Fact]
+    public async Task ARebuildSliceThatExpires_KeepsTheLastTable_AndTheFlushAfterItStillRuns()
+    {
+        var flushed = false;
+        var finished = await ReadAdmission.RunRebuildSliceAsync(
+            async token =>
+            {
+                await Task.Delay(Timeout.Infinite, token);
+                return true;
+            },
+            TimeSpan.FromMilliseconds(50), logger: null, CancellationToken.None);
+        flushed = true;
+
+        Assert.False(finished);
+        Assert.True(flushed);
+    }
+
+    [Fact]
+    public async Task ARebuildThatThrows_KeepsTheLastTable_AndTheFlushAfterItStillRuns()
+    {
+        var flushed = false;
+        var finished = await ReadAdmission.RunRebuildSliceAsync(
+            _ => throw new InvalidOperationException("the scan failed"),
+            TimeSpan.FromSeconds(30), logger: null, CancellationToken.None);
+        flushed = true;
+
+        Assert.False(finished);
+        Assert.True(flushed);
+    }
+
+    [Fact]
+    public async Task ARebuildSlice_EndsWithTheBudget_WhenTheBudgetEnds()
+    {
+        using var budget = new CancellationTokenSource();
+        budget.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ReadAdmission.RunRebuildSliceAsync(
+            async token =>
+            {
+                await Task.Delay(Timeout.Infinite, token);
+                return true;
+            },
+            TimeSpan.FromSeconds(30), logger: null, budget.Token));
+    }
+
+    [Fact]
+    public void TheHourlySweep_RebuildsUnderItsOwnSlice_AndReopensTheConnectionBeforeTheFlush()
+    {
+        var source = File.ReadAllText(Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var rebuild = source.IndexOf("ReadAdmission.RunRebuildSliceAsync(", StringComparison.Ordinal);
+        var flush = source.IndexOf("await _readLatency.FlushAsync(", StringComparison.Ordinal);
+        Assert.True(rebuild > 0 && flush > rebuild, "The rebuild runs in its own slice, before the read-latency flush.");
+        Assert.Contains("connection.State != ConnectionState.Open", source.Substring(rebuild, flush - rebuild));
+        Assert.DoesNotContain("_readAdmission.RefreshAsync(connection", source);
     }
 
     [Fact]

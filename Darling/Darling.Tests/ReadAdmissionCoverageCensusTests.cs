@@ -176,7 +176,7 @@ public sealed class ReadAdmissionWebTests
         /* #5506 part 3: these tests measure admission; with the read cache on, identical calls would share one read. */
         admission.Cache.Enabled = false;
         var band = DarlingWebEndpoints.WebWindowBand(route, _ => null);
-        admission.SetTable(new Dictionary<(ReadSurface, string, string), long> { [(ReadSurface.Web, route, band)] = 2_000 });
+        admission.SetTable(new Dictionary<(ReadSurface, string, string), long> { [(ReadSurface.Web, route, band)] = 3_000 });
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {

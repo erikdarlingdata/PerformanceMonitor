@@ -53,7 +53,12 @@ public sealed class ReadAdmission
     /// <summary>How long a heavy read may wait for a slot.</summary>
     internal static readonly TimeSpan DefaultWaitCap = TimeSpan.FromSeconds(45);
 
-    /// <summary>The p90 at or above which a (surface, route, band) is heavy.</summary>
+    /// <summary>The share of the hourly store sweep's budget the table rebuild may use (#5506 part 3). The 7-day scan
+    /// is the one slow step on the flush's connection; its own slice keeps a long scan from taking the budget the
+    /// read-latency flush needs.</summary>
+    internal static readonly TimeSpan RebuildSliceBudget = TimeSpan.FromSeconds(60);
+
+    /// <summary>The p90 above which a (surface, route, band) is heavy.</summary>
     internal const long HeavyThresholdMs = 2_000;
 
     /// <summary>The smallest retry-after a refusal names.</summary>
@@ -168,7 +173,10 @@ public sealed class ReadAdmission
         if (_p90.TryGetValue((surface, route, band), out var p90))
         {
             expectedMs = p90;
-            return p90 >= HeavyThresholdMs;
+            /* #5506 part 3: the table holds a bucket UPPER bound (capped at the largest max seen), so a real p90 anywhere
+               in (1,500, 2,000] reads as 2,000. Strictly above the threshold is the only value a real p90 over it
+               produces. */
+            return p90 > HeavyThresholdMs;
         }
 
         expectedMs = HeavyThresholdMs;
@@ -428,6 +436,27 @@ public sealed class ReadAdmission
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             _logger?.LogWarning("The long-read table was not rebuilt, so the last one stays in force: {Message}", ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>The hourly rebuild under a slice of <paramref name="budget"/> of its own (#5506 part 3). The slice ending,
+    /// or a fault <paramref name="rebuild"/> lets through, keeps the last table and returns, so the flush that follows
+    /// still runs; only <paramref name="budget"/> itself ending (the sweep's, or shutdown) propagates. Returns whether the
+    /// rebuild finished. A canceled slice can leave the caller's connection broken: the caller reopens it before the flush.</summary>
+    internal static async Task<bool> RunRebuildSliceAsync(
+        Func<CancellationToken, Task<bool>> rebuild, TimeSpan slice, ILogger? logger, CancellationToken budget)
+    {
+        using var sliceBudget = CancellationTokenSource.CreateLinkedTokenSource(budget);
+        sliceBudget.CancelAfter(slice);
+        try
+        {
+            return await rebuild(sliceBudget.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (sliceBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+        {
+            logger?.LogWarning("The long-read table rebuild did not finish, so the last table stays in force: {Message}", ex.Message);
             return false;
         }
     }

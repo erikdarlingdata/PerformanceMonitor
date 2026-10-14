@@ -11145,7 +11145,19 @@ AND   j.hypertable_name = '{relation}'", connection))
                and never costs the flush. */
             if (_readAdmission is not null)
             {
-                await _readAdmission.RefreshAsync(connection, _readLatency, budget.Token);
+                /* Its own slice of the budget, like the history above: the scan reads seven days, and a canceled slice must
+                   not cancel the flush below, which the same connection then runs. */
+                var readAdmission = _readAdmission;
+                await ReadAdmission.RunRebuildSliceAsync(
+                    token => readAdmission.RefreshAsync(connection, _readLatency, token),
+                    ReadAdmission.RebuildSliceBudget, _logger, budget.Token);
+
+                /* A canceled slice can leave the connection closed or broken. */
+                if (connection.State != ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(budget.Token);
+                }
             }
 
             try
