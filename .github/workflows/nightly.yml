@@ -1468,6 +1468,13 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           mkdir -p releases
           tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          # #5796: the PowerShell scripts ship signed in the Windows zip only. The service csproj leaves them out
+          # of a Linux publish; this fails the job if one comes back. Same check as build.yml's release job.
+          listing="$(tar -tzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
+          if grep -iE '\.(ps1|psm1|psd1|ps1xml)$' <<<"${listing}"; then
+            echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
+            exit 1
+          fi
           (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
           echo "${version}" > releases/linux-version.txt
 

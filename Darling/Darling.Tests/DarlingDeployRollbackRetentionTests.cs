@@ -477,8 +477,13 @@ public sealed class DarlingDeployRollbackRetentionTests
 
         Assert.Contains("[switch]$PruneOnly", DeployScript, StringComparison.Ordinal);
 
+        // #5796: the script ships in the Windows publish only (the only place a rollback backup is taken, so the
+        // only place the advice is given); the Linux publish leaves all three scripts out.
         var csproj = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PerformanceMonitor.Darling.Service.csproj"));
-        Assert.Contains("upgrade-darling.ps1", csproj, StringComparison.Ordinal);
+        Assert.Contains(
+            """<None Include="..\tools\upgrade-darling.ps1" Link="upgrade-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />""",
+            csproj,
+            StringComparison.Ordinal);
     }
 
     /// <summary>

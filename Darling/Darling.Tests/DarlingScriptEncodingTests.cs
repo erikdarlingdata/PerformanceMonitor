@@ -61,6 +61,39 @@ public sealed class DarlingScriptEncodingTests
 
         Assert.Equal(ScriptNames, shipped);
         Assert.Equal(ScriptNames, census);
+
+        // The scripts ship to Windows only: each item carries the Windows-target condition, so the Linux publish
+        // (tarball and container image) holds no unsigned copy.
+        var conditioned = Regex.Matches(project, @"Include=""\.\.\\tools\\([^""\\]+\.ps1)""[^>]*Condition=""\$\(DarlingShipsWindowsScripts\)""")
+            .Select(m => m.Groups[1].Value)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(ScriptNames, conditioned);
+    }
+
+    /// <summary>
+    /// The release guard reads a script as signed when it ENDS with a <c># SIG #</c> block, and the signing step adds
+    /// that block at release. A <c># SIG #</c> line in a source script is either a stale block from a signed copy
+    /// committed back, which no longer matches the script and fails to verify, or text that looks like one. Neither
+    /// belongs in the repo, so no script under Darling/tools may hold a line that starts with <c># SIG #</c>.
+    /// </summary>
+    [Fact]
+    public void No_source_script_holds_a_signature_block_line()
+    {
+        var tools = PathTo("Darling", "tools");
+        string[] suffixes = [".ps1", ".psm1", ".psd1", ".ps1xml"];
+        var scripts = Directory.EnumerateFiles(tools, "*", SearchOption.AllDirectories)
+            .Where(path => suffixes.Any(suffix => path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+        Assert.Contains(scripts, path => Path.GetFileName(path) == "install-darling.ps1");
+
+        var offenders = scripts
+            .SelectMany(path => File.ReadLines(path)
+                .Select((line, index) => (path, line, index))
+                .Where(entry => entry.line.TrimStart().StartsWith("# SIG #", StringComparison.Ordinal))
+                .Select(entry => $"{Path.GetRelativePath(tools, entry.path)}:{entry.index + 1}"))
+            .ToArray();
+        Assert.True(offenders.Length == 0, "Signature block lines in source scripts: " + string.Join(", ", offenders));
     }
 
     /// <summary>Why <paramref name="bytes"/> would not read the same under every code page, or null.</summary>

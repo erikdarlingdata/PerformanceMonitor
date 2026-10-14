@@ -1431,12 +1431,54 @@ jobs:
       # network and no published release. Two nupkg members are allowlisted by member path and
       # container; everything else must carry a certificate table, and an empty census is a
       # failure rather than a pass.
-      # It also checks the PowerShell scripts (#5796): every .ps1 must end with a signature block, and
-      # the Darling zip must hold install-, uninstall- and upgrade-darling.ps1 (status 2 when one is missing).
+      # It also checks the PowerShell scripts (#5796): every script must end with a signature block, a
+      # Darling zip must be there, and it must hold install-, uninstall- and upgrade-darling.ps1 at its
+      # root (status 2 when one is missing, when there is no Darling zip, or when a file cannot be read).
       - name: Assert every published executable is signed
         if: github.event_name == 'release'
         shell: pwsh
         run: python3 .github/scripts/verify_release_signatures.py --verify-dir releases
+
+      # #5796: the guard above sees that each script ends with a signature block. Only Windows can say whether
+      # that signature is Valid (chain, digest, timestamp), and this job runs on Windows, so ask it, for the three
+      # scripts at the Darling zip's root. Anything but Valid, or a script that is not there, fails the release.
+      - name: Assert the Darling scripts carry a valid Authenticode signature
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zips = @(Get-ChildItem -Path releases -Filter '*.zip' -File |
+            Where-Object { $_.Name -match 'darling' -and $_.Name -notmatch 'darlingviewer' })
+          if ($zips.Count -ne 1) {
+            Write-Host "::error::Expected one Darling zip in releases/, found $($zips.Count): $($zips.Name -join ', ')"
+            exit 1
+          }
+          $dest = Join-Path ([IO.Path]::GetTempPath()) ('darling-scripts-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $dest | Out-Null
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $failed = 0
+          $zip = [IO.Compression.ZipFile]::OpenRead($zips[0].FullName)
+          try {
+            foreach ($name in 'install-darling.ps1', 'uninstall-darling.ps1', 'upgrade-darling.ps1') {
+              $entry = $zip.GetEntry($name)
+              if ($null -eq $entry) {
+                Write-Host "${name}: Missing (not at the root of $($zips[0].Name))"
+                $failed++
+                continue
+              }
+              $path = Join-Path $dest $name
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $path)
+              $signature = Get-AuthenticodeSignature -LiteralPath $path
+              Write-Host "${name}: $($signature.Status) ($($signature.StatusMessage))"
+              if ($signature.Status -ne 'Valid') { $failed++ }
+            }
+          } finally {
+            $zip.Dispose()
+          }
+          if ($failed) {
+            Write-Host "::error::$failed of the Darling zip's three scripts do not carry a Valid Authenticode signature (#5796)."
+            exit 1
+          }
 
       - name: Upload release assets
         if: github.event_name == 'release'
@@ -2293,6 +2335,13 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           mkdir -p releases
           tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          # #5796: the PowerShell scripts ship signed in the Windows zip only. The service csproj leaves them out
+          # of a Linux publish; this fails the job if one comes back. Same check as nightly.yml's linux job.
+          listing="$(tar -tzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
+          if grep -iE '\.(ps1|psm1|psd1|ps1xml)$' <<<"${listing}"; then
+            echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
+            exit 1
+          fi
           (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
 
       - name: Upload linux artifact to the release

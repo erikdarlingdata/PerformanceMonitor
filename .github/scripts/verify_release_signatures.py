@@ -16,8 +16,12 @@ WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
   certificate table is non-empty. That is "a signature is attached" and nothing more.
 
   PowerShell scripts (#5796) carry their signature as a trailing comment block instead, so a
-  .ps1 counts as signed when it holds the `# SIG # Begin signature block` line and, after it, the
-  `# SIG # End signature block` line. The Darling zip must also hold its three scripts.
+  script counts as signed when it ENDS with that block: a `# SIG # Begin signature block` line,
+  one or more `# SIG # <base64>` lines, and the `# SIG # End signature block` line as the last
+  non-blank line of the file. The Darling zip must hold its three scripts at its root, and the
+  release guard needs a Darling zip to be there at all. The release job then asks Windows itself
+  (Get-AuthenticodeSignature) whether the three scripts' signatures are Valid, which is the check
+  this reader cannot make.
 
   It does NOT verify the signature: not the chain, not trust, not the timestamp, not revocation,
   not whether the digest matches the file. Doing that properly needs a Windows trust store, and
@@ -87,15 +91,20 @@ HEADER_BYTES = 4096
 EOCD_SEARCH_BYTES = 66 * 1024
 
 # PowerShell scripts carry their Authenticode signature as a trailing comment block, not as a PE
-# certificate table (#5796). A signed script ends with these two lines and an unsigned one has
-# neither. They are matched as whole lines, so a script that merely mentions a marker inside a
-# string or a longer comment does not read as signed.
-SCRIPT_SUFFIXES = (".ps1",)
-SIG_BEGIN = re.compile(r"^# SIG # Begin signature block\r?$", re.MULTILINE)
-SIG_END = re.compile(r"^# SIG # End signature block\r?$", re.MULTILINE)
+# certificate table (#5796). A signed script ENDS with the block: the Begin line, one or more body
+# lines of base64, and the End line as the last non-blank line. Each line is matched whole, so a
+# marker at the end of a code line, a block inside a here-string or a comment with code after it,
+# or a Begin/End pair with no body, does not read as signed.
+# .psm1, .psd1 and .ps1xml are Authenticode-signed too. None ships today; they are listed so one
+# that starts shipping is checked rather than skipped. A .ps1xml writes its block as XML comments,
+# which this reader does not parse, so a signed one would read as unsigned: a failure, not a pass.
+SCRIPT_SUFFIXES = (".ps1", ".psm1", ".psd1", ".ps1xml")
+SIG_BEGIN = re.compile(r"# SIG # Begin signature block")
+SIG_BODY = re.compile(r"# SIG # [A-Za-z0-9+/=]+")
+SIG_END = re.compile(r"# SIG # End signature block")
 # The three scripts the Darling service zip ships at its root (the service project links them
-# in). A Darling zip without all three fails the census: a script that is not there cannot be
-# checked, and that is not the same as one that is signed.
+# in). A Darling zip without all three AT ITS ROOT fails the census: a script that is not there
+# cannot be checked, and that is not the same as one that is signed.
 DARLING_SCRIPTS = ("install-darling.ps1", "uninstall-darling.ps1", "upgrade-darling.ps1")
 
 
@@ -158,18 +167,29 @@ def is_script(name: str) -> bool:
 
 
 def script_is_signed(blob: bytes) -> bool:
-    """True when the script holds the Begin line of a signature block and, after it, the End line.
+    """True when the script ENDS with a well-formed signature block.
 
-    A Begin with no End after it is a cut or hand-edited block and reads as unsigned. PowerShell
+    The last non-blank line must be the End line, every line above it up to the Begin line must be
+    a `# SIG # <base64>` body line, and there must be at least one. Anything else reads as
+    unsigned: a Begin with no End, code after the End line (a block inside a here-string or a
+    comment), a Begin/End pair with no body, or a marker at the end of a code line. PowerShell
     writes the block in the file's own encoding, so a UTF-16 file (BOM FF FE or FE FF) is decoded
-    as UTF-16 before the markers are looked for.
+    as UTF-16, and a UTF-8 BOM is dropped so it cannot hide a marker on the first line.
     """
     if blob.startswith((b"\xff\xfe", b"\xfe\xff")):
         text = blob.decode("utf-16", "replace")
     else:
-        text = blob.decode("utf-8", "replace")
-    begin = SIG_BEGIN.search(text)
-    return begin is not None and SIG_END.search(text, begin.end()) is not None
+        text = blob.decode("utf-8-sig", "replace")
+    lines = [line.rstrip("\r") for line in text.split("\n")]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines or not SIG_END.fullmatch(lines.pop()):
+        return False
+    body = 0
+    while lines and SIG_BODY.fullmatch(lines[-1]):
+        lines.pop()
+        body += 1
+    return body > 0 and bool(lines) and SIG_BEGIN.fullmatch(lines[-1]) is not None
 
 
 def is_darling_zip(name: str) -> bool:
@@ -187,7 +207,9 @@ def darling_census(archive: str, members: list[str]) -> str | None:
     """Why `archive` fails the script census, or None. Only a Darling zip has a census (#5796)."""
     if not is_darling_zip(archive):
         return None
-    present = {m.replace("\\", "/").rsplit("/", 1)[-1].lower() for m in members}
+    # Full member paths, not file names: the scripts ship at the zip root (#5796), and a copy under
+    # a subfolder is not the one an operator runs.
+    present = {m.replace("\\", "/").lower() for m in members}
     missing = [script for script in DARLING_SCRIPTS if script not in present]
     if not missing:
         return None
@@ -196,6 +218,19 @@ def darling_census(archive: str, members: list[str]) -> str | None:
 
 class ReadError(RuntimeError):
     """A byte range could not be read, or came back the wrong size."""
+
+
+# What reading one archive member can raise: our own ReadError, a corrupt deflate stream, a
+# truncated header, or (zipfile) a compression method this Python cannot decode. Each is a read
+# failure, reported as one, and never a reason to skip the member.
+UNREADABLE = (ReadError, zlib.error, struct.error, NotImplementedError)
+
+
+def no_darling_zip(where: str) -> str:
+    return (
+        f"{where}: no Darling zip (a .zip whose name holds 'darling', not the Viewer's), so its "
+        "three scripts were never checked"
+    )
 
 
 @dataclass
@@ -336,8 +371,9 @@ def check_archive(
                 off, length = certificate_table(blob)
                 signed = off != 0 and length != 0
             findings.append(Finding(asset=name, path=member, size=usize, signed=signed))
-        except ReadError as exc:
-            errors.append(f"{name} :: {member}: {exc}")
+        except UNREADABLE as exc:
+            # A member that cannot be read is an error, never a skip: main exits 2 on any error.
+            errors.append(f"{name} :: {member}: {type(exc).__name__}: {exc}")
     return findings, errors, darling_census(name, [entry[0] for entry in entries])
 
 
@@ -350,7 +386,8 @@ def verify_local_dir(directory: str) -> int:
 
     ALLOWED_UNSIGNED exempts exactly two members of a `.nupkg`. Everything else fails, including
     those same two names in any other container and as standalone files. No allowance covers a
-    `.ps1` script, and the Darling zip must hold all three of its scripts (#5796).
+    script, a Darling zip must be there, and it must hold all three of its scripts at its root
+    (#5796). A file or member that cannot be read is status 2, never a skip.
     """
     import glob
     import os
@@ -358,6 +395,7 @@ def verify_local_dir(directory: str) -> int:
 
     findings: list[Finding] = []
     census: list[str] = []
+    darling_zips = 0
     for path in sorted(glob.glob(os.path.join(directory, "**", "*"), recursive=True)):
         if not os.path.isfile(path):
             continue
@@ -380,6 +418,8 @@ def verify_local_dir(directory: str) -> int:
                 print(f"GUARD: cannot read {rel}: {exc}", file=sys.stderr)
                 return 2
         elif lower.endswith(ARCHIVE_SUFFIXES):
+            if is_darling_zip(rel):
+                darling_zips += 1
             try:
                 with zipfile.ZipFile(path) as zf:
                     members = zf.infolist()
@@ -398,10 +438,12 @@ def verify_local_dir(directory: str) -> int:
                         findings.append(
                             Finding(rel, info.filename, info.file_size, off != 0 and length != 0)
                         )
-            except (OSError, zipfile.BadZipFile, ReadError, struct.error) as exc:
-                print(f"GUARD: cannot read {rel}: {exc}", file=sys.stderr)
+            except (OSError, zipfile.BadZipFile, *UNREADABLE) as exc:
+                print(f"GUARD: cannot read {rel}: {type(exc).__name__}: {exc}", file=sys.stderr)
                 return 2
 
+    if not darling_zips:
+        census.append(no_darling_zip(directory))
     if not findings:
         print(f"GUARD FAIL: no executables or scripts found under {directory}", file=sys.stderr)
         return 2
@@ -469,6 +511,7 @@ def release_assets(tag: str, repo: str, gh: str) -> list[dict]:
 
 def build_report(tag: str, repo: str, gh: str, include_dlls: bool) -> Report:
     report = Report(tag=tag)
+    darling_zips = 0
     for asset in release_assets(tag, repo, gh):
         name, url, size = asset["name"], asset["browser_download_url"], asset["size"]
         lower = name.lower()
@@ -479,13 +522,17 @@ def build_report(tag: str, repo: str, gh: str, include_dlls: bool) -> Report:
                 blob = fetch_range(url, 0, size) if size else b""
                 report.findings.append(Finding(name, "", size, script_is_signed(blob)))
             elif lower.endswith(ARCHIVE_SUFFIXES):
+                if is_darling_zip(name):
+                    darling_zips += 1
                 found, errs, census = check_archive(url, name, size, include_dlls)
                 report.findings.extend(found)
                 report.errors.extend(errs)
                 if census:
                     report.census.append(census)
-        except ReadError as exc:
-            report.errors.append(f"{name}: {exc}")
+        except UNREADABLE as exc:
+            report.errors.append(f"{name}: {type(exc).__name__}: {exc}")
+    if not darling_zips:
+        report.census.append(no_darling_zip(tag))
     return report
 
 
@@ -505,6 +552,44 @@ def _synth_pe(*, signed: bool, plus: bool = True) -> bytes:
     table = (0x800, 0x1C0) if signed else (0, 0)
     struct.pack_into("<II", buf, directories + 4 * 8, *table)
     return bytes(buf)
+
+
+SIG_BLOCK = (
+    "# SIG # Begin signature block\r\n# SIG # MIIFAKEAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
+    "# SIG # End signature block\r\n"
+)
+# Scripts that hold the markers but do not END with a well-formed block. Each must read unsigned.
+FORGED_SCRIPTS: dict[str, bytes] = {
+    "a marker at the end of a code line": (
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n# SIG # MIIF\r\n"
+        "Write-Output 2 # SIG # End signature block\r\n"
+    ).encode("ascii"),
+    "a block inside a here-string": (
+        "$block = @'\r\n" + SIG_BLOCK + "'@\r\nWrite-Output $block\r\n"
+    ).encode("ascii"),
+    "a block inside a comment that closes after it": (
+        "Write-Output 1\r\n<#\r\n" + SIG_BLOCK + "#>\r\n"
+    ).encode("ascii"),
+    "code after the End line": ("Write-Output 1\r\n" + SIG_BLOCK + "Write-Output 2\r\n").encode("ascii"),
+    "only the two markers": b"# SIG # Begin signature block\r\n# SIG # End signature block\r\n",
+    "a block with a non-base64 body line": (
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n# SIG # not base64!\r\n"
+        "# SIG # End signature block\r\n"
+    ).encode("ascii"),
+    "a block with a code line in its body": (
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n# SIG # MIIF\r\nWrite-Output 2\r\n"
+        "# SIG # MIIF\r\n# SIG # End signature block\r\n"
+    ).encode("ascii"),
+    "an End line with no Begin line": (
+        "Write-Output 1\r\n# SIG # MIIF\r\n# SIG # End signature block\r\n"
+    ).encode("ascii"),
+    "a Begin marker after code on its line": (
+        "Write-Output 1 # SIG # Begin signature block\r\n# SIG # MIIF\r\n"
+        "# SIG # End signature block\r\n"
+    ).encode("ascii"),
+}
+# A layout member with this name marks its zip for a zip64 end-of-central-directory record.
+ZIP64 = "<zip64>"
 
 
 def _synth_ps1(*, signed: bool, end: bool = True) -> bytes:
@@ -536,19 +621,56 @@ def _release_dir(root: str, layout: dict[str, object]) -> str:
         target = os.path.join(root, name)
         os.makedirs(os.path.dirname(target) or root, exist_ok=True)
         if isinstance(content, dict):
-            with zipfile.ZipFile(target, "w") as zf:
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
                 for member, signed in content.items():
+                    if member == ZIP64:
+                        continue
                     zf.writestr(member, _synth_file(member, signed))
+            if ZIP64 in content or {"corrupt", "deflate64"} & set(map(str, content.values())):
+                _damage_zip(target, content)
         else:
             with open(target, "wb") as handle:
                 handle.write(_synth_file(name, content))
     return root
 
 
+def _damage_zip(path: str, content: dict[str, object]) -> None:
+    """Mark a synthetic zip as zip64, overwrite a "corrupt" member's deflate stream with junk, or
+    relabel a "deflate64" member as method 9, which neither reader decodes."""
+    import zipfile
+
+    with open(path, "rb") as handle:
+        data = bytearray(handle.read())
+    if ZIP64 in content:
+        eocd = data.rfind(b"PK\x05\x06")
+        struct.pack_into("<II", data, eocd + 12, 0xFFFFFFFF, 0xFFFFFFFF)
+    with zipfile.ZipFile(path) as zf:
+        infos = zf.infolist()
+        cd_offset = zf.start_dir
+    for info in infos:
+        if content.get(info.filename) == "deflate64":
+            struct.pack_into("<H", data, info.header_offset + 8, 9)
+            entry = data.find(b"PK" , cd_offset)
+            while entry >= 0:
+                nlen = struct.unpack_from("<H", data, entry + 28)[0]
+                if data[entry + 46 : entry + 46 + nlen].decode("utf-8") == info.filename:
+                    struct.pack_into("<H", data, entry + 10, 9)
+                entry = data.find(b"PK", entry + 46)
+    for info in [i for i in infos if content.get(i.filename) == "corrupt"]:
+        nlen, elen = struct.unpack_from("<HH", data, info.header_offset + 26)
+        start = info.header_offset + 30 + nlen + elen
+        data[start : start + info.compress_size] = b"\xff" * info.compress_size
+    with open(path, "wb") as handle:
+        handle.write(bytes(data))
+
+
 def _synth_file(name: str, signed: object) -> bytes:
     if is_script(name):
         if signed == "no-end":
             return _synth_ps1(signed=True, end=False)
+        if isinstance(signed, str) and signed in FORGED_SCRIPTS:
+            return FORGED_SCRIPTS[signed]
+        # "deflate64" and "corrupt" are a signed script stored in a way the readers cannot decode.
         return _synth_ps1(signed=bool(signed))
     return _synth_pe(signed=bool(signed))
 
@@ -557,15 +679,34 @@ def self_test() -> int:
     import contextlib
     import io
     import os
+    import pathlib
     import tempfile
 
     failures: list[str] = []
     checks = 0
 
-    def guard(label: str, layout: dict[str, object], want: int) -> None:
-        """Run the release guard over a synthesised release directory."""
+    DARLING_ZIP = "PerformanceMonitorDarling-3.10.0.zip"
+
+    def darling_zip(**scripts: object) -> dict[str, object]:
+        """The Darling zip's members: the service exe and the three scripts at the root.
+
+        A keyword names a script by its first word (install=False) and sets its content.
+        """
+        content: dict[str, object] = {"PerformanceMonitor.Darling.Service.exe": True}
+        for script in DARLING_SCRIPTS:
+            content[script] = scripts.get(script.split("-")[0], True)
+        return content
+
+    def guard(label: str, layout: dict[str, object], want: int, *, darling: bool = True) -> None:
+        """Run the release guard over a synthesised release directory.
+
+        Every release must carry the Darling zip (#5796), so a layout with none gets a correct one
+        (three signed scripts at its root) unless `darling` is False.
+        """
         nonlocal checks
         checks += 1
+        if darling and not any(is_darling_zip(name) for name in layout):
+            layout = {**layout, DARLING_ZIP: darling_zip()}
         with tempfile.TemporaryDirectory() as tmp:
             directory = _release_dir(os.path.join(tmp, "releases"), layout)
             sink = io.StringIO()
@@ -630,6 +771,7 @@ def self_test() -> int:
     # shares nothing with them but would pass any allowlist loose enough to be written by name
     # alone. So every case below pairs a member path with a container.
     # ------------------------------------------------------------------------------------------
+    VIEWER = "PerformanceMonitorDarlingViewer-darlingviewer-Portable.zip"
     stub = "lib/app/PerformanceMonitorLite_ExecutionStub.exe"
     squirrel = "lib/app/Squirrel.exe"
     app = "lib/app/PerformanceMonitorLite.exe"
@@ -697,37 +839,30 @@ def self_test() -> int:
     guard("a nupkg whose stub is signed and app is not", {nupkg: {app: False, stub: False}}, 1)
 
     # Finding nothing to check is a broken run, not a clean one.
-    guard("a directory with no executables", {}, 2)
+    guard("a directory with no executables", {}, 2, darling=False)
 
     # ------------------------------------------------------------------------------------------
     # The Darling zip's PowerShell scripts (#5796). Each one is signed like an executable, no
     # allowance covers them, and the Darling zip must hold all three.
     # ------------------------------------------------------------------------------------------
-    darling = "PerformanceMonitorDarling-3.10.0.zip"
 
-    def darling_zip(**scripts: object) -> dict[str, object]:
-        content: dict[str, object] = {"PerformanceMonitor.Darling.Service.exe": True}
-        for script in DARLING_SCRIPTS:
-            content[script] = scripts.get(script.split("-")[0], True)
-        return content
-
-    guard("a Darling zip with three signed scripts", {**correct_release(), darling: darling_zip()}, 0)
+    guard("a Darling zip with three signed scripts", {**correct_release(), DARLING_ZIP: darling_zip()}, 0)
     guard(
         "a Darling zip with one unsigned script",
-        {**correct_release(), darling: darling_zip(upgrade=False)},
+        {**correct_release(), DARLING_ZIP: darling_zip(upgrade=False)},
         1,
     )
     guard(
         "a Darling zip with no scripts",
-        {**correct_release(), darling: {"PerformanceMonitor.Darling.Service.exe": True}},
+        {**correct_release(), DARLING_ZIP: {"PerformanceMonitor.Darling.Service.exe": True}},
         2,
     )
     missing_one = darling_zip()
     del missing_one["uninstall-darling.ps1"]
-    guard("a Darling zip missing one script", {**correct_release(), darling: missing_one}, 2)
+    guard("a Darling zip missing one script", {**correct_release(), DARLING_ZIP: missing_one}, 2)
     guard(
         "a Darling zip whose script has a Begin line and no End line",
-        {**correct_release(), darling: darling_zip(install="no-end")},
+        {**correct_release(), DARLING_ZIP: darling_zip(install="no-end")},
         1,
     )
     guard(
@@ -737,11 +872,42 @@ def self_test() -> int:
     )
     guard(
         "the Darling Viewer's Velopack zip, which carries no scripts",
-        {"PerformanceMonitorDarlingViewer-darlingviewer-Portable.zip": {"Viewer.exe": True}},
+        {VIEWER: {"Viewer.exe": True}},
         0,
     )
     guard("an unsigned standalone script", {**correct_release(), "install-darling.ps1": False}, 1)
-    guard("a directory holding only signed scripts", {"install-darling.ps1": True}, 0)
+    guard(
+        "a directory holding only signed scripts and the Darling zip",
+        {"install-darling.ps1": True},
+        0,
+    )
+
+    # The census reads full member paths, and a release with no Darling zip has no census at all.
+    viewer_only = {"PerformanceMonitor.Darling.Service.exe": True}
+    viewer_only.update({f"viewer/{script}": True for script in DARLING_SCRIPTS})
+    guard("a Darling zip with its scripts only under a subfolder", {DARLING_ZIP: viewer_only}, 2)
+    guard("a release with no Darling zip", correct_release(), 2, darling=False)
+    guard(
+        "a release whose Darling zip was renamed",
+        {**correct_release(), "PerformanceMonitorService-3.10.0.zip": darling_zip()},
+        2,
+        darling=False,
+    )
+    guard("a release with only the Viewer's zip", {VIEWER: {"Viewer.exe": True}}, 2, darling=False)
+    guard(
+        "a Darling zip with a member in a compression method it cannot decode",
+        {DARLING_ZIP: darling_zip(upgrade="deflate64")},
+        2,
+    )
+    guard(
+        "a Darling zip with a corrupt deflate stream",
+        {DARLING_ZIP: darling_zip(upgrade="corrupt")},
+        2,
+    )
+
+    # Each forged or damaged block, inside the Darling zip, through the release guard.
+    for kind in FORGED_SCRIPTS:
+        guard(f"a Darling zip whose script is {kind}", {DARLING_ZIP: darling_zip(install=kind)}, 1)
 
     # The marker reader itself.
     expect("a signed script read as unsigned", script_is_signed(_synth_ps1(signed=True)))
@@ -762,6 +928,28 @@ def self_test() -> int:
             b"$a = '# SIG # Begin signature block'\r\n$b = '# SIG # End signature block'\r\n"
         ),
     )
+    for kind, blob in FORGED_SCRIPTS.items():
+        expect(f"a script that is {kind} read as signed", not script_is_signed(blob))
+    expect(
+        "a signed script with trailing blank lines read as unsigned",
+        script_is_signed(_synth_ps1(signed=True) + b"\r\n  \r\n"),
+    )
+    expect(
+        "a UTF-8 BOM hid a first-line Begin marker",
+        script_is_signed(b"\xef\xbb\xbf" + SIG_BLOCK.encode("ascii")),
+    )
+    expect(
+        "a signed script with a UTF-8 BOM read as unsigned",
+        script_is_signed(b"\xef\xbb\xbf" + _synth_ps1(signed=True)),
+    )
+    expect(
+        "a .psm1, .psd1 or .ps1xml was not treated as a script",
+        all(is_script(f"m{suffix}") for suffix in (".psm1", ".psd1", ".ps1xml", ".PS1")),
+    )
+    expect(
+        "the release-mode census passed scripts that are only under a subfolder",
+        darling_census(DARLING_ZIP, [f"viewer/{script}" for script in DARLING_SCRIPTS]) is not None,
+    )
     expect(
         "a signed UTF-16 script read as unsigned",
         script_is_signed(b"\xff\xfe" + _synth_ps1(signed=True).decode("ascii").encode("utf-16-le")),
@@ -777,11 +965,11 @@ def self_test() -> int:
     expect("Darling-test.zip was not taken for a Darling zip", is_darling_zip("Darling-test.zip"))
     expect(
         "the release-mode census passed a Darling zip with no scripts",
-        darling_census(darling, ["PerformanceMonitor.Darling.Service.exe"]) is not None,
+        darling_census(DARLING_ZIP, ["PerformanceMonitor.Darling.Service.exe"]) is not None,
     )
     expect(
         "the release-mode census failed a Darling zip with its three scripts",
-        darling_census(darling, ["x.exe", *DARLING_SCRIPTS]) is None,
+        darling_census(DARLING_ZIP, ["x.exe", *DARLING_SCRIPTS]) is None,
     )
 
     # The allowance predicate itself, at the boundary the container check defends.
@@ -845,6 +1033,82 @@ def self_test() -> int:
         [f.label for f in regressed.unsigned] == [setup],
     )
 
+    # ------------------------------------------------------------------------------------------
+    # The published-release mode, end to end: main() over real archives served as file:// URLs,
+    # which curl reads with the same ranged requests it makes against GitHub. Only the asset
+    # listing is replaced, because that is the one call that needs a published release.
+    # ------------------------------------------------------------------------------------------
+    def by_tag(label: str, layout: dict[str, object], want: int, **extra: str) -> str:
+        """Run main() in release mode over `layout` and return its output.
+
+        `extra` maps an asset name to a URL that cannot be read.
+        """
+        nonlocal checks
+        checks += 1
+        module = sys.modules[__name__]
+        listing = module.release_assets
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = _release_dir(os.path.join(tmp, "releases"), layout)
+            assets = [
+                {
+                    "name": name,
+                    "browser_download_url": pathlib.Path(directory, name).resolve().as_uri(),
+                    "size": os.path.getsize(os.path.join(directory, name)),
+                }
+                for name in sorted(layout)
+            ]
+            for name, url in extra.items():
+                assets.append({"name": name, "browser_download_url": url, "size": 4096})
+            sink = io.StringIO()
+            module.release_assets = lambda tag, repo, gh: assets
+            try:
+                with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                    got = main(["vSELFTEST"])
+            finally:
+                module.release_assets = listing
+        if got != want:
+            failures.append(f"release mode, {label}: main returned {got}, expected {want}")
+        return sink.getvalue()
+
+    release = {**correct_release(), DARLING_ZIP: darling_zip()}
+    by_tag("a correct release", release, 0)
+    by_tag("an unsigned Setup.exe", {**release, setup: False}, 1)
+    by_tag("an unsigned script in the Darling zip", {**release, DARLING_ZIP: darling_zip(upgrade=False)}, 1)
+    by_tag("an unsigned standalone script", {**release, "install-darling.ps1": False}, 1)
+    by_tag("a Darling zip missing one script", {**release, DARLING_ZIP: missing_one}, 2)
+    by_tag("a Darling zip with its scripts only under a subfolder", {**release, DARLING_ZIP: viewer_only}, 2)
+    by_tag("a release with no Darling zip", correct_release(), 2)
+    by_tag(
+        "a release whose Darling zip was renamed",
+        {**correct_release(), "PerformanceMonitorService-3.10.0.zip": darling_zip()},
+        2,
+    )
+    by_tag(
+        "a Darling zip with a member in an unsupported compression method",
+        {**release, DARLING_ZIP: darling_zip(upgrade="deflate64")},
+        2,
+    )
+    out = by_tag(
+        "a Darling zip with a corrupt deflate stream",
+        {**release, DARLING_ZIP: darling_zip(upgrade="corrupt")},
+        2,
+    )
+    # The unreadable member is the error, not the whole archive: the members beside it are still
+    # checked and listed.
+    expect(
+        "release mode dropped the readable members of a zip with one corrupt member",
+        f"{DARLING_ZIP} :: install-darling.ps1" in out and f"{DARLING_ZIP} :: upgrade-darling.ps1" in out,
+    )
+    by_tag("a zip64 Darling zip", {**release, DARLING_ZIP: {**darling_zip(), ZIP64: True}}, 2)
+    by_tag(
+        "an asset whose ranged read fails, beside a correct release",
+        release,
+        2,
+        **{"Extra-Portable.zip": pathlib.Path(tempfile.gettempdir(), "no-such-5796.zip").as_uri()},
+    )
+    for kind in FORGED_SCRIPTS:
+        by_tag(f"a Darling zip whose script is {kind}", {**release, DARLING_ZIP: darling_zip(install=kind)}, 1)
+
     for f in failures:
         print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
     if failures:
@@ -853,7 +1117,7 @@ def self_test() -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("tag", nargs="?", help="release tag, e.g. v3.7.0")
     parser.add_argument("--self-test", action="store_true", dest="self_test")
@@ -873,7 +1137,7 @@ def main() -> int:
         help="also check .dll members inside archives (slower; the shipped defect was .exe only)",
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.self_test:
         return self_test()
@@ -946,7 +1210,11 @@ def main() -> int:
         )
     for failure in report.census:
         print(f"\nCENSUS FAIL: {failure}", file=sys.stderr)
-    if report.census:
+    # A file that could not be read was not checked, so an error fails the run whatever else was
+    # found: three readable signed scripts and one unreadable one is not a clean release (#5796).
+    if report.errors:
+        print(f"\n{len(report.errors)} asset(s) or member(s) could not be read.", file=sys.stderr)
+    if report.census or report.errors:
         return 2
     return 1 if report.unsigned else 0
 

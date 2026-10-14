@@ -10,6 +10,10 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;CA2254</NoWarn>
+    <!-- #5796: true when this build targets Windows, which gates the three PowerShell scripts below. -->
+    <DarlingShipsWindowsScripts>false</DarlingShipsWindowsScripts>
+    <DarlingShipsWindowsScripts Condition="$(RuntimeIdentifier.StartsWith('win'))">true</DarlingShipsWindowsScripts>
+    <DarlingShipsWindowsScripts Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">true</DarlingShipsWindowsScripts>
     <WarningsAsErrors>CS4014</WarningsAsErrors>
   </PropertyGroup>
 
@@ -77,10 +81,14 @@
          upgrade-darling.ps1 has to be here for a second reason (#2525): the service's install-directory
          report tells operators to prune rollback backups with `upgrade-darling.ps1 -PruneOnly`, and advice
          naming a file that is not on the box is worse than no advice. DarlingDeployRollbackRetentionTests
-         pins this line for exactly that. -->
-    <None Include="..\tools\install-darling.ps1" Link="install-darling.ps1" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\tools\uninstall-darling.ps1" Link="uninstall-darling.ps1" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\tools\upgrade-darling.ps1" Link="upgrade-darling.ps1" CopyToOutputDirectory="PreserveNewest" />
+         pins this line for exactly that.
+         #5796: they ship to Windows only. They are Authenticode-signed in the Windows zip, and the Linux
+         publish (the tarball and the container image) has no use for them, so a Windows RID, or no RID on a
+         Windows build machine (the release and nightly zips publish without one), is the condition. The
+         Linux release job asserts its tarball holds no .ps1. -->
+    <None Include="..\tools\install-darling.ps1" Link="install-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
+    <None Include="..\tools\uninstall-darling.ps1" Link="uninstall-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
+    <None Include="..\tools\upgrade-darling.ps1" Link="upgrade-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
   </ItemGroup>
 
   <ItemGroup>
