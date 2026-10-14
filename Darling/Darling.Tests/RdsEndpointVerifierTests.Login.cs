@@ -22,6 +22,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /* #1776 own-store: these cases never connect to any store; the login probe is an in-memory fake. */
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public partial class RdsEndpointVerifierTests
 {
     private static IEnumerable<string> ServiceFiles()

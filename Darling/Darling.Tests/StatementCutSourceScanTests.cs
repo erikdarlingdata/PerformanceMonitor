@@ -42,6 +42,7 @@ namespace Darling.Tests;
 /// and a JSON-generic local.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementCutSourceScanTests
 {
     /// <summary>Folders scanned, repo-root relative. Lite MCP, services and analysis; the shared alerting, notification and analysis projects; Darling service and analysis.</summary>

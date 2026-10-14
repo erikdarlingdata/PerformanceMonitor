@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// shapes.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class Viewer4627EdgeCallerTests
 {
     /// <summary>The two files that turn a plan edge into a brush.</summary>

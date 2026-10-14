@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// Exact strings for every <see cref="QueryStoreIntervalWide.WideStartBound"/> and both scopes, and a census that
 /// the note's reason phrase is spelled once across the product source.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class QueryStoreIntervalWideHistoryNoteTests
 {
     private static readonly DateTime Start = new(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);

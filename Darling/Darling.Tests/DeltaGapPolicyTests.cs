@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// <c>interval == 0 &lt;=&gt; no delta was knowable</c> that the whole (delta, interval) reading rests
 /// on.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class DeltaGapPolicyTests
 {
     private const int ServerId = 1;

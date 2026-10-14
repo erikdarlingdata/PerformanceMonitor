@@ -51,6 +51,7 @@ namespace PerformanceMonitorLite.Tests;
 /// files carry comments naming the very calls being searched for.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class EntraDeviceCodeTests
 {
     // ---- The connection string ------------------------------------------------------------

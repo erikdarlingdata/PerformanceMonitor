@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// any floor is the NORMAL case there, and a naive floor check would send every long window to a 4-day table.
 /// Half of the table below exists to hold that line.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class RollupCoverageRoutingTests
 {
     private static readonly DateTime Now = new(2026, 7, 25, 12, 0, 0, DateTimeKind.Utc);

@@ -23,6 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// name, so it misses a comma join (<c>FROM a, query_stats</c>), a quoted name (<c>FROM "query_stats"</c>) and a
 /// name that starts the next literal (<c>"FROM " + "query_stats"</c>). None of those three is in Lite today.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class ArchivableTableBareReadSweepTests
 {
     /* (file, table) -> the number of bare reads that file makes on purpose, and why. */

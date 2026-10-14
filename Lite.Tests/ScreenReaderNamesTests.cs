@@ -30,6 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Column Display Index: 7" and "ServerConnection". The Viewer twin is in Darling.Tests (ViewerScreenReaderNamesTests).
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class ScreenReaderNamesTests
 {
     private static string RepoRoot([CallerFilePath] string thisFile = "") =>

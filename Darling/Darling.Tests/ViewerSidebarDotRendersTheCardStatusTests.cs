@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// three source trees, strips comments with a real lexer rather than a line prefix, and forbids the words
 /// themselves — an <c>if</c> chain, a switch, a dictionary and a ternary all have to spell them.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class ViewerSidebarDotRendersTheCardStatusTests
 {
     private static readonly DateTime Now = new(2026, 8, 21, 12, 0, 0, DateTimeKind.Utc);

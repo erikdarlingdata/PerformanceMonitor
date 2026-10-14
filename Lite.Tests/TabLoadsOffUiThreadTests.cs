@@ -24,6 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 /// through <c>Task.Run</c> too, the main window's included (#5650 removed its old exemption): a user write waits up to
 /// 30 s for the store write lock, and a window that waited that long on the UI thread looked hung for the whole wait.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class TabLoadsOffUiThreadTests
 {
     /* Calls that sit outside a Task.Run lexically because the METHOD holding them is only ever called from inside

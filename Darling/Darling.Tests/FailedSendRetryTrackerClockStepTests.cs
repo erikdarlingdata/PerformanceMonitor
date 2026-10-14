@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// which only tests read.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class FailedSendRetryTrackerClockStepTests
 {
     private static readonly DateTime T0 = new(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);

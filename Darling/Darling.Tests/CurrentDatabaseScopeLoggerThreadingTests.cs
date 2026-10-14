@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// logger off, so a new caller cannot reopen the gap. The Viewer reaches the same readers with no host logger; it calls only the
 /// readers, whose logger parameter is optional, never <c>CurrentDatabaseScope</c> directly.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class CurrentDatabaseScopeLoggerThreadingTests
 {
     [Theory]

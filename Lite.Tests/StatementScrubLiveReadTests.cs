@@ -32,6 +32,7 @@ namespace PerformanceMonitorLite.Tests;
 /// monitored server returns). Pinned here: the Live Snapshot row, and a scan that every re-run call site passes its
 /// result through <c>LivePlanDisplay.Filter</c> and that no new live read of the monitored server appears unnoticed.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementScrubLiveReadTests
 {
     private const string Marker = SensitiveStatements.PlaceholderText;

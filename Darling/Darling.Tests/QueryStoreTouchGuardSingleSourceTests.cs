@@ -48,6 +48,7 @@ namespace Darling.Tests;
 /// <see cref="TheGuardedStoreTypesAreDerivedFromTheGuardSites"/> are what see them, and both read SOURCE for
 /// that reason. Cripple either one and its own mutation passes silently.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class QueryStoreTouchGuardSingleSourceTests
 {
     /* The two files that carry a guarded last_seen touch. Named rather than globbed: a glob that stopped

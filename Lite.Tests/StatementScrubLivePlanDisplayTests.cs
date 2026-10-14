@@ -31,6 +31,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <see cref="LivePlanDisplay.Filter"/> at the call. Pinned here: the helper, a scan of every caller in the app, and
 /// the state the plan viewer is left in for a plan the filter withholds whole.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementScrubLivePlanDisplayTests
 {
     private const string Marker = SensitiveStatements.PlaceholderText;

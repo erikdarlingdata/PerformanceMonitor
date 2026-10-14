@@ -44,6 +44,7 @@ namespace Darling.Tests;
 /// alike, and that the new cross-server read is bounded the way <see cref="DarlingFleetReader.FleetLastCollectionSql"/>'s
 /// comment demands of a read over a table that only grows.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class FleetCardPostgresCpuTests
 {
     private static readonly DateTime Now = new(2026, 9, 10, 12, 0, 0, DateTimeKind.Utc);

@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// construct witnesses — a desynchronised walk cannot stay balanced across hundreds of real files by luck,
 /// and every one of these pins reports its offenders by LINE.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class CSharpSourceWalkerTests
 {
     /// <summary>Joins fixture lines with <c>\n</c> explicitly rather than embedding newlines in a literal,

@@ -37,6 +37,7 @@ namespace Lite.Tests;
 /// set, so the parity claim above still holds everywhere else and a second change cannot ride along with
 /// this one.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class AlertDeliveryChannelTests
 {
     /* ─────────────── the parity claim: Lite's stored values did not move ─────────────── */

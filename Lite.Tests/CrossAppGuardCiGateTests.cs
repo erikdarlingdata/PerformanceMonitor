@@ -83,6 +83,7 @@ namespace Lite.Tests;
 /// <see cref="WholeTreeBackstopIsIntact"/> holds.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class CrossAppGuardCiGateTests
 {
     /* Which filter gates which suite, per build.yml's "Run Lite tests (shard)" / "Run Darling tests"

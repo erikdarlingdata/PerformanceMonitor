@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// are deliberately not scored), and against the two tools' descriptions and refusals.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class FactSourceRegistryTests
 {
     /// <summary>A source literal wherever it is stamped: <c>Source = "waits"</c> on a fact, or the one named

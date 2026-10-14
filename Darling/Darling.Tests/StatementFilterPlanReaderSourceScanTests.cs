@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// wrapped and planted in <c>StatementFilterPlanReadsLiveTests</c>. (2) No other file under <c>Mcp</c> names a plan column in
 /// SQL it runs, so a tool cannot read a plan around the seam. (3) The scan itself is proven against planted sources.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementFilterPlanReaderSourceScanTests
 {
     /// <summary>Each public read, and how many times its own body calls <c>SensitiveStatements.Xml</c> (a method that only

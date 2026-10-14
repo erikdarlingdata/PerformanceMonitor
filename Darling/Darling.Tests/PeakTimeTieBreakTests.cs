@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// an old one, is held to both halves without anyone registering it; a sort added without either half fails
 /// here rather than showing a different time on a rerun.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class PeakTimeTieBreakTests
 {
     private const string AnalysisProject = "PerformanceMonitor.Darling.Analysis";

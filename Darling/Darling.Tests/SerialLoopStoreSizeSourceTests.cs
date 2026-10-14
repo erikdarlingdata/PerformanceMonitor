@@ -50,6 +50,7 @@ namespace Darling.Tests;
 /// </list></para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class SerialLoopStoreSizeSourceTests
 {
     /// <summary>

@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// withheld guard first (Lite.Tests holds the same scan over Lite and the shared project), and the service handlers a live
 /// answer comes from still judge it.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementScrubViewerSavePathsTests
 {
     private static IEnumerable<string> ViewerSources() =>

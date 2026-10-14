@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// machine — it never goes to the store or the control plane, because a color is a preference of the
 /// person at this screen and not a fact about the fleet. A viewer seat on another machine keeps its own.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class ViewerThemeColorOverridesTests
 {
     private static readonly string ViewerDir = Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer");

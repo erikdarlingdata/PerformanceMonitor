@@ -16,6 +16,7 @@ namespace PerformanceMonitorLite.Tests;
 /// The text now says what the code knows (the database was busy, nothing was dismissed, try again) and names the
 /// holder only when the lock registry named one.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StoreBusyReportTests
 {
     private static StoreLockTimeoutException Timeout(params StoreLockHolder[] holders)

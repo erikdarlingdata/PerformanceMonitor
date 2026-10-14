@@ -74,6 +74,7 @@ namespace Darling.Tests;
 /// store connection held for the body's duration, and a 60 s watchdog that only logs. It is derived at
 /// the width the knob is MOVING to (8), not the seeded 4.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class CollectionSweepCommandTimeoutTests
 {
     /// <summary>

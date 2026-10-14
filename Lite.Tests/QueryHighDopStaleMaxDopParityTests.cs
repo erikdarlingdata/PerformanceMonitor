@@ -57,6 +57,7 @@ namespace Lite.Tests;
 /// exists for).</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class QueryHighDopStaleMaxDopParityTests
 {
     /// <summary>

@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// to the sidebar's server, as on a fresh load. Every reload runs this path: a local add, edit or remove, and
 /// the sync above, all through <c>LoadServersAsync(preserveSelection: true)</c>.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class ViewerServerSetSyncTests
 {
     // ── Source pins: the wiring in the viewer shell ──────────────────────────────────────────────

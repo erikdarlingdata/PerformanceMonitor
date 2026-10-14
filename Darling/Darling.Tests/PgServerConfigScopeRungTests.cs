@@ -59,6 +59,7 @@ namespace Darling.Tests;
 /// collector's payload tail and UNION, the probe, the reader census, and the live round trip through
 /// <c>get_pg_server_config</c>.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class PgServerConfigScopeRungTests
 {
     private const int RungVersion = 138;

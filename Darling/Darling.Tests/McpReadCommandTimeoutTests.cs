@@ -50,6 +50,7 @@ namespace Darling.Tests;
 /// precedent. Each band encodes the reasoning that produced the number, so a re-derivation inside it is free
 /// and a drift out of it has to argue with the derivation on <see cref="McpCommandDeadlines"/>.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class McpReadCommandTimeoutTests
 {
     /// <summary>

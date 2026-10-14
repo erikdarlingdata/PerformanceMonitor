@@ -17,6 +17,7 @@ namespace Darling.Tests;
 // what keeps the expected strings honest on a machine that separates numbers differently.
 //
 // Ported from erikdarlingdata/PerformanceStudio@caa57ce's MetricFormatterTests.
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class Viewer4577Tests
 {
     private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;

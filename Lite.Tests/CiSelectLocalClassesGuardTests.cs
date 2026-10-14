@@ -219,6 +219,84 @@ public sealed class CiSelectLocalClassesGuardTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #5798: the extractor reads declarations from C# and SQL hunks, a store migration as its V-number, and nothing
+    /// else: not a call, not a parameter, not a name only a test file declares.
+    /// </summary>
+    [Fact]
+    public void SymbolExtractor_ReadsTheDeclarationsOfCSharpAndSqlHunks()
+    {
+        var diff = string.Join('\n',
+            "diff --git a/Darling/Store/PgMigrations.cs b/Darling/Store/PgMigrations.cs",
+            "--- a/Darling/Store/PgMigrations.cs",
+            "+++ b/Darling/Store/PgMigrations.cs",
+            "@@ -10,0 +11,4 @@ public static class PgMigrations",
+            "+    private const string V184Sql = @\"",
+            "+    public static int CountWidgetSpans(int limit) => limit;",
+            "+        return ReadWidgetThing(limit);",
+            "+        new Migration(184, \"widget-spans\", V184Sql),",
+            "diff --git a/install/52_widget.sql b/install/52_widget.sql",
+            "--- a/install/52_widget.sql",
+            "+++ b/install/52_widget.sql",
+            "@@ -1,0 +1,2 @@",
+            "+CREATE TABLE IF NOT EXISTS collect.widget_spans (id int);",
+            "+CREATE OR ALTER VIEW report.v_widget_rollup AS SELECT 1;",
+            "diff --git a/Lite.Tests/WidgetTests.cs b/Lite.Tests/WidgetTests.cs",
+            "--- a/Lite.Tests/WidgetTests.cs",
+            "+++ b/Lite.Tests/WidgetTests.cs",
+            "@@ -1,0 +1,1 @@",
+            "+    public void OnlyInATestFile() { }",
+            "");
+        var diffFile = Path.Combine(_repo, "fixture.diff");
+        File.WriteAllText(diffFile, diff);
+        const string Code = "import importlib.util, json, sys\n"
+            + "spec = importlib.util.spec_from_file_location('ci_select', sys.argv[1])\n"
+            + "m = importlib.util.module_from_spec(spec)\n"
+            + "spec.loader.exec_module(m)\n"
+            + "tokens, tests = m.changed_symbols(open(sys.argv[2], encoding='utf-8').read())\n"
+            + "print(json.dumps({'tokens': sorted(tokens), 'tests': sorted(tests)}))\n";
+
+        var (code, output) = Run(ParitySource.RepoRoot(), "python", "-I", "-c", Code, Script(), diffFile);
+
+        Assert.True(code == 0, output);
+        var json = Json(output);
+        var tokens = json.GetProperty("tokens").EnumerateArray().Select(t => t.GetString()).ToList();
+        Assert.Equal(
+            new[] { "CountWidgetSpans", "PgMigrations", "V184", "V184Sql", "v_widget_rollup", "widget_spans" },
+            tokens);
+        Assert.Equal("Lite.Tests/WidgetTests.cs", Assert.Single(json.GetProperty("tests").EnumerateArray()).GetString());
+    }
+
+    /// <summary>
+    /// #5798: <c>local-filter</c> prints, per suite, the test executable's class filter and then the class list, and
+    /// last the guard set. A helper class with no test of its own and a Stage=Guard class are not in the list.
+    /// </summary>
+    [Fact]
+    public void LocalFilter_PrintsTheClassFilter_ThenTheClassList_ThenTheGuardSet()
+    {
+        Write("Lite.Tests/HoldsTestsTests.cs",
+            "public class HoldsTestsTests\n{\n    [Fact]\n    public void T() => FrobnicateWidget();\n\n"
+            + "    private sealed class FakeWidgetHelper\n    {\n        public void F() => FrobnicateWidget();\n    }\n\n"
+            + "    [Fact]\n    public void U() { }\n}\n");
+        Write("Lite.Tests/WidgetGuardTests.cs",
+            "[Trait(\"Stage\", \"Guard\")]\npublic class WidgetGuardTests\n{\n    [Fact]\n    public void T() => FrobnicateWidget();\n}\n");
+        Git("add", "-A");
+        Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "holders");
+        Git("tag", "-f", "base");
+        ChangeProbe("public int FrobnicateWidget() => 2;");
+
+        var (code, output) = RunScript("local-filter", "--base", "base", "--root", _repo);
+
+        Assert.True(code == 0, output);
+        var text = output.Replace("\r", "", StringComparison.Ordinal);
+        // NamesProbeTests and LiveProbeTests name the method but declare no [Fact], so they are not test classes.
+        Assert.Contains("lite: -class \"*.HoldsTestsTests\"\nlite classes: HoldsTestsTests\nguard: -trait Stage=Guard\n",
+            text, StringComparison.Ordinal);
+        Assert.DoesNotContain("FakeWidgetHelper", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("WidgetGuardTests", text, StringComparison.Ordinal);
+        Assert.Contains("no --map:", text, StringComparison.Ordinal);
+    }
+
     private static JsonElement Json(string output)
     {
         var start = output.IndexOf('{', StringComparison.Ordinal);

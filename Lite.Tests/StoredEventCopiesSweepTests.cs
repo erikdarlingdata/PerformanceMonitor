@@ -17,6 +17,7 @@ namespace PerformanceMonitorLite.Tests;
 /// are skipped by the shared <see cref="CSharpSourceWalker"/>. A new read fails here until it goes through
 /// StoredEventCopies or joins the list with its reason.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class StoredEventCopiesSweepTests
 {
     private static readonly string[] Views = ["v_blocked_process_reports", "v_long_query_completions", "v_system_health_events", "v_deadlocks"];

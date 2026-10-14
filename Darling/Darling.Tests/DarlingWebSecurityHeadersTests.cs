@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// reply, in loopback mode and in network mode. A second group checks <c>wwwroot/</c> for any construct the policy
 /// would block, so a later change to the page cannot start failing in the browser without a test going red.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class DarlingWebSecurityHeadersTests
 {
     private const string ListenIp = "192.168.1.205";

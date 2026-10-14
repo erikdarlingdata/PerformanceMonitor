@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// a <c>Grid</c> are checked: an attached <c>Grid.Row</c> on something nested inside a <c>StackPanel</c> is
 /// inert, and reading it as an assignment against the enclosing grid would invent offenders.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class XamlGridRowRangeTests
 {
     [Fact]

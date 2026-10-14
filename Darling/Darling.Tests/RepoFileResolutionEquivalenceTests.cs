@@ -42,6 +42,7 @@ namespace Darling.Tests;
 /// subdirectory reds there rather than silently resolving from a different starting point.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class RepoFileResolutionEquivalenceTests
 {
     /// <summary>A call site that really exists, paired with the resolver that used to serve it.</summary>

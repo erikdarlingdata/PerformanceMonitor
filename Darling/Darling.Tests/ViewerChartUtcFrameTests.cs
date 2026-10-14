@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// pins read every file of the viewer, so a chart added later that plots a display-time X, or draws its axis or hover
 /// in the old frame, fails here and not on a screen in another time zone.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class ViewerChartUtcFrameTests
 {
     private static string RepoRoot([CallerFilePath] string thisFile = "")

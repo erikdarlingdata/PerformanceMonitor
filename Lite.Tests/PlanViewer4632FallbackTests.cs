@@ -53,6 +53,7 @@ namespace Lite.Tests;
 /// resolved-brush assertions below already pin the exact color value that rendering path would hand a
 /// critical-tier node under each scope.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class PlanViewer4632FallbackTests
 {
     private const string DashboardLightTheme = "deprecated/Dashboard/Themes/LightTheme.xaml";

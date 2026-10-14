@@ -52,6 +52,7 @@ namespace Lite.Tests;
 /// Lite) and in the nightly, so a docs edit that quietly breaks the parity this file checks is caught
 /// there instead of at PR time.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class LiteRuntimePrerequisiteDocsTests
 {
     private const string RootReadmePath = "README.md";

@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// <see cref="ViewerCommandDeadlines"/>. Freezing the numbers themselves would couple three
 /// deliberate values to one test, which is what the <c>.Storage</c> pin declined to do.</para>
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class ViewerCommandTimeoutTests
 {
     /// <summary>

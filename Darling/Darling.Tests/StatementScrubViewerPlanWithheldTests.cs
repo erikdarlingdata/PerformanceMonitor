@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// and no site that saves a plan to a <c>.sqlplan</c> file writes it. The control and the guard are the shared
 /// <c>PerformanceMonitor.Ui</c> ones Lite uses too; Lite.Tests holds the same pins for Lite's own save sites.
 /// </summary>
+[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementScrubViewerPlanWithheldTests
 {
     private const string Marker = SensitiveStatements.PlaceholderText;
