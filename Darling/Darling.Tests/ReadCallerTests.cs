@@ -18,7 +18,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the read caller (#5793): the MCP caller string (client info name and version, else the User-Agent's first product
-/// token, else <c>unknown</c>, held to 80 characters), the web caller (a salted hash of the session key that two reads of one
+/// token, else <c>unknown</c>, sanitized as #5654 sanitizes stored display text and held to 80 characters on whole text
+/// elements), the web caller (a salted hash of the session key that two reads of one
 /// session share, two sessions do not, and that is neither the key nor a prefix of it), the accumulator's distinct-caller
 /// count and its cap, and a name scan that fails if any recorder input or stored column is named like personal data.
 /// </summary>
@@ -43,6 +44,59 @@ public sealed class ReadCallerTests
         var agent = ReadCaller.OfMcpClient(null, null, "x/" + new string('9', 200));
         Assert.Equal(80, agent.Length);
         Assert.StartsWith("ua:x/999", agent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AClientNameWhoseCutWouldSplitAnEmoji_KeepsWholeTextElements()
+    {
+        /* 79 characters, then an emoji whose surrogate pair sits at UTF-16 indexes 79 and 80: an index cut keeps the high
+           half alone. The cut keeps whole text elements, so the emoji goes and no lone surrogate is stored. */
+        const string Robot = "\U0001F916";
+        var caller = ReadCaller.OfMcpClient(new string('n', 79) + Robot + "tail", null, null);
+        Assert.Equal(new string('n', 79), caller);
+        Assert.DoesNotContain(caller, char.IsSurrogate);
+
+        /* An emoji that fits is kept whole, and a joined emoji sequence (family, joined by U+200D) is one text element. */
+        const string Family = "\U0001F468\u200D\U0001F469\u200D\U0001F467";
+        var fits = ReadCaller.OfMcpClient(new string('n', 70) + Robot + Family + "x", null, null);
+        Assert.Equal(new string('n', 70) + Robot + Family, fits);
+
+        var cutFamily = ReadCaller.OfMcpClient(new string('n', 75) + Family, null, null);
+        Assert.Equal(new string('n', 75), cutFamily);
+
+        /* The ua: arm: "ua:" plus 76 characters puts the emoji at indexes 79 and 80 again. */
+        var agent = ReadCaller.OfMcpClient(null, null, new string('a', 76) + Robot + "/1.0");
+        Assert.Equal("ua:" + new string('a', 76), agent);
+        Assert.DoesNotContain(agent, char.IsSurrogate);
+    }
+
+    [Fact]
+    public void AClientNameCarryingControlAndReorderingCharacters_IsStoredSanitized()
+    {
+        /* A line break and ESC become one space (a run collapses to one); U+202E RIGHT-TO-LEFT OVERRIDE and U+200B are dropped,
+           so the stored caller reads as the text that was stored. The version gets the same treatment. */
+        Assert.Equal(
+            "evil client 1.0 x",
+            ReadCaller.OfMcpClient("evil\nclient\u001B\u202E", "1.0\r\n\u200Bx", null));
+        Assert.Equal("cli 2", ReadCaller.OfMcpClient("\u202Ecli\u2066", "\t2\u0085", null));
+
+        /* A name that sanitizes to nothing is no name: the caller falls through to the User-Agent. */
+        Assert.Equal("ua:node/22", ReadCaller.OfMcpClient("\u202E\u200B", "1.0", "node/22"));
+
+        /* The ua: arm: the token stops at a line break or ESC, and the format characters inside it are dropped. */
+        Assert.Equal("ua:node/22", ReadCaller.OfMcpClient(null, null, "node/22\nX-Other: 1"));
+        Assert.Equal("ua:node", ReadCaller.OfMcpClient(null, null, "node\u001B[31m/22"));
+        Assert.Equal("ua:node/22", ReadCaller.OfMcpClient(null, null, "no\u202Ede/22\u2069"));
+        Assert.Equal("unknown", ReadCaller.OfMcpClient(null, null, "\u202E\u200B (x)"));
+
+        foreach (var caller in new[]
+                 {
+                     ReadCaller.OfMcpClient("a\u202Eb\nc\u001Bd", "\u2067v", null),
+                     ReadCaller.OfMcpClient(null, null, "t\u202E\u061C/1\u001B"),
+                 })
+        {
+            Assert.DoesNotContain(caller, c => char.IsControl(c) || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format);
+        }
     }
 
     [Fact]
@@ -150,6 +204,12 @@ public sealed class ReadCallerTests
         Assert.Equal(1_000, ReadLatencyAccumulator.MaxDistinctCallers);
         Assert.Equal(ReadLatencyAccumulator.MaxDistinctCallers, row.DistinctCallers);
         Assert.Equal(ReadLatencyAccumulator.MaxDistinctCallers + 250, row.Count);
+
+        /* The guide says the count is capped, so a reader who sees exactly the cap knows it is a floor (#5793 review). */
+        var description = typeof(DarlingMcpReadLatencyTools).GetMethod(nameof(DarlingMcpReadLatencyTools.GetReadLatency))!
+            .GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
+        var cap = ReadLatencyAccumulator.MaxDistinctCallers.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Contains($"At most {cap} are counted per hour; {cap} means at least that many.", description, StringComparison.Ordinal);
     }
 
     /* A name that reads like personal or credential data. Compared after lower-casing and dropping '_' and '-'. */

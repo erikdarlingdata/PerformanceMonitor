@@ -2711,6 +2711,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// request's session key, a salted hash. Only the hash leaves this method; the key itself is never recorded.</summary>
     internal static string WebReadCaller(HttpContext context)
         => ReadCaller.OfWebSession(context.Request.Cookies[Mcp.DarlingWebHostService.SessionCookieName]);
+
     /// <summary>The window band of one <c>/api/read/&lt;name&gt;</c> request (#5506): the window the query string sent, else
     /// the default <see cref="CatalogDescriptors"/> declares for that read, else <c>none</c>. Internal so a test can pin a
     /// request that sends no window against the catalog's default.</summary>

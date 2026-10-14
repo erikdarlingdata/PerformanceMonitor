@@ -78,7 +78,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "wait_total_ms is the summed part of these reads' time spent waiting for a store connection rather than running. "
         + "Rows stored before schema V182 read as band none with 0 for both. "
         + "distinct_callers is the most different callers (MCP clients by name and version, web sessions by a salted hash that "
-        + "holds no personal data) that read the route in any one hour of the window, 0 on rows stored before schema V183. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
+        + "holds no personal data) that read the route in any one hour of the window, 0 on rows stored before schema V183. At most 1,000 are counted per hour; 1,000 means at least that many. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
         + "window/filter, which on a fresh store, or one below schema V148, is the expected answer — not a "
         + "sign anything is broken. The page is capped at limit rows or the shared ~32 KB response budget, whichever cuts first: "

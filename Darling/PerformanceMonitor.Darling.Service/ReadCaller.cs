@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -56,18 +57,23 @@ internal static class ReadCaller
     internal static void SetAmbientMcpCaller(string? caller) => s_ambientMcpCaller.Value = caller;
 
     /// <summary>The MCP caller: client info name and version when the client sent a name, else <c>ua:</c> and the first
-    /// product token of <paramref name="userAgent"/>, else <c>unknown</c>. Trimmed to <see cref="MaxLength"/>.</summary>
+    /// product token of <paramref name="userAgent"/>, else <c>unknown</c>. Every part is client-supplied text, so each one
+    /// runs through <see cref="CustomAlertEvaluator.SanitizeDisplayText"/> (#5654) before it is stored: a line break or
+    /// other control character becomes one space, and a character that reorders or hides text (U+202E and the rest of the
+    /// Unicode Format category) is dropped, so the caller <c>get_slow_reads</c> serves is the text that was stored. The
+    /// result is then cut to <see cref="MaxLength"/> on whole text elements, never inside a surrogate pair or an emoji
+    /// sequence.</summary>
     internal static string OfMcpClient(string? clientName, string? clientVersion, string? userAgent)
     {
-        var name = clientName?.Trim();
-        if (!string.IsNullOrEmpty(name))
+        var name = CustomAlertEvaluator.SanitizeDisplayText(clientName, int.MaxValue);
+        if (name.Length > 0)
         {
-            var version = clientVersion?.Trim();
-            return Cap(string.IsNullOrEmpty(version) ? name : name + " " + version);
+            var version = CustomAlertEvaluator.SanitizeDisplayText(clientVersion, int.MaxValue);
+            return Cap(version.Length == 0 ? name : name + " " + version);
         }
 
-        var product = FirstProductToken(userAgent);
-        return product is null ? Unknown : Cap("ua:" + product);
+        var product = CustomAlertEvaluator.SanitizeDisplayText(FirstProductToken(userAgent), int.MaxValue);
+        return product.Length == 0 ? Unknown : Cap("ua:" + product);
     }
 
     /// <summary>The first product token of a User-Agent value (<c>node/22.3.0</c> from <c>node/22.3.0 (win32; x64)</c>), or
@@ -105,5 +111,28 @@ internal static class ReadCaller
         return "web:" + Convert.ToHexStringLower(mac)[..WebHashHexLength];
     }
 
-    private static string Cap(string value) => value.Length > MaxLength ? value[..MaxLength] : value;
+    /* Cut on text elements, not on a UTF-16 index: an index cut can keep the high half of a surrogate pair alone, which the
+       store's UTF-8 writer refuses or the JSON writer turns into U+FFFD (#3625). The kept text is at most MaxLength UTF-16
+       characters and ends on a whole text element; a space left at the cut is trimmed. */
+    private static string Cap(string value)
+    {
+        if (value.Length <= MaxLength)
+        {
+            return value;
+        }
+
+        var end = 0;
+        while (end < value.Length)
+        {
+            var next = StringInfo.GetNextTextElementLength(value, end);
+            if (end + next > MaxLength)
+            {
+                break;
+            }
+
+            end += next;
+        }
+
+        return value[..end].TrimEnd();
+    }
 }
