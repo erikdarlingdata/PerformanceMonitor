@@ -38,12 +38,13 @@ public sealed class ReadLatencyCapacityRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
-    public void TheRungIsRegistered_OnceAtTheTopOfTheLadder()
+    public void TheRungIsRegistered_OnceBelowTheTopOfTheLadder()
     {
         Assert.Equal("read-latency-capacity-fields", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(RungVersion, PgMigrations.Scripts[^1].Version);
+        /* V183 (#5793) took the top of the ladder; this rung stays registered below it. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
@@ -65,24 +66,29 @@ public sealed class ReadLatencyCapacityRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheSentinel_AtTheLastOrdinal_AndAFullyMigratedStoreMapsToThisTopRung()
+    public void TheProbeCarriesTheSentinel_BelowV183s_AndAStoreStoppedHereMapsToThisRung()
     {
         Assert.Contains("to_regclass('collect.read_latency') AND attname = 'window_band'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasReadLatencyCapacityFields", parameters[^1].Name);
-        Assert.Equal("hasNotificationRouteScope", parameters[^2].Name);
+        /* V183's sentinel (#5793) is the last parameter; this one is just below it. */
+        Assert.Equal("hasReadCaller", parameters[^1].Name);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[^2].Name);
+        Assert.Equal("hasNotificationRouteScope", parameters[^3].Name);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({parameters.Length - 1})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({parameters.Length})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({parameters.Length - 2})", viewer, StringComparison.Ordinal);
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
+        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        var behind = (object[])all.Clone();
-        behind[^1] = false;
+        var atThisRung = (object[])all.Clone();
+        atThisRung[^1] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
+
+        var behind = (object[])atThisRung.Clone();
+        behind[^2] = false;
         Assert.Equal(181, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasReadLatencyCapacityFields)", StringComparison.Ordinal);
@@ -118,6 +124,7 @@ public sealed class ReadLatencyCapacityRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V181 shape and the ladder back to 181. */
+        await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
         await ExecAsync(connection, @"
 DELETE FROM darling_schema_version WHERE version >= 182;
@@ -138,7 +145,7 @@ VALUES ('2026-10-01 05:10', 'mcp', 'get_wait_stats', 'timeout', 60000, '{}', fal
 
     private static async Task AssertMigratedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        Assert.Equal(RungVersion, await ProbedVersionAsync(connection, ct));
+        Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
         Assert.Equal("3|3|0|0|10", await ScalarAsync(connection, @"
 SELECT count(*) || '|' || count(*) FILTER (WHERE window_band = 'none') || '|' || max(max_in_flight) || '|' || sum(wait_total_ms) || '|' || sum(run_count)
 FROM collect.read_latency", ct));

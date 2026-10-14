@@ -318,9 +318,15 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 183)
+        {
+            /* V183 (#5793) - the read-latency distinct caller column is the probe's newest sentinel. */
+            await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
+        }
+
         if (simulatedVersion < 182)
         {
-            /* V182 (#5506) - the read-latency window band column is the probe's newest sentinel. */
+            /* V182 (#5506) - the read-latency window band column. */
             await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
         }
 

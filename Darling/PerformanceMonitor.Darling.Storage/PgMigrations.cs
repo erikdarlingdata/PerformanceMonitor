@@ -1206,6 +1206,23 @@ ALTER TABLE collect.slow_reads
     ADD COLUMN IF NOT EXISTS wait_ms bigint;";
 
     /// <summary>
+    /// V183 (#5793): who made each read, with no personal data. <c>collect.slow_reads</c> gains the nullable <c>caller</c> (an
+    /// MCP client's own name and version, its User-Agent product token when it sent none, or <c>web:</c> and a salted hash of
+    /// the web session key) and <c>collect.read_latency</c> gains <c>distinct_callers</c> (how many different callers read the
+    /// key in the hour). The caller does not join the hourly key, which would multiply its rows by the number of clients.
+    ///
+    /// <para>Rows stored before this rung get a NULL caller and a count of 0 from the column default. Both ADD COLUMNs are
+    /// IF NOT EXISTS, so a second run does nothing, and neither rewrites the table. <b>No Lite twin:</b> Lite records no read
+    /// latency.</para>
+    /// </summary>
+    private const string V183Sql = @"
+ALTER TABLE collect.slow_reads
+    ADD COLUMN IF NOT EXISTS caller text;
+
+ALTER TABLE collect.read_latency
+    ADD COLUMN IF NOT EXISTS distinct_callers integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1499,6 +1516,7 @@ $rung$;";
         new Migration(180, "external-alerts", V180Sql),
         new Migration(181, "notification-route-scope", V181Sql),
         new Migration(182, "read-latency-capacity-fields", V182Sql),
+        new Migration(183, "read-caller", V183Sql),
     };
 
     /// <summary>

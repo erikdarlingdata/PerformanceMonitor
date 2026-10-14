@@ -129,7 +129,7 @@ public sealed class McpToolLatencyRecordingTests
         return SendJsonRpcAsync(server, path, requestBody);
     }
 
-    private static async Task<(int StatusCode, string Body)> SendJsonRpcAsync(TestServer server, string path, string requestBody)
+    private static async Task<(int StatusCode, string Body)> SendJsonRpcAsync(TestServer server, string path, string requestBody, string? userAgent = null)
     {
         var ctx = await server.SendAsync(c =>
         {
@@ -142,6 +142,10 @@ public sealed class McpToolLatencyRecordingTests
             c.Request.Body = new System.IO.MemoryStream(bytes);
             c.Request.ContentLength = bytes.Length;
             c.Connection.RemoteIpAddress = IPAddress.Loopback;
+            if (userAgent is not null)
+            {
+                c.Request.Headers.UserAgent = userAgent;
+            }
         });
 
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
@@ -262,5 +266,56 @@ public sealed class McpToolLatencyRecordingTests
         Assert.Equal(ReadOutcome.Error, sample.Outcome);
         Assert.Equal(1, sample.Count);
         Assert.DoesNotContain(drained, d => d.Surface == ReadSurface.Mcp && d.Route == "run_custom_view_panel");
+    }
+
+    /// <summary>#5793: the stateless host has no client info on a tool call from a client on the initialize handshake, so the
+    /// caller is the first product token of its User-Agent, on both the hourly key and the slow-read row.</summary>
+    [Fact]
+    public async Task AToolCallWithNoClientInfo_IsNamedByItsUserAgentProduct_OnTheHourAndTheSlowRead()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var slowReads = new SlowReadLog(0);
+        using var server = await BuildServer(readLatency, slowReads);
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"latency_probe_ok\",\"arguments\":{}}}";
+
+        await SendJsonRpcAsync(server, "/", requestBody, "node/22.3.0 (win32; x64) undici/6.19");
+        await SendJsonRpcAsync(server, "/", requestBody, "python-httpx/0.27.0");
+
+        var sample = Assert.Single(readLatency.Drain(), d => d.Route == "latency_probe_ok");
+        Assert.Equal(2, sample.DistinctCallers);
+        Assert.True(slowReads.TryRead(out var first));
+        Assert.True(slowReads.TryRead(out var second));
+        Assert.Equal(new[] { "ua:node/22.3.0", "ua:python-httpx/0.27.0" }, new[] { first!.Caller, second!.Caller });
+    }
+
+    /// <summary>#5793: a tool call that carries neither client info nor a User-Agent records <c>unknown</c>.</summary>
+    [Fact]
+    public async Task AToolCallWithNeitherClientInfoNorUserAgent_IsUnknown()
+    {
+        var slowReads = new SlowReadLog(0);
+        using var server = await BuildServer(new ReadLatencyAccumulator(), slowReads);
+
+        await ToolsCallAsync(server, "/", "latency_probe_ok");
+
+        Assert.True(slowReads.TryRead(out var record));
+        Assert.Equal("unknown", record!.Caller);
+    }
+
+    /// <summary>#5793: run_custom_view_panel records through the shared composed-panel runner, which takes the caller the tool
+    /// filter worked out for the call.</summary>
+    [Fact]
+    public async Task ACustomViewPanelCall_RecordsTheMcpCallerOnItsComposeSample()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var slowReads = new SlowReadLog(0);
+        using var server = await BuildServer(readLatency, slowReads);
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"spec\":\"{}\"}}}";
+
+        await SendJsonRpcAsync(server, "/", requestBody, "Claude-User/1.0");
+
+        Assert.Equal(1, Assert.Single(readLatency.Drain(), d => d.Surface == ReadSurface.Compose).DistinctCallers);
+        Assert.True(slowReads.TryRead(out var record));
+        Assert.Equal("compose", record!.Surface);
+        Assert.Equal("ua:Claude-User/1.0", record.Caller);
     }
 }

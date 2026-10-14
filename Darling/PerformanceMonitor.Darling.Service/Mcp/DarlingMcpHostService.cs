@@ -1087,6 +1087,10 @@ public sealed class DarlingMcpHostService : BackgroundService
         var hostReadLatency = readLatency ?? new ReadLatencyAccumulator();
         var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger, slowReads);
 
+        /* #5793: the filter names a client that sent no client info by its User-Agent product token, read through the
+           accessor. AddHttpContextAccessor is idempotent, so a host that already registers it is unchanged. */
+        services.AddHttpContextAccessor();
+
         /* #4782: run_custom_view_panel records its composed-panel run through the shared runner, which used to
            find the accumulator in a process-wide static that only the web host set -- so the run was dropped
            whenever the web host was off, and was tied to whichever web server was mapped last when several

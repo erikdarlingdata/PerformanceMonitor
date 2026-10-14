@@ -51,6 +51,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "(surface, route, window band: 1h, 24h, 7d, 7d+ or none). "
         + "max_in_flight is the most other reads running when one started. "
         + "wait_total_ms is the summed wait for a store connection. "
+        + "distinct_callers is the most different callers in one hour; no personal data. "
         + "Sorted p95 desc. Optional surface (web/compose/mcp) and route filter. Empty means no read in the window, not a failure. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history — how long the web dashboard's `/api/read/*` "
@@ -75,7 +76,9 @@ public sealed class DarlingMcpReadLatencyTools
         + "7d (over 24 hours up to 7 days), 7d+ (longer), or none (the read asked for no window). "
         + "max_in_flight is the most other reads already running on the service when one of these reads started. "
         + "wait_total_ms is the summed part of these reads' time spent waiting for a store connection rather than running. "
-        + "Rows stored before schema V182 read as band none with 0 for both. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
+        + "Rows stored before schema V182 read as band none with 0 for both. "
+        + "distinct_callers is the most different callers (MCP clients by name and version, web sessions by a salted hash that "
+        + "holds no personal data) that read the route in any one hour of the window, 0 on rows stored before schema V183. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
         + "window/filter, which on a fresh store, or one below schema V148, is the expected answer — not a "
         + "sign anything is broken. The page is capped at limit rows or the shared ~32 KB response budget, whichever cuts first: "
@@ -159,6 +162,7 @@ public sealed class DarlingMcpReadLatencyTools
                 gate_failures = x.Row.GateFailures,
                 max_in_flight = x.Row.MaxInFlight,
                 wait_total_ms = x.Row.WaitTotalMs,
+                distinct_callers = x.Row.DistinctCallers,
             }).ToArray();
 
             return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes);

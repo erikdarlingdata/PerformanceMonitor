@@ -53,7 +53,8 @@ internal static class DarlingReadLatencyReader
         long GateFailures,
         string WindowBand = ReadWindowBand.None,
         int MaxInFlight = 0,
-        long WaitTotalMs = 0)
+        long WaitTotalMs = 0,
+        int DistinctCallers = 0)
     {
         /// <summary>Zero when nothing ran, matching how <c>get_collector_cost</c> reports its average.</summary>
         public long MeanMs => RunCount > 0 ? TotalMs / RunCount : 0;
@@ -74,7 +75,7 @@ internal static class DarlingReadLatencyReader
         var sql = $@"
 WITH windowed AS
 (
-    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms
+    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers
     FROM collect.read_latency
     WHERE metric_time >= $1{surfaceFilter}{routeFilter}
 ),
@@ -91,7 +92,8 @@ totals AS
         coalesce(sum(run_count) FILTER (WHERE outcome = 'fallback_raw'), 0) AS fallbacks,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'gate_failed'), 0) AS gate_failures,
         max(max_in_flight)                                    AS max_in_flight,
-        sum(wait_total_ms)                                    AS wait_total_ms
+        sum(wait_total_ms)                                    AS wait_total_ms,
+        max(distinct_callers)                                 AS distinct_callers
     FROM windowed
     GROUP BY surface, route, window_band
 ),
@@ -109,7 +111,7 @@ bucket_arrays AS
     GROUP BY surface, route, window_band
 )
 SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts, t.fallbacks, t.gate_failures,
-       t.window_band, t.max_in_flight, t.wait_total_ms::bigint
+       t.window_band, t.max_in_flight, t.wait_total_ms::bigint, t.distinct_callers
 FROM totals AS t
 JOIN bucket_arrays AS ba ON ba.surface = t.surface AND ba.route = t.route AND ba.window_band = t.window_band
 ORDER BY t.surface, t.route, t.window_band";
@@ -142,7 +144,8 @@ ORDER BY t.surface, t.route, t.window_band";
                 reader.GetInt64(8),
                 reader.GetString(9),
                 reader.GetInt32(10),
-                reader.GetInt64(11)));
+                reader.GetInt64(11),
+                reader.GetInt32(12)));
         }
 
         return rows;

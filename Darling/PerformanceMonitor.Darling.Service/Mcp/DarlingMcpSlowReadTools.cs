@@ -43,6 +43,7 @@ public sealed class DarlingMcpSlowReadTools
         "Gets the monitoring tool's OWN slow or failed reads — each with the arguments it was asked with, the source "
         + "that answered, and its slowest statements. Not a monitored SQL Server or PostgreSQL target. Newest first. "
         + "Optional server_name, surface (web/compose/mcp) and route filter. Empty means none was recorded, not a failure. "
+        + "caller names who read it (MCP client name and version, or a salted web-session hash); no personal data. "
         + "<<GUIDE>> "
         + "Gets the reads the monitoring tool itself answered slowly or badly. The service records one row per read on any "
         + "surface (web dashboard, composed panel, MCP tool) when the read took 5 seconds or more, or ended in a timeout, "
@@ -58,7 +59,10 @@ public sealed class DarlingMcpSlowReadTools
         + "statement's rows stays null (the driver reports no returned-row count). The read's own rows is recorded only by "
         + "reads that count them, as get_query_store_top does, and is null otherwise. in_flight is how many other reads were "
         + "already running on the service when this read started, and wait_ms is the part of total_ms it spent waiting for a store "
-        + "connection rather than running; both are null on rows stored before schema V182. A statement label is the product's own SQL "
+        + "connection rather than running; both are null on rows stored before schema V182. caller is who made the read: an MCP "
+        + "client's own name and version (ua: and its User-Agent product token when it sent none, unknown when neither), or web: "
+        + "and 12 hex characters of a hash of the web session key under a salt that lives only in the service's memory, so it holds "
+        + "no personal data and cannot be turned back into the key; null on rows stored before schema V183. A statement label is the product's own SQL "
         + "text with a short hash; parameter values are never stored. summary counts reads per (surface, route, outcome) "
         + "over the window and the filters, so it covers more than the page. reads is newest first, then newest id; the "
         + "page is capped at limit rows or the ~32 KB response budget, whichever cuts first, and truncated says either "
@@ -189,6 +193,7 @@ public sealed class DarlingMcpSlowReadTools
             rows = r.RowCount,
             in_flight = r.InFlight,
             wait_ms = r.WaitMs,
+            caller = r.Caller,
             statement_count = r.StatementCount,
             statements_truncated = r.StatementsTruncated,
             statements_omitted = omitted,

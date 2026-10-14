@@ -10,6 +10,7 @@ using System;
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -75,8 +76,17 @@ public sealed class McpToolLatencyFilter
         next => async (request, cancellationToken) =>
         {
             var toolName = request.Params?.Name;
-            if (string.IsNullOrEmpty(toolName) || string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
+            if (string.IsNullOrEmpty(toolName))
             {
+                return await next(request, cancellationToken);
+            }
+
+            /* #5793: who made the call, worked out once here so the recorder only ever sees the finished string. The
+               composed-panel tool records itself through the shared runner, which reads it from the ambient value. */
+            var caller = CallerOf(request);
+            if (string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
+            {
+                ReadCaller.SetAmbientMcpCaller(caller);
                 return await next(request, cancellationToken);
             }
 
@@ -88,15 +98,15 @@ public sealed class McpToolLatencyFilter
             {
                 var result = await next(request, cancellationToken);
                 var outcome = ReadScope.Resolve(ClassifyResult(result, cancellationToken), readScope.Fallback);
-                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope);
-                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome));
+                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope, caller);
+                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome), caller);
                 return result;
             }
             catch (Exception ex)
             {
                 var outcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, cancellationToken), readScope.Fallback);
-                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope);
-                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, SlowReadLog.ErrorClassOf(ex));
+                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope, caller);
+                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, SlowReadLog.ErrorClassOf(ex), caller);
                 throw;
             }
         };
@@ -121,7 +131,7 @@ public sealed class McpToolLatencyFilter
     /// <summary>Offers a slow or failed call to the slow-read record (#5097). The arguments are built only when the
     /// call qualifies, and nothing here can reach the request.</summary>
     private void OfferSlow(ReadScope scope, string toolName, ReadOutcome outcome, long elapsedMs,
-        ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request, string? errorClass)
+        ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request, string? errorClass, string caller)
     {
         if (_slowReads is null || !_slowReads.ShouldRecord(outcome, elapsedMs))
         {
@@ -145,7 +155,7 @@ public sealed class McpToolLatencyFilter
             _logger?.LogDebug(ex, "Slow-read arguments for MCP tool {Tool} were not read.", toolName);
         }
 
-        _slowReads.Offer(scope, ReadSurface.Mcp, toolName, outcome, elapsedMs, arguments, errorClass, _logger);
+        _slowReads.Offer(scope, ReadSurface.Mcp, toolName, outcome, elapsedMs, arguments, errorClass, _logger, caller);
     }
 
     /// <summary>The window band of the call (#5506): the window arguments the caller sent, else the defaults the matched
@@ -170,11 +180,35 @@ public sealed class McpToolLatencyFilter
         }
     }
 
-    private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope)
+    /// <summary>The caller of the call (#5793): the client info the request's server holds (sent per request from protocol
+    /// 2026-07-28; the stateless host has none for an older client's tool call), else the first product token of the HTTP
+    /// request's User-Agent, else <c>unknown</c>. The User-Agent is the only part of the request read. Never throws.</summary>
+    private string CallerOf(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
     {
         try
         {
-            _readLatency.Record(ReadSurface.Mcp, toolName, outcome, elapsedMs, windowBand, scope.InFlightAtStart, scope.WaitMs);
+            var clientInfo = request.Server?.ClientInfo;
+            string? userAgent = null;
+            if (string.IsNullOrWhiteSpace(clientInfo?.Name)
+                && request.Services?.GetService(typeof(IHttpContextAccessor)) is IHttpContextAccessor accessor)
+            {
+                userAgent = accessor.HttpContext?.Request.Headers.UserAgent.ToString();
+            }
+
+            return ReadCaller.OfMcpClient(clientInfo?.Name, clientInfo?.Version, userAgent);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "The caller of MCP tool {Tool} was not read.", request.Params?.Name);
+            return ReadCaller.Unknown;
+        }
+    }
+
+    private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope, string caller)
+    {
+        try
+        {
+            _readLatency.Record(ReadSurface.Mcp, toolName, outcome, elapsedMs, windowBand, scope.InFlightAtStart, scope.WaitMs, caller);
         }
         catch (Exception ex)
         {

@@ -115,4 +115,18 @@ ALTER TABLE IF EXISTS collect.slow_reads
     DROP COLUMN IF EXISTS wait_ms;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    /// <summary>
+    /// V183 (#5793): the read caller column of <c>collect.slow_reads</c> and the distinct caller count of
+    /// <c>collect.read_latency</c> (the probe's newest sentinel). Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV183SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS collect.read_latency
+    DROP COLUMN IF EXISTS distinct_callers;
+ALTER TABLE IF EXISTS collect.slow_reads
+    DROP COLUMN IF EXISTS caller;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
 }

@@ -263,7 +263,9 @@ public sealed class McpToolsListBudgetTests
        198,817 -> 198,869 bytes. */
     /* #5750 F10: re-measured at the head of the shared branch: 198,844 bytes, so the 198,869 above no longer holds (the head text changed
        since it was measured). Constant set to the measured value. */
-    private const int TotalCeilingBytes = 198_844;
+    /* #5793: get_read_latency's head names distinct_callers (512 -> 590 bytes) and get_slow_reads' head names caller (356 -> 460
+       bytes), each in one sentence that also says it holds no personal data. The measured total went 198,844 -> 198,998 bytes. */
+    private const int TotalCeilingBytes = 198_998;
 
 
 

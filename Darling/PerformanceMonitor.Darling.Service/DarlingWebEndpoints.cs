@@ -702,7 +702,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
-            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true);
+            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true,
+                caller: WebReadCaller(context));
             if (outcome.Payload is not null)
             {
                 return JsonNodeResult(outcome.Payload);
@@ -2661,7 +2662,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
         ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false,
-        Action<Exception>? onRunException = null, DateTime? nowUtc = null)
+        Action<Exception>? onRunException = null, DateTime? nowUtc = null, string? caller = null)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -2674,7 +2675,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         using var readScope = ReadScope.Open(readLatency?.Logger);
         readScope.Scope.CaptureStatements = true;
         var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
-        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback, readScope.Scope);
+        /* #5793: the web route passes its session hash; the MCP tool passes none, and the tool filter's ambient caller
+           names the client instead. */
+        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback, readScope.Scope,
+            caller ?? ReadCaller.AmbientMcpCaller);
         return outcome;
     }
 
@@ -2694,13 +2698,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #5506: the band of the window the page asked for (hours, hours_back or days_back on the query string); a
                request that sends none records none. */
             var band = ReadWindowBand.Of(ReadWindowBand.HoursOf(key => First(context, key)));
-            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs);
+            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs, WebReadCaller(context));
         }
         catch (Exception ex)
         {
             recorder.Logger?.LogDebug(ex, "Read-latency recording failed for /api/read/{Route}.", name);
         }
     }
+
+    /// <summary>The caller of a web or composed-panel read (#5793): <see cref="ReadCaller.OfWebSession(string?)"/> over the
+    /// request's session key, a salted hash. Only the hash leaves this method; the key itself is never recorded.</summary>
+    internal static string WebReadCaller(HttpContext context)
+        => ReadCaller.OfWebSession(context.Request.Cookies[Mcp.DarlingWebHostService.SessionCookieName]);
 
     /// <summary>The query string as slow-read arguments. A key name is caller text: only plain identifier characters
     /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>. A key that
@@ -2770,7 +2779,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))
                 : [new KeyValuePair<string, string?>(q.Key, null)]));
 
-            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger);
+            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger, WebReadCaller(context));
         }
         catch (Exception ex)
         {
@@ -2778,7 +2787,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
-    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken, ReadFallback? noted = null, ReadScope? scope = null)
+    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken, ReadFallback? noted = null, ReadScope? scope = null, string? caller = null)
     {
         try
         {
@@ -2807,7 +2816,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var resolved = ReadScope.Resolve(readOutcome, noted);
             recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, resolved, elapsedMs, ComposeWindowBand(body),
-                scope?.InFlightAtStart ?? 0, scope?.WaitMs ?? 0);
+                scope?.InFlightAtStart ?? 0, scope?.WaitMs ?? 0, caller);
 
             /* #5097: a slow or failed run also becomes a slow-read row. The panel body is the arguments. */
             if (scope is not null && recorder?.SlowReads is { } slowReads && slowReads.ShouldRecord(resolved, elapsedMs))
@@ -2815,7 +2824,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var errorClass = outcome.Fault is not null ? SlowReadLog.ErrorClassOf(outcome.Fault)
                     : outcome.AuthorSqlState is { Length: > 0 } sqlState ? sqlState
                     : resolved == ReadOutcome.Error ? "compose_error" : null;
-                slowReads.Offer(scope, ReadSurface.Compose, measureKey, resolved, elapsedMs, body.DeepClone() as JsonObject, errorClass, recorder.Logger);
+                slowReads.Offer(scope, ReadSurface.Compose, measureKey, resolved, elapsedMs, body.DeepClone() as JsonObject, errorClass, recorder.Logger, caller);
             }
         }
         catch (Exception ex)
