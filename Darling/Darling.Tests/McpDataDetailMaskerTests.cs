@@ -581,6 +581,66 @@ public sealed class McpDataDetailMaskerTests
         Assert.Contains("login#1", meta, StringComparison.Ordinal);
     }
 
+    /* #5632 Phase A, L8 ruling: the status envelope's message is Darling's own sentence (a precondition names its fix), so
+       it is masked as free text under BOTH levels and never withheld; a message key inside a result row keeps the
+       field-table treatment (withheld under metadataOnly). */
+    private const string EnvelopeAnswer =
+        "{\"status\":\"precondition\",\"message\":\"Query Store is READ_ONLY on this database: run ALTER DATABASE CURRENT SET QUERY_STORE (OPERATION_MODE = READ_WRITE) where b = 'zq-lit-5632' and size 731900417.\"," +
+        "\"rows\":[{\"message\":\"step output 731900417\"}]}";
+
+    [Theory]
+    [InlineData(McpDataDetail.MaskLiterals)]
+    [InlineData(McpDataDetail.MetadataOnly)]
+    public void EnvelopeMessage_IsMaskedAsFreeText_UnderBothLevels_AndNeverWithheld(McpDataDetail mode)
+    {
+        var masked = JsonNode.Parse(McpDataDetailMasker.ForAnswer(mode).Answer(EnvelopeAnswer))!.AsObject();
+        string envelope = masked["message"]!.GetValue<string>();
+
+        Assert.NotEqual(Withheld, envelope);
+        Assert.StartsWith("Query Store is READ_ONLY on this database: run ALTER DATABASE CURRENT SET QUERY_STORE", envelope, StringComparison.Ordinal);
+        Assert.DoesNotContain("zq-lit-5632", envelope, StringComparison.Ordinal);
+        Assert.DoesNotContain("731900417", envelope, StringComparison.Ordinal);
+        Assert.Equal("precondition", masked["status"]!.GetValue<string>());
+        /* The key keeps its place in the envelope. */
+        Assert.Equal(new[] { "status", "message", "rows" }, masked.Select(p => p.Key).ToArray());
+
+        string row = masked["rows"]![0]!["message"]!.GetValue<string>();
+        Assert.DoesNotContain("731900417", row, StringComparison.Ordinal);
+        if (mode == McpDataDetail.MetadataOnly)
+        {
+            Assert.Equal(Withheld, row);
+        }
+        else
+        {
+            Assert.Equal("step output ?", row);
+        }
+    }
+
+    [Fact]
+    public void ARootMessageWithoutAStatus_IsARowField_AndACleanEnvelope_ComesBackAsTheSameInstance()
+    {
+        const string noStatus = "{\"message\":\"step output 731900417\"}";
+        Assert.Equal(Withheld, JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Answer(noStatus))!["message"]!.GetValue<string>());
+
+        const string clean = "{\"status\":\"empty\",\"message\":\"No rows in the window.\",\"rows\":[]}";
+        Assert.Same(clean, McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Answer(clean));
+        Assert.Same(clean, McpDataDetailMasker.ForAnswer(McpDataDetail.MaskLiterals).Answer(clean));
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task RealHost_KeepsTheEnvelopeMessage_UnderMetadataOnly()
+    {
+        using var server = await StatementFilterCensus.BuildHostAsync();
+
+        var (meta, isError) = await StatementFilterCensus.FilterThroughHostAsync(server, EnvelopeAnswer, dataDetail: McpDataDetail.MetadataOnly);
+
+        Assert.False(isError);
+        var root = JsonNode.Parse(meta)!;
+        Assert.StartsWith("Query Store is READ_ONLY", root["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.DoesNotContain("731900417", meta, StringComparison.Ordinal);
+        Assert.Equal(Withheld, root["rows"]![0]!["message"]!.GetValue<string>());
+    }
+
     [Fact]
     public void HostRegistersTheFilterJustOutsideTheStatementFilter()
     {

@@ -12,6 +12,8 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
@@ -87,6 +89,54 @@ public sealed class McpDataDetailMasker
     {
         if (_mode == McpDataDetail.Full || string.IsNullOrEmpty(output)) return output;
         return SensitiveStatements.JsonCore(output, (key, value) => Value(key, value, freeText), Xml, key => key, Refusal);
+    }
+
+    /// <summary>
+    /// A tool's whole JSON answer, as the host filter masks it (#5632 Phase A, L8 ruling). The status envelope's
+    /// <c>message</c> (the top-level <c>message</c> of an object that also carries a top-level string <c>status</c>) is
+    /// Darling's own sentence the operator must read: a <c>precondition</c> names the fix, an <c>unavailable</c> says
+    /// what is missing. It is masked as free text under both levels (its literals and digits replaced) and never
+    /// withheld. Every other field, a <c>message</c> key inside a result row included, is masked by
+    /// <see cref="Json(string, bool)"/> as before. The SAME instance when nothing changed.
+    /// </summary>
+    public string Answer(string output)
+    {
+        if (_mode == McpDataDetail.Full || string.IsNullOrEmpty(output)) return output;
+        if (!TryEnvelope(output, out JsonObject? root, out string? message)) return Json(output);
+
+        // Keep the key in its place while the rest is masked: a JSON null passes the walker untouched.
+        root!["message"] = null;
+        string rest = root.ToJsonString(McpHelpers.JsonOptions);
+        string maskedRest = Json(rest);
+        if (string.Equals(maskedRest, Refusal, StringComparison.Ordinal)) return Refusal;
+
+        string maskedMessage = IsOwnPlaceholder(message!) ? message! : MaskLiterals(message!);
+        if (ReferenceEquals(maskedRest, rest) && string.Equals(maskedMessage, message, StringComparison.Ordinal)) return output;
+
+        JsonObject masked = JsonNode.Parse(maskedRest)!.AsObject();
+        masked["message"] = maskedMessage;
+        return masked.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>True when <paramref name="output"/> is a JSON object whose top level carries a string <c>status</c>
+    /// and a string <c>message</c>: the status envelope.</summary>
+    private static bool TryEnvelope(string output, out JsonObject? root, out string? message)
+    {
+        root = null;
+        message = null;
+        if (!output.TrimStart().StartsWith('{')) return false;
+        try
+        {
+            if (JsonNode.Parse(output) is not JsonObject parsed) return false;
+            if (parsed["status"] is not JsonValue status || !status.TryGetValue(out string? _)) return false;
+            if (parsed["message"] is not JsonValue text || !text.TryGetValue(out message)) return false;
+            root = parsed;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     /// <summary>One field of this answer, masked by <paramref name="name"/>'s class (a key or a context label); a name

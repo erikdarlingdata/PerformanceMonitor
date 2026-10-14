@@ -139,6 +139,73 @@ internal static class StatementFilterCensus
         return app.GetTestServer();
     }
 
+    /// <summary>The bearer token <see cref="BuildLiveHostAsync"/> gates on: long enough to clear the network bind's floor,
+    /// so the investigations arm resolves on.</summary>
+    public const string LiveHostToken = "l8-contract-token-5632-0123456789abcdef0123456789abcdef";
+
+    /// <summary>
+    /// The REAL MCP host over a live store (#5632 Phase A, L8; review round 1 asked for it, as <see cref="BuildHostAsync"/>
+    /// holds a dummy data source and no write policy). It registers <paramref name="storeConnectionString"/> as the store,
+    /// serves <paramref name="dataDetail"/>, resolves the write policy as a start does from <c>mcp.allowInvestigations</c>
+    /// on and <c>mcp.allowWrites</c> off with <paramref name="bearerToken"/>, and gates every request on that token
+    /// (loopback included, as a start that serves the investigation tools does). Call it with
+    /// <see cref="CallRealToolAsync"/>'s <c>bearerToken</c>. Dispose it with the test.
+    /// </summary>
+    public static async Task<TestServer> BuildLiveHostAsync(
+        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+
+        var postgres = NpgsqlDataSource.Create(storeConnectionString);
+        builder.Services.AddSingleton(postgres);
+        builder.Services.AddSingleton(new McpDataDetailSetting(dataDetail));
+        builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(false));
+        var sharedBaselines = new BaselineCache();
+        builder.Services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(
+            postgres, planFetcher: null, logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+            baselineCache: sharedBaselines));
+        builder.Services.AddSingleton<Microsoft.Extensions.Logging.ILogger>(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var writes = DarlingMcpWritePolicy.ResolveForStart(
+            new McpConfig { AllowInvestigations = true, AllowWrites = false }, bearerToken, out var tokenProblem);
+        Assert.Null(tokenProblem);
+        Assert.True(writes.Investigations && !writes.Writes && !writes.ServerAdmin, "The live host must serve the investigation arm only.");
+
+        DarlingMcpHostService.ConfigureMcpServices(
+            builder.Services, DarlingPeerDirectory.Snapshot.Empty, new ReadLatencyAccumulator(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, null, writes);
+
+        var app = builder.Build();
+        var host = new DarlingMcpHostService(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingMcpHostService>.Instance,
+            new McpRuntimeState(),
+            new MonitoredServerRegistryState());
+        host.ConfigurePipeline(
+            app, networkMode: false, networkListenIp: null,
+            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), bearerToken: bearerToken, requireTokenWhenLoopbackOnly: true);
+
+        await app.StartAsync();
+        return app.GetTestServer();
+    }
+
+    /// <summary>The HTTP status of a <c>tools/call</c> sent with <paramref name="bearerToken"/> (none when null), for the
+    /// gate checks on <see cref="BuildLiveHostAsync"/>.</summary>
+    public static async Task<int> CallStatusAsync(TestServer server, string toolName, string? bearerToken)
+    {
+        string body = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject { ["name"] = toolName, ["arguments"] = new JsonObject() },
+        }.ToJsonString();
+        var ctx = await SendAsync(server, "/", body, bearerToken);
+        return ctx.Response.StatusCode;
+    }
+
     /// <summary>Sends <paramref name="rawToolText"/> through the host's registered filters as a tool's result and
     /// returns what a client would receive. <paramref name="dataDetail"/> is the <c>mcp.dataDetail</c> level the host
     /// serves for this call (#5632), set back to <c>full</c> afterwards; one host serves one call at a time here.</summary>
@@ -165,7 +232,7 @@ internal static class StatementFilterCensus
     /// block and the error flag; throws when the server answered a protocol error, so a test fails loudly instead of
     /// reading an empty answer as a clean one.</summary>
     public static async Task<(string Text, bool IsError)> CallRealToolAsync(
-        TestServer server, string toolName, JsonObject arguments, string path = "/")
+        TestServer server, string toolName, JsonObject arguments, string path = "/", string? bearerToken = null)
     {
         string body = new JsonObject
         {
@@ -175,7 +242,7 @@ internal static class StatementFilterCensus
             ["params"] = new JsonObject { ["name"] = toolName, ["arguments"] = arguments },
         }.ToJsonString();
 
-        JsonElement root = (await RpcAsync(server, path, body)).RootElement;
+        JsonElement root = (await RpcAsync(server, path, body, bearerToken)).RootElement;
         if (root.TryGetProperty("error", out var error))
         {
             throw new InvalidOperationException("The server answered a protocol error: " + error.GetRawText());
@@ -188,27 +255,35 @@ internal static class StatementFilterCensus
     }
 
     /// <summary>The names <c>tools/list</c> advertises on <paramref name="path"/>.</summary>
-    public static async Task<IReadOnlyList<string>> ListToolNamesAsync(TestServer server, string path = "/")
+    public static async Task<IReadOnlyList<string>> ListToolNamesAsync(TestServer server, string path = "/", string? bearerToken = null)
     {
-        using var doc = await RpcAsync(server, path, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+        using var doc = await RpcAsync(server, path, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", bearerToken);
         return doc.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray()
             .Select(t => t.GetProperty("name").GetString()!).ToList();
     }
 
-    private static async Task<JsonDocument> RpcAsync(TestServer server, string path, string requestBody)
-    {
-        var ctx = await server.SendAsync(c =>
+    private static Task<HttpContext> SendAsync(TestServer server, string path, string requestBody, string? bearerToken) =>
+        server.SendAsync(c =>
         {
             c.Request.Method = "POST";
             c.Request.Path = path;
             c.Request.Headers.Host = "localhost";
             c.Request.Headers.Accept = "application/json, text/event-stream";
+            if (bearerToken is not null)
+            {
+                c.Request.Headers.Authorization = "Bearer " + bearerToken;
+            }
+
             c.Request.ContentType = "application/json";
             var bytes = Encoding.UTF8.GetBytes(requestBody);
             c.Request.Body = new System.IO.MemoryStream(bytes);
             c.Request.ContentLength = bytes.Length;
             c.Connection.RemoteIpAddress = IPAddress.Loopback;
         });
+
+    private static async Task<JsonDocument> RpcAsync(TestServer server, string path, string requestBody, string? bearerToken = null)
+    {
+        var ctx = await SendAsync(server, path, requestBody, bearerToken);
 
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
         string raw = await reader.ReadToEndAsync();

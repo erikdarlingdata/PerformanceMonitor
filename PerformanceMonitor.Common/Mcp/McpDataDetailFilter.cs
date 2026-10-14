@@ -78,7 +78,7 @@ public static class McpDataDetailFilter
             if (structured is not null)
             {
                 string json = structured.Value.GetRawText();
-                string masked = Checked(masker.Json(json), json);
+                string masked = Checked(masker.Answer(json), json);
                 if (!ReferenceEquals(masked, json))
                 {
                     using JsonDocument parsed = JsonDocument.Parse(masked);
@@ -115,7 +115,7 @@ public static class McpDataDetailFilter
             case TextContentBlock text:
             {
                 if (string.IsNullOrEmpty(text.Text)) return block;
-                string masked = Checked(masker.Json(text.Text), text.Text);
+                string masked = Checked(masker.Answer(text.Text), text.Text);
                 return ReferenceEquals(masked, text.Text)
                     ? block
                     : new TextContentBlock { Text = masked, Annotations = text.Annotations, Meta = text.Meta };
@@ -123,7 +123,7 @@ public static class McpDataDetailFilter
             case EmbeddedResourceBlock { Resource: TextResourceContents resource } embedded:
             {
                 if (string.IsNullOrEmpty(resource.Text)) return block;
-                string masked = Checked(masker.Json(resource.Text), resource.Text);
+                string masked = Checked(masker.Answer(resource.Text), resource.Text);
                 if (ReferenceEquals(masked, resource.Text)) return block;
                 return new EmbeddedResourceBlock
                 {
