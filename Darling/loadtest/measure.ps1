@@ -200,7 +200,7 @@ WHERE a.t IS NOT NULL;
         $asOf = $anchorParts[0]
         $anchorTime = [datetime]::ParseExact($anchorParts[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
         Write-Host "Every window ends at as_of = $asOf, one second after the newest Query Store row of $ServerName."
-        # The service purges wide rows older than 9 days (QueryStoreIntervalPartitions.WideHorizonDays), and the copy
+        # The service purges wide rows older than 10 days (QueryStoreIntervalPartitions.WideHorizonDays), and the copy
         # gets no new ones, so a window that starts before that edge has lost rows to the purge.
         $purgeEdge = (Get-Date).ToUniversalTime().AddDays(-9)
         foreach ($hours in 24, 168) {

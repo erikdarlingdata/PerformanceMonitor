@@ -184,9 +184,13 @@ public static class DarlingRetention
     /// <summary>
     /// #3953 (V145): the WIDE interval table's own horizon, on <c>first_execution_time</c>, kept separately from
     /// <see cref="QueryStoreIntervalLatestRetentionDays"/> because the two tables serve different readers at
-    /// different windows. The table keeps 9 days and deletes row by row on <c>first_execution_time</c>. A Query
+    /// different windows. The table keeps 10 days and deletes row by row on <c>first_execution_time</c>. A Query
     /// Store interval can span a day, so 8 days is exactly the edge for an interval that starts just past the
-    /// horizon and closes inside a 7-day window; 9 days gives a day of margin. Reads use the table below raw's
+    /// horizon and closes inside a 7-day window; 9 days gave a day of margin. #5809 raised it to 10 so
+    /// get_query_store_regressions can read this table: its span is the 7-day baseline plus the window (8 days for
+    /// a 24-hour call), and the wide gate's #5541 edge (span start - 26 h at or above the table floor) needs
+    /// 8 days + 26 h = 9 days 2 hours held, which 9 days never is. Windows up to about 46 hours now take the
+    /// table; longer ones read raw. Reads use the table below raw's
     /// chunk floor, down to L = max(window start, filled_since, table floor + 26 h (the purge-edge margin)), where the table floor is
     /// the oldest <c>first_execution_time</c> the purge has left. Like <see cref="QueryStoreIntervalLatestRetentionDays"/>
     /// this is a named constant, not a knob, and in no collector schedule.
@@ -861,7 +865,7 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
-            /* #3953 (V145): the WIDE interval table beside V143's, at its own 9-day horizon
+            /* #3953 (V145): the WIDE interval table beside V143's, at its own 10-day horizon
                (QueryStoreIntervalWideRetentionDays) on first_execution_time — a shorter horizon than V143's 15
                days. Same batched-DELETE shape, same pending-replay horizon reasoning, failure-isolated like every
                sibling. The purge deletes row by row on first_execution_time, so the table floor the read gate

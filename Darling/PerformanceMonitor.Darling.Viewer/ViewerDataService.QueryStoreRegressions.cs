@@ -110,8 +110,14 @@ public sealed partial class ViewerDataService
     ///
     /// <para>$1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter (text[]),
     /// $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>).</para>
+    ///
+    /// <para>Since #5809 this raw form is the fallback: <see cref="QueryStoreRegressionsTableSql"/> serves wherever the
+    /// interval table's gate allows.</para>
     /// </summary>
-    public const string QueryStoreRegressionsSql = """
+    public const string QueryStoreRegressionsSql = QueryStoreRegressionsRawPrefix + "\n" + QueryStoreRegressionsSuffix;
+
+    /// <summary>The raw read's two deduping arms (#1841). <see cref="QueryStoreRegressionsTableSql"/> replaces only these.</summary>
+    private const string QueryStoreRegressionsRawPrefix = """
         WITH deduped_baseline AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
                snapshots and the collector re-fetches the OPEN interval every cycle, so the SAME interval
@@ -166,6 +172,13 @@ public sealed partial class ViewerDataService
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
+        """;
+
+    /// <summary>
+    /// Everything after the two arms, shared by <see cref="QueryStoreRegressionsSql"/> and
+    /// <see cref="QueryStoreRegressionsTableSql"/> so the aggregation, the gate and the ranking cannot drift between them.
+    /// </summary>
+    private const string QueryStoreRegressionsSuffix = """
         baseline_performance AS (
             SELECT
                 database_name,
@@ -237,6 +250,81 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// The regression read over <c>query_store_interval_wide</c> (#5809): <see cref="QueryStoreRegressionsSql"/> with its
+    /// two deduping arms replaced by reads of the table, which already holds ONE row per interval identity (the raw arms'
+    /// <c>PARTITION BY</c> key, <c>execution_type_desc</c> included), that interval's latest snapshot, kept as raw is
+    /// written. Same parameters; $5 (the baseline start) is the gate's clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>,
+    /// <c>max(baseline start, raw's chunk floor)</c>), so the table never reaches below what raw itself still holds.
+    ///
+    /// <para><b>Why not <c>query_store_interval_latest</c>.</b> That table keeps Regular executions only, and the raw arms
+    /// count every outcome (Aborted and Exception too). The wide table keeps every outcome, so the averages and
+    /// exec counts are the same function of the same intervals.</para>
+    ///
+    /// <para><b>Bounds.</b> Each arm keeps the raw arm's own <c>collection_time</c> window (the semantic one) and adds the
+    /// #5533 <c>first_execution_time</c> range, both ends: from the arm's start minus
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> (#4605: no row of the arm has an older first execution) to
+    /// its end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>. That range is what
+    /// <c>ix_query_store_interval_wide_server_first_exec</c> scans, so each arm reads its own days of the server's rows
+    /// and no sort runs to dedupe them. The recent arm also takes <c>collection_time &gt;= $5</c>, which only matters when
+    /// raw's floor is inside the recent window: raw then reads the recent arm from its floor too.</para>
+    ///
+    /// <para><b>The one edge where the two reads differ.</b> An interval collected on both sides of the window start (its
+    /// first snapshots before $2, its latest after) is counted by raw in BOTH arms, the partial snapshot in the baseline and
+    /// the latest in the recent window. The table holds only the latest, so it counts that interval in the recent arm alone.
+    /// That is at most one interval per plan (the one open at $2), its partial counts blended into a 7-day baseline, and the
+    /// table form is the one that does not count the same executions on both sides. The window END is exact: the gate reads
+    /// raw for an end before the table's <c>applied_through</c> (its clause 4), where a latest snapshot could sit past it.</para>
+    ///
+    /// <para><c>1 AS rn</c> keeps <see cref="QueryStoreRegressionsSuffix"/>'s <c>WHERE rn = 1</c> true for every row:
+    /// the table's row IS the raw arm's <c>rn = 1</c> row. A static readonly because the interval literals are derived
+    /// from TimeSpans; <c>$$"""</c> keeps <c>$1</c> literal.</para>
+    /// </summary>
+    public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
+
+    /// <summary>The table read's two arms (#5809), in place of <see cref="QueryStoreRegressionsRawPrefix"/>.</summary>
+    private static readonly string QueryStoreRegressionsTablePrefix = $$"""
+        WITH deduped_baseline AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                1 AS rn
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $5
+            AND   collection_time < $2
+            AND   first_execution_time >= $5 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $2 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        deduped_recent AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                query_text,
+                execution_count,
+                avg_duration_us,
+                avg_cpu_time_us,
+                avg_logical_io_reads,
+                last_execution_time,
+                1 AS rn
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time >= $5
+            AND   collection_time <= $3
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        """;
+
+    /// <summary>
     /// The start of the baseline window of the regressions read whose recent window starts at <paramref name="startUtc"/>:
     /// <see cref="BaselineLookbackDays"/> days earlier. The read's baseline arm and the data-start probe take it from here, so
     /// the notice keys on the same earlier window the comparison reads.
@@ -262,11 +350,13 @@ public sealed partial class ViewerDataService
     /// <paramref name="endUtc"/>] vs. the fixed <see cref="BaselineLookbackDays"/>-day baseline ending at
     /// <paramref name="startUtc"/> (#4217), ranked by execution-count-weighted extra duration descending (the
     /// TVF's ORDER BY; the grid then default-sorts by duration % like the Dashboard).
+    /// <paramref name="literalEndUtc"/> is the end of a custom range (null for a preset), the interval table gate's clause 4
+    /// exactly as the Queries grid passes it (#3953, #5809).
     /// </summary>
     public async Task<List<ViewerQueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, DateTime? literalEndUtc = null,
+        CancellationToken cancellationToken = default)
     {
-        var rows = new List<ViewerQueryStoreRegressionRow>();
 
         // #4217: the baseline's lower bound, computed here (not as a SQL interval) so the bound stays a plain
         // timestamp parameter — the same reason DarlingQueryStoreRegressionReader takes it as a parameter
@@ -274,12 +364,80 @@ public sealed partial class ViewerDataService
         // plan-time chunk exclusion).
         var baselineStartUtc = QueryStoreRegressionsBaselineStart(startUtc);
 
+        /* #5809: the interval table where the Queries grid's own gate allows, raw otherwise. */
+        var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
+        {
+            var tableRows = await TryGetQueryStoreRegressionsFromTableAsync(
+                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, cancellationToken);
+            if (tableRows is not null)
+            {
+                return tableRows;
+            }
+        }
+
         await using var command = _dataSource.CreateCommand(QueryStoreRegressionsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+    }
+
+    /// <summary>
+    /// #5809: <see cref="QueryStoreRegressionsTableSql"/> behind the Queries grid's gate
+    /// (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/> over baseline start to window end, so the #5541 floor rule
+    /// applies), the decision and the read in ONE read-only REPEATABLE READ transaction, as
+    /// <c>TryGetQueryStoreTopQueriesFromTableAsync</c> does. Null when the gate says raw or anything here faults
+    /// (cancellation propagates); an empty list is the table's real answer. The read binds the gate's
+    /// <see cref="QueryStoreIntervalWide.WideReadPlan.ClampedStart"/>, so it reads exactly the span raw would, which is
+    /// the span <see cref="GetQueryStoreRegressionsDataStartAsync"/>'s notice describes.
+    /// </summary>
+    private async Task<List<ViewerQueryStoreRegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+            await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                connection, serverId, baselineStartUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
+            if (!plan.UseTable)
+            {
+                return null;
+            }
+
+            await using var command = new NpgsqlCommand(QueryStoreRegressionsTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#5809 regressions table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>The five parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
+    /// filter, $5 baseline start.</summary>
+    private static void AddQueryStoreRegressionsParameters(
+        NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc)
+    {
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+    }
+
+    /// <summary>Reads the rows of either form of the read: both project the same <see cref="QueryStoreRegressionsSuffix"/>.</summary>
+    private static async Task<List<ViewerQueryStoreRegressionRow>> ReadQueryStoreRegressionRowsAsync(NpgsqlDataReader reader, CancellationToken cancellationToken)
+    {
+        var rows = new List<ViewerQueryStoreRegressionRow>();
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerQueryStoreRegressionRow
