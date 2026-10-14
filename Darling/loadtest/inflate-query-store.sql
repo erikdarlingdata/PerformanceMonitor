@@ -29,11 +29,20 @@ out of every read and every build (#5794 review round 1).
 
 The row triggers: the late-row triggers on the wide and latest parents fire once per inserted row, and the wide one
 keeps a list of the (server, hour) pairs it has marked in one transaction-local string that grows with every pair, so a
-clone of a multi-day partition would run for hours. The script disables the user triggers of the two parents for the
-inflate and enables them again at the end, also when the inflate fails. It then does in one statement what the wide
-table's trigger would have done: it marks every (synthetic server, hour) that the compose rollup has already built as
-late, so the rollup rebuilds those hours with the clones in them. The plan regression builder needs no mark: it builds
-every (server, day) that has no built row, and the synthetic servers have none.
+clone of a multi-day partition would run for hours. The script saves the state of each user trigger of the two parents
+and their partitions in loadtest.trigger_state, then disables them, in one transaction. At the end, also when the
+inflate fails, loadtest.restore_triggers() sets each trigger back to its saved state by name and empties the table, in
+one transaction. If psql is stopped before the end (Ctrl-C, or a killed session), run the recovery statement before you
+start the service:
+    CALL loadtest.restore_triggers();
+A run that starts while saved states remain keeps them: they are the states from before the first run.
+
+The script then does in one statement what the wide table's trigger would have done: it marks every (synthetic
+server, hour) that the compose rollup has already built as late, so the rollup rebuilds those hours with the clones in
+them. The mark is owed from the first commit that adds wide rows (loadtest.compose_mark_owed holds the flag) until the
+mark commits, so a run that stops after its last wide clone and runs again still marks (#5794 review round 2). The
+plan regression builder needs no mark: it builds every (server, day) that has no built row, and the synthetic servers
+have none.
 
 Idempotent: loadtest.inflate_done records each (table, partition, copy) when its transaction commits, and every
 insert also says ON CONFLICT DO NOTHING. A second run with the same n adds no rows. A later run with a larger n
@@ -76,6 +85,26 @@ CREATE TABLE IF NOT EXISTS loadtest.inflate_done
     CONSTRAINT pk_inflate_done PRIMARY KEY (table_name, partition_name, copy_no)
 );
 
+/* Each user trigger of the two parents and their partitions as it was before the first run, by name, so the end of the
+   run sets each one back to that state, not to enabled (#5794 review round 2). Empty when no run is in progress. */
+CREATE TABLE IF NOT EXISTS loadtest.trigger_state
+(
+    relation_name text NOT NULL,
+    trigger_name text NOT NULL,
+    is_parent boolean NOT NULL,
+    tgenabled "char" NOT NULL,
+    CONSTRAINT pk_trigger_state PRIMARY KEY (relation_name, trigger_name)
+);
+
+/* One row while the compose rollup mark is owed: from the commit of a wide clone to the commit of the mark. */
+CREATE TABLE IF NOT EXISTS loadtest.compose_mark_owed
+(
+    id smallint NOT NULL DEFAULT 1,
+    owed_since timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    CONSTRAINT pk_compose_mark_owed PRIMARY KEY (id),
+    CONSTRAINT ck_compose_mark_owed_one_row CHECK (id = 1)
+);
+
 /* The six tables, in one place for the procedure and the report. */
 CREATE OR REPLACE FUNCTION loadtest.query_store_tables()
 RETURNS text[]
@@ -108,6 +137,81 @@ AS $f$
     WHERE EXISTS (SELECT 1 FROM pg_class AS c WHERE c.oid = p_table::regclass AND c.relkind = 'r')
     ORDER BY 1;
 $f$;
+
+/* The user triggers of the two parents and of their partitions: the ones whose late-row work the script does itself. */
+CREATE OR REPLACE FUNCTION loadtest.trigger_relations()
+RETURNS TABLE (rel regclass)
+LANGUAGE sql
+STABLE
+AS $f$
+    SELECT x.leaf FROM loadtest.leaves('collect.query_store_interval_wide') AS x
+    UNION
+    SELECT x.leaf FROM loadtest.leaves('collect.query_store_interval_latest') AS x
+    UNION
+    SELECT 'collect.query_store_interval_wide'::regclass
+    UNION
+    SELECT 'collect.query_store_interval_latest'::regclass;
+$f$;
+
+/* Saves the state of each user trigger, unless states from an earlier run are still saved, and disables them. One
+   CALL is one transaction, so the save and both ALTERs apply together or not at all. */
+CREATE OR REPLACE PROCEDURE loadtest.disable_triggers()
+LANGUAGE plpgsql
+AS $p$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM loadtest.trigger_state) THEN
+        INSERT INTO loadtest.trigger_state (relation_name, trigger_name, is_parent, tgenabled)
+        SELECT format('%I.%I', n.nspname, c.relname), tg.tgname, c.relkind = 'p', tg.tgenabled
+        FROM pg_trigger AS tg
+        JOIN pg_class AS c ON c.oid = tg.tgrelid
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE NOT tg.tgisinternal
+        AND   tg.tgrelid IN (SELECT r.rel FROM loadtest.trigger_relations() AS r);
+    ELSE
+        RAISE NOTICE 'trigger states from an earlier run are still saved: they are kept';
+    END IF;
+
+    ALTER TABLE collect.query_store_interval_wide DISABLE TRIGGER USER;
+    ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER USER;
+END
+$p$;
+
+/* Sets each saved trigger back to its saved state by name, parents first (an ALTER on a parent also reaches its
+   partitions), then empties the saved states. One CALL is one transaction. It is also the recovery statement after an
+   interrupted run. */
+CREATE OR REPLACE PROCEDURE loadtest.restore_triggers()
+LANGUAGE plpgsql
+AS $p$
+DECLARE
+    r record;
+    restored integer := 0;
+BEGIN
+    FOR r IN
+        SELECT s.relation_name, s.trigger_name, s.tgenabled
+        FROM loadtest.trigger_state AS s
+        ORDER BY s.is_parent DESC, s.relation_name, s.trigger_name
+    LOOP
+        CONTINUE WHEN NOT EXISTS
+        (
+            SELECT 1
+            FROM pg_trigger AS tg
+            WHERE tg.tgrelid = to_regclass(r.relation_name)
+            AND   tg.tgname = r.trigger_name
+        );
+        EXECUTE format
+        (
+            'ALTER TABLE %s %s TRIGGER %I',
+            r.relation_name,
+            CASE r.tgenabled WHEN 'D' THEN 'DISABLE' WHEN 'R' THEN 'ENABLE REPLICA' WHEN 'A' THEN 'ENABLE ALWAYS' ELSE 'ENABLE' END,
+            r.trigger_name
+        );
+        restored := restored + 1;
+    END LOOP;
+
+    DELETE FROM loadtest.trigger_state;
+    RAISE NOTICE 'user triggers set back to their saved states: %', restored;
+END
+$p$;
 
 /* The estimated rows (the planner's reltuples, NULL for a leaf never analyzed) and the total bytes of every leaf of the
    six tables. Both come from the catalog and the file sizes, so the report reads no table rows: a count(*) of every leaf
@@ -156,7 +260,6 @@ DECLARE
     insert_columns text;
     select_columns text;
     added bigint;
-    wide_added bigint := 0;
     marked bigint;
 BEGIN
     IF p_n IS NULL OR p_n < 1 THEN
@@ -175,16 +278,7 @@ BEGIN
         FROM pg_trigger AS tg
         WHERE NOT tg.tgisinternal
         AND   tg.tgenabled <> 'D'
-        AND   tg.tgrelid IN
-              (
-                  SELECT x.leaf FROM loadtest.leaves('collect.query_store_interval_wide') AS x
-                  UNION ALL
-                  SELECT x.leaf FROM loadtest.leaves('collect.query_store_interval_latest') AS x
-                  UNION ALL
-                  SELECT 'collect.query_store_interval_wide'::regclass
-                  UNION ALL
-                  SELECT 'collect.query_store_interval_latest'::regclass
-              )
+        AND   tg.tgrelid IN (SELECT r.rel FROM loadtest.trigger_relations() AS r)
     );
 
     /* 1. The synthetic servers. The sources are the servers with Query Store interval rows: the coverage tables hold
@@ -354,8 +448,9 @@ BEGIN
                 USING k;
                 GET DIAGNOSTICS added = ROW_COUNT;
 
-                IF t = 'collect.query_store_interval_wide' THEN
-                    wide_added := wide_added + added;
+                /* The mark is owed from this commit on, in the same transaction as the rows. */
+                IF t = 'collect.query_store_interval_wide' AND added > 0 THEN
+                    INSERT INTO loadtest.compose_mark_owed DEFAULT VALUES ON CONFLICT DO NOTHING;
                 END IF;
 
                 INSERT INTO loadtest.inflate_done (table_name, partition_name, copy_no, rows_added)
@@ -370,16 +465,21 @@ BEGIN
     /* 3. What the wide table's late-row trigger would have done, in one statement on the small built table: every
        (synthetic server, hour) whose source pair the compose rollup has built becomes a late pair (late_seq above
        built_seq), so the rollup's next ticks rebuild those hours with the clones in them. Hours the rollup has not
-       built yet need no mark: their first build reads every server. */
-    IF wide_added > 0 AND to_regclass('collect.query_store_compose_stamp_built') IS NOT NULL THEN
-        INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq)
-        SELECT sm.synthetic_server_id, s.hour, 1
-        FROM collect.query_store_compose_stamp_built AS s
-        JOIN loadtest.server_map AS sm
-          ON sm.source_server_id = s.server_id
-        ON CONFLICT (server_id, hour) DO UPDATE SET late_seq = b.late_seq + 1;
-        GET DIAGNOSTICS marked = ROW_COUNT;
-        RAISE NOTICE 'compose rollup: % (synthetic server, hour) pairs marked late', marked;
+       built yet need no mark: their first build reads every server. The flag, not this run's row count, decides: a run
+       that added every wide clone and stopped before the mark adds no wide rows when it runs again. A store without the
+       built table has built no hour, so it needs no mark and the flag is cleared. */
+    IF EXISTS (SELECT 1 FROM loadtest.compose_mark_owed) THEN
+        IF to_regclass('collect.query_store_compose_stamp_built') IS NOT NULL THEN
+            INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq)
+            SELECT sm.synthetic_server_id, s.hour, 1
+            FROM collect.query_store_compose_stamp_built AS s
+            JOIN loadtest.server_map AS sm
+              ON sm.source_server_id = s.server_id
+            ON CONFLICT (server_id, hour) DO UPDATE SET late_seq = b.late_seq + 1;
+            GET DIAGNOSTICS marked = ROW_COUNT;
+            RAISE NOTICE 'compose rollup: % (synthetic server, hour) pairs marked late', marked;
+        END IF;
+        DELETE FROM loadtest.compose_mark_owed;
         COMMIT;
     END IF;
 END
@@ -390,23 +490,21 @@ CREATE TEMP TABLE inflate_before AS SELECT * FROM loadtest.partition_report();
 DROP TABLE IF EXISTS pg_temp.inflate_done_before;
 CREATE TEMP TABLE inflate_done_before AS SELECT d.table_name, d.partition_name, d.copy_no FROM loadtest.inflate_done AS d;
 
-/* The service must be stopped: these ALTERs wait for every open writer of the two tables. Enabled again below, also
-   when the inflate fails. If psql itself is stopped before then, run the two ENABLE statements by hand. */
-ALTER TABLE collect.query_store_interval_wide DISABLE TRIGGER USER;
-ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER USER;
+/* The service must be stopped: the ALTERs wait for every open writer of the two tables. Restored below, also when the
+   inflate fails. If psql itself is stopped before then, run CALL loadtest.restore_triggers(); by hand. */
+CALL loadtest.disable_triggers();
 
 \set ON_ERROR_STOP 0
 CALL loadtest.inflate(:n, :'host');
 \set inflate_failed :ERROR
 \set ON_ERROR_STOP 1
 
-ALTER TABLE collect.query_store_interval_wide ENABLE TRIGGER USER;
-ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER USER;
+CALL loadtest.restore_triggers();
 
 \if :inflate_failed
     DO $$
     BEGIN
-        RAISE EXCEPTION 'The inflate failed: the error is above. The triggers are enabled again. Run the script again with the same n: it continues from the last partition it completed.';
+        RAISE EXCEPTION 'The inflate failed: the error is above. The triggers are back in their earlier states. Run the script again with the same n: it continues from the last partition it completed.';
     END
     $$;
 \endif
