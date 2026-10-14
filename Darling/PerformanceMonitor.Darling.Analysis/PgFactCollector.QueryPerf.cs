@@ -551,12 +551,14 @@ WITH plan_agg AS
     /// <summary>
     /// The work memory for the PLAN_REGRESSION snapshot transaction (#5812, bound 2), set with <c>SET LOCAL</c> so it ends with
     /// that transaction and touches no other statement on the pooled connection. The daily read groups every built day's
-    /// totals plus the live rows by plan, and the planner, which cannot see that the days repeat the same plans, sorts them
-    /// all: about 384,000 rows on a planted store at the default 4MB went to disk (an external merge of about 16MB). A
-    /// sort takes memory only as it grows, so a small server's read uses what it needs; the cap covers a busy server's
-    /// fourteen days in memory.
+    /// totals plus the live rows by plan. At the default 4MB the planner sorts them all, and on a planted busy server (15
+    /// built days, about 384,000 rows) that sort went to disk (an external merge of about 15MB). From 32MB up it hashes in
+    /// memory instead: two hash aggregates of about 35MB to 42MB each, under the hash limit of twice work_mem
+    /// (<c>hash_mem_multiplier</c>). 64MB is the bound: 32MB also did not spill, but it is below its own peak (about 35MB)
+    /// and fits only through that multiplier, so 64MB keeps the headroom. A hash or sort takes memory only as it grows, so
+    /// a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every bound on one plant).
     /// </summary>
-    internal const string PlanRegressionDailyWorkMemSql = "SET LOCAL work_mem = '128MB'";
+    internal const string PlanRegressionDailyWorkMemSql = "SET LOCAL work_mem = '64MB'";
 
     /// <summary>
     /// M: the start of the day the comparison window's exact edge (<paramref name="rawWindowStart"/>) falls in (#5448).

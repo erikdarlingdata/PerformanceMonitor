@@ -24,9 +24,9 @@ namespace Darling.Tests;
 /// #5812 bound 2, a manual rig (skipped unless <c>DARLING_NOSPILL_RIG_PLANS</c> is set): does the PLAN_REGRESSION daily read
 /// spill to disk at field scale once its live half is bounded by the watermarks? It plants one server with fifteen built
 /// days of daily totals (<c>DARLING_NOSPILL_RIG_PLANS</c> plans a day, two per query; today built through 10:00) and one open
-/// hour of interval rows after today's watermark, and runs the read under <c>EXPLAIN (ANALYZE, FORMAT JSON)</c> twice: at the
-/// server's own <c>work_mem</c>, and inside a transaction that runs the collector's
-/// <see cref="PgFactCollector.PlanRegressionDailyWorkMemSql"/>. It fails if the second run has a Sort that reports
+/// hour of interval rows after today's watermark, and runs the read under <c>EXPLAIN (ANALYZE, FORMAT JSON)</c> at the
+/// server's own <c>work_mem</c>, at each weighed bound, and inside a transaction that runs the collector's
+/// <see cref="PgFactCollector.PlanRegressionDailyWorkMemSql"/>. It fails if that last run has a Sort that reports
 /// <c>Sort Space Type: Disk</c>, a Hash of more than one batch, or a HashAggregate of more than one batch or any disk use. It prints the rows, the execution time and every sort and hash node.
 /// Plant it once on a dev rig; it is not a CI test.
 /// </summary>
@@ -35,6 +35,10 @@ namespace Darling.Tests;
 public sealed class PlanRegressionDailyNoSpillRig
 {
     private const int ServerA = -5812501;
+
+    /// <summary>The bounds weighed against <see cref="PgFactCollector.PlanRegressionDailyWorkMemSql"/> (64MB): the smaller one,
+    /// and the 128MB it replaced; measured and printed, never asserted.</summary>
+    private static readonly string[] WeighedWorkMem = ["32MB", "128MB"];
 
     [Fact]
     public async Task Measure()
@@ -103,9 +107,18 @@ FROM generate_series(1, @p) AS n", ("s", ServerA), ("w", watermark), ("p", plans
 
         Assert.Equal(15, built.Count);
 
-        /* Before: the server's own work_mem, outside any transaction. After: inside a transaction that runs the read's own
-           SET LOCAL (PlanRegressionDailyWorkMemSql), as the collector does. One plant, both runs. */
+        /* Before: the server's own work_mem, outside any transaction. Then each smaller bound that was weighed against the
+           collector's, printed only, so the choice can be measured again on one plant. After: inside a transaction that runs
+           the read's own SET LOCAL (PlanRegressionDailyWorkMemSql), as the collector does. One plant, every run. */
         var before = await ExplainAsync(connection, null, window, built, plans, ct);
+        foreach (var weighed in WeighedWorkMem)
+        {
+            await using var trial = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+            await ExecAsync(connection, $"SET LOCAL work_mem = '{weighed}'");
+            await ExplainAsync(connection, trial, window, built, plans, ct);
+            await trial.RollbackAsync(ct);
+        }
+
         await using (var snapshot = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct))
         {
             await ExecAsync(connection, PgFactCollector.PlanRegressionDailyWorkMemSql);
