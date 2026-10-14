@@ -10443,8 +10443,9 @@ LEFT JOIN LATERAL (
     /// chunk changed (same materialization hypertable and database): a compression job replaces the chunk without
     /// moving the floor, and a retention drop moves it later by one chunk. A view with no last floor to serve (a new
     /// view, one that was empty and now has rows, a changed hypertable or database) is measured on the calling thread
-    /// inside <see cref="RollupFloorInlineColdBudget"/>; one the budget does not reach is served none, the router's null
-    /// floor. Either way an answer that serves a last floor or no floor for a cold view carries
+    /// to completion (#5818: no time budget, since a null floor routes a past-horizon window to raw and mislabels the hourly
+    /// route's empty answer); only one the drain already holds, or whose last measure failed, is served none, the router's
+    /// null floor. Either way an answer that serves a last floor or no floor for a cold view carries
     /// <see cref="RollupCoverage.FloorsPending"/>, so no caller caches it: the next probe after the drain lands the
     /// fresh floor serves it. No statement names more than one rollup to find a floor.</para>
     ///
@@ -10702,9 +10703,11 @@ LEFT JOIN LATERAL (
 
         /* The one inline cold path: a cold view with no floor to serve (a store's first probe, before the warm-up lands; a
            view that was empty and now has rows; a new view; a changed hypertable or database) is measured on the calling
-           thread, one statement per view, inside RollupFloorInlineColdBudget. A null floor would route its read to raw
-           as if raw covered the window. A view served its last floor is left to the drain. Views the budget does not
-           reach go to the drain like any other, and the answer is pending. The drain runs on the caller's data source,
+           thread, one statement per view, to completion. #5818: it had a 5 s budget, and a view the budget did not reach
+           was served a null floor, which routes a past-horizon window to raw as if raw covered it and makes the hourly
+           route's empty answer say the rollup materialized nothing; under CI load the first probe ran out of it. Which
+           kind of nothing a read found must not depend on a clock, so only the caller's token stops it. A view served
+           its last floor is left to the drain, and so is one the drain holds or whose retry is not due (pending). The drain runs on the caller's data source,
            so a caller that disposes it right after the probe would otherwise never see the floor land. */
         if (cold.Any(j => !lastFloor.Contains(j.View)))
         {
@@ -10716,7 +10719,6 @@ LEFT JOIN LATERAL (
                 held = RollupFloorViewsHeld(cache, cold);
             }
 
-            var started = Stopwatch.GetTimestamp();
             foreach (var job in cold.ToArray())
             {
                 /* Served its last floor (the drain re-measures it), the drain already holds it (queued or measuring), or
@@ -10726,23 +10728,11 @@ LEFT JOIN LATERAL (
                     continue;
                 }
 
-                var remaining = RollupFloorInlineColdBudget - Stopwatch.GetElapsedTime(started);
-                if (remaining <= TimeSpan.Zero)
-                {
-                    break;
-                }
-
-                using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                budget.CancelAfter(remaining);
                 try
                 {
-                    var entry = await MeasureOneRollupFloorAsync(dataSource, cache, job, inlineLogger, budget.Token);
+                    var entry = await MeasureOneRollupFloorAsync(dataSource, cache, job, inlineLogger, cancellationToken);
                     cold.Remove(job);
                     newEntries[job.View] = entry;
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    break;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -10960,11 +10950,6 @@ LEFT JOIN LATERAL (
     internal static bool IsBucketAligned(DateTime value, TimeSpan bucketWidth)
         => bucketWidth > TimeSpan.Zero && value.Ticks % bucketWidth.Ticks == 0;
 
-    /// <summary>#5808: how long one probe may spend measuring its cold views that have no floor to serve inline (a store's
-    /// first probe, a view that was empty and now has rows, a new view) before it leaves the rest to the background
-    /// drain.</summary>
-    internal static readonly TimeSpan RollupFloorInlineColdBudget = TimeSpan.FromSeconds(5);
-
     /// <summary>The fixed marker the catalog floor check (<see cref="RollupCatalogFloorCheckSql"/>) carries (#5808).</summary>
     internal const string CatalogFloorMarker = "/* coverage-floor:catalog */";
 
@@ -10988,8 +10973,8 @@ LEFT JOIN LATERAL (
     /// on. Routing and arming must agree about what a rollup covers, or the router would serve a window the arming
     /// gate considers uncovered (or the reverse). A view is named only when <see cref="RollupAvailability"/> proved it
     /// present: a relation is resolved at PARSE time, so no in-statement <c>to_regclass</c> test could keep this off a
-    /// view that does not exist. Only the background drain, and a probe measuring a view with no floor to serve inside
-    /// <see cref="RollupFloorInlineColdBudget"/>, run it.</para>
+    /// view that does not exist. Only the background drain, and a probe measuring a view with no floor to serve, run
+    /// it.</para>
     /// </summary>
     internal static string RollupColdFloorSql(string view)
         => $"SELECT (SELECT {ColdFloorMarker} min(bucket) FROM collect.{view})";
@@ -15939,7 +15924,7 @@ public sealed class RollupCoverage
 
     /// <summary>
     /// #5808: true when at least one present rollup has no floor measured against its current identity, so the
-    /// background drain is still measuring it. Either it has none (the probe's inline budget did not reach it, or its
+    /// background drain is still measuring it. Either it has none (the drain held it when the probe ran, or its
     /// measure failed): it answers a null floor from <see cref="FloorOf"/>, which routes as a null floor always has (to
     /// raw when raw reaches further back). Or its oldest chunk changed and the catalog could not give the new floor: it
     /// answers its LAST floor, which a retention drop may have moved later by one chunk. A
