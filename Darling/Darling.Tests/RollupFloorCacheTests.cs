@@ -101,7 +101,7 @@ public sealed class RollupFloorCacheTests
     }
 
     [Fact]
-    public void RollupFloorsToMeasure_NoChunkAtAll_IsAlwaysMeasured()
+    public void RollupFloorsToMeasure_AnEntryWhoseHypertableIsGoneFromTheCatalog_IsMeasured()
     {
         var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
         {
@@ -187,46 +187,50 @@ public sealed class RollupFloorCacheTests
         Assert.Null(coverage.CeilingOf(TimescaleSupport.QueryStoreStatsHourlyView));
     }
 
-    /* ─────────────────────────── the two-argument SQL overload ─────────────────────────── */
+    /* ─────────────────────────── the one-view cold floor and the raw floors ─────────────────────────── */
 
     [Fact]
-    public void RollupCoverageProbeSql_TwoArgument_NamesOnlyTheMeasuredViews()
+    public void RollupColdFloorSql_NamesOnlyItsOwnView_WithTheColdMarker()
     {
-        var measure = new HashSet<string>(StringComparer.Ordinal) { TimescaleSupport.QueryStoreStatsHourlyView };
+        var sql = TimescaleSupport.RollupColdFloorSql(TimescaleSupport.QueryStoreStatsHourlyView);
 
-        var sql = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All, measure);
-
-        Assert.Contains($"(SELECT {TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView})", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain($"collect.{TimescaleSupport.QueryStatsHourlyView})", sql, StringComparison.Ordinal);
-
-        /* Column count is unchanged — a non-measured present view still contributes a placeholder column,
-           so the reader's ordinals never depend on which rollups happened to be measured this cycle. */
-        var columns = sql["SELECT ".Length..].Split(", ");
-        Assert.Equal(TimescaleSupport.RollupViews.Length + TimescaleSupport.RolledRawTables.Length, columns.Length);
-    }
-
-    [Fact]
-    public void RollupCoverageProbeSql_NullMeasureSet_IsByteIdenticalToTheOneArgumentForm()
-    {
-        foreach (var shape in new[] { RollupAvailability.All, RollupAvailability.None, RollupAvailability.WithoutIntervalHourlies })
+        Assert.Equal(
+            $"SELECT (SELECT {TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView})",
+            sql,
+            StringComparer.Ordinal);
+        foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews.Where(r => r.View != TimescaleSupport.QueryStoreStatsHourlyView))
         {
-            var oneArg = TimescaleSupport.RollupCoverageProbeSql(shape);
-            var twoArgNullMeasure = TimescaleSupport.RollupCoverageProbeSql(shape, measure: null);
-
-            Assert.Equal(oneArg, twoArgNullMeasure, StringComparer.Ordinal);
+            Assert.DoesNotContain($"collect.{view})", sql, StringComparison.Ordinal);
         }
     }
 
     [Fact]
-    public void RollupCoverageProbeSql_OneArgumentForm_MatchesTodaysLiteralOutputForAllPresent()
+    public void RawFloorProbeSql_ReadsOneColumnPerTableItIsGiven_AndNoRollup()
     {
-        /* A literal copy of today's (pre-#4539) output for RollupAvailability.All, so a change to this
-           overload's SHAPE (not just its selectivity) cannot slip through unnoticed. */
-        var expected = "SELECT " + string.Join(", ", TimescaleSupport.RollupViews
-                .Select(r => $"(SELECT /* coverage-floor:cold */ min(bucket) FROM collect.{r.View})")
-                .Concat(TimescaleSupport.RolledRawTables.Select(t => $"(SELECT min(collection_time) FROM collect.{t})")));
+        var all = TimescaleSupport.RawFloorProbeSql(TimescaleSupport.RolledRawTables);
+        var expected = "SELECT " + string.Join(", ", TimescaleSupport.RolledRawTables.Select(t => $"(SELECT min(collection_time) FROM collect.{t})"))
+            + " " + TimescaleSupport.RawFloorMarker;
+        Assert.Equal(expected, all, StringComparer.Ordinal);
 
-        Assert.Equal(expected, TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All), StringComparer.Ordinal);
+        var one = TimescaleSupport.RawFloorProbeSql(new[] { "procedure_stats" });
+        Assert.Equal($"SELECT (SELECT min(collection_time) FROM collect.procedure_stats) {TimescaleSupport.RawFloorMarker}", one, StringComparer.Ordinal);
+        foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews)
+        {
+            Assert.DoesNotContain($"collect.{view}", all, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(3, 4)]
+    [InlineData(6, 32)]
+    [InlineData(7, 60)]
+    [InlineData(40, 60)]
+    public void RollupFloorRetryDelay_DoublesFromAMinute_AndNeverPassesTheReuseBound(int failures, int expectedMinutes)
+    {
+        Assert.Equal(TimeSpan.FromMinutes(expectedMinutes), TimescaleSupport.RollupFloorRetryDelay(failures));
+        Assert.True(TimescaleSupport.RollupFloorRetryDelay(failures) <= TimescaleSupport.RollupFloorMaxReuse);
     }
 
     /* ─────────────────────────── the oldest-chunk catalog SQL ─────────────────────────── */

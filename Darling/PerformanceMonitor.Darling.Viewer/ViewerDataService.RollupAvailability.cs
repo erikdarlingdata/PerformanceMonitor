@@ -70,7 +70,9 @@ public sealed partial class ViewerDataService
             _ = ex;
         }
 
-        _rollupsProbed = true;
+        /* #5808: an answer with a floor still pending is used once and not cached: the next call re-probes (a catalog
+           read) and picks up the floor the store's background drain measures. */
+        _rollupsProbed = !_rollupCoverage.FloorsPending;
         _rollupProbeAtUtc = DateTime.UtcNow;
         return (_rollups, _rollupCoverage);
     }
