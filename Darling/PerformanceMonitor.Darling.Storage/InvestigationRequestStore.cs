@@ -1,0 +1,634 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace PerformanceMonitor.Darling.Storage;
+
+/// <summary>One alert handed to the investigation store by the dispatcher (#5632 Phase A). Every time is UTC.</summary>
+/// <param name="RouteId">The route whose agent level answered 1; its limits are the next four members.</param>
+/// <param name="DedupKeys">Every incident dedup key of the alert (a row is recorded per key); empty when it has none.</param>
+public sealed record InvestigationAlert(
+    int RouteId,
+    int ServerId,
+    string ServerName,
+    string Family,
+    string MetricName,
+    DateTime AlertTimeUtc,
+    IReadOnlyList<string> DedupKeys,
+    string? StoryPathHash,
+    int MaxPerHour,
+    int MaxPerDay,
+    int LeaseMinutes,
+    int ExpiryMinutes);
+
+/// <summary>What <see cref="InvestigationRequestStore.OpenOrJoinAsync"/> did with an alert.</summary>
+public enum InvestigationOpenOutcome
+{
+    /// <summary>A new request was opened.</summary>
+    Opened,
+
+    /// <summary>The alert joined an open or claimed request of the same server and family.</summary>
+    Joined,
+
+    /// <summary>The route's hourly or daily limit was reached: nothing was opened.</summary>
+    LimitReached,
+}
+
+/// <summary>The result of <see cref="InvestigationRequestStore.OpenOrJoinAsync"/>; the request is null at a limit.</summary>
+public sealed record InvestigationOpenResult(InvestigationOpenOutcome Outcome, Guid? RequestId);
+
+/// <summary>What a claim answered.</summary>
+public enum InvestigationClaimOutcome
+{
+    /// <summary>The request is now claimed under the new claim id.</summary>
+    Claimed,
+
+    /// <summary>Another claim holds a live lease.</summary>
+    AlreadyClaimed,
+
+    /// <summary>The request is reported, closed or expired, or has used its three claims.</summary>
+    NotOpen,
+
+    /// <summary>No request has that id.</summary>
+    NotFound,
+}
+
+/// <summary>The result of a claim. The lease and claim count are set only when <see cref="Outcome"/> is Claimed.</summary>
+public sealed record InvestigationClaimResult(
+    InvestigationClaimOutcome Outcome, Guid? ClaimId, DateTime? LeaseUntilUtc, int ClaimCount, string? Reason);
+
+/// <summary>What a report submission answered.</summary>
+public enum InvestigationSubmitOutcome
+{
+    /// <summary>The report was stored and the request is reported.</summary>
+    Reported,
+
+    /// <summary>The claim id is not the request's current claim: a newer claim superseded it, or it never held one.</summary>
+    LeaseLost,
+
+    /// <summary>The request already holds a report.</summary>
+    AlreadyReported,
+
+    /// <summary>The request is closed.</summary>
+    NotOpen,
+
+    /// <summary>No request has that id.</summary>
+    NotFound,
+}
+
+/// <summary>A report an agent returns under its claim. <see cref="EvidenceJson"/> is a JSON array of at least one item.</summary>
+public sealed record InvestigationReportSubmission(
+    Guid RequestId,
+    Guid ClaimId,
+    string AgentId,
+    short ReportFormat,
+    string Verdict,
+    string RootCause,
+    bool RootCauseFound,
+    string? Summary,
+    string EvidenceJson);
+
+/// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.</summary>
+public sealed record InvestigationRequestRow(
+    Guid RequestId,
+    int RouteId,
+    int ServerId,
+    string ServerName,
+    string Family,
+    string FirstMetric,
+    DateTime FirstAlertAtUtc,
+    DateTime LastAlertAtUtc,
+    int AlertCount,
+    string State,
+    DateTime OpenedAtUtc,
+    DateTime ExpiresAtUtc,
+    string? ClaimedBy,
+    DateTime? LeaseUntilUtc,
+    int ClaimCount,
+    DateTime? ReportedAtUtc);
+
+/// <summary>What one expiry sweep did.</summary>
+public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);
+
+/// <summary>
+/// The store operations of Level 1 investigations (#5632 Phase A, plan v2 section 2 and ruling R4): open or join a request,
+/// claim it, submit its report, list requests, and the expiry sweep. Every time is bound as a UTC <c>timestamptz</c>
+/// parameter from the injected clock, never a bare <c>now()</c>, so the windows do not depend on the session's zone and a
+/// test can move the clock.
+///
+/// <para><b>Open or join is one transaction.</b> It takes a transaction-scoped advisory lock on the server and family, so two
+/// alerts of one incident cannot both open a request; joins an open or claimed request of that server and family when the
+/// alert falls inside its 30-minute window or carries a dedup key already on it; and otherwise takes
+/// <c>pg_advisory_xact_lock(5632, route_id)</c> over the count of the route's requests and the INSERT (ruling R6), so two
+/// families of one route cannot both pass the limit. At a limit it journals <c>limit_reached</c> once per route per hour
+/// (the journal's <c>once_key</c>) and opens nothing. Joins never count toward a limit.</para>
+///
+/// <para><b>Claim is one conditional UPDATE</b> (state open, or claimed with a lapsed lease; fewer than three claims; not
+/// expired) with <c>RETURNING</c>, so two agents claiming at once cannot both win. When no row returns, one SELECT says why,
+/// and the refusal is journaled once per request and reason. <b>Submit</b> accepts the current claim's report while the
+/// request is claimed (its lease live or lapsed) or expired under that claim, until a newer claim supersedes it.
+/// <b>List</b> writes nothing, so the SELECT-only web role can serve it. <b>The sweep</b> only expires: it journals each lapsed
+/// lease once per claim and moves a request past its expiry, or out of claims, to <c>expired</c>. It never reopens a lease;
+/// the claim's own WHERE takes a lapsed lease over.</para>
+/// </summary>
+public sealed class InvestigationRequestStore
+{
+    /// <summary>The first key of the route lock, <c>pg_advisory_xact_lock(5632, route_id)</c>.</summary>
+    public const int RouteLockKey = 5632;
+
+    /// <summary>The grouping window: an alert this long after a request's first alert still joins it.</summary>
+    public static readonly TimeSpan GroupingWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>The claims a request may take before it expires.</summary>
+    public const int MaxClaims = 3;
+
+    internal const string GroupLockSql =
+        "SELECT pg_advisory_xact_lock(hashtextextended('investigation:' || $1::text || ':' || $2, 5632))";
+
+    internal const string RouteLockSql = "SELECT pg_advisory_xact_lock($1, $2)";
+
+    internal const string FindJoinSql = @"
+SELECT r.request_id
+FROM config.investigation_requests AS r
+WHERE r.server_id = $1
+  AND r.family = $2
+  AND r.state IN ('open', 'claimed')
+  AND r.expires_at > $3
+  AND (   $4 <= r.window_until
+       OR EXISTS (SELECT 1 FROM config.investigation_request_alerts AS a
+                  WHERE a.request_id = r.request_id AND a.dedup_key = ANY($5)))
+ORDER BY r.opened_at DESC
+LIMIT 1";
+
+    internal const string JoinSql = @"
+UPDATE config.investigation_requests
+SET alert_count = alert_count + 1,
+    last_alert_at = greatest(last_alert_at, $2)
+WHERE request_id = $1";
+
+    internal const string CountRouteSql = @"
+SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
+       count(*)
+FROM config.investigation_requests
+WHERE route_id = $1
+  AND opened_at > $2 - interval '1 day'";
+
+    internal const string OpenSql = @"
+INSERT INTO config.investigation_requests
+    (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
+     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + interval '30 minutes', $10, $10 + make_interval(mins => $11), $12)";
+
+    internal const string AlertRowsSql = @"
+INSERT INTO config.investigation_request_alerts (request_id, alert_time, server_id, metric_name, dedup_key)
+SELECT $1, $2, $3, $4, k
+FROM unnest($5::text[]) AS k";
+
+    internal const string JournalSql = @"
+INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
+
+    internal const string ClaimSql = @"
+UPDATE config.investigation_requests
+SET state = 'claimed',
+    claimed_by = $2,
+    claim_id = $3,
+    claimed_at = $4,
+    lease_until = $4 + make_interval(mins => lease_minutes),
+    claim_count = claim_count + 1
+WHERE request_id = $1
+  AND (state = 'open' OR (state = 'claimed' AND lease_until < $4))
+  AND claim_count < 3
+  AND expires_at > $4
+RETURNING lease_until, claim_count, server_id";
+
+    internal const string ClaimWhySql = @"
+SELECT state, lease_until, claim_count, expires_at, server_id
+FROM config.investigation_requests
+WHERE request_id = $1";
+
+    internal const string SubmitLockSql = @"
+SELECT state, claim_id, server_id, first_metric, first_dedup_key, story_path_hash
+FROM config.investigation_requests
+WHERE request_id = $1
+FOR UPDATE";
+
+    internal const string ReportInsertSql = @"
+INSERT INTO config.investigation_reports
+    (request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence,
+     server_id, metric_name, dedup_key, story_path_hash)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14)";
+
+    internal const string ReportedSql = @"
+UPDATE config.investigation_requests
+SET state = 'reported', reported_at = $2, lease_until = NULL
+WHERE request_id = $1";
+
+    internal const string SetBriefSql = @"
+UPDATE config.investigation_requests
+SET brief_format = $3, brief = $4::jsonb
+WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
+
+    internal const string ReleaseSql = @"
+UPDATE config.investigation_requests
+SET state = 'open', claimed_by = NULL, claim_id = NULL, claimed_at = NULL, lease_until = NULL,
+    claim_count = greatest(claim_count - 1, 0)
+WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
+
+    internal const string ListSql = @"
+SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
+       effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at
+FROM (
+    SELECT r.*,
+           CASE
+               WHEN r.state IN ('open', 'claimed') AND r.expires_at <= $1 THEN 'expired'
+               WHEN r.state = 'claimed' AND r.lease_until < $1 AND r.claim_count >= 3 THEN 'expired'
+               WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
+               ELSE r.state
+           END AS effective_state
+    FROM config.investigation_requests AS r
+    WHERE ($3::integer IS NULL OR r.server_id = $3)
+      AND ($4::text IS NULL OR r.family = $4)
+) AS s
+WHERE ($2::text IS NULL OR s.effective_state = $2)
+ORDER BY s.opened_at DESC, s.request_id
+LIMIT $5";
+
+    internal const string SweepLapsedSql = @"
+INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, once_key)
+SELECT $1, r.request_id, r.server_id, 'lease_expired', 'service', r.claimed_by, 'lease_expired:' || r.claim_id::text
+FROM config.investigation_requests AS r
+WHERE r.state = 'claimed' AND r.lease_until < $1
+ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
+
+    internal const string SweepExpireSql = @"
+WITH expired AS (
+    UPDATE config.investigation_requests
+    SET state = 'expired'
+    WHERE (state IN ('open', 'claimed') AND expires_at <= $1)
+       OR (state = 'claimed' AND lease_until < $1 AND claim_count >= 3)
+    RETURNING request_id, server_id
+)
+INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, once_key)
+SELECT $1, e.request_id, e.server_id, 'expired', 'service', 'expired:' || e.request_id::text
+FROM expired AS e
+ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
+
+    private readonly NpgsqlDataSource _dataSource;
+    private readonly int _commandTimeoutSeconds;
+    private readonly Func<DateTime> _utcNow;
+
+    /// <summary>
+    /// <paramref name="dataSource"/> must connect as a role that may write the investigation tables: the store owner for
+    /// open, join and the sweep; the owner or the <c>mcp</c> role for claim and submit. <paramref name="commandTimeoutSeconds"/>
+    /// is applied to every command. <paramref name="utcNow"/> is the clock (tests move it); it defaults to the wall clock.
+    /// </summary>
+    public InvestigationRequestStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds, Func<DateTime>? utcNow = null)
+    {
+        _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
+        _commandTimeoutSeconds = commandTimeoutSeconds;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
+    }
+
+    private DateTime Now() => DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
+
+    /// <summary>
+    /// Opens a request for <paramref name="alert"/>, joins it to an open or claimed request of the same server and family,
+    /// or refuses at the route's limit, in one transaction. See the class remarks for the locks.
+    /// </summary>
+    public async Task<InvestigationOpenResult> OpenOrJoinAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        var now = Now();
+        var alertTime = DateTime.SpecifyKind(alert.AlertTimeUtc, DateTimeKind.Utc);
+        var keys = alert.DedupKeys.Where(k => !string.IsNullOrEmpty(k)).Distinct(StringComparer.Ordinal).ToArray();
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await ExecAsync(connection, transaction, GroupLockSql, cancellationToken, P(alert.ServerId), P(alert.Family));
+
+        Guid? joinId = null;
+        await using (var find = Command(connection, transaction, FindJoinSql,
+                         P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(keys)))
+        {
+            var found = await find.ExecuteScalarAsync(cancellationToken);
+            if (found is Guid id)
+            {
+                joinId = id;
+            }
+        }
+
+        if (joinId is Guid join)
+        {
+            await ExecAsync(connection, transaction, JoinSql, cancellationToken, P(join), P(alertTime));
+            await InsertAlertRowsAsync(connection, transaction, join, alert, alertTime, keys, cancellationToken);
+            await JournalAsync(connection, transaction, now, join, alert.RouteId, alert.ServerId, "joined", "service",
+                alert.MetricName, null, null, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new InvestigationOpenResult(InvestigationOpenOutcome.Joined, join);
+        }
+
+        await ExecAsync(connection, transaction, RouteLockSql, cancellationToken, P(RouteLockKey), P(alert.RouteId));
+
+        long lastHour, lastDay;
+        await using (var count = Command(connection, transaction, CountRouteSql, P(alert.RouteId), P(now)))
+        await using (var reader = await count.ExecuteReaderAsync(cancellationToken))
+        {
+            await reader.ReadAsync(cancellationToken);
+            lastHour = reader.GetInt64(0);
+            lastDay = reader.GetInt64(1);
+        }
+
+        if (lastHour >= alert.MaxPerHour || lastDay >= alert.MaxPerDay)
+        {
+            var which = lastHour >= alert.MaxPerHour ? "hourly" : "daily";
+            var detail = string.Create(CultureInfo.InvariantCulture,
+                $"{{\"limit\":\"{which}\",\"last_hour\":{lastHour},\"last_day\":{lastDay},\"max_per_hour\":{alert.MaxPerHour},\"max_per_day\":{alert.MaxPerDay}}}");
+            var onceKey = string.Create(CultureInfo.InvariantCulture, $"limit_reached:{alert.RouteId}:{now:yyyy-MM-ddTHH}");
+            await JournalAsync(connection, transaction, now, null, alert.RouteId, alert.ServerId, "limit_reached", "service",
+                which, detail, onceKey, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new InvestigationOpenResult(InvestigationOpenOutcome.LimitReached, null);
+        }
+
+        var requestId = Guid.NewGuid();
+        await ExecAsync(connection, transaction, OpenSql, cancellationToken,
+            P(requestId), P(alert.RouteId), P(alert.ServerId), P(alert.ServerName), P(alert.Family), P(alert.MetricName),
+            PNullable(keys.FirstOrDefault()), PNullable(alert.StoryPathHash), P(alertTime), P(now), P(alert.ExpiryMinutes),
+            P(alert.LeaseMinutes));
+        await InsertAlertRowsAsync(connection, transaction, requestId, alert, alertTime, keys, cancellationToken);
+        await JournalAsync(connection, transaction, now, requestId, alert.RouteId, alert.ServerId, "opened", "service",
+            alert.MetricName, null, null, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new InvestigationOpenResult(InvestigationOpenOutcome.Opened, requestId);
+    }
+
+    /// <summary>
+    /// Claims <paramref name="requestId"/> for <paramref name="agentId"/> under a new claim id with one conditional UPDATE.
+    /// When no row returns, one SELECT says why, and the refusal is journaled once per request and reason.
+    /// </summary>
+    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(agentId);
+        var now = Now();
+        var claimId = Guid.NewGuid();
+        var actor = "agent:" + agentId;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var claim = Command(connection, transaction, ClaimSql, P(requestId), P(agentId), P(claimId), P(now)))
+        await using (var reader = await claim.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var leaseUntil = reader.GetFieldValue<DateTime>(0);
+                var claimCount = reader.GetInt32(1);
+                var serverId = reader.GetInt32(2);
+                await reader.DisposeAsync();
+                await JournalAsync(connection, transaction, now, requestId, null, serverId, "claimed", actor,
+                    claimId.ToString(), null, null, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return new InvestigationClaimResult(InvestigationClaimOutcome.Claimed, claimId, leaseUntil, claimCount, null);
+            }
+        }
+
+        InvestigationClaimOutcome outcome;
+        string reason;
+        int count = 0;
+        int? server = null;
+        await using (var why = Command(connection, transaction, ClaimWhySql, P(requestId)))
+        await using (var reader = await why.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                outcome = InvestigationClaimOutcome.NotFound;
+                reason = "not_found";
+            }
+            else
+            {
+                var state = reader.GetString(0);
+                DateTime? leaseUntil = reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTime>(1);
+                count = reader.GetInt32(2);
+                var expiresAt = reader.GetFieldValue<DateTime>(3);
+                server = reader.GetInt32(4);
+                (outcome, reason) = state switch
+                {
+                    "claimed" when leaseUntil >= now && expiresAt > now => (InvestigationClaimOutcome.AlreadyClaimed, "already_claimed"),
+                    "reported" => (InvestigationClaimOutcome.NotOpen, "reported"),
+                    "closed" => (InvestigationClaimOutcome.NotOpen, "closed"),
+                    _ when expiresAt <= now || state == "expired" => (InvestigationClaimOutcome.NotOpen, "expired"),
+                    _ when count >= MaxClaims => (InvestigationClaimOutcome.NotOpen, "claim_limit"),
+                    _ => (InvestigationClaimOutcome.NotOpen, state),
+                };
+            }
+        }
+
+        /* A refusal for an unknown id names no request row, so its once key still carries the id it was asked for. */
+        await JournalAsync(connection, transaction, now, outcome == InvestigationClaimOutcome.NotFound ? null : requestId, null, server,
+            "refused", actor, "claim:" + reason, null, "refused:claim:" + requestId.ToString() + ":" + reason, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new InvestigationClaimResult(outcome, null, null, count, reason);
+    }
+
+    /// <summary>
+    /// Stores the brief composed for the current claim. False when <paramref name="claimId"/> no longer holds the request.
+    /// </summary>
+    public async Task<bool> SetBriefAsync(Guid requestId, Guid claimId, short briefFormat, string briefJson, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(briefJson);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, SetBriefSql, P(requestId), P(claimId), P(briefFormat), P(briefJson));
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    /// <summary>
+    /// Returns a claim that could not be served (the brief failed to compose) to <c>open</c> and gives the claim back.
+    /// False when <paramref name="claimId"/> no longer holds the request.
+    /// </summary>
+    public async Task<bool> ReleaseAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, ReleaseSql, P(requestId), P(claimId));
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    /// <summary>
+    /// Accepts the current claim's report while the request is claimed (lease live or lapsed) or expired under that claim,
+    /// until a newer claim supersedes it. A refusal is journaled once per request and reason.
+    /// </summary>
+    public async Task<InvestigationSubmitOutcome> SubmitAsync(InvestigationReportSubmission report, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        var now = Now();
+        var actor = "agent:" + report.AgentId;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        string? state = null;
+        Guid? currentClaim = null;
+        int serverId = 0;
+        string? metric = null, dedupKey = null, story = null;
+        await using (var command = Command(connection, transaction, SubmitLockSql, P(report.RequestId)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                state = reader.GetString(0);
+                currentClaim = reader.IsDBNull(1) ? null : reader.GetGuid(1);
+                serverId = reader.GetInt32(2);
+                metric = reader.GetString(3);
+                dedupKey = reader.IsDBNull(4) ? null : reader.GetString(4);
+                story = reader.IsDBNull(5) ? null : reader.GetString(5);
+            }
+        }
+
+        var outcome = state switch
+        {
+            null => InvestigationSubmitOutcome.NotFound,
+            "reported" => InvestigationSubmitOutcome.AlreadyReported,
+            "closed" => InvestigationSubmitOutcome.NotOpen,
+            _ when currentClaim != report.ClaimId => InvestigationSubmitOutcome.LeaseLost,
+            "claimed" or "expired" => InvestigationSubmitOutcome.Reported,
+            _ => InvestigationSubmitOutcome.LeaseLost,
+        };
+
+        if (outcome != InvestigationSubmitOutcome.Reported)
+        {
+            var reason = outcome switch
+            {
+                InvestigationSubmitOutcome.NotFound => "not_found",
+                InvestigationSubmitOutcome.AlreadyReported => "already_reported",
+                InvestigationSubmitOutcome.NotOpen => "closed",
+                _ => "lease_lost",
+            };
+            await JournalAsync(connection, transaction, now, state is null ? null : report.RequestId, null, state is null ? null : serverId,
+                "refused", actor, "submit:" + reason, null,
+                "refused:submit:" + report.RequestId.ToString() + ":" + report.ClaimId.ToString() + ":" + reason, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return outcome;
+        }
+
+        await ExecAsync(connection, transaction, ReportInsertSql, cancellationToken,
+            P(report.RequestId), P(report.ReportFormat), P(report.AgentId), P(report.ClaimId), P(now), P(report.Verdict),
+            P(report.RootCause), P(report.RootCauseFound), PNullable(report.Summary), P(report.EvidenceJson), P(serverId),
+            PNullable(metric), PNullable(dedupKey), PNullable(story));
+        await ExecAsync(connection, transaction, ReportedSql, cancellationToken, P(report.RequestId), P(now));
+        await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, "reported", actor,
+            report.Verdict, null, null, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return InvestigationSubmitOutcome.Reported;
+    }
+
+    /// <summary>
+    /// Lists requests newest first, with the state computed from the lease and the expiry (a lapsed lease reads
+    /// <c>open</c>, or <c>expired</c> after three claims; a request past its expiry reads <c>expired</c>). Writes nothing.
+    /// Every filter is optional.
+    /// </summary>
+    public async Task<IReadOnlyList<InvestigationRequestRow>> ListAsync(
+        string? state, int? serverId, string? family, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, ListSql,
+            P(Now()), PNullable(state), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
+            PNullable(family), P(limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<InvestigationRequestRow>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new InvestigationRequestRow(
+                reader.GetGuid(0),
+                reader.GetInt32(1),
+                reader.GetInt32(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetFieldValue<DateTime>(6),
+                reader.GetFieldValue<DateTime>(7),
+                reader.GetInt32(8),
+                reader.GetString(9),
+                reader.GetFieldValue<DateTime>(10),
+                reader.GetFieldValue<DateTime>(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
+                reader.GetInt32(14),
+                reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The expiry sweep: journals each lapsed lease once per claim, then moves every request past its expiry, or with a
+    /// lapsed lease after its last claim, to <c>expired</c> and journals that once. It never reopens a lease.
+    /// </summary>
+    public async Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default)
+    {
+        var now = Now();
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var lapsed = await ExecAsync(connection, transaction, SweepLapsedSql, cancellationToken, P(now));
+        var expired = await ExecAsync(connection, transaction, SweepExpireSql, cancellationToken, P(now));
+        await transaction.CommitAsync(cancellationToken);
+        return new InvestigationSweepResult(lapsed, expired);
+    }
+
+    private Task<int> InsertAlertRowsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid requestId,
+        InvestigationAlert alert, DateTime alertTime, string[] keys, CancellationToken cancellationToken)
+    {
+        /* A row per incident dedup key; an alert with no key still gets its one row. */
+        var rowKeys = keys.Length == 0 ? new string?[] { null } : keys.Cast<string?>().ToArray();
+        return ExecAsync(connection, transaction, AlertRowsSql, cancellationToken,
+            P(requestId), P(alertTime), P(alert.ServerId), P(alert.MetricName),
+            new NpgsqlParameter<string?[]> { TypedValue = rowKeys, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+    }
+
+    private Task<int> JournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now, Guid? requestId,
+        int? routeId, int? serverId, string journalEvent, string actor, string? reason, string? detailJson, string? onceKey,
+        CancellationToken cancellationToken) =>
+        ExecAsync(connection, transaction, JournalSql, cancellationToken,
+            P(now),
+            new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
+            new NpgsqlParameter<int?> { TypedValue = routeId, NpgsqlDbType = NpgsqlDbType.Integer },
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
+            P(journalEvent), P(actor), PNullable(reason), PNullable(detailJson), PNullable(onceKey));
+
+    private NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, params NpgsqlParameter[] parameters)
+    {
+        var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = _commandTimeoutSeconds };
+        command.Parameters.AddRange(parameters);
+        return command;
+    }
+
+    private async Task<int> ExecAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql,
+        CancellationToken cancellationToken, params NpgsqlParameter[] parameters)
+    {
+        await using var command = Command(connection, transaction, sql, parameters);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static NpgsqlParameter<T> P<T>(T value) => new NpgsqlParameter<T> { TypedValue = value };
+
+    private static NpgsqlParameter<DateTime> P(DateTime value) =>
+        new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(value, DateTimeKind.Utc), NpgsqlDbType = NpgsqlDbType.TimestampTz };
+
+    private static NpgsqlParameter<string?> PNullable(string? value) =>
+        new NpgsqlParameter<string?> { TypedValue = value, NpgsqlDbType = NpgsqlDbType.Text };
+}

@@ -1,0 +1,216 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Globalization;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres and never touches another test's rows,
+   so the class is deliberately NOT [Collection("live-postgres")]. */
+
+/// <summary>
+/// The investigation store's operations on a live store (#5632 Phase A, rulings R4 and R6): alerts of one server and family
+/// group within the 30-minute window and by a known dedup key; the hourly limit opens nothing and journals
+/// <c>limit_reached</c> once; two concurrent claims have one winner; a superseded claim's report is refused as
+/// <c>lease_lost</c>; a late report under a lapsed or expired lease is accepted until a newer claim; the list computes the
+/// state without writing; and the sweep expires without reopening.
+/// </summary>
+public sealed class InvestigationRequestStoreLiveTests
+{
+    private static readonly DateTime T0 = new(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private DateTime _now = T0;
+
+    private static InvestigationAlert Alert(DateTime at, string family = "blocking", int serverId = 7, int routeId = 1,
+        int maxPerHour = 20, int maxPerDay = 100, params string[] keys) =>
+        new(routeId, serverId, "srv-" + serverId.ToString(CultureInfo.InvariantCulture), family, "Blocking", at, keys, null,
+            maxPerHour, maxPerDay, LeaseMinutes: 15, ExpiryMinutes: 240);
+
+    private static InvestigationReportSubmission Report(Guid requestId, Guid claimId) =>
+        new(requestId, claimId, "agent-a", 1, "real", "a long blocking chain", true, "summary", "[{\"tool\":\"get_blocking\"}]");
+
+    [Fact]
+    public async Task AlertsGroup_WithinTheWindow_AndByAKnownKey_AndOpenAnotherPastIt()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(Alert(T0, keys: new[] { "key-1" }), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, first.Outcome);
+
+            /* Same server and family, inside 30 minutes, two incident keys: joins, a row per key. */
+            var second = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(20), keys: new[] { "key-2", "key-3" }), ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, second.Outcome);
+            Assert.Equal(first.RequestId, second.RequestId);
+
+            /* Another family on the same server opens its own. */
+            var other = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(21), family: "resources"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, other.Outcome);
+
+            /* Past the window with a key already on the request: joins late. */
+            var late = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(50), keys: new[] { "key-3" }), ct);
+            Assert.Equal(first.RequestId, late.RequestId);
+
+            /* Past the window with a new key: opens another. */
+            var past = await store.OpenOrJoinAsync(Alert(T0.AddMinutes(51), keys: new[] { "key-9" }), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, past.Outcome);
+            Assert.NotEqual(first.RequestId, past.RequestId);
+
+            Assert.Equal("3|4", await ScalarAsync(connection, $@"
+SELECT alert_count || '|' || (SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{first.RequestId}')
+FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct));
+            Assert.Equal("2", await ScalarAsync(connection,
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'joined'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheHourlyLimit_OpensNothing_AndJournalsLimitReachedOnce_AndTheDailyLimitHoldsAnHourLater()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* Two families per alert server, so each alert opens (joins never count). Limit 2 an hour, 3 a day. */
+            Assert.Equal(InvestigationOpenOutcome.Opened, (await store.OpenOrJoinAsync(Alert(T0, serverId: 1, maxPerHour: 2, maxPerDay: 3), ct)).Outcome);
+            Assert.Equal(InvestigationOpenOutcome.Opened, (await store.OpenOrJoinAsync(Alert(T0, serverId: 2, maxPerHour: 2, maxPerDay: 3), ct)).Outcome);
+            Assert.Equal(InvestigationOpenOutcome.LimitReached, (await store.OpenOrJoinAsync(Alert(T0, serverId: 3, maxPerHour: 2, maxPerDay: 3), ct)).Outcome);
+            Assert.Equal(InvestigationOpenOutcome.LimitReached, (await store.OpenOrJoinAsync(Alert(T0, serverId: 4, maxPerHour: 2, maxPerDay: 3), ct)).Outcome);
+
+            /* A join under the limit still joins. */
+            Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(T0.AddMinutes(1), serverId: 1, maxPerHour: 2, maxPerDay: 3), ct)).Outcome);
+            Assert.Equal("1", await ScalarAsync(connection,
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'limit_reached'", ct));
+
+            _now = T0.AddMinutes(61);
+            Assert.Equal(InvestigationOpenOutcome.Opened, (await store.OpenOrJoinAsync(Alert(_now, serverId: 5, maxPerHour: 2, maxPerDay: 3), ct)).Outcome);
+            Assert.Equal(InvestigationOpenOutcome.LimitReached, (await store.OpenOrJoinAsync(Alert(_now, serverId: 6, maxPerHour: 2, maxPerDay: 3), ct)).Outcome);
+            Assert.Equal("2|daily", await ScalarAsync(connection, @"
+SELECT count(*) || '|' || max(reason) FILTER (WHERE event_time > (SELECT min(event_time) FROM config.investigation_journal WHERE event = 'limit_reached'))
+FROM config.investigation_journal WHERE event = 'limit_reached'", ct));
+            Assert.Equal("3", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TwoConcurrentClaims_HaveOneWinner()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var opened = await store.OpenOrJoinAsync(Alert(T0), ct);
+            var id = opened.RequestId!.Value;
+
+            var claims = await Task.WhenAll(
+                Enumerable.Range(0, 8).Select(i => store.ClaimAsync(id, "agent-" + i.ToString(CultureInfo.InvariantCulture), ct)));
+            Assert.Single(claims, c => c.Outcome == InvestigationClaimOutcome.Claimed);
+            Assert.All(claims.Where(c => c.Outcome != InvestigationClaimOutcome.Claimed),
+                c => Assert.Equal(InvestigationClaimOutcome.AlreadyClaimed, c.Outcome));
+
+            Assert.Equal("1|1", await ScalarAsync(connection, $@"
+SELECT claim_count || '|' || (SELECT count(*) FROM config.investigation_journal WHERE event = 'claimed')
+FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+
+            /* Seven refusals of one reason are journaled once. */
+            Assert.Equal("1", await ScalarAsync(connection,
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused'", ct));
+            Assert.Equal(InvestigationClaimOutcome.NotFound, (await store.ClaimAsync(Guid.NewGuid(), "agent-x", ct)).Outcome);
+        });
+    }
+
+    [Fact]
+    public async Task ALateReport_UnderALapsedLease_IsAccepted_UntilANewerClaimSupersedesIt()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var a = (await store.OpenOrJoinAsync(Alert(T0, serverId: 1), ct)).RequestId!.Value;
+            var b = (await store.OpenOrJoinAsync(Alert(T0, serverId: 2), ct)).RequestId!.Value;
+
+            var claimA = await store.ClaimAsync(a, "agent-a", ct);
+            var claimB1 = await store.ClaimAsync(b, "agent-a", ct);
+            Assert.True(await store.SetBriefAsync(a, claimA.ClaimId!.Value, 1, "{\"brief_format\":1}", ct));
+
+            /* Both leases lapse. The list says open and writes nothing; the sweep journals each lapse once and reopens nothing. */
+            _now = T0.AddMinutes(20);
+            var listed = await store.ListAsync("open", null, null, 10, ct);
+            Assert.Equal(2, listed.Count);
+            Assert.Equal("2", await ScalarAsync(connection,
+                "SELECT count(*) FROM config.investigation_requests WHERE state = 'claimed'", ct));
+            await store.SweepAsync(ct);
+            await store.SweepAsync(ct);
+            Assert.Equal("2|2", await ScalarAsync(connection, @"
+SELECT (SELECT count(*) FROM config.investigation_journal WHERE event = 'lease_expired') || '|' ||
+       (SELECT count(*) FROM config.investigation_requests WHERE state = 'claimed')", ct));
+
+            /* A: the slow agent's report under its lapsed lease is accepted, and a second one is refused. */
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(a, claimA.ClaimId!.Value), ct));
+            Assert.Equal(InvestigationSubmitOutcome.AlreadyReported, await store.SubmitAsync(Report(a, claimA.ClaimId!.Value), ct));
+
+            /* B: a newer claim takes the lapsed lease over; the first claim's report is then lease_lost, the newer one's lands. */
+            var claimB2 = await store.ClaimAsync(b, "agent-b", ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, claimB2.Outcome);
+            Assert.Equal(2, claimB2.ClaimCount);
+            Assert.Equal(InvestigationSubmitOutcome.LeaseLost, await store.SubmitAsync(Report(b, claimB1.ClaimId!.Value), ct));
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(b, claimB2.ClaimId!.Value), ct));
+            Assert.Equal("2|reported", await ScalarAsync(connection,
+                "SELECT count(*) || '|' || min(state) FROM config.investigation_requests", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AReport_UnderAClaimTheSweepExpired_IsAccepted_AndAnExpiredRequestRefusesAClaim()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(id, "agent-a", ct);
+
+            /* Past the 240-minute expiry: the sweep expires it once, and a new claim is refused. */
+            _now = T0.AddMinutes(241);
+            Assert.Equal(1, (await store.SweepAsync(ct)).Expired);
+            Assert.Equal(0, (await store.SweepAsync(ct)).Expired);
+            var refused = await store.ClaimAsync(id, "agent-b", ct);
+            Assert.Equal(InvestigationClaimOutcome.NotOpen, refused.Outcome);
+            Assert.Equal("expired", refused.Reason);
+            Assert.Single(await store.ListAsync("expired", 7, "blocking", 10, ct));
+
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(id, claim.ClaimId!.Value), ct));
+            Assert.Equal("reported|1", await ScalarAsync(connection, $@"
+SELECT r.state || '|' || (SELECT count(*) FROM config.investigation_reports WHERE request_id = r.request_id)
+FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
+        });
+    }
+
+    private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, CancellationToken, Task> body)
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the investigation store live tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var store = new InvestigationRequestStore(dataSource, 30, () => _now);
+        await body(store, connection, ct);
+    }
+
+    private static async Task<string?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+}
