@@ -31,7 +31,7 @@ permissions:
 # already replaced — ~60 reclaimable runner-minutes in one evening). Cancelling a
 # superseded PUSH run is safe because no run's RESULT depends on another run's output: every
 # upload-artifact step in this workflow is gated to the release event (the SignPath signing
-# path) or to failure() (darling-pg diagnostics), except the per-run Lite timing uploads
+# path and the Linux release handoff, #5804) or to failure() (darling-pg diagnostics), except the per-run Lite timing uploads
 # (#5208) and the Guard job's two test-build uploads (#5459), which only jobs of the SAME run
 # download (no run-id; a cancelled run's build is never read by another run), and exactly ONE
 # thing reads a previous run's artifacts: the Lite shard packer (#5208). The gate job picks, once per run, the newest successful push run on dev (of the 30
@@ -2165,12 +2165,14 @@ jobs:
   # container smoke lives in the compose quickstart. On PRs/pushes this job answers exactly two
   # questions: does the service still publish for linux-x64, and does the image still build.
   #
-  # On the RELEASE event this job is the Linux PUBLISHER: before it, a stable release shipped Windows
-  # zips and Setup.exes while the linux tar.gz and the ghcr image existed only at nightly quality
-  # (nightly.yml, tag :nightly) — the compose quickstart pointed released users at a nightly image.
-  # Now the release uploads PerformanceMonitorDarling-linux-x64-<v>.tar.gz + SHA256SUMS-linux.txt to
-  # the release and pushes ghcr :<version> and :latest. Linux binaries are NOT SignPath-signed
-  # (SignPath signs Windows PEs); the checksums file is the integrity story, same as the nightly.
+  # On the RELEASE event this job PACKAGES the Linux release and the darling-linux-publish job below
+  # PUBLISHES it: before them, a stable release shipped Windows zips and Setup.exes while the linux
+  # tar.gz and the ghcr image existed only at nightly quality (nightly.yml, tag :nightly) — the compose
+  # quickstart pointed released users at a nightly image. This job tars the linux-x64 publish into
+  # PerformanceMonitorDarling-linux-x64-<v>.tar.gz + SHA256SUMS-linux.txt and hands both to the publish
+  # job as this run's darling-linux-release artifact; it publishes nothing itself, so it needs only read
+  # access (#5804). Linux binaries are NOT SignPath-signed (SignPath signs Windows PEs); the checksums
+  # file is the integrity story, same as the nightly.
   darling-linux:
     name: Darling Linux build
     # Fail fast on a pull request (#5459), exactly as the Darling PG shards: see the comment on that job.
@@ -2179,12 +2181,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
-      packages: write
-      # Sigstore keyless signing + GitHub provenance (proven on the nightly first): id-token yields
-      # the OIDC identity Fulcio certifies against; attestations stores the tarball's provenance.
-      id-token: write
-      attestations: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v7
@@ -2227,7 +2224,7 @@ jobs:
           set -euo pipefail
 
           if [ "${{ github.event_name }}" = "release" ]; then
-            echo "::notice title=Darling Linux publishing::Release event - packaging the versioned linux tar.gz and pushing the ghcr image."
+            echo "::notice title=Darling Linux packaging::Release event - packaging the versioned linux tar.gz. The Darling Linux publish job uploads it and pushes the ghcr image once the Windows build, signature guards included, has passed."
             exit 0
           fi
 
@@ -2292,6 +2289,73 @@ jobs:
           mkdir -p releases
           tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
           (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+
+      # #5804: the tarball and its checksums leave this job as a same-run artifact rather than as release
+      # assets. darling-linux-publish uploads them only after the Windows build job, whose release steps
+      # assert every published executable is signed, has succeeded, so a failed guard leaves no Linux
+      # asset or :latest image behind. One day of retention: the publish job reads it minutes later.
+      - name: Hand the linux artifact to the publish job
+        if: github.event_name == 'release'
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-linux-release
+          path: releases/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Linux release publish (#5804) ─────────────────────────────────────────────────────────────────
+  # Release only. Before #5804 darling-linux published the Linux release in parallel with the Windows
+  # build job, so a release whose Windows signature guard failed ("Assert every published executable
+  # is signed") still shipped the Linux tarball, its checksums and the ghcr :<version> and :latest
+  # images while the Windows zips never uploaded: a half-published release. This job needs BOTH jobs
+  # and starts only when both succeeded, so every blocking check runs before anything is published.
+  # The cost is wall clock: the Linux publish now starts after the Windows build finishes instead of
+  # alongside it. `!cancelled()` keeps the old behaviour on a release whose Guard tests job failed:
+  # darling-linux and build both still run then, and so does this job. The steps after the download
+  # are the ones darling-linux ran, unchanged; Get version reads the same Directory.Build.props from
+  # the same commit, so steps.version.outputs.VERSION names the version they always did.
+  darling-linux-publish:
+    name: Darling Linux publish
+    needs: [build, darling-linux]
+    if: ${{ !cancelled() && github.event_name == 'release' && needs.build.result == 'success' && needs.darling-linux.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      # Sigstore keyless signing + GitHub provenance (proven on the nightly first): id-token yields
+      # the OIDC identity Fulcio certifies against; attestations stores the tarball's provenance.
+      id-token: write
+      attestations: write
+
+    steps:
+      # The image builds from the checkout (Darling/Dockerfile), as it did in darling-linux.
+      - uses: actions/checkout@v7
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)"
+          [ -n "${version}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
+          echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
+
+      # This run's own artifact (no run-id), so it reads nothing another run left behind.
+      - name: Download the linux artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: darling-linux-release
+          path: releases
+
+      # The artifact must be the tarball this version names, and its checksum must still match.
+      - name: Check the downloaded linux artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          test -f "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz"
+          (cd releases && sha256sum -c SHA256SUMS-linux.txt)
 
       - name: Upload linux artifact to the release
         if: github.event_name == 'release'

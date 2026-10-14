@@ -3181,8 +3181,13 @@ public class CrossAppGuardCiGateTests
         /* Five more (#5459): the shadow-check job fetches THIS run's selection and THIS run's shard reports, and the
            build, darling-pg and lite-tests jobs each fetch THIS run's selection before they narrow their classes.
            Same run, no run-id (the loop above pins that), so a cancelled run's output is never read by another run. */
-        Assert.Equal(8, Regex.Matches(buildCode, "download-artifact").Count);
+        /* One more (#5804): the release-only Linux publish job fetches THIS run's darling-linux-release artifact, which
+           the darling-linux job packaged. Same run, no run-id, and a release run is never cancelled anyway. */
+        Assert.Equal(9, Regex.Matches(buildCode, "download-artifact").Count);
         Assert.Equal(2, Regex.Matches(JobBlock(build, "shadow-check"), "uses: actions/download-artifact@v6").Count);
+        var linuxRelease = StepBlock(JobBlock(build, "darling-linux-publish"), "Download the linux artifact");
+        Assert.Contains("uses: actions/download-artifact@v6", linuxRelease, StringComparison.Ordinal);
+        Assert.Contains("name: darling-linux-release", linuxRelease, StringComparison.Ordinal);
         foreach (var jobKey in new[] { "build", "darling-pg", "lite-tests" })
         {
             var selection = StepBlock(JobBlock(build, jobKey), "Download the test map selection");

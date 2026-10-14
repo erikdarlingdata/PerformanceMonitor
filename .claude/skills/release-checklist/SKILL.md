@@ -210,7 +210,7 @@ Then run `uninstall-darling.ps1`, with `-PurgeData` on a machine you will reuse,
 
 #### (d) The Linux tarball and the container image
 
-The release also attaches `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. The `darling-linux` job in `build.yml` builds them: a framework-dependent publish of the service, tarred with no wrapper folder. The same job pushes `ghcr.io/erikdarlingdata/performancemonitor-darling`, tagged with the version and `latest`.
+The release also attaches `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. The `darling-linux` job in `build.yml` builds them: a framework-dependent publish of the service, tarred with no wrapper folder. The `darling-linux-publish` job uploads them and pushes `ghcr.io/erikdarlingdata/performancemonitor-darling`, tagged with the version and `latest`. It starts only after the Windows `build` job has passed, signature checks included (#5804), so the Linux assets reach the release some minutes after the Windows ones; a release whose Windows build failed has no Linux assets and no new image.
 
 Linux has no install script, no upgrade script and no systemd unit file in the tarball. The supported shapes are in the README's "Run on Linux" section. One is the compose stack in `Darling/compose/`. The other is the tarball extracted to `/opt/darling` under a unit written from the README's example, with your own PostgreSQL. 
 
