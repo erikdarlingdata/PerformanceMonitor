@@ -7,8 +7,10 @@
 
       Reads        (a) The day-scan reads through the real surfaces, with 1-day and 7-day windows: the four MCP Query
                    Store tools, the same reads through the web dashboard's /api/read routes (the Query Store page),
-                   and a Custom Views panel (-CustomViewSpec). Prints the time each call took, as the client saw it,
-                   then the slow-read rows the service wrote for them.
+                   and a Custom Views panel (-CustomViewSpec). Each window ends at the server's newest Query Store
+                   row (as_of), not at now: the copy gets no new rows, so a window that ends at now empties as the
+                   test goes on. Prints the time each call took, as the client saw it, then the slow-read rows the
+                   service wrote for them.
       ReadLatency  (a) The service's own read times for the window that started at -Since, beside the read budgets.
                    The service writes them once an hour, so run this step after that hour has closed.
       Jobs         (b) The hourly work that grows with N: the three Query Store builders (plan regression daily totals,
@@ -105,9 +107,10 @@ function Invoke-Mcp {
 }
 
 # The status words a Darling read puts on the wire when it did not answer the question: a name that resolves to nothing
-# is "invalid" (or "not_found"), a caught exception or a statement timeout is "error". A read like that returns in
-# milliseconds, so the step must count it as a failure, not as a fast read (#5794 review round 1).
-$script:failureStatuses = @('error', 'invalid', 'not_found', 'ambiguous', 'conflict', 'timeout')
+# is "invalid" (or "not_found"), a caught exception or a statement timeout is "error". "unavailable", "precondition"
+# and "not_collected" say that the read had no data to read. A read like that returns in milliseconds, so the step must
+# count it as a failure, not as a fast read (#5794 review rounds 1 and 2).
+$script:failureStatuses = @('error', 'invalid', 'not_found', 'ambiguous', 'conflict', 'timeout', 'unavailable', 'precondition', 'not_collected')
 
 # The reason a tool text or a web body is a failed read, or $null when the read answered. The text is the read's JSON,
 # or a bare sentence for a store fault (the registry read failing).
@@ -130,7 +133,8 @@ function Get-ReadFailure {
         $status = [string] $json.status
         if ($script:failureStatuses -contains $status) {
             $message = if ($json.PSObject.Properties['message']) { [string] $json.message } else { '' }
-            if ($message -match 'timeout|canceling statement') { $status = 'timeout' }
+            # The read guard's text is "The store took too long to answer this read".
+            if ($message -match 'timeout|canceling statement|took too long') { $status = 'timeout' }
             return "${status}: $message"
         }
     }
@@ -156,7 +160,7 @@ function Assert-ToolAnswer {
 }
 
 function Measure-Call {
-    param([string] $Surface, [string] $Read, [string] $Window, [scriptblock] $Call)
+    param([string] $Surface, [string] $Read, [string] $Window, [string] $AsOf, [scriptblock] $Call)
 
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $outcome = 'ok'
@@ -167,21 +171,60 @@ function Measure-Call {
         $outcome = 'failed: ' + ($_.Exception.Message -replace '\|', '/')
     }
     $watch.Stop()
-    [pscustomobject]@{ Surface = $Surface; Read = $Read; Window = $Window; Ms = $watch.ElapsedMilliseconds; Outcome = $outcome }
+    [pscustomobject]@{ Surface = $Surface; Read = $Read; Window = $Window; AsOf = $AsOf; Ms = $watch.ElapsedMilliseconds; Outcome = $outcome }
 }
 
 function Step-Reads {
     if (-not $ServerName) { throw 'The Reads step needs -ServerName: a real server in the copy.' }
     $since = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
     $results = @()
+    $serverLiteral = "'" + ($ServerName -replace "'", "''") + "'"
 
-    # A query to read history for: the busiest query of the server in the last day.
+    # The anchor of every window (#5794 review round 2): one second after the server's newest wide row. The copy gets
+    # no new Query Store rows, so a window that ends at now holds fewer rows each day of the test, and a read of an
+    # empty window is fast. first_execution_time is the column the reads filter on, and its index makes this max cheap.
+    $anchorRow = & $Psql -X -q -A -t -F '|' -v ON_ERROR_STOP=1 -d $Store -c @"
+SELECT to_char(a.t, 'YYYY-MM-DD') || 'T' || to_char(a.t, 'HH24:MI:SS') || 'Z', to_char(a.t, 'YYYY-MM-DD HH24:MI:SS')
+FROM
+(
+    SELECT date_trunc('second', max(w.first_execution_time)) + interval '1 second' AS t
+    FROM collect.query_store_interval_wide AS w
+    WHERE w.server_id = (SELECT s.server_id FROM collect.servers AS s WHERE s.server_name = $serverLiteral)
+) AS a
+WHERE a.t IS NOT NULL;
+"@
+    $anchorParts = "$anchorRow".Trim().Split('|')
+    $asOf = $null
+    if ($anchorParts.Count -eq 2) {
+        $asOf = $anchorParts[0]
+        $anchorTime = [datetime]::ParseExact($anchorParts[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+        Write-Host "Every window ends at as_of = $asOf, one second after the newest Query Store row of $ServerName."
+        # The service purges wide rows older than 9 days (QueryStoreIntervalPartitions.WideHorizonDays), and the copy
+        # gets no new ones, so a window that starts before that edge has lost rows to the purge.
+        $purgeEdge = (Get-Date).ToUniversalTime().AddDays(-9)
+        foreach ($hours in 24, 168) {
+            if ($anchorTime.AddHours(-$hours) -lt $purgeEdge) {
+                Write-Host "WARNING: the ${hours}h window starts before the purge edge ($($purgeEdge.ToString('yyyy-MM-dd HH:mm')) UTC). The service has removed rows from it, so its reads are faster than on a whole window. Restore a newer copy."
+            }
+        }
+    }
+    else {
+        Write-Host "WARNING: $ServerName has no Query Store rows in the copy. The windows end at now, and the reads have nothing to read."
+    }
+    $pickWindow = if ($asOf) {
+        "w.first_execution_time >= timestamp '$($anchorParts[1])' - interval '1 day' AND w.first_execution_time < timestamp '$($anchorParts[1])'"
+    }
+    else {
+        "w.first_execution_time >= (now() AT TIME ZONE 'UTC') - interval '1 day'"
+    }
+
+    # A query to read history for: the busiest query of the server in the day before the anchor.
     $pick = & $Psql -X -q -A -t -F '|' -v ON_ERROR_STOP=1 -d $Store -c @"
 SELECT w.database_name, w.query_id
 FROM collect.query_store_interval_wide AS w
 JOIN collect.servers AS s ON s.server_id = w.server_id
-WHERE s.server_name = '$($ServerName -replace "'", "''")'
-AND   w.first_execution_time >= (now() AT TIME ZONE 'UTC') - interval '1 day'
+WHERE s.server_name = $serverLiteral
+AND   $pickWindow
 ORDER BY w.execution_count DESC NULLS LAST
 LIMIT 1;
 "@
@@ -208,12 +251,16 @@ LIMIT 1;
     if ($pickParts.Count -eq 2) {
         $tools += @{ name = 'get_query_store_query_history'; arguments = @{ server_name = $ServerName; database_name = $pickParts[0]; query_id = [long] $pickParts[1] } }
     }
+    else {
+        Write-Host "get_query_store_query_history is skipped: $ServerName has no Query Store query in the day before the anchor."
+    }
 
     foreach ($hours in 24, 168) {
         foreach ($tool in $tools) {
             $arguments = $tool.arguments.Clone()
             $arguments['hours_back'] = $hours
-            $results += Measure-Call -Surface 'MCP' -Read $tool.name -Window "${hours}h" -Call {
+            if ($asOf) { $arguments['as_of'] = $asOf }
+            $results += Measure-Call -Surface 'MCP' -Read $tool.name -Window "${hours}h" -AsOf $asOf -Call {
                 $answer = Invoke-Mcp -Method 'tools/call' -Params @{ name = $tool.name; arguments = $arguments }
                 Assert-ToolAnswer -Answer $answer
             }
@@ -233,7 +280,8 @@ LIMIT 1;
         foreach ($hours in 24, 168) {
             foreach ($tool in $tools | Select-Object -First 3) {
                 $query = "server_name=$([uri]::EscapeDataString($ServerName))&hours_back=$hours"
-                $results += Measure-Call -Surface 'Web' -Read $tool.name -Window "${hours}h" -Call {
+                if ($asOf) { $query += "&as_of=$([uri]::EscapeDataString($asOf))" }
+                $results += Measure-Call -Surface 'Web' -Read $tool.name -Window "${hours}h" -AsOf $asOf -Call {
                     $page = Invoke-WebRequest -Uri ($WebUrl.TrimEnd('/') + "/api/read/$($tool.name)?$query") -WebSession $session -SkipHttpErrorCheck
                     if ($page.StatusCode -ge 400) { throw "HTTP $($page.StatusCode)" }
                     $failure = Get-ReadFailure -Text ([string] $page.Content)
@@ -248,7 +296,20 @@ LIMIT 1;
 
     if ($CustomViewSpec) {
         $spec = Get-Content -Raw -LiteralPath $CustomViewSpec
-        $results += Measure-Call -Surface 'Compose' -Read 'run_custom_view_panel' -Window 'as the spec says' -Call {
+        $specWindow = 'as the spec says'
+        $specAsOf = ''
+        # The panel's window ends at the same anchor: windowStart and windowEnd win over 'hours'. A spec that sets its own
+        # window keeps it.
+        $specObject = $spec | ConvertFrom-Json -AsHashtable
+        if ($asOf -and -not $specObject.ContainsKey('windowStart') -and -not $specObject.ContainsKey('windowEnd')) {
+            $specHours = if ($specObject.ContainsKey('hours')) { [int] $specObject['hours'] } else { 24 }
+            $specObject['windowEnd'] = $asOf
+            $specObject['windowStart'] = $anchorTime.AddHours(-$specHours).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+            $spec = $specObject | ConvertTo-Json -Depth 50 -Compress
+            $specWindow = "${specHours}h"
+            $specAsOf = $asOf
+        }
+        $results += Measure-Call -Surface 'Compose' -Read 'run_custom_view_panel' -Window $specWindow -AsOf $specAsOf -Call {
             $answer = Invoke-Mcp -Method 'tools/call' -Params @{ name = 'run_custom_view_panel'; arguments = @{ spec = $spec } }
             Assert-ToolAnswer -Answer $answer
         }
@@ -259,9 +320,12 @@ LIMIT 1;
 
     Write-Host ''
     Write-Host "Reads, as the client timed them (started $since UTC; pass -Since '$since' to the ReadLatency step):"
-    Write-Host '| surface | read | window | client_ms | outcome |'
-    Write-Host '|---|---|---|---|---|'
-    foreach ($r in $results) { Write-Host "| $($r.Surface) | $($r.Read) | $($r.Window) | $($r.Ms) | $($r.Outcome) |" }
+    Write-Host '| surface | read | window | as_of | client_ms | outcome |'
+    Write-Host '|---|---|---|---|---|---|'
+    foreach ($r in $results) {
+        $shownAsOf = if ($r.AsOf) { $r.AsOf } else { 'now' }
+        Write-Host "| $($r.Surface) | $($r.Read) | $($r.Window) | $shownAsOf | $($r.Ms) | $($r.Outcome) |"
+    }
 
     Start-Sleep -Seconds 5
     Write-Host ''
@@ -307,6 +371,13 @@ function Step-Jobs {
             $total = ($newest | Measure-Object Ms -Sum).Sum
             Write-Host ''
             Write-Host "hourly_total_ms (the newest run of each job): $total. It must stay well under one hour (3600000 ms). A 'deferred' count above 0 that stays from tick to tick is a backlog that does not clear."
+        }
+        # A job that throws writes no summary line, so the total above leaves it out (#5794 review round 2).
+        $jobs = @('PLAN_REGRESSION daily totals', 'Query Store top daily summary', 'Query Store compose rollup', 'Store object convergence')
+        $logged = @($runs | ForEach-Object { $_.Job })
+        $missing = @($jobs | Where-Object { $logged -notcontains $_ })
+        if ($runs.Count -gt 0 -and $missing.Count -gt 0) {
+            Write-Host "No line in the window for: $($missing -join ', '). hourly_total_ms leaves these out. A job that fails writes no summary line: look for its error in the log."
         }
     }
 
