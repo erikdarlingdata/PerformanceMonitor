@@ -1441,7 +1441,9 @@ jobs:
 
       # #5796: the guard above sees that each script ends with a signature block. Only Windows can say whether
       # that signature is Valid (chain, digest, timestamp), and this job runs on Windows, so ask it, for the three
-      # scripts at the Darling zip's root. Anything but Valid, or a script that is not there, fails the release.
+      # scripts at the Darling zip's root. Valid alone means any trusted signer, so the signer must also be the
+      # SignPath Foundation certificate the release is signed with. Anything else, or a script that is not there,
+      # fails the release. Each script's signer, thumbprint and timestamper are printed for the log.
       - name: Assert the Darling scripts carry a valid Authenticode signature
         if: github.event_name == 'release'
         shell: pwsh
@@ -1469,14 +1471,24 @@ jobs:
               $path = Join-Path $dest $name
               [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $path)
               $signature = Get-AuthenticodeSignature -LiteralPath $path
+              $subject = "$($signature.SignerCertificate.Subject)"
+              $stamper = if ($signature.TimeStamperCertificate) { $signature.TimeStamperCertificate.Subject } else { '(none)' }
               Write-Host "${name}: $($signature.Status) ($($signature.StatusMessage))"
-              if ($signature.Status -ne 'Valid') { $failed++ }
+              Write-Host "  signer: $(if ($subject) { $subject } else { '(none)' })"
+              Write-Host "  thumbprint: $(if ($signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { '(none)' })"
+              Write-Host "  timestamper: $stamper"
+              if ($signature.Status -ne 'Valid') {
+                $failed++
+              } elseif ($subject -notmatch '(^|,\s*)O=SignPath Foundation(,|$)') {
+                Write-Host "  not signed by the SignPath Foundation certificate"
+                $failed++
+              }
             }
           } finally {
             $zip.Dispose()
           }
           if ($failed) {
-            Write-Host "::error::$failed of the Darling zip's three scripts do not carry a Valid Authenticode signature (#5796)."
+            Write-Host "::error::$failed of the Darling zip's three scripts do not carry a Valid Authenticode signature by the SignPath Foundation certificate (#5796)."
             exit 1
           }
 
