@@ -51,7 +51,7 @@ public static class QueryStoreTrendRouting
     /// Does the corrected hourly rollup EXIST here? <c>to_regclass</c> resolves through the database's
     /// search_path — the same resolution the trend SQL's own bare table names get — and returns NULL rather
     /// than erroring on a plain-PostgreSQL store, which is the availability-first discipline
-    /// <see cref="TimescaleSupport.RollupCoverageProbeSql"/> documents: a relation named in a statement is
+    /// <see cref="TimescaleSupport.RollupColdFloorSql"/> documents: a relation named in a statement is
     /// resolved at parse time, so the rollup SQL may only be CHOSEN after this probe, never guarded
     /// in-statement.
     /// </summary>

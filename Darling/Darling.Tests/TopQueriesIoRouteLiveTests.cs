@@ -159,10 +159,13 @@ public sealed class TopQueriesIoRouteLiveTests
     public Task EmptyThenPartial_RoutesByWhichRelationReachesFurtherBack() =>
         WithStoreAsync(async (scratch, connection, ct) =>
         {
+            /* #5808: raw retention in production is drop_chunks, never a row DELETE on a hypertable, so this test loses
+               raw's early hours the same way: one-hour chunks, dropped whole. */
+            await UseHourChunksAsync(connection, ct);
             await IoRollupOracleSeed.PlantAsync(connection, ct, ServerId, ServerName, WindowStart);
             await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, SurvivorAt, "QSURV", 1_000, 1_000, 7, 1);
             await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, ct);
-            await PurgeRawBeforeAsync(connection, WindowStart.AddHours(1), ct);   /* raw now starts at hour 1 */
+            await DropRawChunksBeforeAsync(connection, WindowStart.AddHours(1), ct);   /* raw now starts at hour 1 */
 
             /* io EMPTY: reads is raw (forced, with raw's retention notice); the other rankings keep the stitched rollup. */
             var empty = await ReadAsync(scratch, TopRanking.Reads, ct);
@@ -187,7 +190,7 @@ public sealed class TopQueriesIoRouteLiveTests
 
             /* raw is purged to hour 4: now the partial io reaches further back than raw, and reads takes it, disclosed as
                a hourly window that starts at io's first bucket rather than with raw's retention notice. */
-            await PurgeRawBeforeAsync(connection, WindowStart.AddHours(4), ct);
+            await DropRawChunksBeforeAsync(connection, WindowStart.AddHours(4), ct);
             var partial = await ReadAsync(scratch, TopRanking.Reads, ct);
             Assert.Equal(RetentionTier.Hourly, partial.Tier);
             Assert.True(partial.IoRoute);
@@ -289,6 +292,22 @@ public sealed class TopQueriesIoRouteLiveTests
         }
 
         return rows.ToArray();
+    }
+
+    /// <summary>#5808: one-hour chunks on raw query_stats, set before planting, so each planted hour is its own chunk and
+    /// <see cref="DropRawChunksBeforeAsync"/> can drop the early hours the way raw retention does.</summary>
+    private static async Task UseHourChunksAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT set_chunk_time_interval('collect.query_stats', INTERVAL '1 hour')", connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>#5808: drops raw query_stats' chunks wholly before <paramref name="before"/>: production's raw retention.</summary>
+    private static async Task DropRawChunksBeforeAsync(NpgsqlConnection connection, DateTime before, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT count(*) FROM drop_chunks('collect.query_stats', older_than => $1::timestamp)", connection);
+        command.Parameters.AddWithValue(before);
+        await command.ExecuteScalarAsync(ct);
     }
 
     private static async Task PurgeRawBeforeAsync(NpgsqlConnection connection, DateTime before, CancellationToken ct)

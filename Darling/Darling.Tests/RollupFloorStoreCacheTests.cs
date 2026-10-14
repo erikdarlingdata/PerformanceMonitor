@@ -105,35 +105,21 @@ public sealed class RollupFloorStoreCacheTests
         Assert.Empty(plan.Background);
     }
 
-    /* The second threshold. Between the reuse window and twice the window a floor is served from the cache and
-       re-measured once in the background (the tests above). At twice the window it is measured inline again, so no
-       floor is served older than that, whether or not callers kept arriving. */
-    [Fact]
-    public void ServeCap_IsTwiceTheReuseWindow()
+    /* #5808: there is no second threshold. A floor whose identity is unchanged is served at ANY age and queued for the
+       background drain; the two-hour cap that measured it inline made the first caller after a quiet spell pay every
+       view's cold sort (store A, build 547: nothing refreshes a store no caller reaches). */
+    [Theory]
+    [InlineData(61)]
+    [InlineData(119)]
+    [InlineData(120)]
+    [InlineData(121)]
+    [InlineData(60 * 24 * 30)]
+    public void Plan_AnOldFloorWithItsIdentityUnchanged_IsServed_AndDueInTheBackground_AtAnyAge(int ageMinutes)
     {
-        Assert.Equal(TimescaleSupport.RollupFloorMaxReuse * 2, TimescaleSupport.RollupFloorMaxServeAge);
-        Assert.True(TimescaleSupport.RollupFloorMaxServeAge > TimescaleSupport.RollupFloorMaxReuse);
-    }
-
-    [Fact]
-    public void Plan_AFloorJustUnderTheServeCap_WithItsIdentityUnchanged_IsStillServed_AndDueInTheBackground()
-    {
-        var plan = Plan(Entry(Now - TimescaleSupport.RollupFloorMaxServeAge + TimeSpan.FromMinutes(1)));
+        var plan = Plan(Entry(Now - TimeSpan.FromMinutes(ageMinutes)));
 
         Assert.Empty(plan.Inline);
         Assert.Contains(View, plan.Background);
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(60 * 24 * 30)]
-    public void Plan_AFloorAtOrPastTheServeCap_WithItsIdentityUnchanged_IsInline_NotServedFromTheCache(int minutesPast)
-    {
-        var plan = Plan(Entry(Now - TimescaleSupport.RollupFloorMaxServeAge - TimeSpan.FromMinutes(minutesPast)));
-
-        Assert.Contains(View, plan.Inline);
-        Assert.Empty(plan.Background);
     }
 
     [Theory]
@@ -155,21 +141,6 @@ public sealed class RollupFloorStoreCacheTests
             Assert.Contains(View, plan.Inline);
             Assert.Empty(plan.Background);
         }
-    }
-
-    [Fact]
-    public void Plan_RollupFloorsToMeasure_IsTheUnionOfBoth()
-    {
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [View] = Entry(Now - TimescaleSupport.RollupFloorMaxReuse),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [View] = new("chunk_1", "hyper_1", 7),
-        };
-
-        Assert.Contains(View, TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now));
     }
 
     [Fact]

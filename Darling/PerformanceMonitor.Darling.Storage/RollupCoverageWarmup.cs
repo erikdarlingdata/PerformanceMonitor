@@ -57,6 +57,10 @@ public static class RollupCoverageWarmup
     public static async Task RunDelayedAsync(
         NpgsqlDataSource postgres, ILogger? logger, TimeSpan delay, CancellationToken cancellationToken)
     {
+        /* #5808: the store's floor measures log through the caller's logger, registered BEFORE the delay so a caller
+           that reaches the store during it (and starts the store's first measures) is logged too. */
+        TimescaleSupport.UseRollupFloorLogger(postgres, logger);
+
         try
         {
             if (delay > TimeSpan.Zero)
