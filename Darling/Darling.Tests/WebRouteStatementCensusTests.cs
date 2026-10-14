@@ -86,6 +86,8 @@ public sealed class WebRouteStatementCensusTests
         (new Regex(@"^Results\s*\.\s*NoContent\s*\(\s*\)$", RegexOptions.Compiled), "no body"),
         (new Regex(@"^Results\s*\.\s*Json\s*\(\s*DarlingWebFailureLog\s*\.\s*Body\s*\(", RegexOptions.Compiled),
             "DarlingWebFailureLog.Body is one fixed sentence per failure class, never the exception text"),
+        (new Regex(@"^(?:DarlingWebEndpoints\s*\.\s*)?BusyResult\s*\(\s*context\s*,\s*(?:refusal|busy)\s*\)$", RegexOptions.Compiled),
+            "#5506 part 3: the fixed admission refusal (a limit, a count and a retry-after), never a tool string"),
         (new Regex(@"^ServerErrorResult\s*\(", RegexOptions.Compiled),
             "answers DarlingWebFailureLog.Body(sentence): a fixed sentence, the argument only reaches the log"),
     };

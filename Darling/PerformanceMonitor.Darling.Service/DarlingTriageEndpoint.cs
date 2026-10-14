@@ -596,12 +596,15 @@ internal static class DarlingTriageEndpoint
         return (anchor, readEnd.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
     }
 
+    /// <summary>#5506 part 3: the admission route name of <c>/api/triage</c>.</summary>
+    internal const string TriageRoute = "triage";
+
     /// <summary>
     /// Maps <c>GET /api/triage</c>. Called once from <see cref="DarlingWebEndpoints.MapAll"/>, after the auth
     /// middleware like every sibling route; <paramref name="analysis"/> is the same shared instance the read
     /// dispatch receives (none of the mapped sections currently need it, but the dispatch signature does).
     /// </summary>
-    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger)
+    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger, ReadAdmission? readAdmission = null)
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch();
 
@@ -612,6 +615,13 @@ internal static class DarlingTriageEndpoint
             var dedup = Query(context, "dedup");
             var now = DateTime.UtcNow;
             var (anchor, asOf) = ResolveAnchor(Query(context, "at"), now);
+
+            /* #5506 part 3: the page runs several section reads around its anchor; admitted as one read of its own. */
+            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, TriageRoute, ReadWindowBand.OneDay, context);
+            if (ticket.Refusal is { } refusal)
+            {
+                return DarlingWebEndpoints.BusyResult(context, refusal);
+            }
 
             var notes = new JsonArray();
 

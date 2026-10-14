@@ -144,12 +144,16 @@ public sealed class DarlingWebHostService : BackgroundService
     /* #5097: where the web recorders offer a slow or failed read; null in a test-constructed host. */
     private readonly SlowReadLog? _slowReads;
 
+    /* #5506 part 3: the process's one read admission, shared with the MCP host; null in a test-constructed host. */
+    private readonly ReadAdmission? _readAdmission;
+
     /// <summary>The live monitored-server registry, so the read tools scope an Azure master target's blocking and deadlock facts per call.</summary>
     private readonly MonitoredServerRegistryState? _registryState;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null)
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null)
     {
         _slowReads = slowReads;
+        _readAdmission = readAdmission;
         _registryState = registryState;
         _logger = logger;
         _state = state;
@@ -209,6 +213,9 @@ public sealed class DarlingWebHostService : BackgroundService
                 try
                 {
                     config = DarlingConfig.Load();
+
+                    /* #5506 part 3: reads.maxHeavyReads is file-only and read when the host starts. */
+                    _readAdmission?.Configure(config.Reads.MaxHeavyReads);
                 }
                 catch (Exception ex)
                 {
@@ -1417,7 +1424,7 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes

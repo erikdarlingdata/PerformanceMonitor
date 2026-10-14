@@ -908,6 +908,10 @@ A **file-only** block (not seeded into the control plane): it describes the depl
 
 An optional outbound ping to a dead-man's-switch URL, off unless `url` is set. File-only: the web Admin and MCP cannot edit it, and no page returns it. See [Watching the service from outside](#watching-the-service-from-outside).
 
+### reads (optional)
+
+`reads.maxHeavyReads` (default 2) is how many long reads the MCP server and the web dashboard run at once. A read is long when its tool or page took 2 seconds or more at that window size over the last 7 days (with no history yet, a 7-day or longer window counts as long). Up to 16 more long reads wait, oldest first, for up to 45 seconds; past that a read is refused: `busy` on MCP and HTTP 429 with `Retry-After` on the web. Short reads, the health reads (`get_read_latency`, `get_slow_reads`, `get_collection_health`, `get_collection_log`, `get_store_metrics`, `get_store_log`, `list_servers`) and MCP write tools never wait. `0` turns the limit off. The limit is per service process: the WPF viewer reads the store directly and is not counted. The value is read when each server starts.
+
 ### No Schedule Knobs, by Design
 
 There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.

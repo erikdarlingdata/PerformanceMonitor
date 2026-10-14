@@ -47,6 +47,13 @@ public enum ReadOutcome
     Limit,
     FallbackRaw,
     GateFailed,
+
+    /// <summary>#5506 part 3: the time a heavy read waited for an admission slot, recorded as one extra sample beside the
+    /// read's own outcome. Not a read: the long-read table and the read percentiles leave it out.</summary>
+    QueueWait,
+
+    /// <summary>#5506 part 3: a read refused because the long-read slots and their queue were full.</summary>
+    Busy,
 }
 
 /// <summary>
@@ -86,6 +93,8 @@ public sealed class ReadLatencyAccumulator
         ReadOutcome.Limit => "limit",
         ReadOutcome.FallbackRaw => "fallback_raw",
         ReadOutcome.GateFailed => "gate_failed",
+        ReadOutcome.QueueWait => "queue_wait",
+        ReadOutcome.Busy => "busy",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "No stored label for this read outcome."),
     };
 
@@ -196,6 +205,24 @@ public sealed class ReadLatencyAccumulator
     internal sealed record DrainedLatency(
         ReadSurface Surface, string Route, ReadOutcome Outcome, long Count, long TotalMs, long MaxMs, long[] BucketCounts,
         string WindowBand = ReadWindowBand.None, int MaxInFlight = 0, long WaitTotalMs = 0, int DistinctCallers = 0);
+
+    /// <summary>#5506 part 3: a copy of the unflushed rows, leaving them in place (the long-read table reads them).</summary>
+    internal IReadOnlyList<DrainedLatency> Snapshot()
+    {
+        var rows = new List<DrainedLatency>();
+        foreach (var (key, bucket) in _buckets)
+        {
+            lock (bucket)
+            {
+                rows.Add(new DrainedLatency(
+                    key.Surface, key.Route, key.Outcome, bucket.Count, bucket.TotalMs, bucket.MaxMs,
+                    (long[])bucket.BucketCounts.Clone(), key.WindowBand, bucket.MaxInFlight, bucket.WaitTotalMs,
+                    bucket.Callers?.Count ?? 0));
+            }
+        }
+
+        return rows;
+    }
 
     /// <summary>Drain every accumulated bucket and RESET the window (<c>TryRemove</c>), so the next hour
     /// starts clean and an hour with no reads writes nothing — exactly <see cref="CollectorCostAccumulator.Drain"/>'s

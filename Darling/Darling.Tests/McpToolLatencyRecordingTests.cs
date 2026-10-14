@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -70,6 +71,16 @@ public sealed class McpToolLatencyRecordingTests
         public static string ProbeServersJson([Description("A JSON batch.")] string servers_json) =>
             PerformanceMonitor.Common.McpHelpers.FormatError("latency_probe_servers_json", new InvalidOperationException("probe failed"));
 
+        /// <summary>#5506 part 3: held until the test releases it, so admission's slots stay taken.</summary>
+        internal static TaskCompletionSource Hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        [McpServerTool(Name = "latency_probe_hold"), Description("Test-only: answers Ok once the test releases it.")]
+        public static async Task<string> ProbeHold()
+        {
+            await Hold.Task;
+            return "probe-ok";
+        }
+
         [McpServerTool(Name = "latency_probe_timeout"), Description("Test-only: answers the 57014 statement-timeout envelope.")]
         public static string ProbeTimeout() =>
             PerformanceMonitor.Common.McpHelpers.FormatError(
@@ -81,7 +92,7 @@ public sealed class McpToolLatencyRecordingTests
     /// and <see cref="DarlingMcpHostService.ConfigurePipeline"/>, wired to <paramref name="readLatency"/> — the
     /// same construction <see cref="DarlingMcpHostGateLiveTests.BuildServer"/> uses, plus the test-only probe
     /// tool registered directly on <c>builder.Services</c> (never through production's tool registrations).</summary>
-    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null)
+    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, ReadAdmission? admission = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -98,7 +109,7 @@ public sealed class McpToolLatencyRecordingTests
 
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, readLatency,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, slowReads);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, slowReads, readAdmission: admission);
 
         /* The probe tool is added AFTER ConfigureMcpServices's own AddMcpServer() call, chaining onto the
            SAME builder — WithGeminiCompatibleTools appends to the already-registered tool set rather than
@@ -317,5 +328,124 @@ public sealed class McpToolLatencyRecordingTests
         Assert.True(slowReads.TryRead(out var record));
         Assert.Equal("compose", record!.Surface);
         Assert.Equal("ua:Claude-User/1.0", record.Caller);
+    }
+
+    /// <summary>#5506 part 3: an admission whose table makes <paramref name="surface"/>/<paramref name="route"/> heavy.</summary>
+    private static ReadAdmission HeavyAdmission(ReadSurface surface, string route, string band)
+    {
+        var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
+        admission.SetTable(new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long> { [(surface, route, band)] = 2_000 });
+        return admission;
+    }
+
+    private static async Task WaitUntil(Func<bool> condition)
+    {
+        for (var i = 0; i < 500 && !condition(); i++)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        Assert.True(condition(), "Admission did not reach the expected state in 5 seconds.");
+    }
+
+    /// <summary>#5506 part 3: fills both slots and the whole queue from flows of their own; the returned tickets free them.</summary>
+    private static async Task<System.Collections.Generic.List<Task<ReadAdmissionTicket>>> FillAsync(ReadAdmission admission, ReadSurface surface, string route, string band)
+    {
+        var tickets = new System.Collections.Generic.List<Task<ReadAdmissionTicket>>();
+        for (var i = 0; i < 2 + ReadAdmission.QueueLimit; i++)
+        {
+            tickets.Add(Task.Run(() => admission.AdmitAsync(surface, route, band, System.Threading.CancellationToken.None)));
+            var queued = Math.Max(0, i - 1);
+            await WaitUntil(() => admission.Stats().Queued == queued && admission.Stats().Running == Math.Min(2, i + 1));
+        }
+
+        return tickets;
+    }
+
+    private static async Task ReleaseAsync(System.Collections.Generic.List<Task<ReadAdmissionTicket>> tickets)
+    {
+        foreach (var ticket in tickets)
+        {
+            (await ticket).Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task AtLimitTwo_AThirdHeavyToolCall_Waits_ThenRuns_AndLeavesOneQueueWaitSample()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = HeavyAdmission(ReadSurface.Mcp, "latency_probe_hold", "none");
+        using var server = await BuildServer(readLatency, admission: admission);
+        LatencyProbeTools.Hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var calls = new[]
+        {
+            ToolsCallAsync(server, "/", "latency_probe_hold"),
+            ToolsCallAsync(server, "/", "latency_probe_hold"),
+            ToolsCallAsync(server, "/", "latency_probe_hold"),
+        };
+        await WaitUntil(() => admission.Stats().Running == 2 && admission.Stats().Queued == 1);
+
+        LatencyProbeTools.Hold.SetResult();
+        var answers = await Task.WhenAll(calls);
+        Assert.All(answers, a => Assert.Contains("probe-ok", a.Body, StringComparison.Ordinal));
+
+        var drained = readLatency.Drain().Where(d => d.Route == "latency_probe_hold").ToList();
+        Assert.Equal(3, Assert.Single(drained, d => d.Outcome == ReadOutcome.Ok).Count);
+        Assert.Equal(1, Assert.Single(drained, d => d.Outcome == ReadOutcome.QueueWait).Count);
+        Assert.Equal(0, admission.Stats().Running);
+    }
+
+    [Fact]
+    public async Task AFullQueue_AnswersBusy_WithTheErrorFlag_AndRecordsBusy()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = HeavyAdmission(ReadSurface.Mcp, "latency_probe_ok", "none");
+        using var server = await BuildServer(readLatency, admission: admission);
+        var held = await FillAsync(admission, ReadSurface.Mcp, "latency_probe_ok", "none");
+
+        var (statusCode, body) = await ToolsCallAsync(server, "/", "latency_probe_ok");
+        Assert.Equal(StatusCodes.Status200OK, statusCode);
+        Assert.Contains("\"isError\":true", body, StringComparison.Ordinal);
+        Assert.Contains("busy", body, StringComparison.Ordinal);
+        Assert.Contains("retry_after_seconds", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("probe-ok", body, StringComparison.Ordinal);
+
+        var sample = Assert.Single(readLatency.Drain(), d => d.Route == "latency_probe_ok");
+        Assert.Equal(ReadOutcome.Busy, sample.Outcome);
+        await ReleaseAsync(held);
+    }
+
+    [Fact]
+    public async Task AHealthRead_IsNotAdmitted_EvenWithTheQueueFull()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = HeavyAdmission(ReadSurface.Mcp, "get_read_latency", "24h");
+        using var server = await BuildServer(readLatency, admission: admission);
+        var held = await FillAsync(admission, ReadSurface.Mcp, "get_read_latency", "24h");
+
+        await ToolsCallAsync(server, "/", "get_read_latency");
+        Assert.DoesNotContain(readLatency.Drain(), d => d.Route == "get_read_latency" && d.Outcome == ReadOutcome.Busy);
+        await ReleaseAsync(held);
+    }
+
+    [Fact]
+    public async Task RunCustomViewPanel_RefusedByTheSharedRunner_AnswersBusy_WithTheErrorFlag()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+
+        /* A spec of "{}" records under the catch-all label and the runner's default 24-hour window. */
+        var admission = HeavyAdmission(ReadSurface.Compose, "compose:unknown", "24h");
+        using var server = await BuildServer(readLatency, admission: admission);
+        var held = await FillAsync(admission, ReadSurface.Compose, "compose:unknown", "24h");
+
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"spec\":\"{}\"}}}";
+        var (_, body) = await SendJsonRpcAsync(server, "/", requestBody);
+        Assert.Contains("\"isError\":true", body, StringComparison.Ordinal);
+        Assert.Contains("busy", body, StringComparison.Ordinal);
+
+        var sample = Assert.Single(readLatency.Drain(), d => d.Surface == ReadSurface.Compose);
+        Assert.Equal(ReadOutcome.Busy, sample.Outcome);
+        await ReleaseAsync(held);
     }
 }

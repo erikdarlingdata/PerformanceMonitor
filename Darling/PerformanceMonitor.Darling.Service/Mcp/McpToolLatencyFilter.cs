@@ -59,16 +59,19 @@ public sealed class McpToolLatencyFilter
 
     private readonly SlowReadLog? _slowReads;
 
+    private readonly ReadAdmission? _admission;
+
     public McpToolLatencyFilter(ReadLatencyAccumulator readLatency, ILogger? logger)
         : this(readLatency, logger, null)
     {
     }
 
-    internal McpToolLatencyFilter(ReadLatencyAccumulator readLatency, ILogger? logger, SlowReadLog? slowReads)
+    internal McpToolLatencyFilter(ReadLatencyAccumulator readLatency, ILogger? logger, SlowReadLog? slowReads, ReadAdmission? admission = null)
     {
         _readLatency = readLatency ?? throw new ArgumentNullException(nameof(readLatency));
         _logger = logger;
         _slowReads = slowReads;
+        _admission = admission;
     }
 
     /// <summary>The filter: run the tool, time it, record the outcome. A filter is <c>next =&gt; handler</c>.</summary>
@@ -87,13 +90,46 @@ public sealed class McpToolLatencyFilter
             if (string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
             {
                 ReadCaller.SetAmbientMcpCaller(caller);
-                return await next(request, cancellationToken);
+                var panelResult = await next(request, cancellationToken);
+
+                /* #5506 part 3: the shared runner admits the panel itself and answers a refusal with the busy envelope;
+                   the tool returns text, so the error flag is set here. */
+                if (IsBusyEnvelope(panelResult))
+                {
+                    panelResult.IsError = true;
+                }
+
+                return panelResult;
             }
 
-            var stopwatch = Stopwatch.StartNew();
             using var readScope = ReadScope.Open(_logger);
             readScope.Scope.CaptureStatements = true;
             var windowBand = WindowBandOf(request);
+
+            /* #5506 part 3: admission, after the scope and the band. A refused read answers busy and records busy; a caller
+               that leaves the queue records cancelled; a queued read records its wait as one queue_wait sample. The
+               recorded elapsed time starts after admission (D1), so the read's own percentiles never hold queue time. */
+            using var ticket = _admission is null || !ReadAdmission.IsAdmitted(toolName)
+                ? ReadAdmissionTicket.Passed
+                : await _admission.AdmitAsync(ReadSurface.Mcp, toolName, windowBand, cancellationToken);
+            if (ticket.Refusal is { } refusal)
+            {
+                Record(toolName, ReadOutcome.Busy, ticket.QueueMs ?? 0, windowBand, readScope.Scope, caller);
+                return BusyResult(refusal);
+            }
+
+            if (ticket.CallerLeft)
+            {
+                Record(toolName, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, windowBand, readScope.Scope, caller);
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            if (ticket.QueueMs is { } queueMs)
+            {
+                Record(toolName, ReadOutcome.QueueWait, queueMs, windowBand, readScope.Scope, caller);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 var result = await next(request, cancellationToken);
@@ -110,6 +146,33 @@ public sealed class McpToolLatencyFilter
                 throw;
             }
         };
+
+    /// <summary>#5506 part 3: the MCP answer to a refused read, <c>busy</c> with the error flag set.</summary>
+    internal static CallToolResult BusyResult(ReadAdmissionRefusal refusal) => new()
+    {
+        IsError = true,
+        Content = [new TextContentBlock { Text = ReadAdmission.McpBusyText(refusal) }],
+    };
+
+    /// <summary>Whether a result is the busy envelope (a composed panel the shared runner refused).</summary>
+    internal static bool IsBusyEnvelope(CallToolResult result)
+    {
+        if (result.Content is not { Count: 1 } content || content[0] is not TextContentBlock text
+            || !text.Text.StartsWith('{') || !text.Text.Contains("\"busy\"", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            return JsonNode.Parse(text.Text) is JsonObject body
+                && body["status"] is JsonValue status && status.TryGetValue<string>(out var word) && word == ReadAdmission.BusyStatus;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>Classifies a tool's normal (non-throwing) return: an explicit <see cref="CallToolResult.IsError"/>
     /// or a lone text block carrying the caught-error envelope (<c>McpHelpers.FormatError</c>'s shape) goes

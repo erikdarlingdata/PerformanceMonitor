@@ -307,7 +307,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             sections.Add(await DiagnosticsBundle.RunSectionAsync("slow_reads",
                 async c => DropStatementSummaries(DiagnosticsBundle.ParseReader(await DarlingMcpSlowReadTools.GetSlowReads(postgres, hours, scopeServerName, null, null, 100, true, c))), ct));
             sections.Add(await DiagnosticsBundle.RunSectionAsync("read_latency",
-                async c => DiagnosticsBundle.ParseReader(await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours, null, null, 200, c)), ct));
+                async c => DiagnosticsBundle.ParseReader(await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours, null, null, 200, cancellationToken: c)), ct));
             sections.Add((await DiagnosticsBundle.RunSectionAsync("store_statements",
                 c => StoreStatementsSectionAsync(postgres, hours, c), ct)) with { AfterAlias = CompactStatementTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("store_log",

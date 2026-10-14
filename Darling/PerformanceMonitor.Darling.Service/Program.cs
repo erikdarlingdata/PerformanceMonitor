@@ -571,6 +571,10 @@ builder.Services.AddSingleton<BaselineCache>();
    flush and the web host's recording are separate hosted services in the one process. */
 builder.Services.AddSingleton<ReadLatencyAccumulator>();
 
+/* #5506 part 3: the read admission, one per process: the MCP and web hosts admit through the same slots, each host sets
+   the limit from reads.maxHeavyReads when it starts, and the worker builds its long-read table. */
+builder.Services.AddSingleton<ReadAdmission>();
+
 /* #5097: the slow-read record's queue. The three recorders offer to it; the worker runs its one writer once the store
    is migrated. */
 builder.Services.AddSingleton<SlowReadLog>();

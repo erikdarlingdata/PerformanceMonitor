@@ -30,12 +30,17 @@ public sealed class ReadLatencyRecorder
     {
     }
 
-    internal ReadLatencyRecorder(ReadLatencyAccumulator? readLatency, ILogger? logger, SlowReadLog? slowReads)
+    internal ReadLatencyRecorder(ReadLatencyAccumulator? readLatency, ILogger? logger, SlowReadLog? slowReads, ReadAdmission? admission = null)
     {
         Accumulator = readLatency;
         Logger = logger;
         SlowReads = slowReads;
+        Admission = admission;
     }
+
+    /// <summary>The process's read admission (#5506 part 3), which the web read loop and the composed-panel runner admit
+    /// through; null admits everything.</summary>
+    internal ReadAdmission? Admission { get; }
 
     /// <summary>Where a slow or failed read is offered (#5097); null records none.</summary>
     internal SlowReadLog? SlowReads { get; }

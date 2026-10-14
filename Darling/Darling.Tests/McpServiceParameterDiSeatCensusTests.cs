@@ -91,9 +91,10 @@ public sealed class McpServiceParameterDiSeatCensusTests
            way. DarlingMcpAddServersPolicy added deliberately: the MCP caller's rules for add_servers,
            registered by ConfigureMcpServices via the typed-generic AddSingleton<DarlingMcpAddServersPolicy>
            overload. It is a service type so that a client cannot supply it and the token in McpConfig stays out of
-           DI. */
+           DI. ReadAdmission added by #5506 part 3: get_read_latency's live admission counts, registered via the
+           typed-generic AddSingleton<ReadAdmission> overload. */
         Assert.Equal(
-            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadAdmission", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

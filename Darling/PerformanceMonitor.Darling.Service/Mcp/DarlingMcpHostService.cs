@@ -129,6 +129,9 @@ public sealed class DarlingMcpHostService : BackgroundService
     /* #5097: where the tool filter offers a slow or failed call; null in a test-constructed host. */
     private readonly SlowReadLog? _slowReads;
 
+    /* #5506 part 3: the process's one read admission, shared with the web host; null in a test-constructed host. */
+    private readonly ReadAdmission? _readAdmission;
+
     /* #5288: where this host publishes the served certificate's expiry facts for the worker's alert sweep. It is
        the SAME McpTlsCertificateState singleton DI hands the worker (Program.cs registers it once), so a Publish
        or Clear here is what the "MCP TLS Certificate Expiring" self-alert reads. Optional so a test-constructed
@@ -144,9 +147,10 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// releases it; released by <see cref="ReleaseServerCertificate"/>.</summary>
     private DarlingWebTls.LoadedCertificate? _serverCertificate;
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null)
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null)
     {
         _slowReads = slowReads;
+        _readAdmission = readAdmission;
         _logger = logger;
         _state = state;
         _registryState = registryState;
@@ -205,6 +209,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 try
                 {
                     config = DarlingConfig.Load();
+
+                    /* #5506 part 3: reads.maxHeavyReads is file-only and read when the host starts. */
+                    _readAdmission?.Configure(config.Reads.MaxHeavyReads);
                 }
                 catch (Exception ex)
                 {
@@ -807,7 +814,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
                 builder.Services, declaredPeers, _readLatency, _logger, _slowReads, writes,
-                new DarlingMcpAddServersPolicy(config.Mcp.AllowWindowsAuthOverUnverifiedTls));
+                new DarlingMcpAddServersPolicy(config.Mcp.AllowWindowsAuthOverUnverifiedTls), _readAdmission);
 
             _app = builder.Build();
 
@@ -1071,7 +1078,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null)
     {
         /* add_servers takes its caller policy as a service parameter, so the registration has to exist wherever the
            tools are registered: without it the SDK would serve the parameter as a client argument. Every setting
@@ -1085,7 +1092,7 @@ public sealed class DarlingMcpHostService : BackgroundService
            null-reference. Production's one real call site (TryStartServerAsync) resolves the DI singleton and
            passes it here explicitly. */
         var hostReadLatency = readLatency ?? new ReadLatencyAccumulator();
-        var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger, slowReads);
+        var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger, slowReads, readAdmission);
 
         /* #5793: the filter names a client that sent no client info by its User-Agent product token, read through the
            accessor. AddHttpContextAccessor is idempotent, so a host that already registers it is unchanged. */
@@ -1097,7 +1104,11 @@ public sealed class DarlingMcpHostService : BackgroundService
            were set up in one process. The tool now takes this seat as a DI service parameter, over the SAME
            accumulator the filter above records into. Typed-generic AddSingleton<T>, as the seat census
            (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
-        services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger, slowReads));
+        services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger, slowReads, readAdmission));
+
+        /* #5506 part 3: get_read_latency reads the live admission counts as a DI service parameter. Registered always (a
+           private, idle instance when the host has none), so the SDK never serves the parameter as a client argument. */
+        services.AddSingleton<ReadAdmission>(readAdmission ?? new ReadAdmission());
 
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's

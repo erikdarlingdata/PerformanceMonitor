@@ -91,6 +91,7 @@ public sealed class DarlingMcpReadLatencyTools
         [Description("Optional: scope to one surface (web, compose, or mcp).")] string? surface = null,
         [Description("Optional: scope to one route (read/panel name).")] string? route = null,
         [Description("Maximum rows to return. Default 25; max 1000.")] int limit = DefaultLimit,
+        ReadAdmission? admission = null,
         CancellationToken cancellationToken = default)
     {
         var hoursError = McpHelpers.ValidateHoursBack(hours);
@@ -165,12 +166,42 @@ public sealed class DarlingMcpReadLatencyTools
                 distinct_callers = x.Row.DistinctCallers,
             }).ToArray();
 
-            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes);
+            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_read_latency", ex);
         }
+    }
+
+    /// <summary>#5506 part 3: the live admission counts of THIS process since it started (never stored, so they reset on a
+    /// restart and do not cover another service on the same store): the limit, the long reads running and waiting now,
+    /// and per route the long reads admitted, queued and refused. Null when the host has no admission.</summary>
+    internal static object? AdmissionObject(ReadAdmission? admission)
+    {
+        if (admission is null)
+        {
+            return null;
+        }
+
+        var stats = admission.Stats();
+        return new
+        {
+            scope = "this service process, since it started",
+            limit = stats.Limit,
+            running = stats.Running,
+            queued = stats.Queued,
+            routes = stats.Routes.Select(r => new
+            {
+                surface = r.Surface,
+                route = r.Route,
+                admitted = r.Admitted,
+                queued = r.Queued,
+                rejected = r.Rejected,
+                cache_hits = r.CacheHits,
+                cache_misses = r.CacheMisses,
+            }).ToArray(),
+        };
     }
 
     /// <summary>
@@ -179,9 +210,22 @@ public sealed class DarlingMcpReadLatencyTools
     /// serialized and, while it is over budget with more than one row, the last row is dropped and it is
     /// serialized again — the envelope's own digits and the true/false spelling depend on the final page.
     /// </summary>
-    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes)
+    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes, object? admission = null)
     {
-        string Envelope(IReadOnlyList<object> page, bool truncated) => JsonSerializer.Serialize(new
+        string Envelope(IReadOnlyList<object> page, bool truncated) => admission is not null
+            ? JsonSerializer.Serialize(new
+            {
+                hours,
+                surface,
+                route,
+                note = BucketEstimateNote,
+                admission,
+                truncated,
+                reads_returned = page.Count,
+                reads_total = shaped.Count,
+                reads = page,
+            })
+            : JsonSerializer.Serialize(new
         {
             hours,
             surface,
