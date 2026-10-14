@@ -56,8 +56,15 @@ internal static class ReadConnectionWait
                     }
                 },
             };
-            listener.SetMeasurementEventCallback<int>(static (instrument, value, _, _) => OnPending(value));
-            listener.SetMeasurementEventCallback<double>(static (instrument, value, _, _) => OnCreateSeconds(value));
+            /* Dispatched on the instrument name, not only the CLR type, so a measurement of one instrument can never be read as the other. */
+            listener.SetMeasurementEventCallback<int>(static (instrument, value, _, _) =>
+            {
+                if (instrument.Name == PendingRequestsInstrument) OnPending(value);
+            });
+            listener.SetMeasurementEventCallback<double>(static (instrument, value, _, _) =>
+            {
+                if (instrument.Name == CreateTimeInstrument) OnCreateSeconds(value);
+            });
             listener.Start();
             s_listener = listener;
         }

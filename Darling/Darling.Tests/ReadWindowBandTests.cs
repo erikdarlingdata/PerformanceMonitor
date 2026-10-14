@@ -8,10 +8,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Server;
+using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -62,18 +69,69 @@ public sealed class ReadWindowBandTests
     }
 
     [Fact]
-    public void OfToolCall_UsesTheSentArgument_ElseTheToolsDeclaredDefault_ElseNone()
+    public void HoursOf_TakesADeclaredDefault_OnlyWhenNoWindowWasSent()
     {
-        using var schema = JsonDocument.Parse("""{"type":"object","properties":{"hours_back":{"type":"integer","default":24},"as_of":{"type":"string"}}}""");
-        using var noWindow = JsonDocument.Parse("""{"type":"object","properties":{"server_name":{"type":"string"}}}""");
-        using var sent = JsonDocument.Parse("""{"hours_back":336}""");
+        Assert.Equal(48, ReadWindowBand.HoursOf(k => k == "hours_back" ? "48" : null, k => k == "hours" ? "24" : null));
+        Assert.Equal(24, ReadWindowBand.HoursOf(_ => null, k => k == "hours" ? "24" : null));
+        Assert.Equal(720, ReadWindowBand.HoursOf(_ => null, k => k == "days_back" ? "30" : null));
+        Assert.Null(ReadWindowBand.HoursOf(_ => null, _ => null));
+    }
 
-        var sentArguments = new Dictionary<string, JsonElement> { ["hours_back"] = sent.RootElement.GetProperty("hours_back") };
-        Assert.Equal("7d+", ReadWindowBand.OfToolCall(sentArguments, schema.RootElement));
-        Assert.Equal("24h", ReadWindowBand.OfToolCall(new Dictionary<string, JsonElement>(), schema.RootElement));
-        Assert.Equal("24h", ReadWindowBand.OfToolCall(null, schema.RootElement));
-        Assert.Equal("none", ReadWindowBand.OfToolCall(null, noWindow.RootElement));
-        Assert.Equal("none", ReadWindowBand.OfToolCall(null, null));
+    /// <summary>The MCP path against a really registered tool. The schema the host serves has its <c>default</c> keywords
+    /// stripped for Gemini, so a band read from it was <c>none</c> for a call that leaves <c>hours_back</c> out; the band
+    /// now comes from the tool method's own parameter default, recorded as the tool is created.</summary>
+    [Fact]
+    public void AnMcpCallThatLeavesItsWindowOut_RecordsTheBandOfTheToolsOwnDefault_NotNone()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(typeof(NpgsqlDataSource), _ => null!);
+        services.AddMcpServer().WithGeminiCompatibleTools<DarlingMcpDataTools>();
+        using var provider = services.BuildServiceProvider();
+        var waitStats = provider.GetServices<McpServerTool>().Single(t => t.ProtocolTool.Name == "get_wait_stats");
+        var types = provider.GetRequiredService<McpToolParameterTypes>();
+
+        /* The served schema carries no default to read: the band cannot come from there. */
+        var hoursBack = waitStats.ProtocolTool.InputSchema.GetProperty("properties").GetProperty("hours_back");
+        Assert.False(hoursBack.TryGetProperty("default", out _));
+
+        /* get_wait_stats declares hours_back = 24: a call that sends only server_name reads 24 hours. */
+        using var onlyServer = JsonDocument.Parse("""{"server_name":"SRV1"}""");
+        var serverOnly = new Dictionary<string, JsonElement> { ["server_name"] = onlyServer.RootElement.GetProperty("server_name") };
+        Assert.Equal("24h", McpToolLatencyFilter.WindowBandOf("get_wait_stats", serverOnly, types));
+        Assert.Equal("24h", McpToolLatencyFilter.WindowBandOf("get_wait_stats", null, types));
+
+        /* A sent window wins over the default, and a sent null is the same as leaving it out. */
+        using var sent = JsonDocument.Parse("""{"hours_back":336,"nothing":null}""");
+        Assert.Equal("7d+", McpToolLatencyFilter.WindowBandOf("get_wait_stats",
+            new Dictionary<string, JsonElement> { ["hours_back"] = sent.RootElement.GetProperty("hours_back") }, types));
+        Assert.Equal("24h", McpToolLatencyFilter.WindowBandOf("get_wait_stats",
+            new Dictionary<string, JsonElement> { ["hours_back"] = sent.RootElement.GetProperty("nothing") }, types));
+
+        /* A tool nothing recorded, or no record at all, has no default to take. */
+        Assert.Equal("none", McpToolLatencyFilter.WindowBandOf("not_a_tool", null, types));
+        Assert.Equal("none", McpToolLatencyFilter.WindowBandOf("get_wait_stats", null, null));
+    }
+
+    /// <summary>The web path: a request that sends no window reads the default its catalog row declares, so it records that
+    /// default's band, and a read that takes no window records none.</summary>
+    [Fact]
+    public void AWebReadThatSendsNoWindow_RecordsTheBandOfTheCatalogDefault()
+    {
+        var latency = DarlingWebEndpoints.CatalogDescriptors["get_read_latency"].Params.Single(p => p.Name == "hours");
+        Assert.Equal(ReadWindowBand.Of(Convert.ToDouble(latency.Default, CultureInfo.InvariantCulture)),
+            DarlingWebEndpoints.WebWindowBand("get_read_latency", _ => null));
+        Assert.Equal("1h", DarlingWebEndpoints.WebWindowBand("get_read_latency", k => k == "hours" ? "1" : null));
+        Assert.Equal("1h", DarlingWebEndpoints.WebWindowBand("get_read_latency", k => k == "hours_back" ? "1" : null));
+
+        var daysBack = DarlingWebEndpoints.CatalogDescriptors["get_daily_summary_range"].Params.Single(p => p.Name == "days_back");
+        Assert.Equal(ReadWindowBand.Of(24 * Convert.ToDouble(daysBack.Default, CultureInfo.InvariantCulture)),
+            DarlingWebEndpoints.WebWindowBand("get_daily_summary_range", _ => null));
+        Assert.NotEqual("none", DarlingWebEndpoints.WebWindowBand("get_daily_summary_range", _ => null));
+
+        var noWindow = DarlingWebEndpoints.CatalogDescriptors.First(d =>
+            !d.Value.Params.Any(p => p.Name is "hours" or "hours_back" or "days_back")).Key;
+        Assert.Equal("none", DarlingWebEndpoints.WebWindowBand(noWindow, _ => null));
+        Assert.Equal("none", DarlingWebEndpoints.WebWindowBand("not_a_read", _ => null));
     }
 
     [Fact]

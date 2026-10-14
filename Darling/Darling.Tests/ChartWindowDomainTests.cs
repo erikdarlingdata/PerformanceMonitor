@@ -170,7 +170,8 @@ public sealed class ChartWindowDomainTests
         /* The live-panel default window is kept in lockstep with the run endpoint's DefaultComposeHours, so a
            live composed panel's drawn axis matches the server's default window. */
         Assert.Contains("const DEFAULT_COMPOSE_HOURS = 24;", compose, StringComparison.Ordinal);
-        Assert.Contains("private const int DefaultComposeHours = 24;", EndpointsCs, StringComparison.Ordinal);
+        /* Internal since #5506: the composed-panel window band test reads it. */
+        Assert.Contains("internal const int DefaultComposeHours = 24;", EndpointsCs, StringComparison.Ordinal);
 
         /* The relative-window ceiling is clamped to the SAME MaxWindowHours the run endpoint applies (Math.Clamp),
            so a stored/imported range.hours beyond it draws an axis matching the clamped window the server serves,

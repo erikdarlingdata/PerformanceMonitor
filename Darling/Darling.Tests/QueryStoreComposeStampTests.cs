@@ -463,7 +463,8 @@ public sealed class QueryStoreComposeStampTests
         behind[ProbeOrdinal + 5] = false;
         behind[ProbeOrdinal + 6] = false;
         behind[ProbeOrdinal + 7] = false;
-        /* V181's sentinel (#5750) sits above V173's, so a store missing V173 is missing it too; leaving it true would map the store to V181. */
+        /* V181's (#5750) and V182's (#5506) sentinels sit above V173's, so a store missing V173 is missing them too; leaving
+           either true would map the store to that rung. */
         behind[ProbeOrdinal + 8] = false;
         behind[ProbeOrdinal + 9] = false;
         behind[ProbeOrdinal + 10] = false;

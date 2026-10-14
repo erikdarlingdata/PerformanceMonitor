@@ -196,6 +196,45 @@ SELECT count(*) || '|' || count(*) FILTER (WHERE in_flight IS NULL AND wait_ms I
         Assert.InRange(waitMs, 300, 20_000);
     }
 
+    /// <summary>The unit of Npgsql's <c>db.client.connection.npgsql.create_time</c>, pinned on a real pooled connection. The
+    /// scope opens first and the pool is empty, so the read's one physical open happens inside the scope with no pending
+    /// wait, and only the create callback can record a wait. The recorded wait must be over 0 ms (the instrument name and
+    /// the callback are wired), under 10 s, and no longer than the open measured around it: a create time in milliseconds
+    /// or ticks read as seconds would be 1000 times or more too long and fail the last bound.</summary>
+    [Fact]
+    public async Task APhysicalOpenInsideAScope_RecordsItsCreateTime_InTheRightUnit()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the V182 create-time unit pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        ReadConnectionWait.Register();
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = true, MinPoolSize = 0, MaxPoolSize = 4, Timeout = 30 };
+        await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
+
+        long waitMs;
+        long openMs;
+        using (var scope = ReadScope.Open(null))
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            await using (var connection = await dataSource.OpenConnectionAsync(ct))
+            {
+                stopwatch.Stop();
+                await using var command = new NpgsqlCommand("SELECT 1", connection);
+                Assert.Equal(1, Convert.ToInt32(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+            }
+
+            openMs = stopwatch.ElapsedMilliseconds;
+            waitMs = scope.Scope.WaitMs;
+        }
+
+        Assert.True(waitMs > 0, $"the physical open recorded no wait (open took {openMs} ms)");
+        Assert.True(waitMs < 10_000, $"the physical open recorded {waitMs} ms of wait");
+        Assert.True(waitMs <= openMs + 1, $"the recorded create time ({waitMs} ms) is longer than the open itself ({openMs} ms): a unit is wrong");
+    }
+
     private static async Task<int> ProbedVersionAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
