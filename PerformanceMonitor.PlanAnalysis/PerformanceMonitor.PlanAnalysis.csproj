@@ -19,8 +19,8 @@
 
   <ItemGroup>
     <!-- ActualPlanExecutor RE-EXECUTES a query against the target to capture its ACTUAL plan (SET STATISTICS
-         XML), so it needs the SqlClient runtime connection surface. Version matches Lite/Dashboard/the Darling
-         service (7.0.1) so there is no transitive version skew. -->
+         XML), so it needs the SqlClient runtime connection surface. Its version is the central one in
+         Directory.Packages.props, shared with Lite/Dashboard/the Darling service, so there is no transitive version skew. -->
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
     <PackageReference Include="System.Security.Cryptography.Pkcs" />
