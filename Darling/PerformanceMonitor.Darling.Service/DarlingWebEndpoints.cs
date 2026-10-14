@@ -2691,15 +2691,42 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         try
         {
-            /* #5506: the band of the window the page asked for (hours, hours_back or days_back on the query string); a
-               request that sends none records none. */
-            var band = ReadWindowBand.Of(ReadWindowBand.HoursOf(key => First(context, key)));
+            /* #5506: the band of the window the page asked for (hours, hours_back or days_back on the query string). A
+               request that sends none reads the read's own default window, which the catalog row declares (PHours(def),
+               PInt("days_back", def)), so it records that window's band; only a read that takes no window records none. */
+            var band = WebWindowBand(name, key => First(context, key));
             recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs);
         }
         catch (Exception ex)
         {
             recorder.Logger?.LogDebug(ex, "Read-latency recording failed for /api/read/{Route}.", name);
         }
+    }
+
+    /// <summary>The window band of one <c>/api/read/&lt;name&gt;</c> request (#5506): the window the query string sent, else
+    /// the default <see cref="CatalogDescriptors"/> declares for that read, else <c>none</c>. Internal so a test can pin a
+    /// request that sends no window against the catalog's default.</summary>
+    internal static string WebWindowBand(string name, Func<string, string?> sent) =>
+        ReadWindowBand.Of(ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key)));
+
+    /// <summary>The default the catalog row of read <paramref name="name"/> declares for parameter <paramref name="key"/>,
+    /// as text; null when the read is not in the catalog, does not take that parameter, or declares no default.</summary>
+    private static string? CatalogDefaultText(string name, string key)
+    {
+        if (!CatalogDescriptors.TryGetValue(name, out var read))
+        {
+            return null;
+        }
+
+        foreach (var parameter in read.Params)
+        {
+            if (string.Equals(parameter.Name, key, StringComparison.Ordinal))
+            {
+                return ReadWindowBand.DefaultText(parameter.Default);
+            }
+        }
+
+        return null;
     }
 
     /// <summary>The query string as slow-read arguments. A key name is caller text: only plain identifier characters
@@ -4786,7 +4813,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
             ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the three verdict buckets (pending/captured/expired, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
             ["get_slow_reads"] = R(CatOverview, "The monitoring tool's OWN slow or failed reads, newest first - each with the arguments it was asked with, the source that answered and its slowest statements. Recorded when a read took 5 seconds or more or ended in a timeout, error or limit. Optional server, surface (web/compose/mcp) and route filter.", PHours(DarlingMcpSlowReadTools.DefaultHours), PServer(), PText("surface"), PText("route"), PLimit(DarlingMcpSlowReadTools.DefaultLimit)),
-            ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route), sorted p95 desc. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
+            ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route, window band: 1h, 24h, 7d, 7d+ or none), so one route can return a row per band; sorted p95 desc. window_band is the width of the window the read asked for (its default window when it sent none). max_in_flight is the most other reads running when one started; wait_total_ms is the summed wait for a store connection. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
             ["get_latch_stats"] = R(CatLatch, "Top latch waits in the window.", PServer(), PHours(24), PTop(10), PAsOf()),

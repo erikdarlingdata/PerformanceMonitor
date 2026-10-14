@@ -60,6 +60,7 @@ public sealed class TimingTestCensusTests
         ["QueryStoreIntervalConvergenceLiveTests.cs"] = Diagnostic + " (each step's duration is recorded for the failure message)",
         ["QueryStoreIntervalPurgeRowCappedTests.cs"] = HangGuard + " (120 s for a purge drain)",
         ["RdsLogStateConcurrencyTests.cs"] = "the clock sets how long the test hammers the code (rounds for one second); no assertion is made on a time",
+        ["ReadLatencyCapacityRungTests.cs"] = "the clock times the same physical open whose create time the code under test records, and the assertion compares the two (the recorded time must not exceed the open around it, #5506); load lengthens both, so it cannot flip it. The 10 s ceiling is a hang guard",
         ["ReadScopeStatementCaptureLiveTests.cs"] = "live-postgres member; lower bound only (the recorded duration must reach 550 ms after a 600 ms delay)",
         ["RollupBackfillLiveTests.cs"] = PollLoop + " (a held-chunk wait with a limit)",
         ["SensitiveStatementJsonTests.cs"] = Diagnostic + " (median of 20 identity walks)",

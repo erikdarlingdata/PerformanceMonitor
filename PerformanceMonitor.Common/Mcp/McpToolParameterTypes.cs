@@ -42,6 +42,9 @@ public sealed class McpToolParameterTypes
     private readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, McpParameterType>> _tools =
         new(StringComparer.Ordinal);
 
+    private readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, object>> _defaults =
+        new(StringComparer.Ordinal);
+
     /// <summary>Records one tool's parameters, skipping any that <paramref name="include"/> rejects. A second
     /// registration of the same name replaces the first, so a host that builds its tools twice records the same
     /// answer twice.</summary>
@@ -55,6 +58,7 @@ public sealed class McpToolParameterTypes
 
         var context = new NullabilityInfoContext();
         var parameters = new Dictionary<string, McpParameterType>(StringComparer.Ordinal);
+        var defaults = new Dictionary<string, object>(StringComparer.Ordinal);
 
         foreach (var parameter in method.GetParameters())
         {
@@ -69,9 +73,30 @@ public sealed class McpToolParameterTypes
                 : context.Create(parameter).WriteState != NullabilityState.NotNull;
 
             parameters[parameter.Name] = new McpParameterType(type, allowsNull);
+            if (parameter.HasDefaultValue && parameter.DefaultValue is not null)
+            {
+                defaults[parameter.Name] = parameter.DefaultValue;
+            }
         }
 
         _tools[toolName] = parameters;
+        _defaults[toolName] = defaults;
+    }
+
+    /// <summary>The default the tool method declares for one parameter the caller supplies: the value the SDK binds when
+    /// the caller leaves that argument out. The served schema cannot answer this either, because the host strips every
+    /// <c>default</c> keyword from it for Gemini. False for a tool nothing recorded, a parameter it does not take, or a
+    /// parameter with no default or a null one.</summary>
+    public bool TryGetDefault(string toolName, string parameter, out object? value)
+    {
+        if (_defaults.TryGetValue(toolName, out var found) && found.TryGetValue(parameter, out var declared))
+        {
+            value = declared;
+            return true;
+        }
+
+        value = null;
+        return false;
     }
 
     /// <summary>The parameters recorded for a tool, by name. False for a tool nothing recorded.</summary>

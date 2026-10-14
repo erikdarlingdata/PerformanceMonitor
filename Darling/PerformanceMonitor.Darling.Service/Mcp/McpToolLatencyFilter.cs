@@ -148,20 +148,14 @@ public sealed class McpToolLatencyFilter
         _slowReads.Offer(scope, ReadSurface.Mcp, toolName, outcome, elapsedMs, arguments, errorClass, _logger);
     }
 
-    /// <summary>The window band of the call (#5506): the window arguments the caller sent, else the defaults the matched
-    /// tool declares in its input schema. Never throws; a call it cannot read records <c>none</c>.</summary>
+    /// <summary>The window band of the call (#5506): the window arguments the caller sent, else the defaults the tool
+    /// method declares for them. Never throws; a call it cannot read records <c>none</c>.</summary>
     private string WindowBandOf(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
     {
         try
         {
-            var tool = request.MatchedPrimitive as ModelContextProtocol.Server.McpServerTool;
-            if (tool is null && request.Params?.Name is { Length: > 0 } name
-                && request.Server?.ServerOptions?.ToolCollection is { } tools && tools.TryGetPrimitive(name, out var found))
-            {
-                tool = found;
-            }
-
-            return ReadWindowBand.OfToolCall(request.Params?.Arguments, tool?.ProtocolTool.InputSchema);
+            var types = request.Services?.GetService(typeof(McpToolParameterTypes)) as McpToolParameterTypes;
+            return WindowBandOf(request.Params?.Name, request.Params?.Arguments, types);
         }
         catch (Exception ex)
         {
@@ -169,6 +163,17 @@ public sealed class McpToolLatencyFilter
             return ReadWindowBand.None;
         }
     }
+
+    /// <summary>The window band of a call to <paramref name="toolName"/>. An argument the caller left out takes the default
+    /// the tool method declares, read from <paramref name="types"/> (which <c>McpSchemaCompat.WithGeminiCompatibleTools</c>
+    /// fills from the method as it creates each tool), never from the served input schema: that schema has every
+    /// <c>default</c> keyword stripped for Gemini, so a band read from it would be <c>none</c> for the commonest call, the
+    /// one that leaves <c>hours_back</c> out. Internal so a test can pin it against a really registered tool.</summary>
+    internal static string WindowBandOf(string? toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments, McpToolParameterTypes? types) =>
+        ReadWindowBand.OfToolCall(arguments, key =>
+            types is not null && !string.IsNullOrEmpty(toolName) && types.TryGetDefault(toolName, key, out var value)
+                ? ReadWindowBand.DefaultText(value)
+                : null);
 
     private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope)
     {

@@ -42,32 +42,62 @@ internal static class ReadWindowBand
     /// <summary>The band of a window from <paramref name="start"/> to <paramref name="end"/>; <c>none</c> when either is
     /// missing.</summary>
     internal static string Of(DateTime? start, DateTime? end) =>
-        start is { } s && end is { } e ? Of((e - s).TotalHours) : None;
+        start.HasValue && end.HasValue ? Of((end.Value - start.Value).TotalHours) : None;
 
     /// <summary>The window in hours named by a read's arguments: <c>hours</c>, else <c>hours_back</c>, else
-    /// <c>days_back</c> times 24. <paramref name="lookup"/> returns an argument's text, or null when it was not sent.</summary>
-    internal static double? HoursOf(Func<string, string?> lookup)
+    /// <c>days_back</c> times 24. <paramref name="sent"/> returns the text of an argument the caller sent, or null when it
+    /// was not sent. Only when the caller sent none of the three is <paramref name="declaredDefault"/> asked, in the same
+    /// order, for the default the read itself declares: a call that leaves its window out reads that default window, not
+    /// none, and a sent <c>hours_back</c> is never overridden by a declared default for <c>hours</c>.</summary>
+    internal static double? HoursOf(Func<string, string?> sent, Func<string, string?>? declaredDefault = null)
     {
-        if (Number(lookup("hours")) is { } hours) return hours;
-        if (Number(lookup("hours_back")) is { } hoursBack) return hoursBack;
-        return Number(lookup("days_back")) is { } days ? days * 24 : null;
+        var hours = WindowOf(sent);
+        if (hours.HasValue || declaredDefault is null)
+        {
+            return hours;
+        }
+
+        return WindowOf(declaredDefault);
     }
 
-    /// <summary>The window of an MCP tool call: the arguments the caller sent, else the default the tool declares for that
-    /// argument in its input schema (a call that leaves <c>hours_back</c> out reads the tool's default window, not none).</summary>
-    internal static string OfToolCall(System.Collections.Generic.IDictionary<string, JsonElement>? arguments, JsonElement? inputSchema) =>
-        Of(HoursOf(key =>
-            arguments is not null && arguments.TryGetValue(key, out var sent) && sent.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)
-                ? ElementText(sent)
-                : SchemaDefault(inputSchema, key)));
+    /// <summary>The window of an MCP tool call: the arguments the caller sent, else the default the tool method declares
+    /// for that argument. <paramref name="declaredDefault"/> reads the method's parameter default, never the served input
+    /// schema: the schema the host serves has every <c>default</c> keyword stripped for Gemini (#5506).</summary>
+    internal static string OfToolCall(System.Collections.Generic.IDictionary<string, JsonElement>? arguments, Func<string, string?>? declaredDefault)
+    {
+        return Of(HoursOf(key =>
+        {
+            if (arguments is null || !arguments.TryGetValue(key, out var value))
+            {
+                return null;
+            }
 
-    private static string? SchemaDefault(JsonElement? schema, string key) =>
-        schema is { ValueKind: JsonValueKind.Object } s
-        && s.TryGetProperty("properties", out var properties) && properties.ValueKind == JsonValueKind.Object
-        && properties.TryGetProperty(key, out var property) && property.ValueKind == JsonValueKind.Object
-        && property.TryGetProperty("default", out var value)
-            ? ElementText(value)
-            : null;
+            return value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined ? null : ElementText(value);
+        }, declaredDefault));
+    }
+
+    /// <summary>A declared default as argument text, read the way a sent number is: invariant culture. Null for no default
+    /// or a null default.</summary>
+    internal static string? DefaultText(object? value) =>
+        value is IFormattable formattable ? formattable.ToString(null, CultureInfo.InvariantCulture) : value as string;
+
+    private static double? WindowOf(Func<string, string?> lookup)
+    {
+        var hours = Number(lookup("hours"));
+        if (hours.HasValue)
+        {
+            return hours;
+        }
+
+        var hoursBack = Number(lookup("hours_back"));
+        if (hoursBack.HasValue)
+        {
+            return hoursBack;
+        }
+
+        var days = Number(lookup("days_back"));
+        return days.HasValue ? days.Value * 24 : null;
+    }
 
     private static string? ElementText(JsonElement value) => value.ValueKind switch
     {

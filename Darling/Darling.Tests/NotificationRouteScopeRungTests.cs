@@ -45,7 +45,7 @@ public sealed class NotificationRouteScopeRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
-    public void TheRungIsRegistered_OnceAtTheTopOfTheLadder()
+    public void TheRungIsRegisteredOnce_BelowTheTopOfTheLadder()
     {
         Assert.Equal("notification-route-scope", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
@@ -83,7 +83,7 @@ public sealed class NotificationRouteScopeRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheSentinel_AtTheLastOrdinal_AndAFullyMigratedStoreMapsToThisTopRung()
+    public void TheProbeCarriesTheSentinel_AndMapsToThisRungWhenNoLaterSentinelIsPresent()
     {
         Assert.Contains("attname = 'scope_server_id'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 

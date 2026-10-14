@@ -51,8 +51,8 @@ public sealed class QueryStoreWatermarksRungTests
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions[^1]);
-        /* V179 (#5640), V180 (#5654) and V181 (#5750) sit above this rung, so it is the fourth from the top. */
-        Assert.Equal(new[] { 179, 180, 181, 182 }, versions.TakeLast(4).ToArray());
+        /* V179 (#5640), V180 (#5654), V181 (#5750) and V182 (#5506) sit above this rung, so it is the fifth from the top. */
+        Assert.Equal(new[] { 178, 179, 180, 181, 182 }, versions.TakeLast(5).ToArray());
         Assert.Equal(QueryStoreWatermarks.CreateSql, Rung.Sql);
     }
 
