@@ -279,7 +279,9 @@ public sealed class ReadLatencyFlushLiveTests
     }
 
     /// <summary>#5506 (V182): the window band is written as part of the key, max_in_flight folds by MAX and wait_total_ms
-    /// by addition when a second flush lands in the same hour, and two bands of one route are two rows.</summary>
+    /// by addition when a second flush lands in the same hour, and two bands of one route are two rows. #5793 (V183):
+    /// distinct_callers is each key's count of distinct callers in the flush (a read with no caller counts none), and a
+    /// second flush of the same hour folds by GREATEST, because two partial sets cannot be unioned once counted.</summary>
     [Fact]
     public async Task FlushWritesTheBandInFlightAndWait_AndASecondFlushFoldsThem()
     {
@@ -296,24 +298,27 @@ public sealed class ReadLatencyFlushLiveTests
 
         var metricTime = new DateTime(2026, 1, 1, 7, 0, 0, DateTimeKind.Utc);
         var first = new ReadLatencyAccumulator();
-        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.OneDay, 4, 30);
-        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 9_000, ReadWindowBand.SevenDays, 1, 0);
+        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.OneDay, 4, 30, "client-a/1.0");
+        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 150, ReadWindowBand.OneDay, 3, 0, "client-b/2.0");
+        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 9_000, ReadWindowBand.SevenDays, 1, 0, null);
         await first.FlushAsync(connection, metricTime, logger: null, ct);
 
         var second = new ReadLatencyAccumulator();
-        second.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 200, ReadWindowBand.OneDay, 2, 12);
+        second.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 200, ReadWindowBand.OneDay, 2, 12, "client-a/1.0");
         await second.FlushAsync(connection, metricTime, logger: null, ct);
 
         using var read = new NpgsqlCommand(
-            "SELECT window_band, run_count, max_in_flight, wait_total_ms FROM collect.read_latency ORDER BY window_band", connection);
+            "SELECT window_band, run_count, max_in_flight, wait_total_ms, distinct_callers FROM collect.read_latency ORDER BY window_band",
+            connection);
         await using var reader = await read.ExecuteReaderAsync(ct);
-        var rows = new System.Collections.Generic.List<(string Band, int Runs, int MaxInFlight, long Wait)>();
+        var rows = new System.Collections.Generic.List<(string Band, int Runs, int MaxInFlight, long Wait, int Callers)>();
         while (await reader.ReadAsync(ct))
         {
-            rows.Add((reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt64(3)));
+            rows.Add((reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt64(3), reader.GetInt32(4)));
         }
 
-        Assert.Equal(new[] { ("24h", 2, 4, 42L), ("7d", 1, 1, 0L) }, rows);
+        /* 24h: two callers in the first flush and one in the second fold by GREATEST to 2 (a sum would say 3). */
+        Assert.Equal(new[] { ("24h", 3, 4, 42L, 2), ("7d", 1, 1, 0L, 0) }, rows);
     }
 
     [Fact]
