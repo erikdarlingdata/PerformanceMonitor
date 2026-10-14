@@ -387,8 +387,8 @@ AND   day = $2::date;";
 
         var deferred = plan.Count - started;
         var result = new TickResult(pass1, pass2, failed, removed, deferred);
-        logger.LogInformation("Query Store top daily summary: built {Built} (pass1 {Pass1}, pass2 {Pass2}), failed {Failed}, deferred {Deferred}, removed {Removed} day(s)",
-            result.Built, pass1, pass2, failed, deferred, removed);
+        logger.LogInformation("Query Store top daily summary: built {Built} (pass1 {Pass1}, pass2 {Pass2}), failed {Failed}, deferred {Deferred}, removed {Removed} day(s), {ElapsedMs} ms",
+            result.Built, pass1, pass2, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
         return result;
     }
 }

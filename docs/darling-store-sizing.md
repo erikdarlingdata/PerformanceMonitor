@@ -25,7 +25,7 @@ We have a daily figure only for the Query Store interval tables. These tables ar
 | Query Store interval tables, both | 0.33 GiB | about 14 GiB a day | Measured on store A |
 | `collect.query_store_interval_wide` | about 0.23 GiB | about 10 GiB a day | Measured on store A |
 | `collect.query_store_interval_latest` | about 0.09 GiB | about 4 GiB a day | Measured on store A |
-| Query Store interval tables at steady state | about 3.5 GiB per server in total | about 150 GiB | Measured on store A |
+| Query Store interval tables at steady state | about 3.5 GiB per server in total | about 150 GiB | Computed from the daily sizes and the retention horizons: 10 GiB x 9 days + 4 GiB x 15 days = 150 GiB |
 | Every other collector, SQL Server or PostgreSQL | not measured | not measured | The load test will add it |
 
 The Query Store interval tables are plain PostgreSQL tables, partitioned by day. TimescaleDB compression does not apply to them, so all of their rows stay uncompressed.
@@ -37,14 +37,18 @@ The sizes above assume the default retention horizons. If you change a horizon, 
 | Data | Horizon |
 |---|---|
 | `query_snapshots`, `waiting_tasks`, `running_jobs`, `agent_status` | 7 days |
+| `query_store_stats_interval_hourly` (with TimescaleDB), a Query Store dedup aggregate | 7 days |
 | `collect.query_store_interval_wide` | 9 days |
+| `query_store_stats_interval_daily` (with TimescaleDB), a Query Store dedup aggregate | 10 days |
+| `pg_plan_capture` | 14 days |
 | `collect.query_store_interval_latest` | 15 days |
 | Raw `query_stats`, `procedure_stats`, `query_store_stats` (with TimescaleDB) | 4 days, then the hourly and daily rollups |
-| Most other collector tables | 30 days |
+| Most other collector tables, `config.config_command` (finished commands) and `analysis_findings` | 30 days |
+| Baseline aggregates (with TimescaleDB) | 35 days |
 | `collection_log` | 60 days |
 | Hourly history rollups | 90 days |
-| Size, index, bloat and replication tables | 90 days |
-| `server_properties`, `job_history` and the yearly PostgreSQL tables | 365 days |
+| Size, index, bloat and replication tables, and `config_alert_log` | 90 days |
+| `server_properties`, `job_history`, the yearly PostgreSQL tables and `collect.plan_force_actions` | 365 days |
 | Daily history rollups | Kept with no limit |
 
 With TimescaleDB, the service compresses each 1-day chunk when it is older than 1 day (`TimescaleSupport.CompressAfterDays` is 1, [#4211](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4211) decision 1). Without TimescaleDB, nothing is compressed, and the store is larger than these numbers.
@@ -54,13 +58,14 @@ With TimescaleDB, the service compresses each 1-day chunk when it is older than 
 ### The two facts that set the host size
 
 1. Store A's host has 8 vCPUs and 64 GB of RAM. It serves 43 SQL Servers with Query Store collected. Every collection job keeps up and every compression job succeeds. The largest hourly aggregate refresh takes about 13 s. But reads that scan a day of Query Store data are already slow. For example, a one-day Custom Views panel on the wide table read 8.5 M rows in 48 s ([#5582](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5582)).
-2. `--check-settings` compares the bytes in uncompressed TimescaleDB chunks with the host RAM. It prints the result as a percentage of RAM ([Check Host/Store Sizing Settings](../Darling/README.md#check-hoststore-sizing-settings)). The writes and most reads touch these chunks. On store A the figure is about 150%: 89 GiB of uncompressed chunks against 64 GB of RAM. We recommend a host whose RAM holds the uncompressed chunks, which is a figure of 100% or less.
+2. `--check-settings` compares the bytes in uncompressed TimescaleDB chunks with the host RAM. It prints the result as a percentage of RAM ([Check Host/Store Sizing Settings](../Darling/README.md#check-hoststore-sizing-settings)). The writes and most reads touch these chunks. On store A the figure is about 150%: 89 GiB of uncompressed chunks against 64 GB of RAM. Store A keeps up at 150%, so 100% is not a measured limit. As a cautious rule, we recommend a host whose RAM holds the uncompressed chunks. That is a figure of 100% or less. We have not measured the figure at which a store falls behind.
 
 The tables below use these rules:
 
-- RAM: the uncompressed size per server times the server count, rounded up to a common size. Store A runs at about 150% of RAM, so 64 GB is the measured minimum for 43 servers.
+- RAM: the uncompressed chunk size per server times the server count, rounded up to a common size. This is the cautious rule above. Store A runs at about 150% of RAM and keeps up, so 64 GB works for 43 servers. We have not run store A on a smaller host, so 64 GB is the one size that we know works, not a proven minimum.
+- The RAM rule counts only the TimescaleDB chunks. It leaves out the Query Store interval tables, about 3.5 GiB per server, which are never compressed. [#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794) expects them to matter less for RAM than the chunks. But this guide expects the reads on those tables to reach their limits first, so the load test measures them.
 - Disk: the size per server times the server count, plus 50% for growth, vacuum and the temporary space of the compression jobs.
-- vCPUs: one vCPU for each 5.4 servers, which is store A's ratio (43 servers on 8 vCPUs), rounded to the nearest common size.
+- vCPUs: one vCPU for each 5.4 servers, which is store A's ratio (43 servers on 8 vCPUs). At the top of each row that gives 3.7, 8.3, 16.7 and 27.8 vCPUs. We round them to 4, 8, 16 and 32. The last one is rounded up, to be cautious.
 
 Only the store A row is measured. The other rows are estimates from these rules.
 
@@ -69,9 +74,9 @@ Only the store A row is measured. The other rows are estimates from these rules.
 | Servers | vCPUs | RAM | Disk | Source |
 |---|---|---|---|---|
 | 1 to 20 | 4 | 64 GB | 300 GiB | Estimate: 20 x 2.1 GiB = 42 GiB uncompressed, 20 x 10 GiB x 1.5 = 300 GiB |
-| 21 to 45 | 8 | 64 GB (minimum), 128 GB recommended | 700 GiB | Measured on store A (43 servers, 8 vCPUs, 64 GB). 45 x 2.1 GiB = 95 GiB uncompressed |
+| 21 to 45 | 8 | 64 GB works, 128 GB recommended | 700 GiB | Measured on store A (43 servers, 8 vCPUs, 64 GB). 64 GB is the size we ran, not a proven minimum. 45 x 2.1 GiB = 95 GiB uncompressed |
 | 46 to 90 | 16 | 192 GB | 1.4 TiB | Estimate: 90 x 2.1 GiB = 189 GiB uncompressed, 90 x 10 GiB x 1.5 = 1,350 GiB |
-| 91 to 150 | 32 | 320 GB | 2.2 TiB | Estimate: 150 x 2.1 GiB = 315 GiB uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
+| 91 to 150 | 32 | 320 GB | 2.2 TiB | Estimate: 150 / 5.4 = 27.8 vCPUs, rounded up to 32. 150 x 2.1 GiB = 315 GiB uncompressed, 150 x 10 GiB x 1.5 = 2,250 GiB |
 
 Of the stores we measured, the one with Query Store collected has 43 servers, so the rows above 45 servers are not tested. We expect the day-scan reads on the Query Store tables to get slower as you add servers. The load test will measure how much slower.
 

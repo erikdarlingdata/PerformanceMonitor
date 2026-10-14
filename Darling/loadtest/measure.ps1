@@ -11,7 +11,10 @@
                    then the slow-read rows the service wrote for them.
       ReadLatency  (a) The service's own read times for the window that started at -Since, beside the read budgets.
                    The service writes them once an hour, so run this step after that hour has closed.
-      Jobs         (b) The continuous aggregate refresh jobs and the compression jobs.
+      Jobs         (b) The hourly work that grows with N: the three Query Store builders (plan regression daily totals,
+                   Query Store top daily summary, compose rollup) and the store object convergence pass, which holds
+                   the Query Store partition upkeep, read from the service log (-ServiceLog); the daily retention
+                   purge from the collection log; and the TimescaleDB aggregate refresh and compression jobs.
       Writes       (c) The Query Store collectors' write time per cycle, from the collection log and get_collector_cost.
       Compression  (d) One closed day of the wide table in a compressed hypertable: size and scan time, plain and
                    compressed.
@@ -38,7 +41,8 @@ param(
     [string] $CustomViewSpec,
     [string] $Since,
     [string] $Day,
-    [int] $Hours = 2
+    [int] $Hours = 2,
+    [string] $ServiceLog
 )
 
 Set-StrictMode -Version Latest
@@ -100,6 +104,57 @@ function Invoke-Mcp {
     return $text | ConvertFrom-Json
 }
 
+# The status words a Darling read puts on the wire when it did not answer the question: a name that resolves to nothing
+# is "invalid" (or "not_found"), a caught exception or a statement timeout is "error". A read like that returns in
+# milliseconds, so the step must count it as a failure, not as a fast read (#5794 review round 1).
+$script:failureStatuses = @('error', 'invalid', 'not_found', 'ambiguous', 'conflict', 'timeout')
+
+# The reason a tool text or a web body is a failed read, or $null when the read answered. The text is the read's JSON,
+# or a bare sentence for a store fault (the registry read failing).
+function Get-ReadFailure {
+    param([string] $Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return 'empty answer' }
+    $trimmed = $Text.TrimStart()
+    if (-not ($trimmed.StartsWith('{') -or $trimmed.StartsWith('['))) {
+        if ($trimmed -match '^(Could not |Error)') { return ($trimmed -split "`n")[0] }
+        return $null
+    }
+    try {
+        $json = $trimmed | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+    if ($json -is [System.Management.Automation.PSCustomObject] -and $json.PSObject.Properties['status']) {
+        $status = [string] $json.status
+        if ($script:failureStatuses -contains $status) {
+            $message = if ($json.PSObject.Properties['message']) { [string] $json.message } else { '' }
+            if ($message -match 'timeout|canceling statement') { $status = 'timeout' }
+            return "${status}: $message"
+        }
+    }
+    return $null
+}
+
+# Throws when a tools/call answer is a failed read: a JSON-RPC error, isError, or a failure status word in the tool text.
+# isError is a bool? that the server may leave out, and Set-StrictMode throws on a missing property, so it is tested
+# for first.
+function Assert-ToolAnswer {
+    param($Answer)
+
+    if ($Answer.PSObject.Properties['error'] -and $Answer.error) { throw "JSON-RPC error: $($Answer.error.message)" }
+    if (-not $Answer.PSObject.Properties['result']) { throw 'the answer has no result' }
+    $result = $Answer.result
+    if ($result.PSObject.Properties['isError'] -and $result.isError) { throw 'the tool returned isError' }
+    $text = ''
+    if ($result.PSObject.Properties['content'] -and @($result.content).Count -gt 0 -and $result.content[0].PSObject.Properties['text']) {
+        $text = [string] $result.content[0].text
+    }
+    $failure = Get-ReadFailure -Text $text
+    if ($failure) { throw $failure }
+}
+
 function Measure-Call {
     param([string] $Surface, [string] $Read, [string] $Window, [scriptblock] $Call)
 
@@ -132,12 +187,18 @@ LIMIT 1;
 "@
     $pickParts = "$pick".Trim().Split('|')
 
-    $null = Invoke-Mcp -Method 'initialize' -Params @{
-        protocolVersion = '2025-03-26'
-        capabilities = @{}
-        clientInfo = @{ name = 'darling-loadtest'; version = '1.0' }
+    # A failed handshake does not stop the step: each read below then fails on its own and is listed as failed.
+    try {
+        $null = Invoke-Mcp -Method 'initialize' -Params @{
+            protocolVersion = '2025-03-26'
+            capabilities = @{}
+            clientInfo = @{ name = 'darling-loadtest'; version = '1.0' }
+        }
+        $null = Invoke-Mcp -Method 'notifications/initialized' -Notification
     }
-    $null = Invoke-Mcp -Method 'notifications/initialized' -Notification
+    catch {
+        Write-Host "The MCP handshake failed: $($_.Exception.Message)"
+    }
 
     $tools = @(
         @{ name = 'get_query_store_top'; arguments = @{ server_name = $ServerName } },
@@ -154,22 +215,29 @@ LIMIT 1;
             $arguments['hours_back'] = $hours
             $results += Measure-Call -Surface 'MCP' -Read $tool.name -Window "${hours}h" -Call {
                 $answer = Invoke-Mcp -Method 'tools/call' -Params @{ name = $tool.name; arguments = $arguments }
-                if ($answer.PSObject.Properties['error'] -and $answer.error) { throw $answer.error.message }
-                if ($answer.result.isError) { throw 'the tool returned isError' }
+                Assert-ToolAnswer -Answer $answer
             }
         }
     }
 
     if ($WebToken) {
         $session = $null
-        $null = Invoke-WebRequest -Uri ($WebUrl.TrimEnd('/') + '/auth/login') -Method Post -Body @{ token = $WebToken } `
-            -SessionVariable session -SkipHttpErrorCheck -MaximumRedirection 0
+        try {
+            $null = Invoke-WebRequest -Uri ($WebUrl.TrimEnd('/') + '/auth/login') -Method Post -Body @{ token = $WebToken } `
+                -SessionVariable session -SkipHttpErrorCheck -MaximumRedirection 0
+        }
+        catch {
+            # As for MCP: each web read below then fails on its own and is listed as failed.
+            Write-Host "The web dashboard sign-in failed: $($_.Exception.Message)"
+        }
         foreach ($hours in 24, 168) {
             foreach ($tool in $tools | Select-Object -First 3) {
                 $query = "server_name=$([uri]::EscapeDataString($ServerName))&hours_back=$hours"
                 $results += Measure-Call -Surface 'Web' -Read $tool.name -Window "${hours}h" -Call {
                     $page = Invoke-WebRequest -Uri ($WebUrl.TrimEnd('/') + "/api/read/$($tool.name)?$query") -WebSession $session -SkipHttpErrorCheck
                     if ($page.StatusCode -ge 400) { throw "HTTP $($page.StatusCode)" }
+                    $failure = Get-ReadFailure -Text ([string] $page.Content)
+                    if ($failure) { throw $failure }
                 }
             }
         }
@@ -182,7 +250,7 @@ LIMIT 1;
         $spec = Get-Content -Raw -LiteralPath $CustomViewSpec
         $results += Measure-Call -Surface 'Compose' -Read 'run_custom_view_panel' -Window 'as the spec says' -Call {
             $answer = Invoke-Mcp -Method 'tools/call' -Params @{ name = 'run_custom_view_panel'; arguments = @{ spec = $spec } }
-            if ($answer.result.isError) { throw 'the tool returned isError' }
+            Assert-ToolAnswer -Answer $answer
         }
     }
     else {
@@ -201,6 +269,56 @@ LIMIT 1;
     Write-Host (Invoke-StoreStep -File 'measure-slow-reads.sql' -Variables @{ since = $since })
 }
 
+# The hourly work that grows with N (#5794 review round 1). The Query Store interval tables are plain partitioned
+# tables, so no TimescaleDB job reads them: the work that scans them is the service's own hourly builders, and each
+# writes one summary line per tick that ends with its time in ms. The store object convergence pass, which holds the
+# Query Store partition upkeep, writes one too. The service log's time stamps are the service host's local time.
+function Step-Jobs {
+    Write-Host ''
+    Write-Host "The service's hourly work, from the service log (newest $Hours hour(s)):"
+    if (-not $ServiceLog) {
+        Write-Host 'No -ServiceLog: the hourly builders are not read. Pass the newest darling-service_yyyyMMdd.log file of the service.'
+    }
+    elseif (-not (Test-Path -LiteralPath $ServiceLog)) {
+        Write-Host "No file at $ServiceLog."
+    }
+    else {
+        $pattern = '^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[\w+\] \[[^\]]*\] ' +
+            '(?<job>PLAN_REGRESSION daily totals|Query Store top daily summary|Query Store compose rollup|Store object convergence): ' +
+            '(?<summary>.*), (?<ms>\d+) ms\s*$'
+        $since = (Get-Date).AddHours(-$Hours)
+        $runs = @(Get-Content -LiteralPath $ServiceLog | ForEach-Object {
+            $match = [regex]::Match($_, $pattern)
+            if ($match.Success) {
+                $at = [datetime]::ParseExact($match.Groups['ts'].Value, 'yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture)
+                if ($at -ge $since) {
+                    [pscustomobject]@{ At = $at; Job = $match.Groups['job'].Value; Summary = $match.Groups['summary'].Value; Ms = [long] $match.Groups['ms'].Value }
+                }
+            }
+        })
+        if ($runs.Count -eq 0) {
+            Write-Host '(no builder lines in the window: the log is from a build without the elapsed time, or the service ran less than an hour)'
+        }
+        else {
+            Write-Host '| logged_at (service local time) | job | summary | ms |'
+            Write-Host '|---|---|---|---|'
+            foreach ($r in $runs) { Write-Host "| $($r.At.ToString('yyyy-MM-dd HH:mm:ss')) | $($r.Job) | $($r.Summary -replace '\|', '/') | $($r.Ms) |" }
+            $newest = $runs | Group-Object Job | ForEach-Object { $_.Group | Sort-Object At | Select-Object -Last 1 }
+            $total = ($newest | Measure-Object Ms -Sum).Sum
+            Write-Host ''
+            Write-Host "hourly_total_ms (the newest run of each job): $total. It must stay well under one hour (3600000 ms). A 'deferred' count above 0 that stays from tick to tick is a backlog that does not clear."
+        }
+    }
+
+    Write-Host ''
+    Write-Host 'The daily retention purge, from the collection log:'
+    Write-Host (Invoke-StoreStep -File 'measure-purge.sql')
+
+    Write-Host ''
+    Write-Host 'The TimescaleDB jobs (these do not read the Query Store interval tables):'
+    Write-Host (Invoke-StoreStep -File 'measure-jobs.sql')
+}
+
 foreach ($step in $Steps) {
     Write-Host ''
     Write-Host "## $step"
@@ -210,7 +328,7 @@ foreach ($step in $Steps) {
             if (-not $Since) { throw 'The ReadLatency step needs -Since, the UTC time the Reads step printed.' }
             Write-Host (Invoke-StoreStep -File 'measure-read-latency.sql' -Variables @{ since = $Since })
         }
-        'Jobs' { Write-Host (Invoke-StoreStep -File 'measure-jobs.sql') }
+        'Jobs' { Step-Jobs }
         'Writes' {
             Write-Host (Invoke-StoreStep -File 'measure-writes.sql' -Variables @{ hours = $Hours })
             if ($McpToken -or $McpUrl) {

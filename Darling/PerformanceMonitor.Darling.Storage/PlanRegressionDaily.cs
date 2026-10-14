@@ -448,8 +448,8 @@ AND   day = $2::date;";
 
         var deferred = plan.Count - started;
         var result = new TickResult(built, failed, skipped, removed, deferred);
-        logger.LogInformation("PLAN_REGRESSION daily totals: built {Built}, failed {Failed}, skipped {Skipped}, deferred {Deferred}, removed {Removed} day(s)",
-            built, failed, skipped, deferred, removed);
+        logger.LogInformation("PLAN_REGRESSION daily totals: built {Built}, failed {Failed}, skipped {Skipped}, deferred {Deferred}, removed {Removed} day(s), {ElapsedMs} ms",
+            built, failed, skipped, deferred, removed, (long)elapsed().TotalMilliseconds);
         return result;
     }
 }

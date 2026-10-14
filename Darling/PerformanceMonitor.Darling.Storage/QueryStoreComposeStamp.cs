@@ -935,8 +935,8 @@ WHERE hour < $1;";
 
         var deferred = plan.Count - started + deferredForWriters;
         var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack);
-        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s)",
-            result.Built, builtStale, builtMissing, failed, deferred, removed);
+        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), {ElapsedMs} ms",
+            result.Built, builtStale, builtMissing, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
         return result;
     }
 }

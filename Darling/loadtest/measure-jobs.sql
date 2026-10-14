@@ -1,7 +1,9 @@
 /*
-#5794 load test, step (b): the TimescaleDB background jobs on the inflated copy. One row per continuous aggregate
-refresh job and per compression job, slowest first. hourly_total is the sum of last_run_duration over the jobs that
-run every hour: the hourly jobs fit the hour while it stays well under one hour.
+#5794 load test, step (b), last table: the TimescaleDB background jobs. One row per continuous aggregate refresh job
+and per compression job, slowest first. These jobs do not read the Query Store interval tables, which are plain
+partitioned tables, so their times should not change with N: they are here to show that. The hourly work that does
+grow with N is the service's own Query Store builders, which the Jobs step reads from the service log.
+hourly_total is the sum of last_run_duration over the jobs that run every hour.
 */
 SELECT
     j.job_id,

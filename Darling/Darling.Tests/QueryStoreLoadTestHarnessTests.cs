@@ -26,9 +26,24 @@ public sealed partial class QueryStoreLoadTestHarnessTests
     private const string ScriptPath = "Darling/loadtest/inflate-query-store.sql";
 
     /* A table a migration creates. V171 and V172 rename the old table to <name>_legacy and attach it as a partition of
-       the new parent, so a _legacy name is a partition of a table already on the list, not a table of its own. */
-    [GeneratedRegex(@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?collect\.(query_store_interval_[a-z_]+)", RegexOptions.IgnoreCase)]
+       the new parent, so a _legacy name is a partition of a table already on the list, not a table of its own. The schema
+       is optional: a migration that runs with collect on its search_path can create the table unqualified (#5794
+       review round 1). */
+    [GeneratedRegex(@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:collect\.)?(query_store_interval_[a-z_]+)", RegexOptions.IgnoreCase)]
     private static partial Regex CreatedIntervalTable();
+
+    [Theory]
+    [InlineData("CREATE TABLE collect.query_store_interval_wide (", "query_store_interval_wide")]
+    [InlineData("CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_coverage", "query_store_interval_latest_coverage")]
+    [InlineData("CREATE TABLE query_store_interval_wide_pending (", "query_store_interval_wide_pending")]
+    [InlineData("create table if not exists query_store_interval_new\n(", "query_store_interval_new")]
+    public void CreatedIntervalTable_MatchesQualifiedAndUnqualifiedNames(string sql, string expected)
+    {
+        var match = CreatedIntervalTable().Match(sql);
+
+        Assert.True(match.Success, $"The census regex does not see the table in: {sql}");
+        Assert.Equal(expected, match.Groups[1].Value.ToLowerInvariant());
+    }
 
     [GeneratedRegex(@"'collect\.(query_store_interval_[a-z_]+)'")]
     private static partial Regex ScriptTableLiteral();
