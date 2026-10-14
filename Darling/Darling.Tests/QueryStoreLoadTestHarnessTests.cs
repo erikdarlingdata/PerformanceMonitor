@@ -1,0 +1,88 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// Pins the load-test harness of #5794 to the store's migrations: <c>Darling/loadtest/inflate-query-store.sql</c> must
+/// clone every Query Store interval table that a migration creates. A new interval table that the script leaves out
+/// would make the load test measure a store with fewer rows than the inflated one it claims to be.
+/// </summary>
+public sealed partial class QueryStoreLoadTestHarnessTests
+{
+    private const string ScriptPath = "Darling/loadtest/inflate-query-store.sql";
+
+    /* A table a migration creates. V171 and V172 rename the old table to <name>_legacy and attach it as a partition of
+       the new parent, so a _legacy name is a partition of a table already on the list, not a table of its own. */
+    [GeneratedRegex(@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?collect\.(query_store_interval_[a-z_]+)", RegexOptions.IgnoreCase)]
+    private static partial Regex CreatedIntervalTable();
+
+    [GeneratedRegex(@"'collect\.(query_store_interval_[a-z_]+)'")]
+    private static partial Regex ScriptTableLiteral();
+
+    private static string[] MigrationIntervalTables() =>
+        PgMigrations.Scripts
+            .SelectMany(m => CreatedIntervalTable().Matches(m.Sql).Select(x => x.Groups[1].Value.ToLowerInvariant()))
+            .Where(name => !name.EndsWith("_legacy", StringComparison.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+    [Fact]
+    public void Migrations_CreateTheSixKnownIntervalTables()
+    {
+        /* A floor for the census below: if the regex stops matching the migrations, this fails instead of the census
+           passing on an empty list. */
+        Assert.Equal(
+            new[]
+            {
+                "query_store_interval_latest",
+                "query_store_interval_latest_coverage",
+                "query_store_interval_latest_pending",
+                "query_store_interval_wide",
+                "query_store_interval_wide_coverage",
+                "query_store_interval_wide_pending",
+            },
+            MigrationIntervalTables());
+    }
+
+    [Fact]
+    public void InflateScript_NamesEveryIntervalTableTheMigrationsCreate()
+    {
+        var script = File.ReadAllText(Path.Combine(RepoRoot(), ScriptPath));
+        var listed = ScriptTableLiteral().Matches(script).Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+
+        var missing = MigrationIntervalTables().Where(name => !listed.Contains(name)).ToArray();
+        Assert.True(missing.Length == 0,
+            $"{ScriptPath} does not clone {string.Join(", ", missing)}. Add each to loadtest.query_store_tables().");
+
+        var unknown = listed.Except(MigrationIntervalTables(), StringComparer.Ordinal).ToArray();
+        Assert.True(unknown.Length == 0,
+            $"{ScriptPath} names {string.Join(", ", unknown)}, which no migration creates.");
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
+}
