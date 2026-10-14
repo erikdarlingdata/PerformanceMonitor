@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -110,17 +110,19 @@ public sealed class ExternalAlertRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750) and V182's (#5506) sentinels sit above this one; V183's (#5793) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels sit above this one; V184's (#5632) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 3, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 4, parameters.Length - 1);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 2].Name);
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 3].Name);
+        Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal - 1].Name);
 
@@ -128,12 +130,16 @@ public sealed class ExternalAlertRungTests
         var previousArm = viewer.IndexOf("if (hasClientTimeoutSettings)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && previousArm > thisArm, "the V180 arm sits above the next rung down");
 
-        /* Every sentinel present: maps to the ladder's top. V183's (#5793), V182's (#5506) and V181's (#5750) absent: this rung. This sentinel
+        /* Every sentinel present: maps to the ladder's top. V184's (#5632), V183's (#5793), V182's (#5506) and V181's (#5750) absent: this rung. This sentinel
            absent too: a rung back. */
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
 
-        var withoutV183 = (object[])allPresent.Clone();
+        var withoutV184 = (object[])allPresent.Clone();
+        withoutV184[ProbeOrdinal + 4] = false;
+        Assert.Equal(183, (int)method.Invoke(null, withoutV184)!);
+
+        var withoutV183 = (object[])withoutV184.Clone();
         withoutV183[ProbeOrdinal + 3] = false;
         Assert.Equal(182, (int)method.Invoke(null, withoutV183)!);
 
@@ -227,6 +233,7 @@ public sealed class ExternalAlertRungTests
             /* An upgraded store: one rung behind (no tables, no column, no version row), then migrated, gets all of it. */
             await ExecAsync(connection, "DROP TABLE config.external_alert_state; DROP TABLE config.external_alert_pending; DROP TABLE config.external_alert_source; ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ExternalAlertTables.RungVersion, ct);
+            await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
