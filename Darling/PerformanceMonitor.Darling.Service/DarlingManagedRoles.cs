@@ -1677,6 +1677,37 @@ REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignat
 REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_service_bump() FROM PUBLIC;
 {BuildExternalAlertSourceRolesSql(config)}
 
+-- 10d. Investigation tables (V184, #5632). The blanket config grants above gave admin INSERT/UPDATE/DELETE on all
+--     six, so REVOKE ALL ... CASCADE takes every privilege from PUBLIC and the three roles, and SELECT goes back to
+--     all three (the web dashboard and the MCP list read them). Then each writer gets only what it writes. The
+--     service opens, joins, sweeps and journals as the owner. mcp (the claim and submit tools) updates only the
+--     claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
+--     state column, so an agent's note stays pending until a person decides it. admin (the WPF viewer) closes a
+--     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did.
+--     Nothing but the owner writes the alert links. An identity column needs no sequence grant. One table per write
+--     grant, so provision-roles.sql's mirror (its step 3i) is compared grant for grant. It runs after every blanket
+--     grant above, and before 10a.
+REVOKE ALL ON {config}.investigation_requests, {config}.investigation_request_alerts, {config}.investigation_reports,
+   {config}.investigation_journal, {config}.investigation_notes, {config}.agent_environment_profiles
+   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_requests, {config}.investigation_request_alerts, {config}.investigation_reports,
+   {config}.investigation_journal, {config}.investigation_notes, {config}.agent_environment_profiles
+   TO {admin}, {viewer};
+GRANT SELECT ON {config}.investigation_requests, {config}.investigation_request_alerts, {config}.investigation_reports,
+   {config}.investigation_journal, {config}.investigation_notes, {config}.agent_environment_profiles
+   TO {mcp};
+GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at)
+   ON {config}.investigation_requests TO {mcp};
+GRANT INSERT ON {config}.investigation_reports TO {mcp};
+GRANT INSERT ON {config}.investigation_journal TO {mcp};
+GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id)
+   ON {config}.investigation_notes TO {mcp};
+GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON {config}.investigation_requests TO {admin};
+GRANT INSERT ON {config}.investigation_journal TO {admin};
+GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
+GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
+GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
+
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so

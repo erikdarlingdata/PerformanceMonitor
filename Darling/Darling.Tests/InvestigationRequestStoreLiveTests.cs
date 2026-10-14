@@ -191,6 +191,87 @@ FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
         });
     }
 
+    /// <summary>Claim, brief, release, re-claim and submit as a non-superuser holding exactly the managed <c>mcp</c>
+    /// role's investigation grants (#5632). Every other fact connects as the owner, which can write anything, so a
+    /// missing grant would pass them all and fail only in a deployment, with a 42501. The grants are TAKEN FROM
+    /// <see cref="DarlingManagedRoles.BuildProvisioningSql"/>'s output with the role name swapped (the
+    /// <c>ServerTagMcpRoleLiveTests</c> pattern: a per-run role name, since a role belongs to the whole cluster), so
+    /// removing one from the product's SQL fails this test. The same role may not set a note's state or link an alert.</summary>
+    [Fact]
+    public async Task TheMcpRoleGrants_LetClaimBriefReleaseAndSubmit_AndNothingMore()
+    {
+        var roleName = "inv_mcp_" + Guid.NewGuid().ToString("N")[..8];
+        var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        var grants = PerformanceMonitor.Darling.Service.DarlingManagedRoles.BuildProvisioningSql(
+                ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp)
+            .Split(';')
+            .Select(statement => string.Join(' ', statement.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)))
+            .Where(statement => statement.StartsWith("GRANT ", StringComparison.Ordinal)
+                && statement.EndsWith(" TO mcp", StringComparison.Ordinal)
+                && statement.Contains(" config.investigation_", StringComparison.Ordinal))
+            .Select(statement => statement[..^" TO mcp".Length] + " TO " + roleName)
+            .ToList();
+
+        /* SELECT on the six, UPDATE on the claim and report columns, INSERT on reports, the journal and notes. */
+        Assert.Equal(5, grants.Count);
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0, keys: new[] { "key-1" }), ct)).RequestId!.Value;
+            await ExecAsync(connection, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'; GRANT USAGE ON SCHEMA config TO {roleName};", ct);
+            try
+            {
+                var asMcp = new NpgsqlConnectionStringBuilder(connection.ConnectionString) { Username = roleName, Password = rolePassword }.ConnectionString;
+                await using var source = NpgsqlDataSource.Create(asMcp);
+                var mcp = new InvestigationRequestStore(source, 30, () => _now);
+
+                /* Before the grants the role can do nothing: the 42501 proves the grants below are what lets it in. */
+                Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => mcp.ClaimAsync(id, "agent-a", ct))).SqlState);
+
+                foreach (var grant in grants)
+                {
+                    await ExecAsync(connection, grant, ct);
+                }
+
+                var first = await mcp.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationClaimOutcome.Claimed, first.Outcome);
+                Assert.True(await mcp.SetBriefAsync(id, first.ClaimId!.Value, 1, "{\"brief_format\":1}", ct));
+                Assert.True(await mcp.ReleaseAsync(id, first.ClaimId!.Value, ct));
+                var second = await mcp.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationClaimOutcome.Claimed, second.Outcome);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await mcp.SubmitAsync(Report(id, second.ClaimId!.Value), ct));
+                Assert.Equal("reported|1", await ScalarAsync(connection,
+                    $"SELECT state || '|' || (SELECT count(*) FROM config.investigation_reports) FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+
+                await using var direct = await source.OpenConnectionAsync(ct);
+                await ExecAsync(direct, $"INSERT INTO config.investigation_notes (server_id, note_text, author, source_request_id) VALUES (7, 'a proposal', 'agent:agent-a', '{id}')", ct);
+                Assert.Equal("pending", await ScalarAsync(connection, "SELECT state FROM config.investigation_notes", ct));
+                foreach (var refused in new[]
+                {
+                    "INSERT INTO config.investigation_notes (note_text, author, state) VALUES ('self-approved', 'agent:agent-a', 'approved')",
+                    "UPDATE config.investigation_notes SET state = 'approved'",
+                    $"INSERT INTO config.investigation_request_alerts (request_id, alert_time, server_id, metric_name) VALUES ('{id}', now(), 7, 'Blocking')",
+                    "UPDATE config.investigation_requests SET closed_reason = 'mine'",
+                    "DELETE FROM config.investigation_reports",
+                    "UPDATE config.agent_environment_profiles SET profile_text = 'x'",
+                })
+                {
+                    Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(direct, refused, ct))).SqlState);
+                }
+            }
+            finally
+            {
+                await ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
+            }
+        });
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

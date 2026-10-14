@@ -545,6 +545,38 @@ public sealed class DarlingManagedRolesTests
     }
 
     [Fact]
+    public void BuildProvisioningSql_InvestigationTables_RevokeEverything_ThenGrantEachWriterOnlyWhatItWrites()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var flat = Regex.Replace(sql, @"\s+", " ");
+
+        /* #5632: the blanket config writes gave admin INSERT/UPDATE/DELETE on all six tables. The REVOKE ALL comes after
+           the last blanket grant and before the password key revoke, which stays the last grant-side statement. */
+        const string Six = "config.investigation_requests, config.investigation_request_alerts, config.investigation_reports, config.investigation_journal, config.investigation_notes, config.agent_environment_profiles";
+        var revoke = flat.IndexOf($"REVOKE ALL ON {Six} FROM PUBLIC, admin, viewer, mcp CASCADE;", StringComparison.Ordinal);
+        Assert.True(revoke > flat.LastIndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal));
+        Assert.True(revoke < flat.IndexOf("REVOKE ALL ON config.password_key, ", StringComparison.Ordinal));
+        Assert.Contains($"GRANT SELECT ON {Six} TO admin, viewer;", flat, StringComparison.Ordinal);
+        Assert.Contains($"GRANT SELECT ON {Six} TO mcp;", flat, StringComparison.Ordinal);
+
+        /* mcp: the claim and report columns only, and a note without its state, so an agent's note stays pending. */
+        Assert.Contains("GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at) ON config.investigation_requests TO mcp;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT ON config.investigation_reports TO mcp;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT ON config.investigation_journal TO mcp;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id) ON config.investigation_notes TO mcp;", flat, StringComparison.Ordinal);
+
+        /* admin (the WPF viewer): close a request, write the profiles, write and decide notes, journal it. */
+        Assert.Contains("GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON config.investigation_requests TO admin;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, DELETE ON config.investigation_notes TO admin;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;", flat, StringComparison.Ordinal);
+
+        /* Nobody but the owner links alerts, and viewer writes nothing here. */
+        Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO", flat);
+        Assert.DoesNotMatch(@"GRANT (INSERT|UPDATE|DELETE)[^;]* ON config\.(investigation|agent_environment)[a-z_]* TO [a-z_, ]*viewer", flat);
+    }
+
+    [Fact]
     public void BuildProvisioningSql_McpRole_GrantsAlertTuningWrites_NarrowlyWithBeaconColumns()
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);

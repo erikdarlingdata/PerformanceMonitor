@@ -1582,6 +1582,48 @@ BEGIN
    END LOOP;
 END $do$;
 
+-- 3i. Investigation tables (V184, #5632), mirroring managed provisioning's section 10d grant for grant. Step 3 and the
+--     default privileges gave admin INSERT/UPDATE/DELETE on all six, so REVOKE ALL ... CASCADE takes every privilege
+--     from PUBLIC and the three roles, and SELECT goes back to all three. mcp (the claim and submit tools) updates only
+--     the claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
+--     state column, so an agent's note stays pending until a person decides it. admin (the desktop Viewer) closes a
+--     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did. The
+--     service writes the rest as the owner. On a store below V184 the block warns and skips; re-run the script once
+--     the service has migrated the store to V184.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_requests') IS NULL
+      OR pg_catalog.to_regclass('config.investigation_request_alerts') IS NULL
+      OR pg_catalog.to_regclass('config.investigation_reports') IS NULL
+      OR pg_catalog.to_regclass('config.investigation_journal') IS NULL
+      OR pg_catalog.to_regclass('config.investigation_notes') IS NULL
+      OR pg_catalog.to_regclass('config.agent_environment_profiles') IS NULL THEN
+      RAISE WARNING 'The investigation tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_requests, config.investigation_request_alerts, config.investigation_reports,
+      config.investigation_journal, config.investigation_notes, config.agent_environment_profiles
+      FROM PUBLIC, admin, viewer, mcp CASCADE;
+   GRANT SELECT ON config.investigation_requests, config.investigation_request_alerts, config.investigation_reports,
+      config.investigation_journal, config.investigation_notes, config.agent_environment_profiles
+      TO admin, viewer;
+   GRANT SELECT ON config.investigation_requests, config.investigation_request_alerts, config.investigation_reports,
+      config.investigation_journal, config.investigation_notes, config.agent_environment_profiles
+      TO mcp;
+   GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at)
+      ON config.investigation_requests TO mcp;
+   GRANT INSERT ON config.investigation_reports TO mcp;
+   GRANT INSERT ON config.investigation_journal TO mcp;
+   GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id)
+      ON config.investigation_notes TO mcp;
+   GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON config.investigation_requests TO admin;
+   GRANT INSERT ON config.investigation_journal TO admin;
+   GRANT INSERT, DELETE ON config.investigation_notes TO admin;
+   GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;
+   GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
+END $do$;
+
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it comes after EVERY grant above, so none of them can put a privilege back. REVOKE ALL ... CASCADE takes every
