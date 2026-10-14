@@ -269,14 +269,20 @@ public sealed class RollupFloorCacheLiveTests
         Assert.True(truthAfter > truthBefore, "the recreated store's floor must be later, or a stale floor would go unnoticed");
         Assert.Equal(oldestChunkBefore, await OldestChunkAsync(store.ConnectionString, ct));
 
+        /* #5808: the changed database is never served the old floor. The caller gets no floor for the view (the
+           router's "no evidence") and the background drain measures it; the next call has the new floor. */
         var second = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        Assert.Null(second.FloorOf(HourlyView));
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
+        Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
 
-        Assert.Equal(truthAfter, second.FloorOf(HourlyView));
+        var third = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        Assert.Equal(truthAfter, third.FloorOf(HourlyView));
         Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
     }
 
     [Fact]
-    public async Task APastTheHourFloorWithItsChunkUnchanged_IsServedFromTheCache_AndRemeasuredOnceInTheBackground_AChangedChunkIsMeasuredInline()
+    public async Task APastTheHourFloorWithItsChunkUnchanged_IsServedFromTheCache_AndRemeasuredOnceInTheBackground_AChangedChunkTakesTheCatalogFloor()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4957 background re-measure test (it mints its own scratch database).");
@@ -328,11 +334,13 @@ public sealed class RollupFloorCacheLiveTests
         var pastTheHourAgain = pastTheHour + TimescaleSupport.RollupFloorMaxReuse + TimeSpan.FromMinutes(1);
         var inline = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheHourAgain, ct);
         Assert.Equal(floorAfterDrop, inline.FloorOf(HourlyView));
-        Assert.Equal(3, factory.Provider.CountContaining(MinBucketStatement));
+
+        /* #5808: the new oldest chunk is filled from its range start, so its floor comes from the catalog, with no sort. */
+        Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
     }
 
     [Fact]
-    public async Task AFloorPastTwiceTheHourWithItsChunkUnchanged_IsMeasuredInline_NotServedFromTheCache()
+    public async Task AFloorPastTwiceTheHourWithItsChunkUnchanged_IsServedFromTheCache_AndMeasuredInTheBackground_NotInline()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4957 serve-cap test (it mints its own scratch database).");
@@ -359,17 +367,91 @@ public sealed class RollupFloorCacheLiveTests
         Assert.True(floorAfterDelete > floorCold);
         Assert.Equal(oldestChunk, await OldestChunkAsync(store.ConnectionString, ct));
 
-        /* At the serve cap the entry is no longer served: the first caller measures it inline and gets the true floor
-           in the same call, with the sort already run when it returns (no polling for a background pass). */
-        var pastTheCap = now + TimescaleSupport.RollupFloorMaxServeAge + TimeSpan.FromMinutes(1);
-        var inline = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheCap, ct);
-        Assert.Equal(floorAfterDelete, inline.FloorOf(HourlyView));
+        /* #5808, the cause on store A: past twice the hour the entry used to be measured INLINE, and nothing refreshes a
+           store no caller reaches, so the first caller after a quiet two hours paid every view's cold sort. Now that
+           caller is served the cached floor and runs no sort itself; the background drain measures the view. */
+        var pastTheCap = now + (TimescaleSupport.RollupFloorMaxReuse * 2) + TimeSpan.FromMinutes(1);
+        var served = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheCap, ct);
+        Assert.Equal(floorCold, served.FloorOf(HourlyView));
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
         Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
 
-        /* It replaced the entry, so the next call is current and measures nothing. */
+        /* The drain replaced the entry, so the next call is current and measures nothing. */
         var next = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheCap, ct);
         Assert.Equal(floorAfterDelete, next.FloorOf(HourlyView));
         Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
+    }
+
+    /* #5808: the floor from the catalog. The oldest materialization chunk is compressed and filled from its range start,
+       so the first probe takes the range start as the floor with a bounded check and no min(bucket) sort, and the second
+       probe reads nothing inline. A rollup name the continuous-aggregate catalog does not list (here a plain view in its
+       place) is measured once and cached as not listed, and the three raw tables are read once and then refreshed only
+       in the background past the hour. */
+    [Fact]
+    public async Task ACompressedOldestChunkTakesTheCatalogFloor_AnUnlistedViewIsMeasuredOnce_AndTheRawTablesAreReadOnce()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5808 catalog floor test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var now = SeedEnd();
+        var from = DateTime.SpecifyKind(now.Date.AddDays(-3), DateTimeKind.Unspecified);
+        var planted = TimescaleSupport.QueryStatsIoHourlyView;
+
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await PopulateStoreAsync(store.ConnectionString, from, now, deleteRawBefore: null, oneDayChunks: true, ct);
+        await using (var connection = new NpgsqlConnection(store.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using (var enable = new NpgsqlCommand(
+                $"ALTER MATERIALIZED VIEW collect.{HourlyView} SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", connection))
+            {
+                await enable.ExecuteNonQueryAsync(ct);
+            }
+
+            await CompressMaterializationChunksAsync(connection, HourlyView, ct);
+            await using var plant = new NpgsqlCommand(
+                $"ALTER MATERIALIZED VIEW collect.{planted} RENAME TO {planted}_moved; CREATE VIEW collect.{planted} AS SELECT TIMESTAMP '2020-01-01 00:00:00' AS bucket",
+                connection);
+            await plant.ExecuteNonQueryAsync(ct);
+        }
+
+        var truth = await TruthAsync(store.ConnectionString, ct);
+        Assert.Equal(from, truth);
+
+        var factory = new CommandCountingLoggerFactory();
+        await using var dataSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
+        var availability = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+        Assert.True(availability.Has(planted));
+        var plantedStatement = $"{TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{planted}";
+        var catalogCheck = $"FROM collect.{HourlyView} WHERE bucket = $1) {TimescaleSupport.CatalogFloorMarker}";
+
+        var first = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
+        Assert.Equal(truth, first.FloorOf(HourlyView));
+        Assert.Equal(0, factory.Provider.CountContaining(MinBucketStatement));
+        Assert.Equal(1, factory.Provider.CountContaining(catalogCheck));
+        Assert.Equal(1, factory.Provider.CountContaining(plantedStatement));
+        Assert.Equal(1, factory.Provider.CountContaining(TimescaleSupport.RawFloorMarker));
+        var coldAfterFirst = factory.Provider.CountContaining(TimescaleSupport.ColdFloorMarker);
+
+        var second = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
+        Assert.Equal(truth, second.FloorOf(HourlyView));
+        Assert.Equal(new DateTime(2020, 1, 1), second.FloorOf(planted));
+        Assert.NotNull(second.RawOldestOf("query_store_stats"));
+        Assert.Equal(coldAfterFirst, factory.Provider.CountContaining(TimescaleSupport.ColdFloorMarker));
+        Assert.Equal(1, factory.Provider.CountContaining(catalogCheck));
+        Assert.Equal(1, factory.Provider.CountContaining(TimescaleSupport.RawFloorMarker));
+
+        /* Past the hour: served from the cache; the drain refreshes the raw floors once and re-checks the catalog floor,
+           still without a min(bucket) sort of the compressed chunk. */
+        var pastTheHour = now + TimescaleSupport.RollupFloorMaxReuse + TimeSpan.FromMinutes(1);
+        var third = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheHour, ct);
+        Assert.Equal(truth, third.FloorOf(HourlyView));
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
+        Assert.Equal(2, factory.Provider.CountContaining(TimescaleSupport.RawFloorMarker));
+        Assert.Equal(2, factory.Provider.CountContaining(catalogCheck));
+        Assert.Equal(0, factory.Provider.CountContaining(MinBucketStatement));
     }
 
     [Fact]

@@ -41,7 +41,7 @@ public sealed class RollupFloorCacheTests
             [TimescaleSupport.QueryStoreStatsHourlyView] = new("_hyper_1_1_chunk", SomeHypertable),
         };
 
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
 
         Assert.Contains(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
@@ -58,7 +58,7 @@ public sealed class RollupFloorCacheTests
             [TimescaleSupport.QueryStoreStatsHourlyView] = new("_hyper_1_1_chunk", SomeHypertable),
         };
 
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
 
         Assert.DoesNotContain(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
@@ -75,7 +75,7 @@ public sealed class RollupFloorCacheTests
             [TimescaleSupport.QueryStoreStatsHourlyView] = new("_hyper_1_2_chunk", SomeHypertable),
         };
 
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
 
         Assert.Contains(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
@@ -95,7 +95,7 @@ public sealed class RollupFloorCacheTests
             [TimescaleSupport.QueryStoreStatsHourlyView] = new("_hyper_1_1_chunk", AnotherHypertable),
         };
 
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
 
         Assert.Contains(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
@@ -112,7 +112,7 @@ public sealed class RollupFloorCacheTests
             [TimescaleSupport.QueryStoreStatsHourlyView] = new(null, null),
         };
 
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
 
         Assert.Contains(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
@@ -127,7 +127,7 @@ public sealed class RollupFloorCacheTests
         };
 
         var absent = RollupAvailability.All with { QueryStoreGrainHourly = false };
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, absent, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, absent, Now);
 
         Assert.DoesNotContain(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
@@ -148,7 +148,7 @@ public sealed class RollupFloorCacheTests
             [TimescaleSupport.QueryStoreStatsHourlyView] = new("_hyper_1_1_chunk", SomeHypertable),
         };
 
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
 
         Assert.Contains(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
@@ -166,93 +166,12 @@ public sealed class RollupFloorCacheTests
             [TimescaleSupport.QueryStoreStatsHourlyView] = new("_hyper_1_1_chunk", SomeHypertable),
         };
 
-        var measure = TimescaleSupport.RollupFloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
+        var measure = FloorsToMeasure(cached, oldestNow, RollupAvailability.All, Now);
 
         Assert.DoesNotContain(TimescaleSupport.QueryStoreStatsHourlyView, measure);
     }
 
     /* ─────────────────────────── the floor merge (the #4553 over-claim fix) ─────────────────────────── */
-
-    [Fact]
-    public void MergeRollupFloors_MeasuredNull_WithACachedEntry_EvictsIt()
-    {
-        var view = TimescaleSupport.QueryStoreStatsHourlyView;
-        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = null };
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [view] = Entry("_hyper_1_1_chunk", SomeFloor),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [view] = new("_hyper_1_1_chunk", SomeHypertable),
-        };
-
-        var (floors, newEntries) = TimescaleSupport.MergeRollupFloors(measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now);
-
-        Assert.DoesNotContain(view, floors);
-        Assert.DoesNotContain(view, newEntries.Keys);
-    }
-
-    [Fact]
-    public void MergeRollupFloors_NotMeasuredThisCycle_WithACachedEntry_IsReused()
-    {
-        var view = TimescaleSupport.QueryStoreStatsHourlyView;
-        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [view] = Entry("_hyper_1_1_chunk", SomeFloor),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [view] = new("_hyper_1_1_chunk", SomeHypertable),
-        };
-
-        var (floors, newEntries) = TimescaleSupport.MergeRollupFloors(measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now);
-
-        Assert.Equal(SomeFloor, floors[view]);
-        Assert.Equal(SomeFloor, newEntries[view].Floor);
-    }
-
-    [Fact]
-    public void MergeRollupFloors_MeasuredWithAFloor_ReplacesTheCachedEntry()
-    {
-        var view = TimescaleSupport.QueryStoreStatsHourlyView;
-        var freshFloor = SomeFloor.AddDays(1);
-        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = freshFloor };
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [view] = Entry("_hyper_1_1_chunk", SomeFloor),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [view] = new("_hyper_1_2_chunk", SomeHypertable),
-        };
-
-        var (floors, newEntries) = TimescaleSupport.MergeRollupFloors(measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now);
-
-        Assert.Equal(freshFloor, floors[view]);
-        Assert.Equal(freshFloor, newEntries[view].Floor);
-        Assert.Equal("_hyper_1_2_chunk", newEntries[view].ChunkName);
-        Assert.Equal(Now, newEntries[view].MeasuredAtUtc);
-    }
-
-    [Fact]
-    public void MergeRollupFloors_ViewNoLongerPresent_DropsTheStaleEntry()
-    {
-        var view = TimescaleSupport.QueryStoreStatsHourlyView;
-        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [view] = Entry("_hyper_1_1_chunk", SomeFloor),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal);
-
-        var absent = RollupAvailability.All with { QueryStoreGrainHourly = false };
-        var (floors, newEntries) = TimescaleSupport.MergeRollupFloors(measuredThisCycle, cached, oldestNow, absent, Now);
-
-        Assert.DoesNotContain(view, floors);
-        Assert.DoesNotContain(view, newEntries.Keys);
-    }
 
     /* ─────────────────────────── #4605: the ceiling ─────────────────────────── */
 
@@ -266,73 +185,6 @@ public sealed class RollupFloorCacheTests
             new Dictionary<string, DateTime>(StringComparer.Ordinal));
 
         Assert.Null(coverage.CeilingOf(TimescaleSupport.QueryStoreStatsHourlyView));
-    }
-
-    [Fact]
-    public void MergeRollupFloors_SixArgument_ReMeasuredView_ReplacesTheCachedCeiling()
-    {
-        var view = TimescaleSupport.QueryStoreStatsHourlyView;
-        var freshFloor = SomeFloor.AddDays(1);
-        var staleCeiling = SomeFloor.AddHours(1);
-        var freshCeiling = freshFloor.AddHours(1);
-        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = freshFloor };
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [view] = new TimescaleSupport.RollupFloorCacheEntry("_hyper_1_1_chunk", SomeHypertable, SomeFloor, Now, staleCeiling),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [view] = new("_hyper_1_2_chunk", SomeHypertable),
-        };
-        var ceilingsMeasuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = freshCeiling };
-
-        var (_, newEntries) = TimescaleSupport.MergeRollupFloors(
-            measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now, ceilingsMeasuredThisCycle);
-
-        Assert.Equal(freshCeiling, newEntries[view].Ceiling);
-    }
-
-    [Fact]
-    public void MergeRollupFloors_SixArgument_NotMeasuredThisCycle_KeepsTheCachedCeiling()
-    {
-        var view = TimescaleSupport.QueryStoreStatsHourlyView;
-        var cachedCeiling = SomeFloor.AddHours(1);
-        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [view] = new TimescaleSupport.RollupFloorCacheEntry("_hyper_1_1_chunk", SomeHypertable, SomeFloor, Now, cachedCeiling),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [view] = new("_hyper_1_1_chunk", SomeHypertable),
-        };
-        var ceilingsMeasuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
-
-        var (_, newEntries) = TimescaleSupport.MergeRollupFloors(
-            measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now, ceilingsMeasuredThisCycle);
-
-        Assert.Equal(cachedCeiling, newEntries[view].Ceiling);
-    }
-
-    [Fact]
-    public void MergeRollupFloors_FiveArgument_BehavesExactlyAsBefore_LeavingTheCeilingUnset()
-    {
-        var view = TimescaleSupport.QueryStoreStatsHourlyView;
-        var freshFloor = SomeFloor.AddDays(1);
-        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = freshFloor };
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [view] = Entry("_hyper_1_1_chunk", SomeFloor),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [view] = new("_hyper_1_2_chunk", SomeHypertable),
-        };
-
-        var (floors, newEntries) = TimescaleSupport.MergeRollupFloors(measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now);
-
-        Assert.Equal(freshFloor, floors[view]);
-        Assert.Null(newEntries[view].Ceiling);
     }
 
     /* ─────────────────────────── the two-argument SQL overload ─────────────────────────── */
@@ -409,61 +261,6 @@ public sealed class RollupFloorCacheTests
     /* ─────────── #5329: a reused floor is still asked whether anything is earlier ─────────── */
 
     [Fact]
-    public void RollupViewsToCheckForAnEarlierFloor_AReusedView_IsACandidate()
-    {
-        var view = TimescaleSupport.QueryStatsIoHourlyView;
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal) { [view] = Entry("_hyper_1_1_chunk", SomeFloor) };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal) { [view] = new("_hyper_1_1_chunk", SomeHypertable) };
-
-        var views = TimescaleSupport.RollupViewsToCheckForAnEarlierFloor(
-            cached, oldestNow, RollupAvailability.All, new HashSet<string>(StringComparer.Ordinal), deferred: null);
-
-        Assert.Equal(new[] { view }, views);
-    }
-
-    [Fact]
-    public void RollupViewsToCheckForAnEarlierFloor_AViewBeingMeasuredADeferredViewAnUncachedViewAndAChangedChunk_AreNotCandidates()
-    {
-        var measured = TimescaleSupport.QueryStatsIoHourlyView;
-        var deferred = TimescaleSupport.ProcedureStatsIoHourlyView;
-        var uncached = TimescaleSupport.QueryStoreStatsHourlyView;
-        var changed = TimescaleSupport.QueryStatsHourlyView;
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
-        {
-            [measured] = Entry("_hyper_1_1_chunk", SomeFloor),
-            [deferred] = Entry("_hyper_1_1_chunk", SomeFloor),
-            [changed] = Entry("_hyper_1_1_chunk", SomeFloor),
-        };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
-        {
-            [measured] = new("_hyper_1_1_chunk", SomeHypertable),
-            [deferred] = new("_hyper_1_1_chunk", SomeHypertable),
-            [uncached] = new("_hyper_1_1_chunk", SomeHypertable),
-            [changed] = new("_hyper_1_2_chunk", SomeHypertable),
-        };
-
-        var views = TimescaleSupport.RollupViewsToCheckForAnEarlierFloor(
-            cached, oldestNow, RollupAvailability.All,
-            new HashSet<string>(new[] { measured }, StringComparer.Ordinal),
-            new HashSet<string>(new[] { deferred }, StringComparer.Ordinal));
-
-        Assert.Empty(views);
-    }
-
-    [Fact]
-    public void RollupViewsToCheckForAnEarlierFloor_AViewTheStoreLacks_IsNotACandidate()
-    {
-        var view = TimescaleSupport.QueryStatsIoHourlyView;
-        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal) { [view] = Entry("_hyper_1_1_chunk", SomeFloor) };
-        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal) { [view] = new("_hyper_1_1_chunk", SomeHypertable) };
-
-        var views = TimescaleSupport.RollupViewsToCheckForAnEarlierFloor(
-            cached, oldestNow, RollupAvailability.None, new HashSet<string>(StringComparer.Ordinal), deferred: null);
-
-        Assert.Empty(views);
-    }
-
-    [Fact]
     public void RollupEarlierFloorProbeSql_IsABoundedReadPerView_AndNeverTheColdMinBucketStatement()
     {
         var sql = TimescaleSupport.RollupEarlierFloorProbeSql(new[] { TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.ProcedureStatsIoHourlyView });
@@ -474,5 +271,18 @@ public sealed class RollupFloorCacheTests
            read) to prove the cold sort is not re-run; the bounded read carries the earlier marker and never the cold one. */
         Assert.DoesNotContain(TimescaleSupport.ColdFloorMarker, sql, StringComparison.Ordinal);
         Assert.Contains(TimescaleSupport.EarlierFloorMarker, sql, StringComparison.Ordinal);
+    }
+    /// <summary>Every view a cycle does not serve as it stands: <see cref="TimescaleSupport.PlanRollupFloorMeasurements"/>'s
+    /// Inline and Background sets together (#5808 removed the production wrapper that did this).</summary>
+    private static IReadOnlySet<string> FloorsToMeasure(
+        IReadOnlyDictionary<string, TimescaleSupport.RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, TimescaleSupport.RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        DateTime now)
+    {
+        var plan = TimescaleSupport.PlanRollupFloorMeasurements(cached, oldestNow, availability, now);
+        var measure = new HashSet<string>(plan.Inline, StringComparer.Ordinal);
+        measure.UnionWith(plan.Background);
+        return measure;
     }
 }

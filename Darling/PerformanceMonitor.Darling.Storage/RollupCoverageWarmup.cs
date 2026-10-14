@@ -64,6 +64,8 @@ public static class RollupCoverageWarmup
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
 
+            /* #5808: the store's background floor measures log through the caller's logger. */
+            TimescaleSupport.UseRollupFloorLogger(postgres, logger);
             var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken).ConfigureAwait(false);
             await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, cancellationToken).ConfigureAwait(false);
         }
