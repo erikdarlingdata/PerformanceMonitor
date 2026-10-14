@@ -142,7 +142,8 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);
 /// and the refusal is journaled once per request and reason. <b>Submit</b> accepts the current claim's report while the
 /// request is claimed (its lease live or lapsed) or expired under that claim, until a newer claim supersedes it.
 /// <b>List</b> writes nothing, so the SELECT-only web role can serve it. <b>The sweep</b> only expires: it journals each lapsed
-/// lease once per claim and moves a request past its expiry, or out of claims, to <c>expired</c>. It never reopens a lease;
+/// lease once per claim and moves a request past its expiry, or out of claims, to <c>expired</c> (journaled <c>expired</c> or
+/// <c>claims_exhausted</c>, once per request). A release keeps its claim counted. It never reopens a lease;
 /// the claim's own WHERE takes a lapsed lease over.</para>
 /// </summary>
 public sealed class InvestigationRequestStore
@@ -245,8 +246,7 @@ WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
 
     internal const string ReleaseSql = @"
 UPDATE config.investigation_requests
-SET state = 'open', claimed_by = NULL, claim_id = NULL, claimed_at = NULL, lease_until = NULL,
-    claim_count = greatest(claim_count - 1, 0)
+SET state = 'open', claimed_by = NULL, claim_id = NULL, claimed_at = NULL, lease_until = NULL
 WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
 
     internal const string ListSql = @"
@@ -257,6 +257,7 @@ FROM (
            CASE
                WHEN r.state IN ('open', 'claimed') AND r.expires_at <= $1 THEN 'expired'
                WHEN r.state = 'claimed' AND r.lease_until < $1 AND r.claim_count >= 3 THEN 'expired'
+               WHEN r.state = 'open' AND r.claim_count >= 3 THEN 'expired'
                WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
                ELSE r.state
            END AS effective_state
@@ -281,10 +282,12 @@ WITH expired AS (
     SET state = 'expired'
     WHERE (state IN ('open', 'claimed') AND expires_at <= $1)
        OR (state = 'claimed' AND lease_until < $1 AND claim_count >= 3)
-    RETURNING request_id, server_id
+       OR (state = 'open' AND claim_count >= 3)
+    RETURNING request_id, server_id, expires_at > $1 AS exhausted
 )
 INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, once_key)
-SELECT $1, e.request_id, e.server_id, 'expired', 'service', 'expired:' || e.request_id::text
+SELECT $1, e.request_id, e.server_id, CASE WHEN e.exhausted THEN 'claims_exhausted' ELSE 'expired' END, 'service',
+       'expired:' || e.request_id::text
 FROM expired AS e
 ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
@@ -468,7 +471,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     }
 
     /// <summary>
-    /// Returns a claim that could not be served (the brief failed to compose) to <c>open</c> and gives the claim back.
+    /// Returns a request whose claim could not be served (the brief failed to compose) to <c>open</c>. The claim stays
+    /// counted (#5632 review round 1, L4): a brief that keeps failing cannot claim and release forever; after the third
+    /// claim the claim UPDATE refuses and the sweep expires the request, journaling <c>claims_exhausted</c> once.
     /// False when <paramref name="claimId"/> no longer holds the request.
     /// </summary>
     public async Task<bool> ReleaseAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
@@ -586,8 +591,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     }
 
     /// <summary>
-    /// The expiry sweep: journals each lapsed lease once per claim, then moves every request past its expiry, or with a
-    /// lapsed lease after its last claim, to <c>expired</c> and journals that once. It never reopens a lease.
+    /// The expiry sweep: journals each lapsed lease once per claim, then moves every request past its expiry, or out of
+    /// claims (its last claim's lease lapsed, or released), to <c>expired</c> and journals that once: <c>expired</c> past the
+    /// expiry, <c>claims_exhausted</c> before it. It never reopens a lease.
     /// </summary>
     public async Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default)
     {

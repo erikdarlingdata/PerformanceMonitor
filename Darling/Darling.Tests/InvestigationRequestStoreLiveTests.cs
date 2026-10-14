@@ -233,6 +233,36 @@ FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
         });
     }
 
+    /// <summary>A release keeps its claim counted (#5632 review round 1, L4): three claim-release cycles use the three
+    /// claims, the fourth claim is refused, and the sweep expires the request and journals <c>claims_exhausted</c> once.</summary>
+    [Fact]
+    public async Task ThreeClaimReleaseCycles_RefuseTheFourthClaim_AndTheSweepJournalsClaimsExhaustedOnce()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            for (var cycle = 1; cycle <= 3; cycle++)
+            {
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationClaimOutcome.Claimed, claim.Outcome);
+                Assert.Equal(cycle, claim.ClaimCount);
+                Assert.True(await store.ReleaseAsync(id, claim.ClaimId!.Value, ct));
+            }
+
+            var fourth = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.NotOpen, fourth.Outcome);
+            Assert.Equal("claim_limit", fourth.Reason);
+            Assert.Single(await store.ListAsync("expired", 7, "blocking", 10, ct));
+
+            Assert.Equal(1, (await store.SweepAsync(ct)).Expired);
+            Assert.Equal(0, (await store.SweepAsync(ct)).Expired);
+            Assert.Equal("expired|3|1", await ScalarAsync(connection, $@"
+SELECT r.state || '|' || r.claim_count || '|'
+       || (SELECT count(*) FROM config.investigation_journal WHERE request_id = r.request_id AND event = 'claims_exhausted')
+FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
+        });
+    }
+
     /// <summary>Claim, brief, release, re-claim and submit as a non-superuser holding exactly the managed <c>mcp</c>
     /// role's investigation grants (#5632). Every other fact connects as the owner, which can write anything, so a
     /// missing grant would pass them all and fail only in a deployment, with a 42501. The grants are TAKEN FROM
