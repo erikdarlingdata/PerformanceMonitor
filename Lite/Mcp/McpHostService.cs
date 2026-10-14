@@ -140,7 +140,7 @@ public sealed class McpHostService : BackgroundService
                     Name = "PerformanceMonitorLite",
                     Version = "1.2.0"
                 };
-                options.ServerInstructions = McpInstructions.Text;
+                /* ServerInstructions is set by AddMcpWritePolicy above, from the served set (#5789). */
             })
             /* Stateless mode: each request is self-contained (no Mcp-Session-Id round-trip).
                Required for clients like Google Antigravity that don't echo the session id,

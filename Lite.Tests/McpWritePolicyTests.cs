@@ -234,6 +234,90 @@ public sealed class McpWritePolicyTests
         }
     }
 
+    /* #5789 (Darling's twin): mcp_allow_writes hides the write tools, and the census was the fixed catalog line
+       "93 tools (89 by default; ...)" whichever way the switch was set. The host now renders it from the names
+       before and after McpWritePolicy.Apply; these pin that rendering for each switch state. */
+    [Fact]
+    public void ServedCensus_WritesOff_CountsTheServedTools_AndSaysTheSwitchIsOff()
+    {
+        var all = RegisteredTools();
+        var catalog = McpWritePolicy.ToolNames(all);
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: false));
+
+        var text = McpInstructions.Build(catalog, served);
+        Assert.Contains(
+            $"## Tools\n\n{served.Count} tools ({catalog.Count} in the catalog; `{McpWritePolicy.WritesSetting}` is off, so the " +
+            $"{catalog.Count - served.Count} write tools are not served): discovery/health",
+            text, StringComparison.Ordinal);
+        Assert.Equal(McpWritePolicy.WriteTools.Count, catalog.Count - served.Count);
+        Assert.DoesNotContain($"{catalog.Count} tools (", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServedCensus_WritesOn_CountsEveryTool_AndSaysTheSwitchIsOn()
+    {
+        var all = RegisteredTools();
+        var catalog = McpWritePolicy.ToolNames(all);
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: true));
+
+        var text = McpInstructions.Build(catalog, served);
+        Assert.Contains(
+            $"## Tools\n\n{catalog.Count} tools (the {McpWritePolicy.WriteTools.Count} write tools included: " +
+            $"`{McpWritePolicy.WritesSetting}` is on): discovery/health",
+            text, StringComparison.Ordinal);
+        Assert.DoesNotContain("in the catalog", text, StringComparison.Ordinal);
+    }
+
+    /* #5789 end to end: through the host's own registration, the count initialize's instructions state is the
+       length of tools/list on the same server, with the writes off and on. */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InitializeInstructions_CountTheToolsThatToolsListServes(bool allowWrites)
+    {
+        using var server = await BuildServer(allowWrites);
+
+        var listBody = await PostAsync(server, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
+        var initBody = await PostAsync(server,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"," +
+            "\"capabilities\":{},\"clientInfo\":{\"name\":\"census-test\",\"version\":\"1.0\"}}}");
+
+        var served = ResultOf(listBody).GetProperty("tools").GetArrayLength();
+        var instructions = ResultOf(initBody).GetProperty("instructions").GetString() ?? "";
+
+        var census = System.Text.RegularExpressions.Regex.Match(instructions, @"## Tools\s+(\d+) tools ");
+        Assert.True(census.Success, "the instructions carry no '## Tools / N tools' census");
+        Assert.Equal(served, int.Parse(census.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(allowWrites, !instructions.Contains("in the catalog", StringComparison.Ordinal));
+    }
+
+    /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server
+    /// does not serve. Every backticked name that is a Lite tool must be in the served set, writes off and on.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RenderedInstructions_NameOnlyServedTools(bool allowWrites)
+    {
+        var all = RegisteredTools();
+        var catalog = McpWritePolicy.ToolNames(all);
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites));
+        var text = McpInstructions.Build(catalog, served);
+
+        var named = System.Text.RegularExpressions.Regex.Matches(text, "`([a-z][a-z0-9_]*)`")
+            .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        var unserved = named.Where(n => catalog.Contains(n) && !served.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        Assert.True(named.Count(catalog.Contains) > 3, "the scan found almost no tool names; the backtick pattern no longer matches the text");
+        Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
+    }
+
+    private static JsonElement ResultOf(string body)
+    {
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        return document.RootElement.GetProperty("result").Clone();
+    }
+
     [Fact]
     public void WritesOn_ServesTheMuteAndItsUndo()
     {

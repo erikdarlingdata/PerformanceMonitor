@@ -1103,9 +1103,17 @@ public sealed class DarlingMcpHostService : BackgroundService
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
            annotation hints. PostConfigure runs after the SDK's own options setup, so it sees the full set, and
            the narrowed collection is the one every request's session options are cloned from, so / and /core
-           both serve it. Default (no settings): every write tool is absent. */
-        services.PostConfigure<ModelContextProtocol.Server.McpServerOptions>(
-            options => DarlingMcpWritePolicy.Apply(options.ToolCollection, writes));
+           both serve it. Default (no settings): every write tool is absent.
+           #5789: the instructions are rendered HERE, from the names before and after the narrowing, so their
+           tool census counts the set tools/list serves and names the switch that is off. They used to carry a
+           fixed catalog count (182 while 160 were served with the writes off). */
+        services.PostConfigure<ModelContextProtocol.Server.McpServerOptions>(options =>
+        {
+            var catalog = DarlingMcpWritePolicy.ToolNames(options.ToolCollection);
+            DarlingMcpWritePolicy.Apply(options.ToolCollection, writes);
+            options.ServerInstructions = DarlingMcpInstructions.Build(
+                declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection));
+        });
 
         services
             .AddMcpServer(options =>
@@ -1115,7 +1123,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     Name = "PerformanceMonitorDarling",
                     Version = "1.0.0"
                 };
-                options.ServerInstructions = DarlingMcpInstructions.Build(declaredPeers);
+                /* ServerInstructions is set by the write-switch PostConfigure above, from the served set (#5789). */
             })
             /* Stateless mode: each request is self-contained (no Mcp-Session-Id round-trip).
                Required for clients like Google Antigravity that don't echo the session id,

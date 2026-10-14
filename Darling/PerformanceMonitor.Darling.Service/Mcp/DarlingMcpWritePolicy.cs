@@ -164,6 +164,20 @@ internal static class DarlingMcpWritePolicy
         ApplyAnnotations(tools);
     }
 
+    /// <summary>The protocol names of <paramref name="tools"/>, in collection order; empty for null. The host takes
+    /// them before and after <see cref="Apply"/> so the instructions' census counts the served set (#5789).</summary>
+    internal static List<string> ToolNames(IEnumerable<McpServerTool>? tools)
+    {
+        var names = new List<string>();
+        if (tools is null)
+            return names;
+
+        foreach (var tool in tools)
+            names.Add(tool.ProtocolTool.Name);
+
+        return names;
+    }
+
     /// <summary>
     /// A fresh collection holding only the tools <paramref name="policy"/> offers; the input is untouched.
     /// The same shape as <see cref="DarlingCoreToolProfile.FilterToolCollection"/>.

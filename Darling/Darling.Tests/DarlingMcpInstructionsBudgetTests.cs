@@ -7,8 +7,12 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -23,6 +27,7 @@ namespace Darling.Tests;
 /// confirmed this fails against the pre-#3898-Phase-2 instructions (88,532 / 52,942 characters, and the old
 /// "### Diagnostic-analysis tools" family headers present).
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpInstructionsBudgetTests
 {
     private const int InstructionsBudget = 8_000;
@@ -80,5 +85,122 @@ public sealed class DarlingMcpInstructionsBudgetTests
             .Select(t => $"{t.Name}: \"{ShoutedEmphasis.Match(t.Description!).Value}\"")
             .ToList();
         Assert.True(offenders.Count == 0, "tool descriptions with shouted emphasis: " + string.Join("; ", offenders));
+    }
+
+    /* #5789: initialize said "This server exposes 182 tools" while tools/list served 160, because the census was a
+       fixed catalog count and the write switches narrow the served set after it. The host now renders the census
+       from the names before and after DarlingMcpWritePolicy.Apply; these pin that rendering for each switch state. */
+
+    private static List<string> Catalog() => DarlingMcpWritePolicy.ToolNames(McpToolsListBudgetTests.BuildServedTools().Tools);
+
+    private static List<string> Served(DarlingMcpWritePolicy.Effective policy)
+    {
+        var all = new McpServerPrimitiveCollection<McpServerTool>();
+        foreach (var tool in McpToolsListBudgetTests.BuildServedTools().Tools)
+            all.Add(tool);
+        return DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(all, policy));
+    }
+
+    [Fact]
+    public void ServedCensus_WritesOff_CountsTheServedTools_AndSaysTheWritesAreOff()
+    {
+        var catalog = Catalog();
+        var served = Served(DarlingMcpWritePolicy.Effective.Off);
+        var writes = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
+        var admin = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
+        var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+
+        Assert.True(served.Count < catalog.Count, "the writes-off configuration should serve fewer tools than the catalog");
+        Assert.Equal(catalog.Count - served.Count, writes + admin);
+
+        var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
+        Assert.Contains(
+            $"This server exposes {served.Count} of its {catalog.Count} tools: the write tools are off, so the {writes + admin} that change " +
+            $"monitoring configuration are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more). " +
+            $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: thirty-five are the " +
+            "PostgreSQL reads (`get_pg_*`), plus the Custom Views and custom-alert-rule reads, and central-store-only reads",
+            text, StringComparison.Ordinal);
+        Assert.DoesNotContain($"This server exposes {catalog.Count} tools.", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("onboarding", text, StringComparison.Ordinal);
+        Assert.True(text.Length <= InstructionsBudget, $"the writes-off instructions are {text.Length} characters; D2's budget is {InstructionsBudget}");
+    }
+
+    [Fact]
+    public void ServedCensus_WritesOnServerAdminOff_NamesTheServerAdminSwitch()
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: false));
+        var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+
+        var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
+        Assert.Contains(
+            $"This server exposes {served.Count} of its {catalog.Count} tools: `mcp.allowServerAdmin` is off, so the " +
+            $"{catalog.Count - served.Count} tools that add, edit and remove monitored servers are not served. {shared} are the same names Lite exposes. The remaining " +
+            $"{served.Count - shared} are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +
+            "custom-alert-rule, alert-tuning and server-tag tools, and central-store-only reads",
+            text, StringComparison.Ordinal);
+        Assert.True(text.Length <= InstructionsBudget, $"the writes-on instructions are {text.Length} characters; D2's budget is {InstructionsBudget}");
+    }
+
+    /// <summary>Everything served: the rendered census is exactly the catalog census <see cref="DarlingMcpInstructions.Text"/>
+    /// carries, so the constant cannot drift from the registered tools or from the Lite overlap.</summary>
+    [Fact]
+    public void ServedCensus_EverythingOn_IsTheCatalogCensus()
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: true));
+        Assert.Equal(catalog.Count, served.Count);
+
+        var census = DarlingMcpInstructions.ToolCensus(catalog, served);
+        Assert.StartsWith($"This server exposes {catalog.Count} tools. ", census, StringComparison.Ordinal);
+        Assert.Contains(census, DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.Equal(DarlingMcpInstructions.Text, DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served));
+    }
+
+    /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server
+    /// does not serve. Every backticked name that is a Darling tool must be in the served set, for each switch state.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void RenderedInstructions_NameOnlyServedTools(bool writes, bool serverAdmin)
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(writes, serverAdmin));
+        var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
+
+        var named = Regex.Matches(text, "`([a-z][a-z0-9_]*)`").Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        var unserved = named.Where(n => catalog.Contains(n) && !served.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        Assert.True(named.Count(catalog.Contains) > 10, "the scan found almost no tool names; the backtick pattern no longer matches the text");
+        Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
+    }
+
+    /// <summary><see cref="DarlingMcpInstructions.LiteToolNames"/> is exactly the set of tool names Lite registers,
+    /// read from Lite's own <c>[McpServerTool(Name = ...)]</c> attributes.</summary>
+    [Fact]
+    public void LiteToolNames_AreExactlyTheNamesLiteRegisters()
+    {
+        var attribute = new Regex(@"\[McpServerTool\(Name = ""([a-z_]+)""", RegexOptions.CultureInvariant);
+        var lite = Directory.GetFiles(Path.Combine(RepoRoot(), "Lite", "Mcp"), "*.cs")
+            .SelectMany(f => attribute.Matches(File.ReadAllText(f)).Select(m => m.Groups[1].Value))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.NotEmpty(lite);
+        Assert.Equal(lite, DarlingMcpInstructions.LiteToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 }

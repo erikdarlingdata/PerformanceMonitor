@@ -126,7 +126,27 @@ internal static class McpWritePolicy
     /// <c>McpServerOptions.ToolCollection</c>, drop the writes the setting does not offer and stamp the hints.
     /// <c>PostConfigure</c> runs after the SDK's own options setup, so it sees the full set, and the narrowed
     /// collection is the one every request is served from. Default (setting absent): every write tool is absent.
+    /// #5789: it also sets the server instructions, from the tool names before and after the narrowing, so their
+    /// census counts the set <c>tools/list</c> serves; they used to carry a fixed catalog count.
     /// </summary>
     internal static IServiceCollection AddMcpWritePolicy(this IServiceCollection services, bool allowWrites) =>
-        services.PostConfigure<McpServerOptions>(options => Apply(options.ToolCollection, allowWrites));
+        services.PostConfigure<McpServerOptions>(options =>
+        {
+            var catalog = ToolNames(options.ToolCollection);
+            Apply(options.ToolCollection, allowWrites);
+            options.ServerInstructions = McpInstructions.Build(catalog, ToolNames(options.ToolCollection));
+        });
+
+    /// <summary>The protocol names of <paramref name="tools"/>, in collection order; empty for null.</summary>
+    internal static List<string> ToolNames(IEnumerable<McpServerTool>? tools)
+    {
+        var names = new List<string>();
+        if (tools is null)
+            return names;
+
+        foreach (var tool in tools)
+            names.Add(tool.ProtocolTool.Name);
+
+        return names;
+    }
 }
