@@ -313,6 +313,110 @@ public sealed class ReadCacheInvalidationTests
         Assert.False(ReadResultCache.IsCacheableText(plan, gcf: false));
     }
 
+    /// <summary>Round 2, L9: the withheld-marker rule holds with GCF on too: a GCF wire of an answer the statement sweep
+    /// withheld a value from is never stored, though the same wire without the marker is.</summary>
+    [Fact]
+    public void AGcfWire_TheStatementSweepWithheldFrom_IsNeverStored()
+    {
+        var clean = GcfOutput.TryEncode(JsonSerializer.Serialize(new { rows = new[] { new { query_text = "select 1" } } }));
+        var placeholder = GcfOutput.TryEncode(JsonSerializer.Serialize(new { rows = new[] { new { query_text = SensitiveStatements.PlaceholderText } } }));
+        var plan = GcfOutput.TryEncode(JsonSerializer.Serialize(new { plan = SensitiveStatements.WithheldPlanSentence }));
+        Assert.NotNull(clean);
+        Assert.NotNull(placeholder);
+        Assert.NotNull(plan);
+        Assert.False(clean!.TrimStart().StartsWith('{'), "the encoded answer is still JSON, so this would not test the GCF arm");
+        Assert.True(ReadResultCache.IsCacheableText(clean, gcf: true));
+        Assert.False(ReadResultCache.IsCacheableText(placeholder!, gcf: true));
+        Assert.False(ReadResultCache.IsCacheableText(plan!, gcf: true));
+    }
+
+    /// <summary>Round 2, L7: an answer over 1 MB is refused before it is parsed, and so is one under 1 MB in characters
+    /// whose UTF-8 form is over it.</summary>
+    [Fact]
+    public void AnAnswerOver1MB_IsNotCacheable_ThoughItIsAnOkJsonObject()
+    {
+        var large = "{\"rows\":[\"" + new string('a', ReadResultCache.MaxAnswerBytes) + "\"]}";
+        Assert.False(ReadResultCache.IsCacheableText(large, gcf: false));
+        var wide = "{\"rows\":[\"" + new string('\u00e9', ReadResultCache.MaxAnswerBytes / 2 + 1) + "\"]}";
+        Assert.True(wide.Length < ReadResultCache.MaxAnswerBytes);
+        Assert.False(ReadResultCache.IsCacheableText(wide, gcf: false));
+        Assert.True(ReadResultCache.IsCacheableText("{\"rows\":[\"" + new string('a', 1000) + "\"]}", gcf: false));
+    }
+
+    /// <summary>Round 2, L4: a value that holds a comma and the same name given twice are two keys (the handler reads the
+    /// first of a repeated name), and so are names and values that hold the key's own separators.</summary>
+    [Fact]
+    public void WebKeys_EscapeNamesAndValues_SoACommaValueIsNotTwoValues()
+    {
+        using var cache = new ReadResultCache(new TimerTimeProvider());
+        var ttl = TimeSpan.FromSeconds(30);
+        var commaValue = ReadCacheKey.ForWeb("probe", [new("database", "x,y")], 0, cache, ttl);
+        var twoValues = ReadCacheKey.ForWeb("probe", [new("database", "x"), new("database", "y")], 0, cache, ttl);
+        Assert.NotEqual(commaValue, twoValues);
+        Assert.Equal(twoValues, ReadCacheKey.ForWeb("probe", [new("database", "x"), new("database", "y")], 0, cache, ttl));
+        Assert.NotEqual(
+            ReadCacheKey.ForWeb("probe", [new("a", "1=b"), new("c", "2")], 0, cache, ttl),
+            ReadCacheKey.ForWeb("probe", [new("a", "1"), new("b", "2"), new("c", "2")], 0, cache, ttl));
+        Assert.NotEqual(
+            ReadCacheKey.ForWeb("probe", [new("a", "1\u001fb=2")], 0, cache, ttl),
+            ReadCacheKey.ForWeb("probe", [new("a", "1"), new("b", "2")], 0, cache, ttl));
+    }
+
+    /// <summary>Round 2, L1: a caller that arrives after a flight's last caller has left, before its read is cancelled,
+    /// starts a read of its own and gets its answer, instead of joining the closing flight and getting a cancellation it
+    /// never asked for.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task ACallerArrivingAsTheLastCallerLeaves_StartsItsOwnRead()
+    {
+        using var cache = new ReadResultCache(new TimerTimeProvider());
+        var ttl = TimeSpan.FromSeconds(30);
+        var runs = 0;
+        ReadFlight<string>? arrived = null;
+        cache.BeforeFlightCancel = () =>
+        {
+            cache.BeforeFlightCancel = null;
+            arrived = cache.Join("k", ttl, _ =>
+            {
+                Interlocked.Increment(ref runs);
+                return Task.FromResult("second");
+            }, _ => null);
+        };
+
+        var first = cache.Join("k", ttl, async token =>
+        {
+            Interlocked.Increment(ref runs);
+            await Task.Delay(Timeout.Infinite, token);
+            return "first";
+        }, _ => null);
+        Assert.True(first.IsLead);
+
+        /* The only caller leaves: its leave closes the flight, the seam arrives in the gap, then the read is cancelled. */
+        using var leaves = new CancellationTokenSource();
+        await leaves.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first.WaitAsync(leaves.Token));
+
+        Assert.NotNull(arrived);
+        Assert.True(arrived!.Value.IsLead, "the caller that arrived in the gap joined the closing flight");
+        Assert.Equal("second", await arrived.Value.WaitAsync(TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
+        Assert.Equal(2, runs);
+    }
+
+    /// <summary>Round 2, M1: a joined caller records only what it got itself.</summary>
+    [Theory]
+    [InlineData(ReadOutcome.Timeout, ReadOutcome.CacheHit)]
+    [InlineData(ReadOutcome.Error, ReadOutcome.CacheHit)]
+    [InlineData(ReadOutcome.FallbackRaw, ReadOutcome.CacheHit)]
+    [InlineData(ReadOutcome.GateFailed, ReadOutcome.CacheHit)]
+    [InlineData(ReadOutcome.Ok, ReadOutcome.CacheHit)]
+    [InlineData(ReadOutcome.Busy, ReadOutcome.Busy)]
+    [InlineData(ReadOutcome.Cancelled, ReadOutcome.Cancelled)]
+    public void AJoinedCaller_RecordsItsOwnOutcome_NeverTheSharedRun(ReadOutcome received, ReadOutcome recorded)
+    {
+        Assert.Equal(recorded, ReadResultCache.JoinedOutcome(received, CancellationToken.None));
+        Assert.Equal(ReadOutcome.Cancelled, ReadResultCache.JoinedOutcome(received, new CancellationToken(canceled: true)));
+    }
+
     [Fact]
     public void AnErrorResult_OrOneWithStructuredContent_IsNotCacheable()
     {

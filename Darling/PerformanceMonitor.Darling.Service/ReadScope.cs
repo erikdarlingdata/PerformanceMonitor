@@ -144,6 +144,27 @@ internal sealed class ReadScope
         }
     }
 
+    /// <summary>
+    /// #5506 part 3 (round 2, L3): this flow's outermost scope stops counting in <see cref="InFlight"/> for the rest of its
+    /// life. A caller answered from the read cache, or one that joined a read another caller runs, runs no read of its
+    /// own, so it must not count in <c>max_in_flight</c> or in another read's <see cref="InFlightAtStart"/> while it waits
+    /// (round 1, L7: reads running only), as a read waiting for an admission slot does not (<see cref="AdmitAsync"/>).
+    /// Exchanged, so the scope is uncounted exactly once whatever else uncounts it.
+    /// </summary>
+    internal void Uncount()
+    {
+        var outermost = this;
+        while (outermost._parent is { } parent)
+        {
+            outermost = parent;
+        }
+
+        if (Interlocked.Exchange(ref outermost._counting, 0) == 1)
+        {
+            Interlocked.Decrement(ref s_inFlight);
+        }
+    }
+
     /// <summary>The time this read waited for a store connection, in milliseconds, apart from its run time (#5506): the
     /// pool's queue wait plus the time to open a new physical connection, summed over every connection the read took.
     /// <see cref="ReadConnectionWait"/> adds it.</summary>

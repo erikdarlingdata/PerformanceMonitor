@@ -73,15 +73,20 @@ internal static class ReadCacheKey
 
     /// <summary>The key of a web read: the query string as the browser sent it (before the read loop adds its own
     /// <c>as_of</c>), sorted by name. Values are kept as sent: the web refuses <c>?hours=24.0</c>, so it is not
-    /// <c>?hours=24</c> there.</summary>
+    /// <c>?hours=24</c> there. Round 2, L4: each value of a repeated name comes as its own pair, and every name and value
+    /// is escaped (<see cref="Uri.EscapeDataString(string)"/>), so the comma that joins a repeated name's values, the
+    /// <c>=</c> and the separator never occur inside one: <c>?database=x&amp;database=y</c> (the handler reads <c>x</c>)
+    /// and <c>?database=x%2Cy</c> are two keys.</summary>
     internal static string ForWeb(string route, IEnumerable<KeyValuePair<string, string?>> query, long generation, ReadResultCache cache, TimeSpan ttl)
     {
         var canonical = new SortedDictionary<string, string>(StringComparer.Ordinal);
         string? asOf = null;
-        foreach (var (name, value) in query)
+        foreach (var (rawName, rawValue) in query)
         {
-            canonical[name] = canonical.TryGetValue(name, out var earlier) ? earlier + "," + value : value ?? string.Empty;
-            if (string.Equals(name, "as_of", StringComparison.Ordinal) && !string.IsNullOrEmpty(value))
+            var name = Uri.EscapeDataString(rawName);
+            var value = Uri.EscapeDataString(rawValue ?? string.Empty);
+            canonical[name] = canonical.TryGetValue(name, out var earlier) ? earlier + "," + value : value;
+            if (string.Equals(rawName, "as_of", StringComparison.Ordinal) && !string.IsNullOrEmpty(rawValue))
             {
                 asOf = value;
             }

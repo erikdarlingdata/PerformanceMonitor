@@ -102,6 +102,22 @@ public sealed class McpToolLatencyRecordingTests
             return "{\"rows\":[" + hours_back + "],\"run\":" + run + "}";
         }
 
+        /// <summary>#5506 part 3 (round 2, M1): counts its runs and waits for <see cref="TimeoutHold"/>, then answers the
+        /// 57014 statement-timeout envelope.</summary>
+        internal static int HeldTimeoutRuns;
+
+        internal static TaskCompletionSource TimeoutHold = CompletedHold();
+
+        [McpServerTool(Name = "latency_probe_held_timeout"), Description("Test-only: answers the 57014 envelope once the test releases it.")]
+        public static async Task<string> ProbeHeldTimeout()
+        {
+            System.Threading.Interlocked.Increment(ref HeldTimeoutRuns);
+            await TimeoutHold.Task;
+            return PerformanceMonitor.Common.McpHelpers.FormatError(
+                "latency_probe_held_timeout",
+                new NpgsqlException("57014: canceling statement due to statement timeout"));
+        }
+
         [McpServerTool(Name = "latency_probe_timeout"), Description("Test-only: answers the 57014 statement-timeout envelope.")]
         public static string ProbeTimeout() =>
             PerformanceMonitor.Common.McpHelpers.FormatError(
@@ -174,6 +190,7 @@ public sealed class McpToolLatencyRecordingTests
         foreach (var band in new[] { ReadWindowBand.None, ReadWindowBand.OneHour, ReadWindowBand.OneDay, ReadWindowBand.SevenDays, ReadWindowBand.Longer })
         {
             table[(ReadSurface.Mcp, "latency_probe_json", band)] = 5_000;
+            table[(ReadSurface.Mcp, "latency_probe_held_timeout", band)] = 5_000;
         }
 
         admission.SetTable(table);
@@ -219,8 +236,16 @@ public sealed class McpToolLatencyRecordingTests
         var first = ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":168}");
         await WaitUntil(() => LatencyProbeTools.JsonRuns == before + 1);
         var second = ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":168}");
-        await Task.Delay(200);
-        LatencyProbeTools.JsonHold.SetResult();
+        try
+        {
+            /* Round 2, L9: the second call has joined when the flight counts two waiters (no fixed delay). */
+            await WaitUntil(() => admission.Cache.WaitingCallers == 2);
+        }
+        finally
+        {
+            LatencyProbeTools.JsonHold.TrySetResult();
+        }
+
         var answers = await Task.WhenAll(first, second);
 
         Assert.Equal(before + 1, LatencyProbeTools.JsonRuns);
@@ -228,6 +253,44 @@ public sealed class McpToolLatencyRecordingTests
         var drained = readLatency.Drain().Where(d => d.Route == "latency_probe_json").ToList();
         Assert.Equal(1, Assert.Single(drained, d => d.Outcome == ReadOutcome.Ok).Count);
         Assert.Equal(1, Assert.Single(drained, d => d.Outcome == ReadOutcome.CacheHit).Count);
+    }
+
+    /// <summary>#5506 part 3 (round 2, M1): one shared read that times out, with two calls joined to it, records exactly one
+    /// timeout, the first call's; each joined call records cache_hit for the shared answer it got.</summary>
+    [Fact]
+    public async Task ReadCache_ASharedReadThatTimesOut_WithTwoJoinedCalls_RecordsExactlyOneTimeout()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = CachingAdmission();
+        using var server = await BuildServer(readLatency, admission: admission);
+        LatencyProbeTools.TimeoutHold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var before = LatencyProbeTools.HeldTimeoutRuns;
+
+        Task<(int StatusCode, string Body)>[] calls;
+        try
+        {
+            var first = ToolsCallAsync(server, "/", "latency_probe_held_timeout", "{}");
+            await WaitUntil(() => LatencyProbeTools.HeldTimeoutRuns == before + 1);
+            calls =
+            [
+                first,
+                ToolsCallAsync(server, "/", "latency_probe_held_timeout", "{}"),
+                ToolsCallAsync(server, "/", "latency_probe_held_timeout", "{}"),
+            ];
+            await WaitUntil(() => admission.Cache.WaitingCallers == 3);
+        }
+        finally
+        {
+            LatencyProbeTools.TimeoutHold.TrySetResult();
+        }
+
+        var answers = await Task.WhenAll(calls);
+        Assert.Equal(before + 1, LatencyProbeTools.HeldTimeoutRuns);
+        Assert.All(answers, a => Assert.Contains("57014", a.Body, StringComparison.Ordinal));
+        var drained = readLatency.Drain().Where(d => d.Route == "latency_probe_held_timeout").ToList();
+        Assert.Equal(1, drained.Where(d => d.Outcome == ReadOutcome.Timeout).Sum(d => d.Count));
+        Assert.Equal(2, drained.Where(d => d.Outcome == ReadOutcome.CacheHit).Sum(d => d.Count));
+        Assert.All(drained, d => Assert.Contains(d.Outcome, new[] { ReadOutcome.Timeout, ReadOutcome.CacheHit }));
     }
 
     [Fact]

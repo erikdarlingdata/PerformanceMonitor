@@ -180,8 +180,9 @@ public sealed class McpToolLatencyFilter
     /// <summary>
     /// #5506 part 3: a heavy read through the read cache. A stored answer is returned at once and records
     /// <c>cache_hit</c>. Otherwise the caller joins the identical read running now, or starts it (D6): the caller that
-    /// starts it records the read's real outcome through <see cref="RunReadAsync"/>; a caller that joined records
-    /// <c>cache_hit</c> with its own elapsed time when the answer is a success, or the outcome it received.
+    /// starts it records the read's real outcome through <see cref="RunReadAsync"/>; a caller that joined records only its
+    /// own outcome with its own elapsed time (round 2, M1: <see cref="ReadResultCache.JoinedOutcome"/>), so one read counts
+    /// once. Neither a hit nor a joined caller counts as a read in flight (round 2, L3).
     /// </summary>
     private async Task<CallToolResult> ServeCachedAsync(ReadAdmission admission, McpRequestHandler<CallToolRequestParams, CallToolResult> next,
         RequestContext<CallToolRequestParams> request, string toolName, string windowBand, ReadScope scope, string caller,
@@ -195,6 +196,7 @@ public sealed class McpToolLatencyFilter
         var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl);
         if (cache.TryGet(key, out var stored))
         {
+            scope.Uncount();
             admission.NoteCacheHit(ReadSurface.Mcp, toolName);
             Record(toolName, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
             return TextResult(stored);
@@ -208,18 +210,14 @@ public sealed class McpToolLatencyFilter
             return await flight.WaitAsync(cancellationToken);
         }
 
+        scope.Uncount();
         try
         {
             var shared = await flight.WaitAsync(cancellationToken);
-            var outcome = ClassifyResult(shared, cancellationToken);
-            if (outcome == ReadOutcome.Ok && !IsBusyEnvelope(shared))
+            var outcome = ReadResultCache.JoinedOutcome(IsBusyEnvelope(shared) ? ReadOutcome.Busy : null, cancellationToken);
+            if (outcome == ReadOutcome.CacheHit)
             {
                 admission.NoteCacheHit(ReadSurface.Mcp, toolName);
-                outcome = ReadOutcome.CacheHit;
-            }
-            else if (IsBusyEnvelope(shared))
-            {
-                outcome = ReadOutcome.Busy;
             }
 
             Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
@@ -227,7 +225,14 @@ public sealed class McpToolLatencyFilter
         }
         catch (Exception ex)
         {
-            Record(toolName, ReadOutcomeClassifier.Classify(ex, cancellationToken), stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
+            var outcome = ReadResultCache.JoinedOutcome(
+                ReadOutcomeClassifier.Classify(ex, cancellationToken) == ReadOutcome.Cancelled ? ReadOutcome.Cancelled : null, cancellationToken);
+            if (outcome == ReadOutcome.CacheHit)
+            {
+                admission.NoteCacheHit(ReadSurface.Mcp, toolName);
+            }
+
+            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
             throw;
         }
     }

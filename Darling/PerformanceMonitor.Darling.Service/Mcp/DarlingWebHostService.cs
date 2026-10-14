@@ -1426,16 +1426,23 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* #5506 part 3: a successful web write (a 2xx answer to a non-GET /api/* request, except the compose run, the rule
            validator and the rule test) moves the read cache's write generation, so no cached answer from before it is
-           served again. */
+           served again. Round 2, L2: moved as the 2xx starts, before its first byte leaves, as the MCP surface moves it
+           before answering, so a browser that refreshes the moment the write answers never reads the entry from before
+           it. A response always starts (an empty one at the end of the pipeline), so the callback always runs. */
         if (_readAdmission is { } readAdmission)
         {
             app.Use(async (context, next) =>
             {
-                await next(context);
-                if (ReadResultCache.IsWebWrite(context.Request.Method, context.Request.Path.Value ?? string.Empty, context.Response.StatusCode))
+                context.Response.OnStarting(() =>
                 {
-                    readAdmission.Cache.BumpGeneration();
-                }
+                    if (ReadResultCache.IsWebWrite(context.Request.Method, context.Request.Path.Value ?? string.Empty, context.Response.StatusCode))
+                    {
+                        readAdmission.Cache.BumpGeneration();
+                    }
+
+                    return Task.CompletedTask;
+                });
+                await next(context);
             });
         }
 

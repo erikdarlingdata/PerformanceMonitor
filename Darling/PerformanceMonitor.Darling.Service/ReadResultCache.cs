@@ -28,8 +28,15 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>Single flight (D6).</b> Identical misses at the same time run one read. The read runs detached from any one
 /// caller under its own token, which is cancelled only when every caller waiting for it has left; each caller waits
-/// with its own token. The caller that started the read stays until it ends even if it leaves, because the read runs on
-/// that caller's request.</para>
+/// with its own token. The caller that started the read stays until it ends even if it leaves, because the read records
+/// through that caller's <see cref="ReadScope"/> and resolves its services from that caller's <c>RequestServices</c>
+/// (round 1, C3), which must outlive it. A flight whose last caller has left is closing: no later caller joins it, so a
+/// caller that arrives then starts a read of its own (round 2, L1).</para>
+///
+/// <para><b>Joined callers (round 2, M1).</b> Only the caller that started the read records its outcome. A joined caller
+/// records what it got itself (<see cref="JoinedOutcome"/>): <c>busy</c> or <c>cancelled</c>, or <c>cache_hit</c> for the
+/// shared answer, whatever that answer was, so one store read counts once in <c>count</c>, <c>timeouts</c> and the
+/// percentiles.</para>
 /// </summary>
 internal sealed class ReadResultCache : IDisposable
 {
@@ -73,6 +80,37 @@ internal sealed class ReadResultCache : IDisposable
 
     /// <summary>The entries held now (for tests).</summary>
     internal int Count => _memory.Count;
+
+    /// <summary>For tests (round 2, L1): runs when a flight's last caller has left, after the flight is closed to new callers
+    /// and before its read is cancelled, so a test can arrive in that gap.</summary>
+    internal Action? BeforeFlightCancel { get; set; }
+
+    /// <summary>The callers waiting on reads in flight now, summed over every key (for tests: a test waits on this rather
+    /// than on a fixed delay to know a caller has joined or left).</summary>
+    internal int WaitingCallers
+    {
+        get
+        {
+            var waiting = 0;
+            foreach (var flight in _flights.Values)
+            {
+                waiting += flight is IFlight counted ? counted.Waiters : 0;
+            }
+
+            return waiting;
+        }
+    }
+
+    /// <summary>
+    /// Round 2, M1: the outcome a joined caller records. It ran no read, so it never records the shared read's outcome
+    /// (<c>timeout</c>, <c>error</c>, <c>fallback_raw</c>, <c>gate_failed</c> or <c>ok</c>), which the caller that started
+    /// the read records once: <c>cancelled</c> when this caller left or the answer it got is a cancellation, <c>busy</c>
+    /// when the answer is the busy refusal, and <c>cache_hit</c> for any other shared answer.
+    /// </summary>
+    internal static ReadOutcome JoinedOutcome(ReadOutcome? received, CancellationToken callerToken) =>
+        callerToken.IsCancellationRequested || received == ReadOutcome.Cancelled ? ReadOutcome.Cancelled
+        : received == ReadOutcome.Busy ? ReadOutcome.Busy
+        : ReadOutcome.CacheHit;
 
     /// <summary>The TTL of a band: <c>none</c> and <c>1h</c> 15 s, <c>24h</c> 30 s, <c>7d</c> 60 s, <c>7d+</c> 120 s.</summary>
     internal static TimeSpan TtlOf(string? band) => band switch
@@ -118,7 +156,11 @@ internal sealed class ReadResultCache : IDisposable
     /// </summary>
     internal static bool IsCacheableText(string? text, bool gcf)
     {
+        /* Round 2, L7: an answer too large to store is refused before it is parsed. A UTF-16 length over the cap is a UTF-8
+           size over it too (no character takes fewer UTF-8 bytes than UTF-16 code units). */
         if (string.IsNullOrEmpty(text)
+            || text.Length > MaxAnswerBytes
+            || Encoding.UTF8.GetByteCount(text) > MaxAnswerBytes
             || text.Contains(PerformanceMonitor.Common.SensitiveStatements.PlaceholderText, StringComparison.Ordinal)
             || text.Contains(PerformanceMonitor.Common.SensitiveStatements.WithheldPlanSentence, StringComparison.Ordinal))
         {
@@ -228,7 +270,7 @@ internal sealed class ReadResultCache : IDisposable
             }
             else
             {
-                flight = new Flight<T>();
+                flight = new Flight<T>(BeforeFlightCancel);
                 flight.TryJoin();
                 _flights[key] = flight;
                 lead = true;
@@ -275,13 +317,37 @@ internal sealed class ReadResultCache : IDisposable
 
     private sealed record Entry(string Text, DateTimeOffset ExpiresAt);
 
+    /// <summary>A flight's waiter count, whatever its answer type.</summary>
+    private interface IFlight
+    {
+        int Waiters { get; }
+    }
+
 #pragma warning disable CA1001 // the source has no timer and a late Leave may still cancel it after the read ends
-    internal sealed class Flight<T>
+    internal sealed class Flight<T> : IFlight
 #pragma warning restore CA1001
     {
+        private readonly Action? _beforeCancel;
         private readonly CancellationTokenSource _cts = new();
         private readonly object _gate = new();
         private int _waiters;
+
+        /* Round 2, L1: set inside the lock by the Leave that takes the waiter count to zero, before the token is cancelled
+           outside it, so a caller that arrives in between does not join a read that is about to be cancelled. */
+        private bool _closing;
+
+        internal Flight(Action? beforeCancel = null) => _beforeCancel = beforeCancel;
+
+        public int Waiters
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _waiters;
+                }
+            }
+        }
 
         /* RunContinuationsAsynchronously: a waiter's continuation must not run inline on the thread that ends the read. */
         internal TaskCompletionSource<T> Source { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -294,7 +360,7 @@ internal sealed class ReadResultCache : IDisposable
         {
             lock (_gate)
             {
-                if (_cts.IsCancellationRequested)
+                if (_closing || _cts.IsCancellationRequested)
                 {
                     return false;
                 }
@@ -311,10 +377,12 @@ internal sealed class ReadResultCache : IDisposable
             lock (_gate)
             {
                 last = --_waiters == 0 && !Task.IsCompleted;
+                _closing |= last;
             }
 
             if (last)
             {
+                _beforeCancel?.Invoke();
                 _cts.Cancel();
             }
         }
@@ -333,11 +401,12 @@ internal readonly struct ReadFlight<T>
     }
 
     /// <summary>True for the caller that started the read: it records the read's real outcome; a joined caller records
-    /// <c>cache_hit</c> or the error it received.</summary>
+    /// only its own (<see cref="ReadResultCache.JoinedOutcome"/>).</summary>
     internal bool IsLead { get; }
 
     /// <summary>Waits for the shared answer with the caller's own token. A caller that leaves stops waiting at once,
-    /// except the lead, which stays until the read ends (the read runs on its request) and then throws.</summary>
+    /// except the lead, which stays until the read ends (the read records through the lead's <see cref="ReadScope"/> and
+    /// uses its <c>RequestServices</c>) and then throws.</summary>
     internal async Task<T> WaitAsync(CancellationToken cancellationToken)
     {
         var flight = _flight;

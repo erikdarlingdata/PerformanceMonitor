@@ -57,7 +57,7 @@ public sealed class ReadCacheWebEndToEndTests
     /// <summary>The production web pipeline over an unreachable store, plus a test-only write route (any 2xx non-GET
     /// <c>/api/*</c> answer moves the cache's write generation) and an optional middleware ahead of everything.</summary>
     private static async Task<(WebApplication App, NpgsqlDataSource Postgres)> BuildServer(ReadAdmission admission, ReadLatencyAccumulator readLatency,
-        Func<RequestDelegate, RequestDelegate>? first = null)
+        Func<RequestDelegate, RequestDelegate>? first = null, Task? heldWriteEnd = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -81,8 +81,27 @@ public sealed class ReadCacheWebEndToEndTests
         host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null,
             allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: "unused-in-loopback-mode", oidcClient: null);
         app.MapPost("/api/__test/write", () => Results.Text("{}", "application/json"));
+
+        /* Round 2, L2: a write whose 2xx and body leave at once, while its handler stays until heldWriteEnd ends. */
+        app.MapPost("/api/__test/held-write", async (HttpContext context) =>
+        {
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsync("{}", context.RequestAborted);
+            await context.Response.Body.FlushAsync(context.RequestAborted);
+            await (heldWriteEnd ?? Task.CompletedTask);
+        });
         await app.StartAsync(TestContext.Current.CancellationToken);
         return (app, postgres);
+    }
+
+    private static async Task WaitUntil(Func<bool> condition, string what)
+    {
+        for (var i = 0; i < 2_000 && !condition(); i++)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        Assert.True(condition(), what);
     }
 
     [Fact(Timeout = 60_000)]
@@ -173,14 +192,15 @@ public sealed class ReadCacheWebEndToEndTests
         await entered.Task.WaitAsync(timeout, TestContext.Current.CancellationToken);
 
         var joinedCall = client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken);
-        await Task.Delay(300, TestContext.Current.CancellationToken);
 
         try
         {
+            /* Round 2, L9: the second caller has joined when the flight counts two waiters (no fixed delay). */
+            await WaitUntil(() => admission.Cache.WaitingCallers == 2, "the second caller never joined the shared read");
             await firstLeaves.CancelAsync();
 
-            /* The first caller has left and the joined caller still waits: the shared read must not be cancelled. */
-            await Task.Delay(300, TestContext.Current.CancellationToken);
+            /* The first caller has left (one waiter) and the joined caller still waits: the shared read must not be cancelled. */
+            await WaitUntil(() => admission.Cache.WaitingCallers == 1, "the first caller never left the shared read");
             Assert.NotNull(readContext);
             Assert.False(readContext!.RequestAborted.IsCancellationRequested, "the shared read was cancelled while a caller still waited for it");
             Assert.False(joinedCall.IsCompleted, "the joined caller was answered before the shared read ended");
@@ -200,6 +220,209 @@ public sealed class ReadCacheWebEndToEndTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstCall.WaitAsync(timeout, TestContext.Current.CancellationToken));
         Assert.True(await firstDone.Task.WaitAsync(timeout, TestContext.Current.CancellationToken),
             "the first caller's request no longer saw its own abort: its RequestAborted was replaced");
+    }
+
+    /// <summary>Round 2, M1: one shared read that times out, with two callers joined to it, records exactly one timeout: the
+    /// lead's. Each joined caller records only cache_hit for the shared answer it got, so one store read counts once in
+    /// count, timeouts and the percentiles.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task ASharedReadThatTimesOut_WithTwoJoinedCallers_RecordsExactlyOneTimeout()
+    {
+        const string route = "get_test_shared_timeout";
+        var band = DarlingWebEndpoints.WebWindowBand(route, _ => null);
+        var admission = HeavyAdmission(2, ReadSurface.Web, route, band);
+        var readLatency = new ReadLatencyAccumulator();
+        var calls = 0;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var entry = new ReadLatencyWebRecordingTests.ExtraDispatchEntryScope((route, async (_, _, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            entered.TrySetResult();
+            await gate.Task;
+            throw new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
+        }));
+        var (app, postgres) = await BuildServer(admission, readLatency);
+        await using var _app = app;
+        await using var _postgres = postgres;
+        using var client = app.GetTestServer().CreateClient();
+        var timeout = TimeSpan.FromSeconds(20);
+
+        var lead = client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken);
+        Task<HttpResponseMessage>[] joined;
+        try
+        {
+            await entered.Task.WaitAsync(timeout, TestContext.Current.CancellationToken);
+            joined =
+            [
+                client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken),
+                client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken),
+            ];
+            await WaitUntil(() => admission.Cache.WaitingCallers == 3, "the two callers never joined the shared read");
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+
+        var responses = await Task.WhenAll(joined.Prepend(lead)).WaitAsync(timeout, TestContext.Current.CancellationToken);
+        foreach (var response in responses)
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+            response.Dispose();
+        }
+
+        Assert.Equal(1, calls);
+        var samples = readLatency.Drain().Where(d => d.Route == route).ToList();
+        Assert.Equal(1, samples.Where(d => d.Outcome == ReadOutcome.Timeout).Sum(d => d.Count));
+        Assert.Equal(2, samples.Where(d => d.Outcome == ReadOutcome.CacheHit).Sum(d => d.Count));
+        Assert.All(samples, d => Assert.Contains(d.Outcome, new[] { ReadOutcome.Timeout, ReadOutcome.CacheHit }));
+    }
+
+    /// <summary>Round 2, L9 (C3's claim): a caller joined to a read that admission refuses gets the busy answer with its own
+    /// Retry-After header, and records its own busy.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task AJoinedCaller_OfARefusedRead_GetsTheBusyAnswerWithRetryAfter()
+    {
+        const string route = "get_test_shared_busy";
+        var band = DarlingWebEndpoints.WebWindowBand(route, _ => null);
+        var clock = new TimerTimeProvider();
+        var admission = HeavyAdmission(1, ReadSurface.Web, route, band, clock);
+        var readLatency = new ReadLatencyAccumulator();
+        var calls = 0;
+        using var entry = new ReadLatencyWebRecordingTests.ExtraDispatchEntryScope((route, (_, _, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult("{\"rows\":[1]}");
+        }));
+        var (app, postgres) = await BuildServer(admission, readLatency);
+        await using var _app = app;
+        await using var _postgres = postgres;
+        using var client = app.GetTestServer().CreateClient();
+        var timeout = TimeSpan.FromSeconds(20);
+
+        /* The only slot is taken in a flow of its own, so the first caller queues (5 s expected, under the 45 s cap). */
+        var held = await Task.Run(() => admission.AdmitAsync(ReadSurface.Web, route, band, TestContext.Current.CancellationToken));
+        HttpResponseMessage[] responses;
+        try
+        {
+            var lead = client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken);
+            await WaitUntil(() => admission.Stats().Queued == 1, "the first caller never queued");
+            var joined = client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken);
+            await WaitUntil(() => admission.Cache.WaitingCallers == 2, "the second caller never joined the queued read");
+
+            /* The cap passes while the first caller waits: it is refused, and the joined caller gets the same answer. */
+            clock.Advance(ReadAdmission.DefaultWaitCap);
+            responses = await Task.WhenAll(lead, joined).WaitAsync(timeout, TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            held.Dispose();
+        }
+
+        foreach (var response in responses)
+        {
+            Assert.Equal((HttpStatusCode)429, response.StatusCode);
+            Assert.NotNull(response.Headers.RetryAfter);
+            Assert.True(response.Headers.RetryAfter!.Delta >= TimeSpan.FromSeconds(ReadAdmission.MinRetryAfterSeconds));
+            response.Dispose();
+        }
+
+        Assert.Equal(0, calls);
+        var samples = readLatency.Drain().Where(d => d.Route == route).ToList();
+        Assert.Equal(2, samples.Where(d => d.Outcome == ReadOutcome.Busy).Sum(d => d.Count));
+    }
+
+    /// <summary>Round 2, L2: the write generation moves before a write's 2xx leaves, so a read sent the moment the 2xx
+    /// arrives, while the write's handler has not yet returned, misses the entry stored before the write.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task ARefreshTheMomentAWriteAnswers_MissesThePreWriteEntry()
+    {
+        const string route = "get_test_refresh_after_write";
+        var band = DarlingWebEndpoints.WebWindowBand(route, _ => null);
+        var admission = HeavyAdmission(2, ReadSurface.Web, route, band);
+        var readLatency = new ReadLatencyAccumulator();
+        var calls = 0;
+        using var entry = new ReadLatencyWebRecordingTests.ExtraDispatchEntryScope((route, (_, _, _) =>
+            Task.FromResult("{\"rows\":[" + Interlocked.Increment(ref calls).ToString(System.Globalization.CultureInfo.InvariantCulture) + "]}")));
+        var writeEnd = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var (app, postgres) = await BuildServer(admission, readLatency, heldWriteEnd: writeEnd.Task);
+        await using var _app = app;
+        await using var _postgres = postgres;
+        using var client = app.GetTestServer().CreateClient();
+        var timeout = TimeSpan.FromSeconds(20);
+
+        var before = await client.GetStringAsync("/api/read/" + route, TestContext.Current.CancellationToken);
+        Assert.Equal(1, calls);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/api/__test/held-write")
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+            };
+            using var write = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken)
+                .WaitAsync(timeout, TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.OK, write.StatusCode);
+
+            var after = await client.GetStringAsync("/api/read/" + route, TestContext.Current.CancellationToken);
+            Assert.Equal(2, calls);
+            Assert.NotEqual(before, after);
+        }
+        finally
+        {
+            writeEnd.TrySetResult();
+        }
+    }
+
+    /// <summary>Round 2, M1 (compose): two callers joined to a composed-panel run that timed out record no timeout of their
+    /// own, only cache_hit. The run here is the test's own flight on the panel's key: the shared runner's run would need a
+    /// store to time out, and it records its one outcome itself, unchanged by this fix.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task AComposedRunThatTimesOut_WithTwoJoinedCallers_RecordsNoTimeoutForThem()
+    {
+        const string route = "compose:unknown";
+        var body = (JsonObject)JsonNode.Parse("{\"panel\":{}}")!;
+        const string band = "24h";
+        var admission = HeavyAdmission(2, ReadSurface.Compose, route, band);
+        var readLatency = new ReadLatencyAccumulator();
+        var recorder = new ReadLatencyRecorder(readLatency, null, null, admission);
+        var cache = admission.Cache;
+        var ttl = ReadResultCache.TtlOf(band);
+        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1");
+        var timedOut = DarlingWebEndpoints.ComposeRunOutcome.AuthorQueryError("canceling statement due to statement timeout", "57014");
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lead = cache.Join(ReadCacheKey.ForCompose(ReadSurface.Mcp, route, body.ToJsonString(), cache.Generation, cache, ttl), ttl,
+            async _ =>
+            {
+                await gate.Task;
+                return timedOut;
+            },
+            _ => null);
+        Assert.True(lead.IsLead);
+
+        Task<DarlingWebEndpoints.ComposeRunOutcome>[] joined;
+        try
+        {
+            joined =
+            [
+                DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, TestContext.Current.CancellationToken, recorder,
+                    remapClientTimeout: true, cacheHost: ReadSurface.Mcp),
+                DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, TestContext.Current.CancellationToken, recorder,
+                    remapClientTimeout: true, cacheHost: ReadSurface.Mcp),
+            ];
+            await WaitUntil(() => cache.WaitingCallers == 3, "the two callers never joined the composed run");
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+
+        var outcomes = await Task.WhenAll(joined).WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        Assert.All(outcomes, o => Assert.Equal("57014", o.AuthorSqlState));
+        var samples = readLatency.Drain().Where(d => d.Surface == ReadSurface.Compose).ToList();
+        Assert.Equal(0, samples.Where(d => d.Outcome == ReadOutcome.Timeout).Sum(d => d.Count));
+        Assert.Equal(2, samples.Where(d => d.Outcome == ReadOutcome.CacheHit).Sum(d => d.Count));
+        Assert.All(samples, d => Assert.Equal(ReadOutcome.CacheHit, d.Outcome));
     }
 
     /// <summary>L5: a malformed integer knob is refused at once, before the cache and admission, even when the route is

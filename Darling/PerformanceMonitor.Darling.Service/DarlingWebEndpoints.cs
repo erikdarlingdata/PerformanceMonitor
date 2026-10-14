@@ -447,11 +447,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 {
                     var cache = admission.Cache;
                     var ttl = ReadResultCache.TtlOf(admissionBand);
+                    /* Round 2, L4: each value of a repeated name is passed apart (StringValues.ToString() joins them with a comma,
+                       which ?database=x%2Cy also gives); the key escapes every name and value. */
                     var key = ReadCacheKey.ForWeb(name,
-                        context.Request.Query.Select(q => new KeyValuePair<string, string?>(q.Key, q.Value.ToString())),
+                        context.Request.Query.SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))),
                         cache.Generation, cache, ttl);
                     if (cache.TryGet(key, out var stored))
                     {
+                        /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
+                        readScope.Scope.Uncount();
                         admission.NoteCacheHit(ReadSurface.Web, name);
                         RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
                         return ToHttpResult(stored, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
@@ -471,28 +475,35 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         return (await flight.WaitAsync(callerAborted)).Answer;
                     }
 
+                    /* Round 2, L3: a joined caller runs no read while it waits for the shared one. Round 2, M1: it records only its
+                       own outcome (busy, cancelled, or cache_hit for the shared answer), never the read's, which the lead records
+                       once: N joiners of one timed-out read are not N + 1 timeouts, and their shorter waits never reach the
+                       percentiles or the hourly p90 table. */
+                    readScope.Scope.Uncount();
                     try
                     {
                         var shared = await flight.WaitAsync(callerAborted);
-                        var joinedOutcome = shared.Outcome;
-                        if (shared.Text is not null || shared.Outcome == ReadOutcome.Ok)
+                        var joinedOutcome = ReadResultCache.JoinedOutcome(shared.Outcome, callerAborted);
+                        if (joinedOutcome == ReadOutcome.CacheHit)
                         {
                             admission.NoteCacheHit(ReadSurface.Web, name);
-                            joinedOutcome = ReadOutcome.CacheHit;
                         }
 
-                        if (joinedOutcome is { } recorded)
-                        {
-                            RecordWebReadLatency(readLatencyRecorder, name, recorded, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
-                        }
-
+                        RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
                         return shared.Text is { } text
                             ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted)
                             : shared.Answer;
                     }
                     catch (Exception ex)
                     {
-                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcomeClassifier.Classify(ex, callerAborted), joinedAt.ElapsedMilliseconds, context, readScope.Scope);
+                        var thrown = ReadResultCache.JoinedOutcome(
+                            ReadOutcomeClassifier.Classify(ex, callerAborted) == ReadOutcome.Cancelled ? ReadOutcome.Cancelled : null, callerAborted);
+                        if (thrown == ReadOutcome.CacheHit)
+                        {
+                            admission.NoteCacheHit(ReadSurface.Web, name);
+                        }
+
+                        RecordWebReadLatency(readLatencyRecorder, name, thrown, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
                         throw;
                     }
                 }
@@ -600,7 +611,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             });
         }
 
-        MapCustomViews(app, postgres, logger, readLatencyRecorder);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
@@ -638,7 +649,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder)
+    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
+        ReadAdmission? readAdmission)
     {
         var store = new CustomViewStore(postgres);
 
@@ -659,20 +671,33 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            resolver's refusal, not a silent fall back to the fleet's numbers. */
         app.MapGet("/api/catalog", async (HttpContext context) =>
         {
+            /* #5506 part 3 (round 2, L5): it reads the store (the schedule overrides, and the server resolver for ?server=), so
+               it is admitted, and recorded, under its MCP twin describe_custom_view_catalog: a light read passes at once. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, CatalogRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, CatalogRoute, ReadWindowBand.None, context, readScope.Scope);
             var serverName = context.Request.Query["server"].ToString();
             if (string.IsNullOrWhiteSpace(serverName))
             {
                 var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
+                run.Complete(ReadOutcome.Ok);
                 return JsonNodeResult(BuildCatalogNode(null, fleetSchedules));
             }
 
             var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
             if (resolveError != null)
             {
+                run.Complete(ReadOutcome.Ok);
                 return JsonNodeResult(JsonNode.Parse(resolveError)!.AsObject());
             }
 
             var schedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, resolved.ServerId, context.RequestAborted);
+            run.Complete(ReadOutcome.Ok);
             return JsonNodeResult(BuildCatalogNode(resolved.ServerId, schedules));
         });
 
@@ -2842,13 +2867,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var key = ReadCacheKey.ForCompose(host, composeRoute, body.ToJsonString(), cache.Generation, cache, ttl);
         if (cache.TryGet(key, out var stored))
         {
+            /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
+            readScope.Scope.Uncount();
             admission.NoteCacheHit(ReadSurface.Compose, composeRoute);
             RecordAdmissionSample(readLatency, composeRoute, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
             return ComposeRunOutcome.FromCache(stored);
         }
 
-        /* D6: the run is shared; the caller that starts it records its real outcome inside the run, a caller that joined
-           records cache_hit with its own elapsed time on success, or the outcome it received. */
+        /* D6: the run is shared; the caller that starts it records its real outcome inside the run. Round 2, M1: a caller
+           that joined records only its own outcome with its own elapsed time (busy, cancelled, or cache_hit for the shared
+           answer), never the run's, so one run counts once. */
         var flight = cache.Join(key, ttl,
             token => RunComposedPanelAdmittedAsync(postgres, body, readLatency, clientDeadlineHeadroomSeconds, remapClientTimeout,
                 includeDataStartFields, onRunException, nowUtc, caller, host, token),
@@ -2859,28 +2887,30 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return await flight.WaitAsync(cancellationToken);
         }
 
+        /* Round 2, L3: a joined caller runs no read while it waits for the shared one. */
+        readScope.Scope.Uncount();
         try
         {
             var shared = await flight.WaitAsync(cancellationToken);
-            if (shared.PayloadText is not null)
+            var joinedOutcome = ReadResultCache.JoinedOutcome(shared.Busy is not null ? ReadOutcome.Busy : null, cancellationToken);
+            if (joinedOutcome == ReadOutcome.CacheHit)
             {
                 admission.NoteCacheHit(ReadSurface.Compose, composeRoute);
-                RecordAdmissionSample(readLatency, composeRoute, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
-            }
-            else if (shared.Busy is not null)
-            {
-                RecordAdmissionSample(readLatency, composeRoute, ReadOutcome.Busy, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
-            }
-            else
-            {
-                RecordComposeLatency(readLatency, body, shared, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback, readScope.Scope, recordCaller);
             }
 
+            RecordAdmissionSample(readLatency, composeRoute, joinedOutcome, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
             return shared;
         }
         catch (Exception ex)
         {
-            RecordAdmissionSample(readLatency, composeRoute, ReadOutcomeClassifier.Classify(ex, cancellationToken), stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
+            var thrown = ReadResultCache.JoinedOutcome(
+                ReadOutcomeClassifier.Classify(ex, cancellationToken) == ReadOutcome.Cancelled ? ReadOutcome.Cancelled : null, cancellationToken);
+            if (thrown == ReadOutcome.CacheHit)
+            {
+                admission.NoteCacheHit(ReadSurface.Compose, composeRoute);
+            }
+
+            RecordAdmissionSample(readLatency, composeRoute, thrown, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
             throw;
         }
     }
@@ -2946,6 +2976,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// panel's own measure key when the body parsed that far, else a fixed catch-all -- bounded cardinality
     /// either way (the compose catalog's own measure keys, never the caller's free text).</summary>
     private const string ComposeUnknownRouteLabel = "compose:unknown";
+
+    /// <summary>#5506 part 3 (round 2, L5): the MCP twin <c>/api/catalog</c> is admitted and recorded under.</summary>
+    internal const string CatalogRoute = "describe_custom_view_catalog";
 
     /// <summary>#5506 part 3 (round 1, M3): the name <c>/api/ag</c> is admitted and recorded under, its MCP twin's.</summary>
     internal const string AgHealthRoute = "get_ag_health";

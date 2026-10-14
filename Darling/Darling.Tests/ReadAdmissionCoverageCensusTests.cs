@@ -42,7 +42,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 6, // the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test and /api/ag
+        ["DarlingWebEndpoints.cs"] = 7, // the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
         ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the dedicated routes record their own samples, #5506 part 3)
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
@@ -170,80 +170,72 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// above counts only routes that open a read scope, so a new route that reads the store without one would pass it; this
     /// one fails until the new route is placed on one side or the other. Exempt: health, static answers, definition reads
     /// (one config row, light by D8's "Simpler" rule) and writes.
+    ///
+    /// <para>Round 2, L5: a route is keyed by its file and its route text, so a second map of the same route in another file
+    /// is a new entry the roster does not hold (<see cref="TheCensus_CatchesASecondMapOfTheSameRouteInAnotherFile"/>), and
+    /// a handler's text ends where its map call does (<see cref="EndOfCall"/>), so a helper below the last map in a file
+    /// cannot satisfy the admit check for it.</para>
     /// </summary>
+    private const string WebFile = "DarlingWebEndpoints.cs: ";
+    private const string SweepsFile = "DarlingFleetSweepEndpoints.cs: ";
+
     private static readonly Dictionary<string, string?> MappedRoutes = new(StringComparer.Ordinal)
     {
-        ["GET \"/api/read/\" + name"] = null,
-        ["GET \"/api/fleet\""] = null,
-        ["GET \"/api/ag\""] = null,
-        ["GET \"/api/triage\""] = null,
-        ["GET \"/api/alert-notebook\""] = null,
-        ["GET \"/api/sweeps\""] = null,
-        ["GET \"/api/sweeps/latest\""] = null,
-        ["GET \"/api/sweeps/{id:long}\""] = null,
-        ["GET \"/api/sweeps/watch-items\""] = null,
-        ["GET Route"] = null, // the database picker, /api/server-databases
-        ["POST \"/api/compose/run\""] = null,
-        ["POST \"/api/alerts/test\""] = null,
-        ["GET \"/api/ping\""] = "health: answers without reading the store (D8)",
-        ["GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
-        ["GET \"/api/session\""] = "the seat's capability probe: reads no store",
-        ["GET \"/api/catalog\""] = "static: the composer's catalog, built in memory",
-        ["GET \"/api/alert-templates\""] = "static: the starter templates, built in memory",
-        ["GET \"/api/views\""] = "definition read: the saved views' summaries (config rows, light)",
-        ["GET \"/api/views/{id:long}\""] = "definition read: one saved view (one config row)",
-        ["GET \"/api/alerts\""] = "definition read: the custom alert rules (config rows, light)",
-        ["GET \"/api/alerts/{id:long}\""] = "definition read: one custom alert rule (one config row)",
-        ["GET \"/api/admin/servers/{id:int}\""] = "admin definition read: one registry row",
-        ["GET DarlingAdminServersReader.Route"] = "admin definition read: the server registry (config rows)",
-        ["POST \"/api/alerts/validate\""] = "validator: parses a rule definition, reads no collected data",
-        ["POST \"/api/views\""] = "write",
-        ["PUT \"/api/views/{id:long}\""] = "write",
-        ["DELETE \"/api/views/{id:long}\""] = "write",
-        ["POST \"/api/alerts\""] = "write",
-        ["PUT \"/api/alerts/{id:long}\""] = "write",
-        ["DELETE \"/api/alerts/{id:long}\""] = "write",
-        ["POST \"/api/mute-rules\""] = "write",
-        ["PATCH \"/api/mute-rules/{id}\""] = "write",
-        ["PUT \"/api/mute-rules/{id}/enabled\""] = "write",
-        ["DELETE \"/api/mute-rules/{id}\""] = "write",
-        ["POST \"/api/servers\""] = "admin write",
-        ["PATCH \"/api/servers/{id:int}\""] = "admin write",
-        ["POST \"/api/alert-history/dismiss\""] = "write",
-        ["POST \"/api/server-tags\""] = "write",
-        ["PATCH \"/api/server-tags/{id:int}\""] = "write",
-        ["DELETE \"/api/server-tags/{id:int}\""] = "write",
-        ["POST \"/api/server-tags/{id:int}/servers\""] = "write",
-        ["DELETE \"/api/server-tags/{id:int}/servers\""] = "write",
+        [WebFile + "GET \"/api/read/\" + name"] = null,
+        [WebFile + "GET \"/api/fleet\""] = null,
+        [WebFile + "GET \"/api/ag\""] = null,
+        ["DarlingTriageEndpoint.cs: GET \"/api/triage\""] = null,
+        ["AlertNotebookEndpoint.cs: GET \"/api/alert-notebook\""] = null,
+        [SweepsFile + "GET \"/api/sweeps\""] = null,
+        [SweepsFile + "GET \"/api/sweeps/latest\""] = null,
+        [SweepsFile + "GET \"/api/sweeps/{id:long}\""] = null,
+        [SweepsFile + "GET \"/api/sweeps/watch-items\""] = null,
+        ["DarlingServerDatabasesEndpoint.cs: GET Route"] = null, // the database picker, /api/server-databases
+        [WebFile + "POST \"/api/compose/run\""] = null,
+        [WebFile + "POST \"/api/alerts/test\""] = null,
+        [WebFile + "GET \"/api/catalog\""] = null, // round 2, L5: it reads the schedule overrides and resolves ?server=
+        [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
+        [WebFile + "GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
+        [WebFile + "GET \"/api/session\""] = "the seat's capability probe: reads no store",
+        [WebFile + "GET \"/api/alert-templates\""] = "static: the starter templates, built in memory",
+        [WebFile + "GET \"/api/views\""] = "definition read: the saved views' summaries (config rows, light)",
+        [WebFile + "GET \"/api/views/{id:long}\""] = "definition read: one saved view (one config row)",
+        [WebFile + "GET \"/api/alerts\""] = "definition read: the custom alert rules (config rows, light)",
+        [WebFile + "GET \"/api/alerts/{id:long}\""] = "definition read: one custom alert rule (one config row)",
+        [WebFile + "GET \"/api/admin/servers/{id:int}\""] = "admin definition read: one registry row",
+        [WebFile + "GET DarlingAdminServersReader.Route"] = "admin definition read: the server registry (config rows)",
+        [WebFile + "POST \"/api/alerts/validate\""] = "validator: parses a rule definition, reads no collected data",
+        [WebFile + "POST \"/api/views\""] = "write",
+        [WebFile + "PUT \"/api/views/{id:long}\""] = "write",
+        [WebFile + "DELETE \"/api/views/{id:long}\""] = "write",
+        [WebFile + "POST \"/api/alerts\""] = "write",
+        [WebFile + "PUT \"/api/alerts/{id:long}\""] = "write",
+        [WebFile + "DELETE \"/api/alerts/{id:long}\""] = "write",
+        [WebFile + "POST \"/api/mute-rules\""] = "write",
+        [WebFile + "PATCH \"/api/mute-rules/{id}\""] = "write",
+        [WebFile + "PUT \"/api/mute-rules/{id}/enabled\""] = "write",
+        [WebFile + "DELETE \"/api/mute-rules/{id}\""] = "write",
+        [WebFile + "POST \"/api/servers\""] = "admin write",
+        [WebFile + "PATCH \"/api/servers/{id:int}\""] = "admin write",
+        [WebFile + "POST \"/api/alert-history/dismiss\""] = "write",
+        [WebFile + "POST \"/api/server-tags\""] = "write",
+        [WebFile + "PATCH \"/api/server-tags/{id:int}\""] = "write",
+        [WebFile + "DELETE \"/api/server-tags/{id:int}\""] = "write",
+        [WebFile + "POST \"/api/server-tags/{id:int}/servers\""] = "write",
+        [WebFile + "DELETE \"/api/server-tags/{id:int}/servers\""] = "write",
     };
+
+    /// <summary>The service's own source files, as (path relative to the service folder, text).</summary>
+    private static IEnumerable<(string File, string Source)> ServiceSources() =>
+        Directory.EnumerateFiles(ServiceDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                        && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Select(f => (Path.GetRelativePath(ServiceDir, f).Replace(Path.DirectorySeparatorChar, '/'), File.ReadAllText(f)));
 
     [Fact]
     public void EveryMappedRoute_IsAdmittedOrExemptWithAReason()
     {
-        var mapCall = new System.Text.RegularExpressions.Regex(@"\.Map(Get|Post|Put|Delete|Patch)\(\s*([^,]+?)\s*,");
-        var found = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var file in Directory.EnumerateFiles(ServiceDir, "*.cs", SearchOption.AllDirectories)
-                     .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                                 && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)))
-        {
-            var source = File.ReadAllText(file);
-            var matches = mapCall.Matches(source);
-            for (var i = 0; i < matches.Count; i++)
-            {
-                var match = matches[i];
-                var lineStart = source.LastIndexOf('\n', match.Index) + 1;
-                if (source.AsSpan(lineStart, match.Index - lineStart).TrimStart().StartsWith("//", StringComparison.Ordinal)
-                    || source.AsSpan(lineStart, match.Index - lineStart).TrimStart().StartsWith("*", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                var key = match.Groups[1].Value.ToUpperInvariant() + " " + match.Groups[2].Value;
-                var end = i + 1 < matches.Count ? matches[i + 1].Index : source.Length;
-                found[key] = source.Substring(match.Index, end - match.Index);
-            }
-        }
-
+        var found = MappedRouteHandlers(ServiceSources());
         Assert.Equal(MappedRoutes.Keys.OrderBy(k => k, StringComparer.Ordinal), found.Keys.OrderBy(k => k, StringComparer.Ordinal));
         foreach (var (route, reason) in MappedRoutes)
         {
@@ -260,6 +252,191 @@ public sealed class ReadAdmissionCoverageCensusTests
                 Assert.False(string.IsNullOrWhiteSpace(reason));
             }
         }
+    }
+
+    /// <summary>Round 2, L5: a second map of a route already on the roster, in another file, is a key of its own and fails the
+    /// roster check; a handler's text ends at its own map call, so an admit in a helper below it does not count.</summary>
+    [Fact]
+    public void TheCensus_CatchesASecondMapOfTheSameRouteInAnotherFile()
+    {
+        /* Members only, with no type declaration: the guard-stage scanner reads this file's text, and must not take the
+           planted text for a type of its own. */
+        const string secondMap = """
+            internal static void MapSecond(WebApplication app) =>
+                app.MapGet("/api/fleet", async (HttpContext context) => Results.Json(new { note = "a ) in a string, and '(' too" }));
+
+            private static Task AdmitBelow(HttpContext context) => DarlingWebEndpoints.AdmitWebRouteAsync(null, "x", "none", context);
+            """;
+        var found = MappedRouteHandlers(ServiceSources().Append(("SecondMap.cs", secondMap)));
+
+        Assert.Contains(WebFile + "GET \"/api/fleet\"", found.Keys);
+        var second = Assert.Single(found, f => f.Key == "SecondMap.cs: GET \"/api/fleet\"").Value;
+        Assert.DoesNotContain("AdmitWebRouteAsync(", second, StringComparison.Ordinal);
+        Assert.EndsWith("too\" }))", second, StringComparison.Ordinal);
+        Assert.NotEqual(MappedRoutes.Keys.OrderBy(k => k, StringComparer.Ordinal), found.Keys.OrderBy(k => k, StringComparer.Ordinal));
+    }
+
+    /// <summary>Every <c>Map*</c> call in <paramref name="sources"/>, keyed <c>file: METHOD route</c>, with the text of the
+    /// call itself (from <c>.Map</c> to its closing parenthesis). A call whose parentheses do not balance, or a key mapped
+    /// twice in one file, fails here.</summary>
+    private static Dictionary<string, string> MappedRouteHandlers(IEnumerable<(string File, string Source)> sources)
+    {
+        var mapCall = new System.Text.RegularExpressions.Regex(@"\.Map(Get|Post|Put|Delete|Patch)\(\s*([^,]+?)\s*,");
+        var found = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (file, source) in sources)
+        {
+            var matches = mapCall.Matches(source);
+            for (var i = 0; i < matches.Count; i++)
+            {
+                var match = matches[i];
+                var lineStart = source.LastIndexOf('\n', match.Index) + 1;
+                if (source.AsSpan(lineStart, match.Index - lineStart).TrimStart().StartsWith("//", StringComparison.Ordinal)
+                    || source.AsSpan(lineStart, match.Index - lineStart).TrimStart().StartsWith("*", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var key = file + ": " + match.Groups[1].Value.ToUpperInvariant() + " " + match.Groups[2].Value;
+                var open = match.Index + 4 + match.Groups[1].Length;
+                var end = EndOfCall(source, open);
+                Assert.True(end > open, $"{key}: the census could not find where its map call ends");
+                Assert.True(found.TryAdd(key, source.Substring(match.Index, end - match.Index)), $"{key} is mapped twice in one file");
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>The index just past the parenthesis that closes the one at <paramref name="open"/>, or -1. Comments, string
+    /// literals (regular, verbatim, raw and interpolated, with the holes of an interpolated one read as code) and character
+    /// literals are skipped, so a parenthesis inside one is not counted.</summary>
+    internal static int EndOfCall(string source, int open)
+    {
+        var close = Matching(source, open, '(', ')');
+        return close < 0 ? -1 : close + 1;
+    }
+
+    private static int Matching(string s, int open, char opener, char closer)
+    {
+        var depth = 0;
+        for (var i = open; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (c == '/' && i + 1 < s.Length && s[i + 1] == '/')
+            {
+                i = s.IndexOf('\n', i);
+                if (i < 0)
+                {
+                    return -1;
+                }
+            }
+            else if (c == '/' && i + 1 < s.Length && s[i + 1] == '*')
+            {
+                i = s.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                if (i < 0)
+                {
+                    return -1;
+                }
+
+                i++;
+            }
+            else if (c == '\'')
+            {
+                i = s.IndexOf('\'', i + (i + 1 < s.Length && s[i + 1] == '\\' ? 3 : 2));
+                if (i < 0)
+                {
+                    return -1;
+                }
+            }
+            else if (c == '"' || ((c == '$' || c == '@') && StringStart(s, i) >= 0))
+            {
+                i = EndOfString(s, i);
+                if (i < 0)
+                {
+                    return -1;
+                }
+            }
+            else if (c == opener)
+            {
+                depth++;
+            }
+            else if (c == closer && --depth == 0)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>The index of the first quote of a string literal whose prefix (<c>$</c>, <c>@</c>) starts at
+    /// <paramref name="i"/>, or -1 when no quote follows the prefix.</summary>
+    private static int StringStart(string s, int i)
+    {
+        var j = i;
+        while (j < s.Length && (s[j] == '$' || s[j] == '@'))
+        {
+            j++;
+        }
+
+        return j < s.Length && s[j] == '"' ? j : -1;
+    }
+
+    /// <summary>The index of the last character of the string literal that starts at <paramref name="i"/>, or -1.</summary>
+    private static int EndOfString(string s, int i)
+    {
+        var quote = s[i] == '"' ? i : StringStart(s, i);
+        var prefix = s.AsSpan(i, quote - i);
+        var verbatim = prefix.Contains('@');
+        var interpolated = prefix.Contains('$');
+        var quotes = 0;
+        while (quote + quotes < s.Length && s[quote + quotes] == '"')
+        {
+            quotes++;
+        }
+
+        if (quotes >= 3)
+        {
+            var end = s.IndexOf(new string('"', quotes), quote + quotes, StringComparison.Ordinal);
+            return end < 0 ? -1 : end + quotes - 1;
+        }
+
+        for (var k = quote + 1; k < s.Length; k++)
+        {
+            var c = s[k];
+            if (!verbatim && c == '\\')
+            {
+                k++;
+            }
+            else if (c == '"')
+            {
+                if (verbatim && k + 1 < s.Length && s[k + 1] == '"')
+                {
+                    k++;
+                }
+                else
+                {
+                    return k;
+                }
+            }
+            else if (interpolated && c == '{')
+            {
+                if (k + 1 < s.Length && s[k + 1] == '{')
+                {
+                    k++;
+                }
+                else
+                {
+                    k = Matching(s, k, '{', '}');
+                    if (k < 0)
+                    {
+                        return -1;
+                    }
+                }
+            }
+        }
+
+        return -1;
     }
 }
 
