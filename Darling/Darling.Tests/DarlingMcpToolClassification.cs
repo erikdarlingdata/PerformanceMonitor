@@ -38,7 +38,7 @@ internal static class DarlingMcpToolClassification
         "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom",
         "get_health_parser_scheduler_issues", "get_health_parser_severe_errors",
         "get_health_parser_significant_waits", "get_health_parser_system_health", "get_index_usage",
-        "get_job_history", "get_latch_stats", "get_lock_wait_trend", "get_long_query_completions",
+        "get_investigation_reports", "get_job_history", "get_latch_stats", "get_lock_wait_trend", "get_long_query_completions",
         "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats",
         "get_memory_trend", "get_mute_rules", "get_notification_routes", "get_object_locking",
         "get_oversized_plan_backlog", "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health",
@@ -61,7 +61,7 @@ internal static class DarlingMcpToolClassification
         "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
         "get_top_procedures_by_cpu", "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags",
         "get_wait_stats", "get_wait_trend", "get_wait_types", "get_waiting_tasks", "list_custom_alert_rules",
-        "list_custom_alert_templates", "list_custom_views", "list_servers", "run_custom_view_panel",
+        "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_servers", "run_custom_view_panel",
         "test_custom_alert_rule", "validate_custom_alert_rule", "validate_custom_view",
     };
 }

@@ -816,12 +816,14 @@ public sealed class DarlingMcpAlertTools
     }
 
     /// <summary>
-    /// The refusal for a route that carries an agent level (#5632 Phase A): an agent route decides which alerts open
+    /// The refusal for an agent route (#5632 Phase A): a route whose agent_level is 1 or more decides which alerts open
     /// investigations, and the agent tools are served over this same listener, so it is changed only by a person in the
-    /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route.
+    /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route,
+    /// including agent_level 0: that is the route's explicit Off (null inherits, 0 is off, 1 investigates), so it opens
+    /// no investigation and is an ordinary route to enable, disable or delete.
     /// </summary>
     internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
-        route.AgentLevel is null
+        route.AgentLevel is null or < 1
             ? null
             : Outcome("refused",
                 $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +

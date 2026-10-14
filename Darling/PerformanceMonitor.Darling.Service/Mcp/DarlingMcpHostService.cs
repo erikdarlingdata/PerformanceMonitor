@@ -585,29 +585,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
                why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
                front of every request cover them as they cover the writes, since they are only served with a token. */
-            if (DarlingMcpWritePolicy.InvestigationsConflict(config.Mcp))
-            {
-                _logger.LogCritical(DarlingMcpWritePolicy.InvestigationConflictLine);
-            }
-            else if (config.Mcp.AllowInvestigations)
-            {
-                if (!writes.Investigations)
-                {
-                    _logger.LogCritical(
-                        "{Setting} is on but no usable bearer token is available{Problem} — the investigation tools stay off. Set " +
-                        "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters.",
-                        DarlingMcpWritePolicy.InvestigationsSetting,
-                        writeTokenProblem is null ? "" : " (the token " + writeTokenProblem + ")",
-                        DarlingHostBinding.MinimumTokenLength);
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "MCP investigation tools are ON ({Setting}): claim_investigation_request and submit_investigation_report " +
-                        "write investigation state; every MCP request, loopback included, must present the bearer token.",
-                        DarlingMcpWritePolicy.InvestigationsSetting);
-                }
-            }
+            LogInvestigationsGate(_logger, config.Mcp, writes, writeTokenProblem);
 
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck
                and the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
@@ -946,6 +924,41 @@ public sealed class DarlingMcpHostService : BackgroundService
         });
         PinForwardedHeadersOff(builder.Services);
         return builder;
+    }
+
+    /// <summary>
+    /// The start's log lines for the investigation tools (#5632 Phase A, ruling R2), one decision for the start and the
+    /// tests. Both <c>mcp.allowInvestigations</c> and <c>mcp.allowWrites</c> on: exactly one Critical line,
+    /// <see cref="DarlingMcpWritePolicy.InvestigationConflictLine"/>, and the tools stay off. Investigations on with no
+    /// usable token: a Critical line naming the token. Served: one Warning that every request must present the token.
+    /// Investigations off: nothing.
+    /// </summary>
+    internal static void LogInvestigationsGate(
+        ILogger logger, McpConfig mcp, DarlingMcpWritePolicy.Effective served, string? tokenProblem)
+    {
+        if (DarlingMcpWritePolicy.InvestigationsConflict(mcp))
+        {
+            logger.LogCritical(DarlingMcpWritePolicy.InvestigationConflictLine);
+        }
+        else if (mcp.AllowInvestigations)
+        {
+            if (!served.Investigations)
+            {
+                logger.LogCritical(
+                    "{Setting} is on but no usable bearer token is available{Problem}: the investigation tools stay off. Set " +
+                    "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters.",
+                    DarlingMcpWritePolicy.InvestigationsSetting,
+                    tokenProblem is null ? "" : " (the token " + tokenProblem + ")",
+                    DarlingHostBinding.MinimumTokenLength);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "MCP investigation tools are ON ({Setting}): claim_investigation_request and submit_investigation_report " +
+                    "write investigation state; every MCP request, loopback included, must present the bearer token.",
+                    DarlingMcpWritePolicy.InvestigationsSetting);
+            }
+        }
     }
 
     /// <summary>
