@@ -81,6 +81,27 @@ public sealed class McpToolLatencyRecordingTests
             return "probe-ok";
         }
 
+        /// <summary>#5506 part 3: counts its runs and waits for <see cref="JsonHold"/>, so the read cache tests see whether
+        /// the tool ran.</summary>
+        internal static int JsonRuns;
+
+        internal static TaskCompletionSource JsonHold = CompletedHold();
+
+        internal static TaskCompletionSource CompletedHold()
+        {
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            done.SetResult();
+            return done;
+        }
+
+        [McpServerTool(Name = "latency_probe_json"), Description("Test-only: answers a JSON object that names its run.")]
+        public static async Task<string> ProbeJson([Description("Hours.")] int hours_back = 24)
+        {
+            var run = System.Threading.Interlocked.Increment(ref JsonRuns);
+            await JsonHold.Task;
+            return "{\"rows\":[" + hours_back + "],\"run\":" + run + "}";
+        }
+
         [McpServerTool(Name = "latency_probe_timeout"), Description("Test-only: answers the 57014 statement-timeout envelope.")]
         public static string ProbeTimeout() =>
             PerformanceMonitor.Common.McpHelpers.FormatError(
@@ -132,6 +153,92 @@ public sealed class McpToolLatencyRecordingTests
 
         await app.StartAsync();
         return app.GetTestServer();
+    }
+
+    private static Task<(int StatusCode, string Body)> ToolsCallAsync(TestServer server, string path, string toolName, string arguments)
+    {
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"" + toolName + "\",\"arguments\":" + arguments + "}}";
+        return SendJsonRpcAsync(server, path, requestBody);
+    }
+
+    /// <summary>#5506 part 3: an admission, cache on, that classifies <c>latency_probe_json</c> as heavy in every band.</summary>
+    private static ReadAdmission CachingAdmission()
+    {
+        var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
+        var table = new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long>();
+        foreach (var band in new[] { ReadWindowBand.None, ReadWindowBand.OneHour, ReadWindowBand.OneDay, ReadWindowBand.SevenDays, ReadWindowBand.Longer })
+        {
+            table[(ReadSurface.Mcp, "latency_probe_json", band)] = 5_000;
+        }
+
+        admission.SetTable(table);
+        return admission;
+    }
+
+    [Fact]
+    public async Task ReadCache_AHeavyRead_IsAnsweredFromMemory_TheSecondTime_WithNoToolRun()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = CachingAdmission();
+        using var server = await BuildServer(readLatency, admission: admission);
+        LatencyProbeTools.JsonHold = LatencyProbeTools.CompletedHold();
+        var before = LatencyProbeTools.JsonRuns;
+
+        /* The number forms and the omitted default are pinned in ReadCacheKeyTests (the guard refuses 24.0 for an int, and a probe tool is not in the host's
+           recorded parameter defaults). */
+        var first = await ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":24}");
+        var second = await ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":24}");
+        var third = await ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":24}");
+
+        Assert.Equal(before + 1, LatencyProbeTools.JsonRuns);
+        Assert.Contains("run", first.Body, StringComparison.Ordinal);
+        Assert.Equal(first.Body, second.Body);
+        Assert.Equal(first.Body, third.Body);
+
+        var drained = readLatency.Drain().Where(d => d.Route == "latency_probe_json").ToList();
+        Assert.Equal(1, Assert.Single(drained, d => d.Outcome == ReadOutcome.Ok).Count);
+        Assert.Equal(2, Assert.Single(drained, d => d.Outcome == ReadOutcome.CacheHit).Count);
+        var stats = Assert.Single(admission.Stats().Routes, r => r.Route == "latency_probe_json");
+        Assert.Equal((2L, 1L), (stats.CacheHits, stats.CacheMisses));
+    }
+
+    [Fact]
+    public async Task ReadCache_TwoIdenticalMisses_RunOneRead_AndTheJoinedCallRecordsCacheHit()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = CachingAdmission();
+        using var server = await BuildServer(readLatency, admission: admission);
+        LatencyProbeTools.JsonHold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var before = LatencyProbeTools.JsonRuns;
+
+        var first = ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":168}");
+        await WaitUntil(() => LatencyProbeTools.JsonRuns == before + 1);
+        var second = ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":168}");
+        await Task.Delay(200);
+        LatencyProbeTools.JsonHold.SetResult();
+        var answers = await Task.WhenAll(first, second);
+
+        Assert.Equal(before + 1, LatencyProbeTools.JsonRuns);
+        Assert.Equal(answers[0].Body, answers[1].Body);
+        var drained = readLatency.Drain().Where(d => d.Route == "latency_probe_json").ToList();
+        Assert.Equal(1, Assert.Single(drained, d => d.Outcome == ReadOutcome.Ok).Count);
+        Assert.Equal(1, Assert.Single(drained, d => d.Outcome == ReadOutcome.CacheHit).Count);
+    }
+
+    [Fact]
+    public async Task ReadCache_ALightRead_IsNeverCached()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
+        using var server = await BuildServer(readLatency, admission: admission);
+        LatencyProbeTools.JsonHold = LatencyProbeTools.CompletedHold();
+        var before = LatencyProbeTools.JsonRuns;
+
+        await ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":1}");
+        await ToolsCallAsync(server, "/", "latency_probe_json", "{\"hours_back\":1}");
+
+        Assert.Equal(before + 2, LatencyProbeTools.JsonRuns);
+        Assert.DoesNotContain(admission.Stats().Routes, r => r.Route == "latency_probe_json" && (r.CacheHits > 0 || r.CacheMisses > 0));
     }
 
     private static Task<(int StatusCode, string Body)> ToolsCallAsync(TestServer server, string path, string toolName)
@@ -334,6 +441,8 @@ public sealed class McpToolLatencyRecordingTests
     private static ReadAdmission HeavyAdmission(ReadSurface surface, string route, string band)
     {
         var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
+        /* #5506 part 3: these tests measure admission; with the read cache on, identical calls would share one read. */
+        admission.Cache.Enabled = false;
         admission.SetTable(new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long> { [(surface, route, band)] = 2_000 });
         return admission;
     }

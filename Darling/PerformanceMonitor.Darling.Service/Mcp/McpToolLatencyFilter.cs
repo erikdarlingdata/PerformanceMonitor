@@ -8,6 +8,7 @@
 
 using System;
 using System.Diagnostics;
+using System.Threading;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
@@ -106,46 +107,151 @@ public sealed class McpToolLatencyFilter
             readScope.Scope.CaptureStatements = true;
             var windowBand = WindowBandOf(request);
 
-            /* #5506 part 3: admission, after the scope and the band. A refused read answers busy and records busy; a caller
-               that leaves the queue records cancelled; a queued read records its wait as one queue_wait sample. The
-               recorded elapsed time starts after admission (D1), so the read's own percentiles never hold queue time. */
-            using var ticket = _admission is null || !ReadAdmission.IsAdmitted(toolName)
-                ? ReadAdmissionTicket.Passed
-                : await _admission.AdmitAsync(ReadSurface.Mcp, toolName, windowBand, cancellationToken);
-            if (ticket.Refusal is { } refusal)
+            /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
+               or runs once and is stored. A hit skips admission. */
+            if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand))
             {
-                Record(toolName, ReadOutcome.Busy, ticket.QueueMs ?? 0, windowBand, readScope.Scope, caller);
-                return BusyResult(refusal);
+                return await ServeCachedAsync(admission, next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
             }
 
-            if (ticket.CallerLeft)
+            var answer = await RunReadAsync(next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
+
+            /* A successful write, or a successful unanchored analyze_server (it stores findings, D5), makes every cached
+               answer stored before it unreachable. */
+            if (_admission is not null && MovesGeneration(toolName, request.Params?.Arguments, answer))
             {
-                Record(toolName, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, windowBand, readScope.Scope, caller);
-                throw new OperationCanceledException(cancellationToken);
+                _admission.Cache.BumpGeneration();
             }
 
-            if (ticket.QueueMs is { } queueMs)
-            {
-                Record(toolName, ReadOutcome.QueueWait, queueMs, windowBand, readScope.Scope, caller);
-            }
-
-            var stopwatch = Stopwatch.StartNew();
-            try
-            {
-                var result = await next(request, cancellationToken);
-                var outcome = ReadScope.Resolve(ClassifyResult(result, cancellationToken), readScope.Fallback);
-                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope, caller);
-                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome), caller);
-                return result;
-            }
-            catch (Exception ex)
-            {
-                var outcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, cancellationToken), readScope.Fallback);
-                Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, readScope.Scope, caller);
-                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, SlowReadLog.ErrorClassOf(ex), caller);
-                throw;
-            }
+            return answer;
         };
+
+    /// <summary>The read itself: admission, then the tool, recording the outcome. A cached read runs it once for every
+    /// caller waiting on it, under the flight's token.</summary>
+    private async Task<CallToolResult> RunReadAsync(McpRequestHandler<CallToolRequestParams, CallToolResult> next,
+        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, ReadScope scope, string caller,
+        CancellationToken cancellationToken)
+    {
+        /* #5506 part 3: admission, after the scope and the band. A refused read answers busy and records busy; a caller
+           that leaves the queue records cancelled; a queued read records its wait as one queue_wait sample. The
+           recorded elapsed time starts after admission (D1), so the read's own percentiles never hold queue time. */
+        using var ticket = _admission is null || !ReadAdmission.IsAdmitted(toolName)
+            ? ReadAdmissionTicket.Passed
+            : await _admission.AdmitAsync(ReadSurface.Mcp, toolName, windowBand, cancellationToken);
+        if (ticket.Refusal is { } refusal)
+        {
+            Record(toolName, ReadOutcome.Busy, ticket.QueueMs ?? 0, windowBand, scope, caller);
+            return BusyResult(refusal);
+        }
+
+        if (ticket.CallerLeft)
+        {
+            Record(toolName, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, windowBand, scope, caller);
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        if (ticket.QueueMs is { } queueMs)
+        {
+            Record(toolName, ReadOutcome.QueueWait, queueMs, windowBand, scope, caller);
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var result = await next(request, cancellationToken);
+            var outcome = ReadScope.Resolve(ClassifyResult(result, cancellationToken), scope.Fallback);
+            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
+            OfferSlow(scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome), caller);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            var outcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, cancellationToken), scope.Fallback);
+            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
+            OfferSlow(scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, SlowReadLog.ErrorClassOf(ex), caller);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// #5506 part 3: a heavy read through the read cache. A stored answer is returned at once and records
+    /// <c>cache_hit</c>. Otherwise the caller joins the identical read running now, or starts it (D6): the caller that
+    /// starts it records the read's real outcome through <see cref="RunReadAsync"/>; a caller that joined records
+    /// <c>cache_hit</c> with its own elapsed time when the answer is a success, or the outcome it received.
+    /// </summary>
+    private async Task<CallToolResult> ServeCachedAsync(ReadAdmission admission, McpRequestHandler<CallToolRequestParams, CallToolResult> next,
+        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, ReadScope scope, string caller,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var cache = admission.Cache;
+        var gcf = (request.Services?.GetService(typeof(IGcfOutputFormat)) as IGcfOutputFormat)?.Enabled ?? GcfOutput.Enabled;
+        var types = request.Services?.GetService(typeof(McpToolParameterTypes)) as McpToolParameterTypes;
+        var ttl = ReadResultCache.TtlOf(windowBand);
+        var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl);
+        if (cache.TryGet(key, out var stored))
+        {
+            admission.NoteCacheHit(ReadSurface.Mcp, toolName);
+            Record(toolName, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
+            return TextResult(stored);
+        }
+
+        var flight = cache.Join(key, ttl, token => RunReadAsync(next, request, toolName, windowBand, scope, caller, token),
+            result => CacheableText(result, gcf));
+        if (flight.IsLead)
+        {
+            admission.NoteCacheMiss(ReadSurface.Mcp, toolName);
+            return await flight.WaitAsync(cancellationToken);
+        }
+
+        try
+        {
+            var shared = await flight.WaitAsync(cancellationToken);
+            var outcome = ClassifyResult(shared, cancellationToken);
+            if (outcome == ReadOutcome.Ok && !IsBusyEnvelope(shared))
+            {
+                admission.NoteCacheHit(ReadSurface.Mcp, toolName);
+                outcome = ReadOutcome.CacheHit;
+            }
+            else if (IsBusyEnvelope(shared))
+            {
+                outcome = ReadOutcome.Busy;
+            }
+
+            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
+            return CacheableText(shared, gcf) is { } text ? TextResult(text) : shared;
+        }
+        catch (Exception ex)
+        {
+            Record(toolName, ReadOutcomeClassifier.Classify(ex, cancellationToken), stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
+            throw;
+        }
+    }
+
+    /// <summary>The text of a result the cache may store: one plain text block, no error flag, no structured content or
+    /// metadata, and text <see cref="ReadResultCache.IsCacheableText"/> accepts. Null for anything else.</summary>
+    internal static string? CacheableText(CallToolResult result, bool gcf) =>
+        result.IsError != true && result.StructuredContent is null && result.Meta is null
+        && result.Content is { Count: 1 } content && content[0] is TextContentBlock { Meta: null, Annotations: null } text
+        && ReadResultCache.IsCacheableText(text.Text, gcf)
+            ? text.Text
+            : null;
+
+    private static CallToolResult TextResult(string text) => new()
+    {
+        Content = [new TextContentBlock { Text = text }],
+    };
+
+    /// <summary>Whether a finished call moves the cache's write generation: a successful write tool, or a successful
+    /// <c>analyze_server</c> with no <c>as_of</c> (D5: it stores findings).</summary>
+    internal static bool MovesGeneration(string toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments, CallToolResult result)
+    {
+        var writes = DarlingMcpWritePolicy.IsWrite(toolName)
+            || (string.Equals(toolName, ReadResultCache.AnalyzeServer, StringComparison.Ordinal)
+                && (arguments is null || !arguments.TryGetValue("as_of", out var asOf)
+                    || asOf.ValueKind != System.Text.Json.JsonValueKind.String || string.IsNullOrEmpty(asOf.GetString())));
+        return writes && ClassifyResult(result, CancellationToken.None) == ReadOutcome.Ok;
+    }
 
     /// <summary>#5506 part 3: the MCP answer to a refused read, <c>busy</c> with the error flag set.</summary>
     internal static CallToolResult BusyResult(ReadAdmissionRefusal refusal) => new()

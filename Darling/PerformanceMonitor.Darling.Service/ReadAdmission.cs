@@ -127,7 +127,21 @@ public sealed class ReadAdmission
         _waitCap = waitCap;
         _logger = logger;
         _state = LimiterState.Create(maxHeavyReads);
+        Cache = new ReadResultCache(time);
     }
+
+    /// <summary>#5506 part 3: the process's read cache. It caches only the pairs this classifies as heavy
+    /// (<see cref="IsCached"/>), on the same clock.</summary>
+    internal ReadResultCache Cache { get; }
+
+    /// <summary>Whether an answer of (<paramref name="surface"/>, <paramref name="route"/>, <paramref name="band"/>) is
+    /// served from and stored in <see cref="Cache"/>: a cacheable route (<see cref="ReadResultCache.IsCacheableRoute"/>)
+    /// whose pair is heavy. It does not depend on the limit: with admission off, heavy answers are still cached.</summary>
+    internal bool IsCached(ReadSurface surface, string route, string? band) =>
+        Cache.Enabled
+        && !string.IsNullOrEmpty(route)
+        && ReadResultCache.IsCacheableRoute(route)
+        && IsHeavy(surface, route, string.IsNullOrEmpty(band) ? ReadWindowBand.None : band, out _);
 
     /// <summary>The limit in force (0 = off).</summary>
     internal int Limit => _state.Limit;

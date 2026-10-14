@@ -67,9 +67,12 @@ public sealed class ReadAdmissionCoverageCensusTests
                 var name = Path.GetFileName(file);
                 found[name] = found.GetValueOrDefault(name) + 1;
 
-                /* The admission call comes after the scope and the band, within the next few statements. */
+                /* The admission call comes after the scope and the band, within the next few statements, or (#5506 part 3)
+                   the read cache's dispatch does, whose miss path runs the method that admits
+                   (CacheMissPath_RunsTheMethodThatAdmits). */
                 var window = string.Join("\n", lines.Skip(i + 1).Take(25));
-                if (!window.Contains("AdmitAsync(", StringComparison.Ordinal) && !window.Contains("AdmitWebRouteAsync(", StringComparison.Ordinal))
+                if (!window.Contains("AdmitAsync(", StringComparison.Ordinal) && !window.Contains("AdmitWebRouteAsync(", StringComparison.Ordinal)
+                    && !window.Contains(".IsCached(", StringComparison.Ordinal))
                 {
                     offenders.Add($"{name}:{i + 1}");
                 }
@@ -78,6 +81,21 @@ public sealed class ReadAdmissionCoverageCensusTests
 
         Assert.Empty(offenders);
         Assert.Equal(ScopeSites.OrderBy(p => p.Key), found.OrderBy(p => p.Key));
+    }
+
+    /// <summary>#5506 part 3: a read the cache cannot answer runs through the same method as an uncached one, and that
+    /// method admits it, so only a hit (or a caller that joins a read already admitted) skips admission.</summary>
+    [Theory]
+    [InlineData("Mcp/McpToolLatencyFilter.cs", "private async Task<CallToolResult> RunReadAsync(", "cache.Join(key, ttl, token => RunReadAsync(")]
+    [InlineData("DarlingWebEndpoints.cs", "async Task<WebReadAnswer> RunWebReadAsync()", "return RunWebReadAsync();")]
+    public void CacheMissPath_RunsTheMethodThatAdmits(string file, string method, string joinCall)
+    {
+        var source = File.ReadAllText(Path.Combine(ServiceDir, file));
+        var at = source.IndexOf(method, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"{file} no longer declares {method}");
+        var body = source.Substring(at, Math.Min(2_000, source.Length - at));
+        Assert.Contains("AdmitAsync(", body, StringComparison.Ordinal);
+        Assert.Contains(joinCall, source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -155,6 +173,8 @@ public sealed class ReadAdmissionWebTests
     {
         const string route = "get_notification_routes";
         var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
+        /* #5506 part 3: these tests measure admission; with the read cache on, identical calls would share one read. */
+        admission.Cache.Enabled = false;
         var band = DarlingWebEndpoints.WebWindowBand(route, _ => null);
         admission.SetTable(new Dictionary<(ReadSurface, string, string), long> { [(ReadSurface.Web, route, band)] = 2_000 });
 

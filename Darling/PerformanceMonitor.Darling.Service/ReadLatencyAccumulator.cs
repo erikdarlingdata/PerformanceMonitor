@@ -54,6 +54,10 @@ public enum ReadOutcome
 
     /// <summary>#5506 part 3: a read refused because the long-read slots and their queue were full.</summary>
     Busy,
+
+    /// <summary>#5506 part 3: a read answered from the read cache, or by joining an identical read already running. Its
+    /// elapsed time is the caller's own. Not a store read: the long-read table leaves it out.</summary>
+    CacheHit,
 }
 
 /// <summary>
@@ -95,6 +99,7 @@ public sealed class ReadLatencyAccumulator
         ReadOutcome.GateFailed => "gate_failed",
         ReadOutcome.QueueWait => "queue_wait",
         ReadOutcome.Busy => "busy",
+        ReadOutcome.CacheHit => "cache_hit",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "No stored label for this read outcome."),
     };
 

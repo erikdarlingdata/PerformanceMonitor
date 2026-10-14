@@ -414,7 +414,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
                 var stopwatch = Stopwatch.StartNew();
-                string result;
                 using var readScope = ReadScope.Open(logger);
                 readScope.Scope.CaptureStatements = true;
 
@@ -422,104 +421,171 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                    browser that leaves the queue records cancelled; a queued read records its wait as one queue_wait
                    sample. The recorded elapsed time starts after admission (D1). */
                 var admissionBand = WebWindowBand(name, key => First(context, key));
-                using var ticket = readAdmission is null || !ReadAdmission.IsAdmitted(name)
-                    ? ReadAdmissionTicket.Passed
-                    : await readAdmission.AdmitAsync(ReadSurface.Web, name, admissionBand, context.RequestAborted);
-                if (ticket.Refusal is { } refusal)
+                /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
+                   or runs once and is stored (the text before the statement sweep, which ToHttpResult runs on every answer).
+                   The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
+                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand))
                 {
-                    RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Busy, ticket.QueueMs ?? 0, context, readScope.Scope);
-                    return BusyResult(context, refusal);
-                }
-
-                if (ticket.CallerLeft)
-                {
-                    RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, context, readScope.Scope);
-                    context.RequestAborted.ThrowIfCancellationRequested();
-                }
-
-                if (ticket.QueueMs is { } queueMs)
-                {
-                    RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.QueueWait, queueMs, context, readScope.Scope);
-                }
-
-                stopwatch.Restart();
-                try
-                {
-                    /* #5644 W22: ?hours=abc / ?hours=1.5 (or any other integer knob) was read as the default and answered
-                       200 for a different window than the one asked for, while ?hours=500 got a 400. Refused up front now,
-                       before any tool runs, in the same envelope the range refusals use. */
-                    if (NonIntegerParamRefusal(context) is { } nonIntegerRefusal)
+                    var cache = admission.Cache;
+                    var ttl = ReadResultCache.TtlOf(admissionBand);
+                    var key = ReadCacheKey.ForWeb(name,
+                        context.Request.Query.Select(q => new KeyValuePair<string, string?>(q.Key, q.Value.ToString())),
+                        cache.Generation, cache, ttl);
+                    if (cache.TryGet(key, out var stored))
                     {
-                        return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                        admission.NoteCacheHit(ReadSurface.Web, name);
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        return ToHttpResult(stored, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
                     }
 
-                    /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
-                       taken once here and handed to both the read and the note check. A request with its own anchor
-                       is left as sent. */
-                    var askedAsOf = AsOf(context);
-                    if (askedAsOf is null && WebDataStartNote.CappedByRead.ContainsKey(name))
+                    /* D6: the read runs once, on the first caller's request, under the flight's token, which is cancelled only
+                       when every caller waiting for it has left; each caller waits with its own. */
+                    var callerAborted = context.RequestAborted;
+                    var joinedAt = Stopwatch.StartNew();
+                    var flight = cache.Join(key, ttl, token =>
                     {
-                        askedAsOf = WebDataStartNote.FormatWindowEnd(DateTime.UtcNow);
-                        context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);
+                        context.RequestAborted = token;
+                        return RunWebReadAsync();
+                    }, read => read.Text);
+                    if (flight.IsLead)
+                    {
+                        admission.NoteCacheMiss(ReadSurface.Web, name);
+                        return (await flight.WaitAsync(callerAborted)).Answer;
                     }
 
-                    result = await handler(context, postgres, analysis);
+                    try
+                    {
+                        var shared = await flight.WaitAsync(callerAborted);
+                        var joinedOutcome = shared.Outcome;
+                        if (shared.Text is not null || shared.Outcome == ReadOutcome.Ok)
+                        {
+                            admission.NoteCacheHit(ReadSurface.Web, name);
+                            joinedOutcome = ReadOutcome.CacheHit;
+                        }
 
-                    /* #5644 W22: the tools' own window parameter is hours_back, but a web caller sends hours; a refusal for an
-                       out-of-range one (?hours=-5, ?hours=500) is worded in the caller's own parameter. */
-                    result = NameWindowParameterTheCallerSent(result, key => First(context, key));
+                        if (joinedOutcome is { } recorded)
+                        {
+                            RecordWebReadLatency(readLatencyRecorder, name, recorded, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
+                        }
 
-                    /* #4966: a grid over a window says where its table's data starts when that is after the window's
-                       start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
-                       failed probe returns the tool's answer as it was. */
-                    var askedHours = QueryInt(context, "hours", "hours_back", 0);
-                    result = await WebDataStartNote.AddAsync(
-                        postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
+                        return shared.Text is { } text
+                            ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted)
+                            : shared.Answer;
+                    }
+                    catch (Exception ex)
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcomeClassifier.Classify(ex, callerAborted), joinedAt.ElapsedMilliseconds, context, readScope.Scope);
+                        throw;
+                    }
                 }
-                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+
+                return (await RunWebReadAsync()).Answer;
+
+                async Task<WebReadAnswer> RunWebReadAsync()
                 {
-                    /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
-                       top-of-pipeline backstop (which already owns this exact classification) sees the same
-                       exception rather than this catch turning it into a written body for a caller who is gone. */
-                    throw;
+                    string result;
+                    using var ticket = readAdmission is null || !ReadAdmission.IsAdmitted(name)
+                        ? ReadAdmissionTicket.Passed
+                        : await readAdmission.AdmitAsync(ReadSurface.Web, name, admissionBand, context.RequestAborted);
+                    if (ticket.Refusal is { } refusal)
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Busy, ticket.QueueMs ?? 0, context, readScope.Scope);
+                        return new WebReadAnswer(BusyResult(context, refusal), null, ReadOutcome.Busy);
+                    }
+
+                    if (ticket.CallerLeft)
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, context, readScope.Scope);
+                        context.RequestAborted.ThrowIfCancellationRequested();
+                    }
+
+                    if (ticket.QueueMs is { } queueMs)
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.QueueWait, queueMs, context, readScope.Scope);
+                    }
+
+                    stopwatch.Restart();
+                    try
+                    {
+                        /* #5644 W22: ?hours=abc / ?hours=1.5 (or any other integer knob) was read as the default and answered
+                           200 for a different window than the one asked for, while ?hours=500 got a 400. Refused up front now,
+                           before any tool runs, in the same envelope the range refusals use. */
+                        if (NonIntegerParamRefusal(context) is { } nonIntegerRefusal)
+                        {
+                            return new WebReadAnswer(ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted), null, null);
+                        }
+
+                        /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
+                           taken once here and handed to both the read and the note check. A request with its own anchor
+                           is left as sent. */
+                        var askedAsOf = AsOf(context);
+                        if (askedAsOf is null && WebDataStartNote.CappedByRead.ContainsKey(name))
+                        {
+                            askedAsOf = WebDataStartNote.FormatWindowEnd(DateTime.UtcNow);
+                            context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);
+                        }
+
+                        result = await handler(context, postgres, analysis);
+
+                        /* #5644 W22: the tools' own window parameter is hours_back, but a web caller sends hours; a refusal for an
+                           out-of-range one (?hours=-5, ?hours=500) is worded in the caller's own parameter. */
+                        result = NameWindowParameterTheCallerSent(result, key => First(context, key));
+
+                        /* #4966: a grid over a window says where its table's data starts when that is after the window's
+                           start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
+                           failed probe returns the tool's answer as it was. */
+                        var askedHours = QueryInt(context, "hours", "hours_back", 0);
+                        result = await WebDataStartNote.AddAsync(
+                            postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
+                    }
+                    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                    {
+                        /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
+                           top-of-pipeline backstop (which already owns this exact classification) sees the same
+                           exception rather than this catch turning it into a written body for a caller who is gone. */
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
+                           (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
+                        context.RequestAborted.ThrowIfCancellationRequested();
+
+                        /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
+                           McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
+                           Reported and answered directly from the real Exception here — ServerErrorResult's
+                           sentence-based classifier is for the FAR more common case below, where the exception is
+                           already gone by the time a tool's own catch handed back its envelope. Answering here
+                           too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
+                           routing this through FormatError first would make ToHttpResult's classifier re-derive
+                           from text what this catch already knows structurally, and log it a second time. */
+                        DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                        var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
+                        RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
+                        return new WebReadAnswer(Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex)), null, thrownOutcome);
+                    }
+
+                    /* #4442 scope 2: recorded on BOTH arms of this loop -- here for a tool result that made it
+                       back as a string (success, or a tool's own caught-and-formatted failure), above for a
+                       binding-layer throw the try/catch above answers directly. ClassifyToolResponse's
+                       ServerError arm is the only shape that can carry a 57014 sentence (a tool that caught its
+                       own statement_timeout and formatted it); everything else that reaches here is Ok. */
+                    var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
+                        ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
+                        : ReadOutcome.Ok;
+                    var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
+                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                    OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
+                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
+
+                    /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
+                    ThrowIfCallerGone(result, context.RequestAborted);
+                    var cacheable = resolvedOutcome == ReadOutcome.Ok && ClassifyToolResponse(result) == ToolResponseKind.JsonPassthrough
+                        && ReadResultCache.IsCacheableText(result, gcf: false);
+                    return new WebReadAnswer(ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted),
+                        cacheable ? result : null, resolvedOutcome);
                 }
-                catch (Exception ex)
-                {
-                    /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
-                       (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
-                    context.RequestAborted.ThrowIfCancellationRequested();
-
-                    /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
-                       McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
-                       Reported and answered directly from the real Exception here — ServerErrorResult's
-                       sentence-based classifier is for the FAR more common case below, where the exception is
-                       already gone by the time a tool's own catch handed back its envelope. Answering here
-                       too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
-                       routing this through FormatError first would make ToHttpResult's classifier re-derive
-                       from text what this catch already knows structurally, and log it a second time. */
-                    DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
-                    var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
-                    RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
-                    OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
-                    return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
-                }
-
-                /* #4442 scope 2: recorded on BOTH arms of this loop -- here for a tool result that made it
-                   back as a string (success, or a tool's own caught-and-formatted failure), above for a
-                   binding-layer throw the try/catch above answers directly. ClassifyToolResponse's
-                   ServerError arm is the only shape that can carry a 57014 sentence (a tool that caught its
-                   own statement_timeout and formatted it); everything else that reaches here is Ok. */
-                var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
-                    ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
-                    : ReadOutcome.Ok;
-                var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
-                RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
-                OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
-                    resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
-
-                /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
-                ThrowIfCallerGone(result, context.RequestAborted);
-                return ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             });
         }
 
@@ -6250,6 +6316,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /* ─────────────────────────── response mapping ─────────────────────────── */
+
+    /// <summary>#5506 part 3: one web read's answer: what the caller gets, the text the read cache may store (null when
+    /// it may not), and the outcome a caller that joined the read records (null when the read recorded nothing).</summary>
+    private sealed record WebReadAnswer(IResult Answer, string? Text, ReadOutcome? Outcome);
 
     /// <summary>How a tool's returned string maps to an HTTP outcome — the four kinds of outcome a tool has
     /// (data or a miss; a failure; a refusal; a bare string nothing shapes any more), each with its code.</summary>

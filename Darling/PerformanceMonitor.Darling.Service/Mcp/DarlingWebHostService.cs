@@ -1424,6 +1424,21 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
+        /* #5506 part 3: a successful web write (a 2xx answer to a non-GET /api/* request, except the compose run, the rule
+           validator and the rule test) moves the read cache's write generation, so no cached answer from before it is
+           served again. */
+        if (_readAdmission is { } readAdmission)
+        {
+            app.Use(async (context, next) =>
+            {
+                await next(context);
+                if (ReadResultCache.IsWebWrite(context.Request.Method, context.Request.Path.Value ?? string.Empty, context.Response.StatusCode))
+                {
+                    readAdmission.Cache.BumpGeneration();
+                }
+            });
+        }
+
         DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission);
         app.UseDefaultFiles();
 
