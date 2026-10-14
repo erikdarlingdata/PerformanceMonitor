@@ -17,6 +17,8 @@
     <!-- The plan fetcher connects to the MONITORED SQL Server (same client the Service uses);
          Npgsql and Logging.Abstractions flow transitively from the Storage/Notifications references. -->
     <PackageReference Include="Microsoft.Data.SqlClient" />
+    <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
     <!-- #3838, same reason as the Service project: the Entra providers moved out of the core
          Microsoft.Data.SqlClient package in 7.x and the driver locates them by the assembly being
          PRESENT in the closure. The plan fetcher above opens its SqlConnection on the connection

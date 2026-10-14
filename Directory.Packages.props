@@ -31,6 +31,8 @@
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <PackageVersion Include="ScottPlot.WPF" Version="5.1.59" />
     <PackageVersion Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
+    <!-- #5802: pinned to the patched 10.0.13 until a Microsoft.Data.SqlClient release depends on a patched Pkcs (7.1.1 pulls in 9.0.18); drop the direct references then. -->
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
     <PackageVersion Include="Velopack" Version="1.2.161" />
     <PackageVersion Include="xunit.v3" Version="4.0.2" />

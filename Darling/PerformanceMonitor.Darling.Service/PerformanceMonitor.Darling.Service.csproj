@@ -20,6 +20,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
+    <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
     <!-- #3838: the Entra (Active Directory) authentication providers were split OUT of the core
          Microsoft.Data.SqlClient package in 7.x, so a project that sets
          SqlAuthenticationMethod.ActiveDirectory* on a connection string and does NOT carry this
