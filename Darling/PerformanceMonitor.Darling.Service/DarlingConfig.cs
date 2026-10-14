@@ -1382,6 +1382,18 @@ public sealed class McpConfig
     public bool AllowWindowsAuthOverUnverifiedTls { get; set; }
 
     /// <summary>
+    /// How much collected data the MCP tools hand out (#5632): <c>full</c> (the default, everything as read),
+    /// <c>maskLiterals</c> (statement text, error text and plans keep their shape with every literal replaced;
+    /// parameter values replaced) or <c>metadataOnly</c> (statement text, error text, plans, input buffers and
+    /// parameter values withheld; logins and host names masked). Object and database names, counts, durations, waits,
+    /// times and program names are kept at every level. Applied to every tool answer on this listener by
+    /// <c>McpDataDetailFilter</c>, never inside a reader. An unrecognized value runs as <c>metadataOnly</c> and logs one
+    /// warning at start. File-only and restart-only, like <see cref="AllowWrites"/>.
+    /// </summary>
+    [JsonPropertyName("dataDetail")]
+    public string DataDetail { get; set; } = McpDataDetailModes.DefaultValue;
+
+    /// <summary>
     /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit for the secure
     /// default = loopback-only, tokenless HTTP (today's behavior). Managed-mode only; ignored in BYO
     /// with a caller warning. Any missing precondition (token / valid allowFrom / managed, and a usable

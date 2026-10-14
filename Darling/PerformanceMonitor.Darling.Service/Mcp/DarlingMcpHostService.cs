@@ -804,6 +804,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                     declaredPeers.ThisStoreCovers.Length > 0 ? $"; this store covers {declaredPeers.ThisStoreCovers}" : "");
             }
 
+            /* #5632: mcp.dataDetail, read once per start (file-only, restart-only). McpDataDetailFilter reads the level
+               from this singleton on every call; an unrecognized value runs as metadataOnly, the strictest level, and
+               says so once here. */
+            builder.Services.AddSingleton(new McpDataDetailSetting(ResolveDataDetail(config.Mcp.DataDetail, _logger)));
+
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
                 builder.Services, declaredPeers, _readLatency, _logger, _slowReads, writes,
@@ -1502,12 +1507,40 @@ public sealed class DarlingMcpHostService : BackgroundService
                post-hoc trim-to-budget filter here (it would make a tool's own truncated/*_returned
                fields wrong, cut calls that explicitly asked for more rows, and drop the newest rows
                of anything sorted oldest-first) in favor of sizing each tool's own defaults to fit —
-               see McpResponseBudget.DefaultBytes, which stays as the one shared size target. */
+               see McpResponseBudget.DefaultBytes, which stays as the one shared size target.
+
+               The mcp.dataDetail filter (#5632, McpDataDetailFilter) sits just outside the statement filter, so it
+               reads the statement filter's output as plain JSON before GCF re-encodes it, and masks every tool answer
+               at the level the host registered (a McpDataDetailSetting singleton; none, or full, passes through). */
             .WithRequestFilters(filters => filters
                 .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
                 .AddCallToolFilter(toolLatency.AsFilter())
                 .AddCallToolFilter(GcfCallToolFilter.Instance)
+                .AddCallToolFilter(McpDataDetailFilter.Instance)
                 .AddCallToolFilter(SensitiveStatementOutputFilter.Instance));
+    }
+
+    /// <summary>
+    /// The <c>mcp.dataDetail</c> level this listener serves (#5632). An unrecognized value runs as
+    /// <see cref="McpDataDetail.MetadataOnly"/> and logs one Warning naming it; a recognized level other than the default
+    /// logs one Information line, so the operator can see from the log which level is in force.
+    /// </summary>
+    internal static McpDataDetail ResolveDataDetail(string? configured, ILogger logger)
+    {
+        if (!McpDataDetailModes.TryParse(configured, out McpDataDetail mode))
+        {
+            logger.LogWarning(
+                "{Setting} value '{Value}' is not one of full, maskLiterals or metadataOnly; the MCP tools serve metadataOnly, the strictest level, until it is corrected.",
+                McpDataDetailModes.Setting, configured);
+        }
+        else if (mode != McpDataDetail.Full)
+        {
+            logger.LogInformation(
+                "{Setting} is {Level}: every MCP tool answer is masked at that level.",
+                McpDataDetailModes.Setting, McpDataDetailModes.Word(mode));
+        }
+
+        return mode;
     }
 
     /// <summary>
