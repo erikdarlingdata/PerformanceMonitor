@@ -54,7 +54,7 @@
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
--- V117, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 -- so re-run this script after upgrading past each.
+-- V117, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
@@ -576,7 +576,7 @@ BEGIN
    IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
       EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM viewer;
-GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id)
+GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id, agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
     ON config.config_notification_routes TO viewer;
 $v131$;
    END IF;
@@ -611,7 +611,7 @@ BEGIN
    IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
       EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
-GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id)
+GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id, agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
     ON config.config_notification_routes TO mcp;
 $v131$;
    END IF;

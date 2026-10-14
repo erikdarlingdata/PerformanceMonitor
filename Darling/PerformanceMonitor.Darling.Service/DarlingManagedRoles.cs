@@ -252,7 +252,8 @@ public static class DarlingManagedRoles
             NonSecretColumns: new[]
             {
                 "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at",
-                "scope_server_id", "scope_tag_id",
+                "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes",
+                "agent_expiry_minutes",
             },
             SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" }),
     };

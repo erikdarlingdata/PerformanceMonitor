@@ -159,7 +159,7 @@ public sealed class NotificationRoutesRungTests
         var parent = DarlingManagedRoles.ViewerRestrictedConfigTables.Single(a => a.Table == "config_notification");
 
         Assert.Equal(new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" }, acl.SecretColumns);
-        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }, acl.NonSecretColumns);
+        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns), acl.NonSecretColumns);
 
         foreach (var column in DestinationColumns)
         {
@@ -169,7 +169,7 @@ public sealed class NotificationRoutesRungTests
         }
 
         /* Every column in the DDL is in exactly one list. */
-        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).ToList();
+        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).ToList();
         var classified = acl.SecretColumns.Concat(acl.NonSecretColumns).ToList();
         Assert.Equal(ddlColumns.OrderBy(c => c, StringComparer.Ordinal), classified.OrderBy(c => c, StringComparer.Ordinal));
         Assert.Equal(classified.Count, classified.Distinct(StringComparer.Ordinal).Count());
