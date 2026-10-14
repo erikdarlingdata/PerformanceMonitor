@@ -89,6 +89,38 @@ public sealed partial class QueryStoreLoadTestHarnessTests
             $"{ScriptPath} names {string.Join(", ", unknown)}, which no migration creates.");
     }
 
+    /* measure.ps1's Jobs step reads the hourly builders' summary lines from the service log with one regex. A template
+       word that changes would make the step print "no builder lines" for that job and leave it out of hourly_total_ms
+       (#5794 review round 2). PowerShell's regex is .NET's, so the test runs the script's own pattern. */
+    [Fact]
+    public void MeasureScript_JobsPattern_MatchesEveryBuilderLogTemplate()
+    {
+        var script = File.ReadAllText(Path.Combine(RepoRoot(), "Darling/loadtest/measure.ps1"));
+        var pieces = Regex.Match(script, @"\$pattern = '(?<a>[^']*)' \+\s*'(?<b>[^']*)' \+\s*'(?<c>[^']*)'");
+        Assert.True(pieces.Success, "measure.ps1 no longer builds $pattern from three single-quoted pieces.");
+        var pattern = new Regex(pieces.Groups["a"].Value + pieces.Groups["b"].Value + pieces.Groups["c"].Value);
+
+        (string File, string Job)[] sources =
+        [
+            ("Darling/PerformanceMonitor.Darling.Storage/PlanRegressionDaily.cs", "PLAN_REGRESSION daily totals"),
+            ("Darling/PerformanceMonitor.Darling.Storage/QueryStoreTopDaily.cs", "Query Store top daily summary"),
+            ("Darling/PerformanceMonitor.Darling.Storage/QueryStoreComposeStamp.cs", "Query Store compose rollup"),
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "Store object convergence"),
+        ];
+        foreach (var (file, job) in sources)
+        {
+            var source = File.ReadAllText(Path.Combine(RepoRoot(), file));
+            var templates = Regex.Matches(source, @"LogInformation\(\s*""(?<t>" + Regex.Escape(job) + @": [^""]*\{ElapsedMs\} ms)""");
+            Assert.True(templates.Count == 1, $"{file}: expected one LogInformation(\"{job}: ... {{ElapsedMs}} ms\"), found {templates.Count}.");
+
+            var line = "2026-10-14 09:00:00.000 [INF] [X] " + Regex.Replace(templates[0].Groups["t"].Value, @"\{\w+\}", "1");
+            var match = pattern.Match(line);
+            Assert.True(match.Success, $"measure.ps1's Jobs pattern does not match the {job} line: {line}");
+            Assert.Equal(job, match.Groups["job"].Value);
+            Assert.Equal("1", match.Groups["ms"].Value);
+        }
+    }
+
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
         var dir = Path.GetDirectoryName(thisFile)!;
