@@ -342,6 +342,124 @@ public sealed class McpDataDetailMaskerTests
         Assert.Equal(McpDataDetailClass.Kept, McpDataDetailKeys.Classify("database_name"));
     }
 
+    /* ---- review round 1 (H1, L2): keys and labels the sweep added ---- */
+
+    [Theory]
+    [InlineData("script")]
+    [InlineData("repro_script")]
+    [InlineData("text_data")]
+    [InlineData("top_query_text")]
+    [InlineData("query_preview")]
+    [InlineData("root_query")]
+    [InlineData("worst_victim_query")]
+    [InlineData("Process A")]
+    [InlineData("Process D")]
+    public void SweptStatementKeys_LiteralsReplaced_ThenWithheld(string key)
+    {
+        string json = "{\"" + key + "\":\"SELECT * FROM dbo.t1 WHERE id = 42 AND name = N'acme'\"}";
+        Assert.Equal(
+            "SELECT * FROM dbo.t1 WHERE id = ? AND name = N'?'",
+            Masked(json, McpDataDetail.MaskLiterals)[key]!.GetValue<string>());
+        Assert.Equal(Withheld, Masked(json, McpDataDetail.MetadataOnly)[key]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ReproScript_SniffedDeclareValues_Replaced_ThenWithheld()
+    {
+        const string script = "DECLARE @p1 int = 9001;\\nDECLARE @p2 nvarchar(10) = N'acme';\\n"
+            + "SELECT * FROM dbo.Orders WHERE CustomerId = @p1 AND Name = @p2;";
+        const string json = "{\"kind\":\"query_store\",\"plan_found\":true,\"script\":\"" + script + "\"}";
+
+        var literals = Masked(json, McpDataDetail.MaskLiterals);
+        string masked = literals["script"]!.GetValue<string>();
+        Assert.DoesNotContain("9001", masked, StringComparison.Ordinal);
+        Assert.DoesNotContain("acme", masked, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @p1 int = ?;", masked, StringComparison.Ordinal);
+        Assert.Contains("WHERE CustomerId = @p1 AND Name = @p2", masked, StringComparison.Ordinal);
+        Assert.Equal("query_store", literals["kind"]!.GetValue<string>());
+
+        Assert.Equal(Withheld, Masked(json, McpDataDetail.MetadataOnly)["script"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void DefaultTraceTextData_LoginAndClientGoWithTheText()
+    {
+        const string json = "{\"event_name\":\"Audit Login Failed\",\"text_data\":\"Login failed for user 'bob'. [CLIENT: 10.1.2.3]\"}";
+        // Under maskLiterals hosts are kept (the field table's host row), and the bracketed client address reads as an
+        // identifier; the quoted login is a literal.
+        string masked = Masked(json, McpDataDetail.MaskLiterals)["text_data"]!.GetValue<string>();
+        Assert.Equal("Login failed for user '?'. [CLIENT: 10.1.2.3]", masked);
+        Assert.Equal(Withheld, Masked(json, McpDataDetail.MetadataOnly)["text_data"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("server_principal_name")]
+    [InlineData("root_username")]
+    [InlineData("role_name")]
+    [InlineData("excluded_logins")]
+    public void SweptLoginKeys_Kept_ThenMasked(string key)
+    {
+        string json = "{\"" + key + "\":\"CORP\\\\alice\"}";
+        Assert.Same(json, McpDataDetailMasker.MaskJson(json, McpDataDetail.MaskLiterals));
+        Assert.Equal("login#1", Masked(json, McpDataDetail.MetadataOnly)[key]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ExcludedLogins_ArrayAndContextLabel_MaskedNameByName()
+    {
+        const string array = "{\"excluded_logins\":[\"sa\",\"svc\"]}";
+        var masked = Masked(array, McpDataDetail.MetadataOnly)["excluded_logins"]!.AsArray();
+        Assert.Equal(new[] { "login#1", "login#2" }, masked.Select(n => n!.GetValue<string>()));
+
+        const string label = "{\"fields\":[{\"label\":\"Excluded Logins\",\"value\":\"sa, svc\"},{\"label\":\"Excluded Count\",\"value\":\"3\"}]}";
+        Assert.Same(label, McpDataDetailMasker.MaskJson(label, McpDataDetail.MaskLiterals));
+        var fields = Masked(label, McpDataDetail.MetadataOnly)["fields"]!.AsArray();
+        Assert.Equal("login#1, login#2", fields[0]!["value"]!.GetValue<string>());
+        Assert.Equal("3", fields[1]!["value"]!.GetValue<string>());
+
+        Assert.Equal(McpDataDetailClass.Login, McpDataDetailKeys.Classify("Excluded Logins"));
+        Assert.True(McpDataDetailKeys.IsCommaList("Excluded Logins"));
+        Assert.False(McpDataDetailKeys.IsCommaList("login_name"));
+    }
+
+    /* ---- review round 1 (L1): one numbering per answer ---- */
+
+    [Fact]
+    public void ForAnswer_NumbersLoginsAndHostsAcrossEveryFieldOfOneAnswer()
+    {
+        var masker = McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly);
+        Assert.Equal("login#1", masker.Field("blocked_login_name", "alice"));
+        Assert.Equal("login#2", masker.Field("blocking_login_name", "bob"));
+        Assert.Equal("login#1", masker.Field("login_name", "alice"));
+        Assert.Equal("login#2, login#3", masker.Field("Excluded Logins", "bob, carol"));
+        Assert.Equal("host#1", masker.Field("host_name", "APP01"));
+        Assert.Equal("{\"login_name\":\"login#3\"}", masker.Json("{\"login_name\":\"carol\"}"));
+
+        // A new answer starts over.
+        Assert.Equal("login#1", McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Field("login_name", "bob"));
+
+        var full = McpDataDetailMasker.ForAnswer(McpDataDetail.Full);
+        Assert.Equal("alice", full.Field("login_name", "alice"));
+        Assert.Equal("SELECT 1", full.FreeText("SELECT 1"));
+    }
+
+    [Fact]
+    public void Filter_NumbersLoginsAcrossTheBlocksAndStructuredContentOfOneAnswer()
+    {
+        const string text = "{\"rows\":[{\"login_name\":\"alice\"},{\"login_name\":\"bob\"}]}";
+        const string structured = "{\"login_name\":\"bob\"}";
+        var result = new CallToolResult
+        {
+            Content = new List<ContentBlock> { new TextContentBlock { Text = text } },
+            StructuredContent = JsonDocument.Parse(structured).RootElement.Clone(),
+        };
+
+        var masked = McpDataDetailFilter.Mask(result, McpDataDetail.MetadataOnly);
+        var rows = JsonNode.Parse(((TextContentBlock)masked.Content[0]).Text)!["rows"]!.AsArray();
+        Assert.Equal("login#2", rows[1]!["login_name"]!.GetValue<string>());
+        Assert.Equal("login#2", masked.StructuredContent!.Value.GetProperty("login_name").GetString());
+    }
+
     /* ---- the host filter ---- */
 
     [Fact]

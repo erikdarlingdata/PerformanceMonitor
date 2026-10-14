@@ -57,13 +57,16 @@ public static class McpDataDetailFilter
 
         try
         {
+            // One masker for the whole answer (#5632): every block and the structured content share one login#n and
+            // host#n numbering, so one login is one number throughout the answer.
+            McpDataDetailMasker masker = McpDataDetailMasker.ForAnswer(mode);
             bool changed = false;
             List<ContentBlock>? content = null;
             if (result.Content is { Count: > 0 } blocks)
             {
                 for (int i = 0; i < blocks.Count; i++)
                 {
-                    ContentBlock masked = MaskBlock(blocks[i], mode);
+                    ContentBlock masked = MaskBlock(blocks[i], masker);
                     if (ReferenceEquals(masked, blocks[i])) continue;
                     content ??= new List<ContentBlock>(blocks);
                     content[i] = masked;
@@ -75,7 +78,7 @@ public static class McpDataDetailFilter
             if (structured is not null)
             {
                 string json = structured.Value.GetRawText();
-                string masked = Checked(McpDataDetailMasker.MaskJson(json, mode), json);
+                string masked = Checked(masker.Json(json), json);
                 if (!ReferenceEquals(masked, json))
                 {
                     using JsonDocument parsed = JsonDocument.Parse(masked);
@@ -105,14 +108,14 @@ public static class McpDataDetailFilter
         }
     }
 
-    private static ContentBlock MaskBlock(ContentBlock block, McpDataDetail mode)
+    private static ContentBlock MaskBlock(ContentBlock block, McpDataDetailMasker masker)
     {
         switch (block)
         {
             case TextContentBlock text:
             {
                 if (string.IsNullOrEmpty(text.Text)) return block;
-                string masked = Checked(McpDataDetailMasker.MaskJson(text.Text, mode), text.Text);
+                string masked = Checked(masker.Json(text.Text), text.Text);
                 return ReferenceEquals(masked, text.Text)
                     ? block
                     : new TextContentBlock { Text = masked, Annotations = text.Annotations, Meta = text.Meta };
@@ -120,7 +123,7 @@ public static class McpDataDetailFilter
             case EmbeddedResourceBlock { Resource: TextResourceContents resource } embedded:
             {
                 if (string.IsNullOrEmpty(resource.Text)) return block;
-                string masked = Checked(McpDataDetailMasker.MaskJson(resource.Text, mode), resource.Text);
+                string masked = Checked(masker.Json(resource.Text), resource.Text);
                 if (ReferenceEquals(masked, resource.Text)) return block;
                 return new EmbeddedResourceBlock
                 {

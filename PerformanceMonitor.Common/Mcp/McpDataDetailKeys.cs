@@ -71,9 +71,23 @@ public static class McpDataDetailKeys
             "victim_statement", "victim_sql_text", "victim_query",
             "blocked_sql_text", "blocking_sql_text", "blocked_query", "blocking_query", "bad_actor_query",
             "input_buffer", "inputbuf", "frame", "most_recent_sql_text", "last_sql_text", "current_query",
+            // get_query_repro_script: the statement plus one DECLARE per sniffed parameter value, so the values go with
+            // the statement (replaced under maskLiterals, withheld under metadataOnly).
+            "script", "repro_script",
+            // get_default_trace_events: the trace's TextData, statement text and "Login failed for user '...'
+            // [CLIENT: ...]" lines, so its login and client address go with the withheld text under metadataOnly.
+            "text_data",
+            // get_query_heatmap: each cell's top statement.
+            "top_query_text",
+            // get_finops_optimization (query rows): a 200-character statement preview.
+            "query_preview",
+            // get_pg_blocking: the chain root's and the worst victim's statements.
+            "root_query", "worst_victim_query",
             // The alert context labels that hold a statement (AlertContextBuilders) and the flattened detail text
-            // that repeats them.
+            // that repeats them. "Process A" to "Process D" are the deadlock party facts
+            // (DeadlockGraphSummary.PartyLabel, MaxParties = 4), each with that party's statement.
             "Victim SQL", "Blocking Query", "Blocked Query", "detail_text", "body",
+            "Process A", "Process B", "Process C", "Process D",
             // Mute-rule patterns.
             "query_text_pattern", "query_pattern", "text_pattern", "pattern", "sql_text_pattern",
             // Error text.
@@ -91,6 +105,15 @@ public static class McpDataDetailKeys
             "login_name", "login", "loginname", "original_login_name", "nt_user_name", "nt_username", "user_name",
             "username", "usename", "blocked_login_name", "blocking_login_name", "victim_login_name", "ownerloginname",
             "owner_login_name", "session_login_name", "remediation_username",
+            // get_long_running_queries (the trace-based reader): the login that ran the statement.
+            "server_principal_name",
+            // get_pg_blocking: the chain root's role.
+            "root_username",
+            // get_pg_server_state database_overrides: the role an ALTER ROLE ... SET names.
+            "role_name",
+            // The long-running-query exclusions: get_alert_settings' excluded_logins array and the alert context
+            // label "Excluded Logins" (one comma-joined string, masked name by name: IsCommaList).
+            "excluded_logins",
         }),
         (McpDataDetailClass.Host, new[]
         {
@@ -109,6 +132,14 @@ public static class McpDataDetailKeys
     /// or element name); <see cref="McpDataDetailClass.Kept"/> for a name the table does not list.</summary>
     public static McpDataDetailClass Classify(string? name) =>
         name is { Length: > 0 } && s_byName.TryGetValue(Normalize(name), out var cls) ? cls : McpDataDetailClass.Kept;
+
+    /// <summary>The login and host names whose value is a comma-joined list of names (the alert context label
+    /// <c>Excluded Logins</c>), which the masker numbers name by name; normalized.</summary>
+    private static readonly FrozenSet<string> s_commaLists =
+        new[] { Normalize("Excluded Logins") }.ToFrozenSet(StringComparer.Ordinal);
+
+    /// <summary>True when the field named <paramref name="name"/> holds a comma-joined list of logins or hosts.</summary>
+    public static bool IsCommaList(string? name) => name is { Length: > 0 } && s_commaLists.Contains(Normalize(name));
 
     /// <summary>Lower case with <c>_</c>, <c>-</c>, <c>.</c> and white space removed.</summary>
     public static string Normalize(string name)

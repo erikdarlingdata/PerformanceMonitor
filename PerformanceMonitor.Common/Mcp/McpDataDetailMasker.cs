@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Common;
 /// identities.</item>
 /// <item>A whole answer that is not JSON is error text.</item>
 /// <item>Under <see cref="McpDataDetail.MetadataOnly"/> a login or host becomes <c>login#n</c> or <c>host#n</c>,
-/// numbered per answer, so one answer still shows which rows share one.</item>
+/// numbered per answer (one <see cref="ForAnswer"/> instance), so one answer still shows which rows share one.</item>
 /// <item>It fails closed: any exception returns <see cref="Refusal"/>, never the input.</item>
 /// </list>
 /// </summary>
@@ -47,15 +47,21 @@ public sealed class McpDataDetailMasker
     public const string Refusal = "Output withheld: the mcp.dataDetail masker could not read this result.";
 
     private readonly McpDataDetail _mode;
-    private readonly bool _freeText;
     private readonly Dictionary<string, string> _logins = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _hosts = new(StringComparer.Ordinal);
 
-    private McpDataDetailMasker(McpDataDetail mode, bool freeText)
+    private McpDataDetailMasker(McpDataDetail mode)
     {
         _mode = mode;
-        _freeText = freeText;
     }
+
+    /// <summary>
+    /// One answer's masker at <paramref name="mode"/>: every field, JSON document and free text it masks shares one
+    /// <c>login#n</c> and <c>host#n</c> numbering, so one login reads as one number everywhere in that answer and two
+    /// logins never share a number (#5632). Make one per answer (a tool's result, a brief); never share one across
+    /// answers.
+    /// </summary>
+    public static McpDataDetailMasker ForAnswer(McpDataDetail mode) => new(mode);
 
     /// <summary>
     /// Masks <paramref name="output"/> (a tool's answer, a brief, or an earlier report) at <paramref name="mode"/>.
@@ -63,36 +69,59 @@ public sealed class McpDataDetailMasker
     /// <paramref name="freeText"/> is for text a person or an agent wrote (an earlier report composed into a later
     /// brief): every string the table does not list has its literals replaced too, under both masked levels.
     /// </summary>
-    public static string MaskJson(string output, McpDataDetail mode, bool freeText = false)
-    {
-        if (mode == McpDataDetail.Full || string.IsNullOrEmpty(output)) return output;
-        var masker = new McpDataDetailMasker(mode, freeText);
-        return SensitiveStatements.JsonCore(output, masker.Value, masker.Xml, key => key, Refusal);
-    }
+    public static string MaskJson(string output, McpDataDetail mode, bool freeText = false) =>
+        ForAnswer(mode).Json(output, freeText);
 
     /// <summary>Masks one field's text (<paramref name="name"/> is its key or context label) at
-    /// <paramref name="mode"/>; the composer uses it for fields it writes itself. Logins and hosts are numbered within
-    /// this one call only.</summary>
-    public static string? MaskField(string? name, string? value, McpDataDetail mode)
-    {
-        if (mode == McpDataDetail.Full || value is null) return value;
-        return new McpDataDetailMasker(mode, freeText: false).Value(name ?? string.Empty, value);
-    }
+    /// <paramref name="mode"/>. Logins and hosts are numbered within this one call only: an answer that masks several
+    /// fields uses one <see cref="ForAnswer"/> instance instead.</summary>
+    public static string? MaskField(string? name, string? value, McpDataDetail mode) => ForAnswer(mode).Field(name, value);
 
     /// <summary>Error text (an exception's message) at <paramref name="mode"/>.</summary>
-    public static string MaskErrorText(string message, McpDataDetail mode) =>
-        mode == McpDataDetail.Full || string.IsNullOrEmpty(message)
-            ? message
-            : new McpDataDetailMasker(mode, freeText: false).Masked(McpDataDetailClass.Statement, message);
+    public static string MaskErrorText(string message, McpDataDetail mode) => ForAnswer(mode).ErrorText(message);
+
+    /// <summary>This answer's JSON <paramref name="output"/>, as <see cref="MaskJson(string, McpDataDetail, bool)"/>
+    /// masks it, numbering logins and hosts with every other field of this answer.</summary>
+    public string Json(string output, bool freeText = false)
+    {
+        if (_mode == McpDataDetail.Full || string.IsNullOrEmpty(output)) return output;
+        return SensitiveStatements.JsonCore(output, (key, value) => Value(key, value, freeText), Xml, key => key, Refusal);
+    }
+
+    /// <summary>One field of this answer, masked by <paramref name="name"/>'s class (a key or a context label); a name
+    /// the table does not list is kept.</summary>
+    public string? Field(string? name, string? value) =>
+        _mode == McpDataDetail.Full || value is null ? value : Value(name ?? string.Empty, value, freeText: false);
+
+    /// <summary>Text a person or an agent wrote, or engine prose that can quote collected text (a note, a report's
+    /// root cause, a finding's story): statement text, so its literals are replaced under <c>maskLiterals</c> and it is
+    /// withheld under <c>metadataOnly</c>; XML is masked by its shape.</summary>
+    public string? FreeText(string? text) =>
+        _mode == McpDataDetail.Full || text is null ? text : Value(null, text, freeText: false);
+
+    /// <summary>Error text of this answer: statement text.</summary>
+    public string ErrorText(string message) =>
+        _mode == McpDataDetail.Full || string.IsNullOrEmpty(message) ? message : Masked(McpDataDetailClass.Statement, message);
 
     /// <summary>The value judge: XML by shape, everything else by its key's class. A null key is a whole answer that
-    /// is not JSON, which is error text.</summary>
-    private string? Value(string? key, string? value)
+    /// is not JSON, which is error text. A comma-joined list of logins or hosts (<c>Excluded Logins</c>,
+    /// <see cref="McpDataDetailKeys.IsCommaList"/>) is masked name by name.</summary>
+    private string? Value(string? key, string? value, bool freeText)
     {
         if (string.IsNullOrEmpty(value)) return value;
         if (StartsWithAngle(value)) return Xml(key, value);
         McpDataDetailClass cls = string.IsNullOrEmpty(key) ? McpDataDetailClass.Statement : McpDataDetailKeys.Classify(key);
-        if (cls == McpDataDetailClass.Kept && _freeText) cls = McpDataDetailClass.Statement;
+        if (cls == McpDataDetailClass.Kept && freeText) cls = McpDataDetailClass.Statement;
+        if (cls is McpDataDetailClass.Login or McpDataDetailClass.Host
+            && _mode == McpDataDetail.MetadataOnly
+            && McpDataDetailKeys.IsCommaList(key)
+            && !IsOwnPlaceholder(value))
+        {
+            return string.Join(", ", value
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(name => Masked(cls, name)));
+        }
+
         return Masked(cls, value);
     }
 
