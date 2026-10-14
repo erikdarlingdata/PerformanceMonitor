@@ -185,6 +185,9 @@ public sealed class RepoFileAdoptionTests
         "AlwaysOnXeSessionsTests.cs",
         /* #5459: it cuts build.yml into jobs, steps and arms on the line breaks between them. */
         "GuardStageWorkflowTests.cs",
+        /* #5804: it slices the darling-linux and darling-linux-publish jobs out of build.yml on the line break and
+           indent before each job key (`\n  darling-linux:\n`), so the text must be LF whatever the checkout's line endings. */
+        "LinuxReleasePublishOrderTests.cs",
         "LocalClockBucketKeyTests.cs",
         "LockedModeRestoreCoverageTests.cs",
         /* Its always-on guard pin slices EnsureDatabaseScopedAsync's body up to the method's closing brace, on an

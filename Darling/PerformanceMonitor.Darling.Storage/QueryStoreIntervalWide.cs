@@ -411,11 +411,13 @@ FROM batch_rows AS b;";
        table is the only record left, and ResolveReadAsync extends the bound down to
        ExactBelowFloorStart = max(window start, filled_since, table floor + PurgeEdgeMargin (26 h)) and no further: those are the
        three bounds under which the table provably holds what raw held before its purge.
-       There is no per-server probe on this table: of its two secondary btrees, idx_query_store_interval_wide_first_exec
+       There is no per-server probe on this table: of its first two secondary btrees, idx_query_store_interval_wide_first_exec
        leads with first_execution_time, and the wide btree on (server_id, first_execution_time) (#4952,
        QueryStoreBackgroundIndexes.WideServerFirstExec) leads with server_id but is built in the background by the
        service, not by a migration, so a store can lack it. The per-server reads' bound on first_execution_time is
-       served by that wide btree where it exists. */
+       served by that wide btree where it exists. The third secondary btree (#5807,
+       QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExec) serves only the one-query history read, and is built
+       the same way. */
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
