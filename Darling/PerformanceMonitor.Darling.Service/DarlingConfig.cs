@@ -1370,6 +1370,16 @@ public sealed class McpConfig
     public bool AllowServerAdmin { get; set; }
 
     /// <summary>
+    /// Default OFF (#5632 Phase A, ruling R2). Offers <c>claim_investigation_request</c> and
+    /// <c>submit_investigation_report</c>, which write only investigation state. Served only when a bearer token
+    /// resolves AND <see cref="AllowWrites"/> is off: one token cannot tell an agent from a person, so with both on the
+    /// investigation tools stay off and the start logs one Critical line. File-only and restart-only, like
+    /// <see cref="AllowWrites"/>. The two investigation reads are ordinary reads and need no setting.
+    /// </summary>
+    [JsonPropertyName("allowInvestigations")]
+    public bool AllowInvestigations { get; set; }
+
+    /// <summary>
     /// Default OFF. <c>add_servers</c> defaults to Windows authentication, where this service presents its own
     /// computer account to the host the caller names. Off, it refuses a Windows-authentication entry that also
     /// sets <c>trust_server_certificate</c> or an <c>encrypt_mode</c> other than Mandatory or Strict, because the

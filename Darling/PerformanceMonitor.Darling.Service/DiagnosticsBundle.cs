@@ -76,7 +76,7 @@ internal static class DiagnosticsBundle
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
         "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
-        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "WebConfig.Enabled", "WebConfig.Network",
+        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "WebConfig.Enabled", "WebConfig.Network",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -160,6 +160,7 @@ internal static class DiagnosticsBundle
             ["mcp_network_exposed"] = config.Mcp?.Network is not null,
             ["mcp_allow_writes"] = config.Mcp?.AllowWrites ?? false,
             ["mcp_allow_server_admin"] = config.Mcp?.AllowServerAdmin ?? false,
+            ["mcp_allow_investigations"] = config.Mcp?.AllowInvestigations ?? false,
             ["mcp_allow_windows_auth_over_unverified_tls"] = config.Mcp?.AllowWindowsAuthOverUnverifiedTls ?? false,
             // The PARSED level word, never the raw text; an unknown value runs as metadataOnly, so it reports that.
             ["mcp_data_detail"] = McpDataDetailModes.Word(McpDataDetailModes.Resolve(config.Mcp?.DataDetail)),

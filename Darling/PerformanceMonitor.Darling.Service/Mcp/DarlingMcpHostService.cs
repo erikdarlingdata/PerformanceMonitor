@@ -26,6 +26,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
@@ -579,6 +580,35 @@ public sealed class DarlingMcpHostService : BackgroundService
                     DarlingMcpWritePolicy.ServerAdminSetting);
             }
 
+            /* #5632 Phase A, ruling R2: the investigation tools (claim_investigation_request, submit_investigation_report)
+               write only investigation state and need the same token gate as the writes, but never WITH the writes: one
+               token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
+               why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
+               front of every request cover them as they cover the writes, since they are only served with a token. */
+            if (DarlingMcpWritePolicy.InvestigationsConflict(config.Mcp))
+            {
+                _logger.LogCritical(DarlingMcpWritePolicy.InvestigationConflictLine);
+            }
+            else if (config.Mcp.AllowInvestigations)
+            {
+                if (!writes.Investigations)
+                {
+                    _logger.LogCritical(
+                        "{Setting} is on but no usable bearer token is available{Problem} — the investigation tools stay off. Set " +
+                        "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters.",
+                        DarlingMcpWritePolicy.InvestigationsSetting,
+                        writeTokenProblem is null ? "" : " (the token " + writeTokenProblem + ")",
+                        DarlingHostBinding.MinimumTokenLength);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "MCP investigation tools are ON ({Setting}): claim_investigation_request and submit_investigation_report " +
+                        "write investigation state; every MCP request, loopback included, must present the bearer token.",
+                        DarlingMcpWritePolicy.InvestigationsSetting);
+                }
+            }
+
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck
                and the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
@@ -1104,6 +1134,16 @@ public sealed class DarlingMcpHostService : BackgroundService
            (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
         services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger, slowReads));
 
+        /* #5632 Phase A: claim_investigation_request composes the brief at claim time through this composer, a service
+           parameter, so it must be registered wherever the tools are. The reader reads the store the host registered;
+           the composer masks at the host's mcp.dataDetail level (none registered: full, as the host filter passes
+           through). Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<IInvestigationBriefSourceReader>(sp =>
+            new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger));
+        services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
+            sp.GetRequiredService<IInvestigationBriefSourceReader>(),
+            sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full)));
+
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
            annotation hints. PostConfigure runs after the SDK's own options setup, so it sees the full set, and
@@ -1384,6 +1424,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                wait-type siblings ride along on the existing blocking / memory-grant / core data-read
                classes above. */
             .WithGeminiCompatibleTools<DarlingMcpAlertTools>()
+            /* #5632 Phase A: the Level 1 investigation tools. The two reads are ordinary reads; claim and submit are
+               served only under DarlingMcpWritePolicy's investigations arm (a token, mcp.allowWrites off). */
+            .WithGeminiCompatibleTools<DarlingMcpInvestigationTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
             .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
             /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central

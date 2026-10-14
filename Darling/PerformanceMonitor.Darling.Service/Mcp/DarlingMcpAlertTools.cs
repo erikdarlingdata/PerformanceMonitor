@@ -626,6 +626,7 @@ public sealed class DarlingMcpAlertTools
         try
         {
             var routes = await new PgNotificationRouteStore(postgres).LoadSummariesAsync(cancellationToken);
+            var agentUse = await ReadAgentUseAsync(postgres, cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
@@ -652,7 +653,9 @@ public sealed class DarlingMcpAlertTools
                 enabled_route_count = routes.Count(r => r.Enabled),
                 /* Zero routes is the ordinary state and the caller must be able to tell it from a failed read: an
                    empty array here with route_count 0 IS the answer "every alert goes to every parent channel". */
-                routes = routes.Select(RoutePayload),
+                routes = routes.Select(r => RoutePayload(r, agentUse)),
+                /* #5632: false when the investigation request counts could not be read; agent_requests_* are then null. */
+                agent_use_read = agentUse is not null,
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -708,6 +711,11 @@ public sealed class DarlingMcpAlertTools
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
             }
 
+            if (AgentRouteRefusal(existing, "set_notification_route_enabled") is { } agentRefusal)
+            {
+                return agentRefusal;
+            }
+
             if (existing.Enabled == enabled)
             {
                 return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
@@ -737,7 +745,14 @@ public sealed class DarlingMcpAlertTools
     {
         try
         {
-            var deleted = await new PgNotificationRouteStore(postgres).DeleteAsync(route_id);
+            var store = new PgNotificationRouteStore(postgres);
+            var existing = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            if (existing is not null && AgentRouteRefusal(existing, "delete_notification_route") is { } agentRefusal)
+            {
+                return agentRefusal;
+            }
+
+            var deleted = await store.DeleteAsync(route_id);
             return deleted == 0
                 ? Outcome("not_found", $"No notification route with route_id {route_id}.")
                 : JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions);
@@ -752,7 +767,11 @@ public sealed class DarlingMcpAlertTools
     /// <c>set_notification_route_enabled</c> returns it, so the two cannot drift apart again. Field names mirror Lite's
     /// payload (<c>McpAlertTools.RoutePayload</c>); <see cref="NotificationRouteKinds"/> spells <c>match_kind</c> and
     /// <c>family</c> for both products, so a <c>*</c> route reads as <c>wildcard</c> with no family.</summary>
-    internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new
+    internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => RoutePayload(r, null);
+
+    /// <summary>The route projection with its agent use (#5632): the requests the route opened in the last hour and the last
+    /// day, beside the limits they count against. Null when <paramref name="agentUse"/> was not read.</summary>
+    internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r, IReadOnlyDictionary<int, (int LastHour, int LastDay)>? agentUse) => new
     {
         route_id = r.RouteId,
         metric_match = r.MetricMatch,
@@ -777,7 +796,36 @@ public sealed class DarlingMcpAlertTools
         agent_max_per_day = r.AgentMaxPerDay,
         agent_lease_minutes = r.AgentLeaseMinutes,
         agent_expiry_minutes = r.AgentExpiryMinutes,
+        agent_requests_last_hour = agentUse is null ? (int?)null : agentUse.TryGetValue(r.RouteId, out var hourUse) ? hourUse.LastHour : 0,
+        agent_requests_last_day = agentUse is null ? (int?)null : agentUse.TryGetValue(r.RouteId, out var dayUse) ? dayUse.LastDay : 0,
     };
+
+    /// <summary>Each route's investigation requests in the last hour and day (#5632), or null when the read fails: the
+    /// route list is still answered, with the use unknown.</summary>
+    private static async Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>?> ReadAgentUseAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds).RouteUseAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is NpgsqlException or TimeoutException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The refusal for a route that carries an agent level (#5632 Phase A): an agent route decides which alerts open
+    /// investigations, and the agent tools are served over this same listener, so it is changed only by a person in the
+    /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route.
+    /// </summary>
+    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
+        route.AgentLevel is null
+            ? null
+            : Outcome("refused",
+                $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +
+                "Change it in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page.");
 
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
     public static async Task<string> GetMuteRules(
