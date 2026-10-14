@@ -835,6 +835,7 @@ The embedded MCP server, over Streamable HTTP bound to `localhost` by default (s
 |---|---|---|
 | `enabled` | `false` | **Off by default** — a headless service does not open a local port unless you ask |
 | `port` | `5152` | Chosen so all three editions coexist on one machine (Dashboard 5150, Lite 5151) |
+| `dataDetail` | `full` | How much collected text every MCP tool answer carries. `full` changes nothing. `maskLiterals` keeps query text but replaces its literal values (numbers, strings, parameter values) with `?`. `metadataOnly` holds back query text, plan XML and input buffers, and masks login and host names; object and database names, counts, durations, waits and times stay. An unknown value is read as `metadataOnly` |
 
 Register with Claude Code:
 
