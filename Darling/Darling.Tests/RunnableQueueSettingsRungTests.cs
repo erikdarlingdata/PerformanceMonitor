@@ -98,10 +98,11 @@ public sealed class RunnableQueueSettingsRungTests
         var parameters = method.GetParameters();
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
-        Assert.Equal("hasNotificationRouteScope", parameters[^1].Name);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[^1].Name);
+        Assert.Equal("hasNotificationRouteScope", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
-        Assert.Equal(ProbeOrdinal + 4, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 5, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
         /* Every sentinel present answers this build's version (V180's). With the later sentinels absent this rung is the answer, 177; with
@@ -112,7 +113,12 @@ public sealed class RunnableQueueSettingsRungTests
 
         /* With V180's sentinel (the top) absent the answer is V179's, 179; with V179's absent too, V178's, 178; with V178's absent
            too, this rung is the answer. */
-        var withoutV181 = (object[])all.Clone();
+        /* With V182's sentinel (#5506, the top) absent the answer is V181's. */
+        var withoutV182 = (object[])all.Clone();
+        withoutV182[ProbeOrdinal + 5] = false;
+        Assert.Equal(181, (int)method.Invoke(null, withoutV182)!);
+
+        var withoutV181 = (object[])withoutV182.Clone();
         withoutV181[ProbeOrdinal + 4] = false;
         Assert.Equal(180, (int)method.Invoke(null, withoutV181)!);
 

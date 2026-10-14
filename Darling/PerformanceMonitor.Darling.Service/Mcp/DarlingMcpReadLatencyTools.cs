@@ -46,11 +46,12 @@ public sealed class DarlingMcpReadLatencyTools
         + "the true duration only proven to exceed the last finite bucket bound, with no bound above it to report.";
 
     [McpServerTool(Name = "get_read_latency"), Description(
-        "Gets the monitoring tool's OWN read-latency history — which of the web dashboard's or MCP server's own "
-        + "reads is really slow, and how often it times out; no server_name. Sums the stored hourly histograms "
-        + "over the window and answers p50/p95/p99 as bucket UPPER-BOUND estimates (never an interpolation), "
-        + "plus count, mean, max and timeouts, per (surface, route, window band: 1h, 24h, 7d, 7d+ or none). Sorted p95 desc. Optional surface "
-        + "(web/compose/mcp) and route filter. Empty means no read recorded in the window, not a failure. "
+        "Gets the monitoring tool's OWN read-latency history (web and MCP reads); no server_name. "
+        + "Sums hourly histograms into p50/p95/p99 bucket upper bounds, count, mean, max and timeouts per "
+        + "(surface, route, window band: 1h, 24h, 7d, 7d+ or none). "
+        + "max_in_flight is the most other reads running when one started. "
+        + "wait_total_ms is the summed wait for a store connection. "
+        + "Sorted p95 desc. Optional surface (web/compose/mcp) and route filter. Empty means no read in the window, not a failure. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history — how long the web dashboard's `/api/read/*` "
         + "reads, the composed-panel runner and every MCP tool call take. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "

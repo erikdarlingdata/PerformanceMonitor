@@ -107,14 +107,20 @@ public sealed class QueryStoreWatermarksRungTests
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 1].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 2].Name);
         Assert.Equal("hasNotificationRouteScope", parameters[ProbeOrdinal + 3].Name);
-        Assert.Equal(ProbeOrdinal + 3, parameters.Length - 1);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 4].Name);
+        Assert.Equal(ProbeOrdinal + 4, parameters.Length - 1);
 
         /* Every sentinel present maps to exactly this build's version; with V180's (the top) absent the answer is V179's; with V179's
            absent too this rung is the answer; with this sentinel absent as well, one rung back. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        var withoutV181 = (object[])all.Clone();
+        /* V182's sentinel (#5506) is the top: with it absent the answer is V181's. */
+        var withoutV182 = (object[])all.Clone();
+        withoutV182[ProbeOrdinal + 4] = false;
+        Assert.Equal(181, (int)method.Invoke(null, withoutV182)!);
+
+        var withoutV181 = (object[])withoutV182.Clone();
         withoutV181[ProbeOrdinal + 3] = false;
         Assert.Equal(180, (int)method.Invoke(null, withoutV181)!);
 

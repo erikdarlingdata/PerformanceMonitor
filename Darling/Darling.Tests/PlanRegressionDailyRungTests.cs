@@ -351,8 +351,8 @@ public sealed class PlanRegressionDailyRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
 
-        /* A newer rung's sentinel (V180's, #5654) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 13, parameters.Length - 1);
+        /* A newer rung's sentinel (V182's, #5506) is the last argument. */
+        Assert.Equal(ProbeOrdinal + 14, parameters.Length - 1);
         Assert.Equal("hasPlanRegressionDaily", parameters[ProbeOrdinal].Name);
 
         /* Every sentinel true is a fully-migrated store, which maps to exactly this build's version. */

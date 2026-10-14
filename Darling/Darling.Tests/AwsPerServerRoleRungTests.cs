@@ -122,8 +122,8 @@ public sealed class AwsPerServerRoleRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* A newer rung's sentinel (V180's, #5654) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 12, arity - 1);
+        /* A newer rung's sentinel (V182's, #5506) is the last argument. */
+        Assert.Equal(ProbeOrdinal + 13, arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);

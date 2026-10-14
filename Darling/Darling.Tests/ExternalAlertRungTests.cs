@@ -117,7 +117,8 @@ public sealed class ExternalAlertRungTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 2, parameters.Length - 1);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 2].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal - 1].Name);
 
@@ -125,11 +126,16 @@ public sealed class ExternalAlertRungTests
         var previousArm = viewer.IndexOf("if (hasClientTimeoutSettings)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && previousArm > thisArm, "the V180 arm sits above the next rung down");
 
-        /* Every sentinel present: maps to the ladder's top. V181's (#5750) absent: this rung. This sentinel absent too: a rung back. */
+        /* Every sentinel present: maps to the ladder's top. V182's (#5506) and V181's (#5750) absent: this rung. This sentinel
+           absent too: a rung back. */
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
 
-        var withoutV181 = (object[])allPresent.Clone();
+        var withoutV182 = (object[])allPresent.Clone();
+        withoutV182[ProbeOrdinal + 2] = false;
+        Assert.Equal(181, (int)method.Invoke(null, withoutV182)!);
+
+        var withoutV181 = (object[])withoutV182.Clone();
         withoutV181[ProbeOrdinal + 1] = false;
         Assert.Equal(ExternalAlertTables.RungVersion, (int)method.Invoke(null, withoutV181)!);
 
