@@ -180,9 +180,9 @@ public static class QueryStoreBackgroundIndexes
     /// read is one range per partition its bound reaches, holding only that query's rows.</para>
     ///
     /// <para><b>Why not reorder the unique key.</b> The upsert's ON CONFLICT names the key's columns, not its order, so a
-    /// reordered unique index would serve too, but changing it means building a second unique index the size of the
-    /// largest one on the store and dropping the first: more than this index costs to build, and not possible
-    /// <c>CONCURRENTLY</c> through the parent of a partitioned table.</para>
+    /// reordered unique index would serve too, but changing it means building a second unique index of all eight columns
+    /// (about three times this index's size on the live test's rows), swapping it in as the arbiter while the writer runs,
+    /// and dropping the first: a larger build and a riskier step than adding this four-column index.</para>
     ///
     /// <para><b>HOT.</b> All four columns are part of the upsert's identity (<c>QueryStoreIntervalWide.IdentityColumns</c>),
     /// so <c>ON CONFLICT ... DO UPDATE</c> rewrites none of them and an update stays heap-only; the HOT census in
