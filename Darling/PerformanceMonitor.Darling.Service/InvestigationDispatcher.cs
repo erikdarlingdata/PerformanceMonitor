@@ -92,10 +92,12 @@ public sealed class InvestigationDispatcher
     /// <summary>
     /// Opens or joins an investigation request for one written alert row, when its route sends it to an agent. Call it after
     /// <c>RecordAlertAsync</c> with the record that call wrote and the context the row was written from. Never throws.
+    /// A finding page passes its lead finding's full story path hash (the metric name holds only eight characters of it);
+    /// an engine alert has none and passes null.
     /// </summary>
     /// <returns>What the store did, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
     public async Task<InvestigationOpenOutcome?> DispatchAsync(
-        AlertHistoryRecord record, AlertContext? context, CancellationToken cancellationToken = default)
+        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default)
     {
         if (record is null || record.Muted)
         {
@@ -125,7 +127,7 @@ public sealed class InvestigationDispatcher
                 record.MetricName,
                 record.AlertTimeUtc ?? AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
                 DedupKeys(record, context, _settings),
-                StoryPathHash: null,
+                storyPathHash,
                 route.AgentMaxPerHour,
                 route.AgentMaxPerDay,
                 route.AgentLeaseMinutes,

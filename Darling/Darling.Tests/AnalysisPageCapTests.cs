@@ -300,6 +300,9 @@ public sealed class AnalysisPageCapTests
 
         var row = Assert.Single(sender.Sent);
         Assert.Equal(FindingRoute.Digest, row.Route);
+        /* #5632 Phase A: the alert carries the finding's whole story path hash; its metric name keeps eight characters. */
+        Assert.Equal("ffffffff44444444", row.StoryPathHash);
+        Assert.EndsWith("[ffffffff]", row.MetricName, StringComparison.Ordinal);
     }
 
     /// <summary>Pin 9: a queued incident re-reported inside the window is one page, not two.</summary>

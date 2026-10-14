@@ -105,7 +105,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 /* #5632 Phase A (ruling R1): each held page the summary names opens or joins a request, after its row. */
                 if (_investigations is not null)
                 {
-                    await _investigations.DispatchAsync(record, alert.Context);
+                    await _investigations.DispatchAsync(record, alert.Context, alert.StoryPathHash);
                 }
             }
             return delivery;
@@ -198,7 +198,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                not an incident, and never does. */
             if (alert.Route != FindingRoute.Digest && _investigations is not null)
             {
-                await _investigations.DispatchAsync(record, context);
+                await _investigations.DispatchAsync(record, context, alert.StoryPathHash);
             }
 
             return delivery;

@@ -126,9 +126,12 @@ SELECT (SELECT count(*) FROM config_alert_log) || '|' || (SELECT count(*) FROM c
             await h.Sender.SendFindingAlertAsync(InvestigationDispatcherTests.Finding("Analysis: blocking [aaaa1111]", FindingRoute.Digest, "42"));
             Assert.Equal("0", await ScalarAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests", ct));
 
-            await h.Sender.SendFindingAlertAsync(InvestigationDispatcherTests.Finding("Analysis: blocking [bbbb2222]", FindingRoute.Page, "42"));
-            Assert.Equal("1|blocking|Analysis: blocking [bbbb2222]", await ScalarAsync(h.Connection,
-                "SELECT count(*) OVER () || '|' || family || '|' || first_metric FROM config.investigation_requests", ct));
+            await h.Sender.SendFindingAlertAsync(InvestigationDispatcherTests.Finding(
+                "Analysis: blocking [bbbb2222]", FindingRoute.Page, "42", hash: "bbbb2222cccc3333dddd4444"));
+            /* #5632 Phase A: the request records the finding's whole story path hash (a report copies it from there), not
+               the eight characters its metric name holds. */
+            Assert.Equal("1|blocking|Analysis: blocking [bbbb2222]|bbbb2222cccc3333dddd4444", await ScalarAsync(h.Connection,
+                "SELECT count(*) OVER () || '|' || family || '|' || first_metric || '|' || story_path_hash FROM config.investigation_requests", ct));
             Assert.Equal("0", await ScalarAsync(h.Connection, UnlinkedSql, ct));
         });
     }

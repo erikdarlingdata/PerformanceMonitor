@@ -159,7 +159,7 @@ public sealed class InvestigationDispatcherTests
         var record = new AlertHistoryRecord("42", "srv", "Deadlocks Detected", "3", "1", 3, 1,
             AlertDelivery.RoutedToDigest(), false, null, null);
 
-        Assert.Null(await dispatcher.DispatchAsync(record, null, cts.Token));
+        Assert.Null(await dispatcher.DispatchAsync(record, null, cancellationToken: cts.Token));
     }
 
     [Fact]
@@ -189,8 +189,36 @@ public sealed class InvestigationDispatcherTests
         Assert.Equal(history.Records.Skip(1).Select(r => r.AlertTimeUtc), asked.Select(a => (DateTime?)a.AlertTimeUtc));
     }
 
-    internal static FindingAlert Finding(string metric, FindingRoute route = FindingRoute.Page, string serverId = "43") =>
-        new(metric, "srv", "0.9", "0.5", serverId, new AlertContext(), 0.9, 0.5, "finding detail", false, route);
+    /// <summary>#5632 Phase A: the metric name holds eight characters of the story path hash; the request records the
+    /// whole hash the finding alert carries, on a single page and on each held page a summary names.</summary>
+    [Fact]
+    public async Task AFindingPage_HandsTheStoreItsFullStoryPathHash_NotTheMetricNamesEightCharacters()
+    {
+        var settings = new DarlingAlertSettings(Config(AgentRoute(5, AlertFamily.Performance)));
+        var history = new RecordingHistoryStore();
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var asked = new List<InvestigationAlert>();
+        var dispatcher = new InvestigationDispatcher(
+            (alert, _) =>
+            {
+                asked.Add(alert);
+                return Task.FromResult(new InvestigationOpenResult(InvestigationOpenOutcome.Opened, Guid.NewGuid()));
+            },
+            settings, NullLogger.Instance);
+        var sender = new DarlingFindingAlertSender(settings, history, webhooks, NullLogger.Instance, dispatcher);
+
+        await sender.SendFindingAlertAsync(Finding("Analysis: blocking [bbbb2222]", hash: "bbbb2222cccc3333dddd4444"));
+        await sender.SendFindingSummaryAsync(new[]
+        {
+            Finding("Analysis: memory [dddd4444]", hash: "dddd4444eeee5555ffff6666"),
+            Finding("Analysis: blocking [aaaa1111]"),
+        });
+
+        Assert.Equal(new string?[] { "bbbb2222cccc3333dddd4444", "dddd4444eeee5555ffff6666", null }, asked.Select(a => a.StoryPathHash));
+    }
+
+    internal static FindingAlert Finding(string metric, FindingRoute route = FindingRoute.Page, string serverId = "43", string? hash = null) =>
+        new(metric, "srv", "0.9", "0.5", serverId, new AlertContext(), 0.9, 0.5, "finding detail", false, route, hash);
 
     private sealed class RecordingHistoryStore : IAlertHistoryStore
     {

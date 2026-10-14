@@ -273,7 +273,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
            report, a recovery or an alert with no agent route dispatches nothing; the dispatcher never throws. */
         if (_investigations is not null)
         {
-            await _investigations.DispatchAsync(record, context, cancellationToken);
+            await _investigations.DispatchAsync(record, context, cancellationToken: cancellationToken);
         }
 
         return delivery;
