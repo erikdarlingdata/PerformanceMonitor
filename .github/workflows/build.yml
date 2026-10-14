@@ -1431,6 +1431,8 @@ jobs:
       # network and no published release. Two nupkg members are allowlisted by member path and
       # container; everything else must carry a certificate table, and an empty census is a
       # failure rather than a pass.
+      # It also checks the PowerShell scripts (#5796): every .ps1 must end with a signature block, and
+      # the Darling zip must hold install-, uninstall- and upgrade-darling.ps1 (status 2 when one is missing).
       - name: Assert every published executable is signed
         if: github.event_name == 'release'
         shell: pwsh

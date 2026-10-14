@@ -15,6 +15,10 @@ WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
   It reads the PE optional header's Security data directory (index 4) and reports whether the
   certificate table is non-empty. That is "a signature is attached" and nothing more.
 
+  PowerShell scripts (#5796) carry their signature as a trailing comment block instead, so a
+  .ps1 counts as signed when it holds the `# SIG # Begin signature block` line and, after it, the
+  `# SIG # End signature block` line. The Darling zip must also hold its three scripts.
+
   It does NOT verify the signature: not the chain, not trust, not the timestamp, not revocation,
   not whether the digest matches the file. Doing that properly needs a Windows trust store, and
   the defect actually shipped twice was TOTAL ABSENCE -- offset 0, size 0 -- which this catches
@@ -82,6 +86,18 @@ HEADER_BYTES = 4096
 # The end-of-central-directory record is 22 bytes plus a comment of up to 64 kB.
 EOCD_SEARCH_BYTES = 66 * 1024
 
+# PowerShell scripts carry their Authenticode signature as a trailing comment block, not as a PE
+# certificate table (#5796). A signed script ends with these two lines and an unsigned one has
+# neither. They are matched as whole lines, so a script that merely mentions a marker inside a
+# string or a longer comment does not read as signed.
+SCRIPT_SUFFIXES = (".ps1",)
+SIG_BEGIN = re.compile(r"^# SIG # Begin signature block\r?$", re.MULTILINE)
+SIG_END = re.compile(r"^# SIG # End signature block\r?$", re.MULTILINE)
+# The three scripts the Darling service zip ships at its root (the service project links them
+# in). A Darling zip without all three fails the census: a script that is not there cannot be
+# checked, and that is not the same as one that is signed.
+DARLING_SCRIPTS = ("install-darling.ps1", "uninstall-darling.ps1", "upgrade-darling.ps1")
+
 
 @dataclass(frozen=True)
 class AllowedUnsigned:
@@ -137,6 +153,47 @@ def allowance_for(container: str, member: str) -> AllowedUnsigned | None:
     return None
 
 
+def is_script(name: str) -> bool:
+    return name.lower().endswith(SCRIPT_SUFFIXES)
+
+
+def script_is_signed(blob: bytes) -> bool:
+    """True when the script holds the Begin line of a signature block and, after it, the End line.
+
+    A Begin with no End after it is a cut or hand-edited block and reads as unsigned. PowerShell
+    writes the block in the file's own encoding, so a UTF-16 file (BOM FF FE or FE FF) is decoded
+    as UTF-16 before the markers are looked for.
+    """
+    if blob.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = blob.decode("utf-16", "replace")
+    else:
+        text = blob.decode("utf-8", "replace")
+    begin = SIG_BEGIN.search(text)
+    return begin is not None and SIG_END.search(text, begin.end()) is not None
+
+
+def is_darling_zip(name: str) -> bool:
+    """True for the Darling service zip (PerformanceMonitorDarling-<version>.zip).
+
+    "darling" anywhere in a .zip name, except the Darling Viewer's: the Viewer's Velopack
+    Portable.zip (PerformanceMonitorDarlingViewer-*) sits in the same release directory and
+    carries no scripts, so a plain "contains Darling" rule would fail every release.
+    """
+    base = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return base.endswith(".zip") and "darling" in base and "darlingviewer" not in base
+
+
+def darling_census(archive: str, members: list[str]) -> str | None:
+    """Why `archive` fails the script census, or None. Only a Darling zip has a census (#5796)."""
+    if not is_darling_zip(archive):
+        return None
+    present = {m.replace("\\", "/").rsplit("/", 1)[-1].lower() for m in members}
+    missing = [script for script in DARLING_SCRIPTS if script not in present]
+    if not missing:
+        return None
+    return f"{archive}: the Darling zip must hold three scripts; missing {', '.join(missing)}"
+
+
 class ReadError(RuntimeError):
     """A byte range could not be read, or came back the wrong size."""
 
@@ -159,6 +216,7 @@ class Report:
     tag: str
     findings: list[Finding] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    census: list[str] = field(default_factory=list)
 
     @property
     def allowed(self) -> list[tuple[Finding, AllowedUnsigned]]:
@@ -258,39 +316,48 @@ def read_zip_member(url: str, method: int, csize: int, lho: int) -> bytes:
     raise ReadError(f"unsupported compression method {method}")
 
 
-def check_archive(url: str, name: str, size: int, include_dlls: bool) -> tuple[list[Finding], list[str]]:
+def check_archive(
+    url: str, name: str, size: int, include_dlls: bool
+) -> tuple[list[Finding], list[str], str | None]:
+    """(findings, read errors, census failure or None) for one archive asset."""
     findings: list[Finding] = []
     errors: list[str] = []
-    wanted = EXECUTABLE_SUFFIXES if include_dlls else (".exe",)
-    for member, method, csize, usize, lho in zip_entries(url, size):
+    wanted = (EXECUTABLE_SUFFIXES if include_dlls else (".exe",)) + SCRIPT_SUFFIXES
+    entries = zip_entries(url, size)
+    for member, method, csize, usize, lho in entries:
         if not member.lower().endswith(wanted):
             continue
         try:
+            # Members are read whole. A script's signature is at its end, not in a header.
             blob = read_zip_member(url, method, csize, lho)
-            off, length = certificate_table(blob)
-            findings.append(
-                Finding(asset=name, path=member, size=usize, signed=off != 0 and length != 0)
-            )
+            if is_script(member):
+                signed = script_is_signed(blob)
+            else:
+                off, length = certificate_table(blob)
+                signed = off != 0 and length != 0
+            findings.append(Finding(asset=name, path=member, size=usize, signed=signed))
         except ReadError as exc:
             errors.append(f"{name} :: {member}: {exc}")
-    return findings, errors
+    return findings, errors, darling_census(name, [entry[0] for entry in entries])
 
 
 def verify_local_dir(directory: str) -> int:
-    """Assert every executable under `directory`, including inside zips and nupkgs, is signed.
+    """Assert every executable and script under `directory`, inside zips and nupkgs too, is signed.
 
     This is the release guard. It runs on the artifacts as they sit on disk BEFORE upload, so it
     needs no network and no published release -- the difference between this and the tag mode is
     only where the bytes come from.
 
     ALLOWED_UNSIGNED exempts exactly two members of a `.nupkg`. Everything else fails, including
-    those same two names in any other container and as standalone files.
+    those same two names in any other container and as standalone files. No allowance covers a
+    `.ps1` script, and the Darling zip must hold all three of its scripts (#5796).
     """
     import glob
     import os
     import zipfile
 
     findings: list[Finding] = []
+    census: list[str] = []
     for path in sorted(glob.glob(os.path.join(directory, "**", "*"), recursive=True)):
         if not os.path.isfile(path):
             continue
@@ -304,10 +371,26 @@ def verify_local_dir(directory: str) -> int:
             except (OSError, ReadError, struct.error) as exc:
                 print(f"GUARD: cannot read {rel}: {exc}", file=sys.stderr)
                 return 2
+        elif is_script(lower):
+            try:
+                with open(path, "rb") as handle:
+                    signed = script_is_signed(handle.read())
+                findings.append(Finding(rel, "", os.path.getsize(path), signed))
+            except OSError as exc:
+                print(f"GUARD: cannot read {rel}: {exc}", file=sys.stderr)
+                return 2
         elif lower.endswith(ARCHIVE_SUFFIXES):
             try:
                 with zipfile.ZipFile(path) as zf:
-                    for info in zf.infolist():
+                    members = zf.infolist()
+                    failure = darling_census(rel, [info.filename for info in members])
+                    if failure:
+                        census.append(failure)
+                    for info in members:
+                        if is_script(info.filename):
+                            signed = script_is_signed(zf.read(info))
+                            findings.append(Finding(rel, info.filename, info.file_size, signed))
+                            continue
                         if not info.filename.lower().endswith(".exe"):
                             continue
                         blob = zf.read(info)
@@ -320,8 +403,9 @@ def verify_local_dir(directory: str) -> int:
                 return 2
 
     if not findings:
-        print(f"GUARD FAIL: no executables found under {directory}", file=sys.stderr)
+        print(f"GUARD FAIL: no executables or scripts found under {directory}", file=sys.stderr)
         return 2
+    scripts = sum(1 for f in findings if is_script(f.path or f.asset))
 
     allowed: list[tuple[Finding, AllowedUnsigned]] = []
     unsigned: list[Finding] = []
@@ -359,13 +443,19 @@ def verify_local_dir(directory: str) -> int:
             )
 
     print(
-        f"\n{len(findings)} executable(s) checked, {len(unsigned)} unsigned, "
-        f"{len(allowed)} allowed unsigned"
+        f"\n{len(findings) - scripts} executable(s) and {scripts} script(s) checked, "
+        f"{len(unsigned)} unsigned, {len(allowed)} allowed unsigned"
     )
     if unsigned:
-        print(f"GUARD FAIL: {len(unsigned)} unsigned executable(s). See #3288.", file=sys.stderr)
-        return 1
-    return 0
+        print(
+            f"GUARD FAIL: {len(unsigned)} unsigned executable(s) or script(s). See #3288 and #5796.",
+            file=sys.stderr,
+        )
+    for failure in census:
+        print(f"GUARD FAIL: {failure}", file=sys.stderr)
+    if census:
+        return 2
+    return 1 if unsigned else 0
 
 
 def release_assets(tag: str, repo: str, gh: str) -> list[dict]:
@@ -385,10 +475,15 @@ def build_report(tag: str, repo: str, gh: str, include_dlls: bool) -> Report:
         try:
             if lower.endswith(".exe"):
                 report.findings.append(check_standalone_exe(url, name, size))
+            elif is_script(lower):
+                blob = fetch_range(url, 0, size) if size else b""
+                report.findings.append(Finding(name, "", size, script_is_signed(blob)))
             elif lower.endswith(ARCHIVE_SUFFIXES):
-                found, errs = check_archive(url, name, size, include_dlls)
+                found, errs, census = check_archive(url, name, size, include_dlls)
                 report.findings.extend(found)
                 report.errors.extend(errs)
+                if census:
+                    report.census.append(census)
         except ReadError as exc:
             report.errors.append(f"{name}: {exc}")
     return report
@@ -412,11 +507,26 @@ def _synth_pe(*, signed: bool, plus: bool = True) -> bytes:
     return bytes(buf)
 
 
+def _synth_ps1(*, signed: bool, end: bool = True) -> bytes:
+    """A small script, with a signature block when `signed` (its End line only when `end`).
+
+    The block's body is filler: the guard reads the markers, not the certificate.
+    """
+    text = "param()\r\nWrite-Output 'hello'\r\n"
+    if signed:
+        text += "\r\n# SIG # Begin signature block\r\n# SIG # MIIFAKEAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
+        if end:
+            text += "# SIG # End signature block\r\n"
+    return text.encode("ascii")
+
+
 def _release_dir(root: str, layout: dict[str, object]) -> str:
     """Materialise a release directory. A str key is a standalone file, a dict is an archive.
 
     Used by the self-test so the guard is exercised through its real entry point -- a directory
-    of real zip and nupkg files -- rather than through a stubbed finding list.
+    of real zip and nupkg files -- rather than through a stubbed finding list. A `.ps1` name gets a
+    synthetic script, every other name a synthetic PE image; the value `"no-end"` is a script whose
+    signature block has a Begin line and no End line.
     """
     import os
     import zipfile
@@ -428,11 +538,19 @@ def _release_dir(root: str, layout: dict[str, object]) -> str:
         if isinstance(content, dict):
             with zipfile.ZipFile(target, "w") as zf:
                 for member, signed in content.items():
-                    zf.writestr(member, _synth_pe(signed=bool(signed)))
+                    zf.writestr(member, _synth_file(member, signed))
         else:
             with open(target, "wb") as handle:
-                handle.write(_synth_pe(signed=bool(content)))
+                handle.write(_synth_file(name, content))
     return root
+
+
+def _synth_file(name: str, signed: object) -> bytes:
+    if is_script(name):
+        if signed == "no-end":
+            return _synth_ps1(signed=True, end=False)
+        return _synth_ps1(signed=bool(signed))
+    return _synth_pe(signed=bool(signed))
 
 
 def self_test() -> int:
@@ -581,6 +699,91 @@ def self_test() -> int:
     # Finding nothing to check is a broken run, not a clean one.
     guard("a directory with no executables", {}, 2)
 
+    # ------------------------------------------------------------------------------------------
+    # The Darling zip's PowerShell scripts (#5796). Each one is signed like an executable, no
+    # allowance covers them, and the Darling zip must hold all three.
+    # ------------------------------------------------------------------------------------------
+    darling = "PerformanceMonitorDarling-3.10.0.zip"
+
+    def darling_zip(**scripts: object) -> dict[str, object]:
+        content: dict[str, object] = {"PerformanceMonitor.Darling.Service.exe": True}
+        for script in DARLING_SCRIPTS:
+            content[script] = scripts.get(script.split("-")[0], True)
+        return content
+
+    guard("a Darling zip with three signed scripts", {**correct_release(), darling: darling_zip()}, 0)
+    guard(
+        "a Darling zip with one unsigned script",
+        {**correct_release(), darling: darling_zip(upgrade=False)},
+        1,
+    )
+    guard(
+        "a Darling zip with no scripts",
+        {**correct_release(), darling: {"PerformanceMonitor.Darling.Service.exe": True}},
+        2,
+    )
+    missing_one = darling_zip()
+    del missing_one["uninstall-darling.ps1"]
+    guard("a Darling zip missing one script", {**correct_release(), darling: missing_one}, 2)
+    guard(
+        "a Darling zip whose script has a Begin line and no End line",
+        {**correct_release(), darling: darling_zip(install="no-end")},
+        1,
+    )
+    guard(
+        "a non-Darling zip with no scripts and signed executables",
+        {portable.replace("Portable", "Other"): {"Other.exe": True, "Another.exe": True}},
+        0,
+    )
+    guard(
+        "the Darling Viewer's Velopack zip, which carries no scripts",
+        {"PerformanceMonitorDarlingViewer-darlingviewer-Portable.zip": {"Viewer.exe": True}},
+        0,
+    )
+    guard("an unsigned standalone script", {**correct_release(), "install-darling.ps1": False}, 1)
+    guard("a directory holding only signed scripts", {"install-darling.ps1": True}, 0)
+
+    # The marker reader itself.
+    expect("a signed script read as unsigned", script_is_signed(_synth_ps1(signed=True)))
+    expect("an unsigned script read as signed", not script_is_signed(_synth_ps1(signed=False)))
+    expect(
+        "a Begin line with no End line read as signed",
+        not script_is_signed(_synth_ps1(signed=True, end=False)),
+    )
+    expect(
+        "an End line before the Begin line read as signed",
+        not script_is_signed(
+            b"# SIG # End signature block\r\nWrite-Output 1\r\n# SIG # Begin signature block\r\n"
+        ),
+    )
+    expect(
+        "a marker inside a string read as signed",
+        not script_is_signed(
+            b"$a = '# SIG # Begin signature block'\r\n$b = '# SIG # End signature block'\r\n"
+        ),
+    )
+    expect(
+        "a signed UTF-16 script read as unsigned",
+        script_is_signed(b"\xff\xfe" + _synth_ps1(signed=True).decode("ascii").encode("utf-16-le")),
+    )
+    expect(
+        "a signed LF-only script read as unsigned",
+        script_is_signed(_synth_ps1(signed=True).replace(b"\r\n", b"\n")),
+    )
+    expect(
+        "the Darling Viewer's Portable.zip was taken for the Darling zip",
+        not is_darling_zip("PerformanceMonitorDarlingViewer-darlingviewer-Portable.zip"),
+    )
+    expect("Darling-test.zip was not taken for a Darling zip", is_darling_zip("Darling-test.zip"))
+    expect(
+        "the release-mode census passed a Darling zip with no scripts",
+        darling_census(darling, ["PerformanceMonitor.Darling.Service.exe"]) is not None,
+    )
+    expect(
+        "the release-mode census failed a Darling zip with its three scripts",
+        darling_census(darling, ["x.exe", *DARLING_SCRIPTS]) is None,
+    )
+
     # The allowance predicate itself, at the boundary the container check defends.
     expect(
         "a standalone file was granted an allowance",
@@ -657,7 +860,10 @@ def main() -> int:
     parser.add_argument(
         "--verify-dir",
         metavar="DIR",
-        help="release guard: every .exe under DIR, including inside zips/nupkgs, must be signed",
+        help=(
+            "release guard: every .exe and .ps1 under DIR, including inside zips/nupkgs, must be "
+            "signed, and the Darling zip must hold its three scripts"
+        ),
     )
     parser.add_argument("--repo", default="erikdarlingdata/PerformanceMonitor")
     parser.add_argument("--gh", default="gh", help="gh executable (use the identity wrapper)")
@@ -701,12 +907,17 @@ def main() -> int:
                     "unsigned_count": len(report.unsigned),
                     "allowed_unsigned_count": len(report.allowed),
                     "errors": report.errors,
+                    "census_failures": report.census,
                 },
                 indent=2,
             )
         )
     else:
-        print(f"{report.tag}: {len(report.findings)} executable(s) checked\n")
+        scripts = sum(1 for f in report.findings if is_script(f.path or f.asset))
+        print(
+            f"{report.tag}: {len(report.findings) - scripts} executable(s) and "
+            f"{scripts} script(s) checked\n"
+        )
         width = max((len(f.label) for f in report.findings), default=0)
         allowed_labels = {f.label for f, _ in report.allowed}
         for f in sorted(report.findings, key=lambda x: (x.signed, x.label)):
@@ -725,13 +936,19 @@ def main() -> int:
     if report.errors and not report.findings:
         return 2
     if not report.findings:
-        print("\nFATAL: no executables found — a release with nothing to check is a broken run.",
+        print("\nFATAL: no executables or scripts found — a release with nothing to check is a broken run.",
               file=sys.stderr)
         return 2
     if report.unsigned:
-        print(f"\n{len(report.unsigned)} unsigned executable(s). See #3288.", file=sys.stderr)
-        return 1
-    return 0
+        print(
+            f"\n{len(report.unsigned)} unsigned executable(s) or script(s). See #3288 and #5796.",
+            file=sys.stderr,
+        )
+    for failure in report.census:
+        print(f"\nCENSUS FAIL: {failure}", file=sys.stderr)
+    if report.census:
+        return 2
+    return 1 if report.unsigned else 0
 
 
 if __name__ == "__main__":
