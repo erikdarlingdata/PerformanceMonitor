@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -318,9 +319,14 @@ public sealed class ReadCacheInvalidationTests
     [Fact]
     public void AGcfWire_TheStatementSweepWithheldFrom_IsNeverStored()
     {
-        var clean = GcfOutput.TryEncode(JsonSerializer.Serialize(new { rows = new[] { new { query_text = "select 1" } } }));
-        var placeholder = GcfOutput.TryEncode(JsonSerializer.Serialize(new { rows = new[] { new { query_text = SensitiveStatements.PlaceholderText } } }));
-        var plan = GcfOutput.TryEncode(JsonSerializer.Serialize(new { plan = SensitiveStatements.WithheldPlanSentence }));
+        /* A one-row answer is no smaller as a GCF wire (the never-grow guard keeps the JSON), so each answer has rows. */
+        static string? Wire(string text) => GcfOutput.TryEncode(JsonSerializer.Serialize(new
+        {
+            rows = Enumerable.Range(1, 4).Select(i => new { query_id = i, query_text = text }).ToArray(),
+        }));
+        var clean = Wire("select 1");
+        var placeholder = Wire(SensitiveStatements.PlaceholderText);
+        var plan = Wire(SensitiveStatements.WithheldPlanSentence);
         Assert.NotNull(clean);
         Assert.NotNull(placeholder);
         Assert.NotNull(plan);

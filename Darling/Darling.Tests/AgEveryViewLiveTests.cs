@@ -110,7 +110,10 @@ FROM generate_series(1, $7) AS n",
         var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs").ReplaceLineEndings("\n");
         var start = web.IndexOf("app.MapGet(\"/api/ag\"", StringComparison.Ordinal);
         Assert.True(start >= 0);
-        var call = web.Substring(start, 400);
+        /* The route body now opens with the admission ticket (#5506 part 3), so the pin reads the whole route, up to the next one. */
+        var end = web.IndexOf("app.MapGet(\"/api/ag/count\"", start, StringComparison.Ordinal);
+        Assert.True(end > start);
+        var call = web.Substring(start, end - start);
         Assert.Contains("responseByteBudget: null", call, StringComparison.Ordinal);
 
         var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAgTools.cs").ReplaceLineEndings("\n");

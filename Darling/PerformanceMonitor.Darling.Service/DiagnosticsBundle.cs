@@ -75,7 +75,7 @@ internal static class DiagnosticsBundle
     internal static readonly string[] ConfigShapeProjected =
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
-        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
+        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
         "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "WebConfig.Enabled", "WebConfig.Network",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
@@ -164,6 +164,8 @@ internal static class DiagnosticsBundle
             ["web_enabled"] = config.Web?.Enabled ?? false,
             ["web_network_exposed"] = config.Web?.Network is not null,
             ["analyzer_present"] = config.Analyzer is not null,
+            /* #5506 part 3: the read-admission limit, a plain number; a busy answer is only readable beside it (0 means the limit is off). */
+            ["reads_max_heavy_reads"] = config.Reads?.MaxHeavyReads,
             ["capture_plans"] = config.CapturePlans,
             ["query_stats_deferred_plan_fetch"] = config.QueryStatsDeferredPlanFetch,
             // The PARSED mode word, never the raw text (free config text); an unknown value runs as off, so it reports off.

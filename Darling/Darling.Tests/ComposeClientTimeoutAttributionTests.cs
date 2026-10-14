@@ -152,17 +152,19 @@ public class ComposeClientTimeoutAttributionTests
         /* The call wraps onto a second line for the caller argument (#5793), so whitespace runs are compared as one space. */
         var call = Regex.Replace(CallArguments(WebCode(), "await RunComposedPanelAsync(postgres, body, context.RequestAborted"), @"\s+", " ");
 
-        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true, caller: WebReadCaller(context)", call);
+        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true, caller: WebReadCaller(context), cacheHost: ReadSurface.Web", call);
     }
 
     [Fact]
     public void TheMcpCaller_PassesNoHeadroom_AndTheRemapFlag()
     {
-        var call = CallArguments(
+        /* #5506 part 3 (D4): the call passes the tool's own token, so a caller that leaves while the run waits for an admission slot
+           leaves the queue, and names the MCP cache host; the call wraps onto a second line, so whitespace runs compare as one space. */
+        var call = Regex.Replace(CallArguments(
             Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomViewTools.cs"),
-            "DarlingWebEndpoints.RunComposedPanelAsync(");
+            "DarlingWebEndpoints.RunComposedPanelAsync("), @"\s+", " ");
 
-        Assert.Equal("DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None, readLatency, remapClientTimeout: true", call);
+        Assert.Equal("DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, cancellationToken, readLatency, remapClientTimeout: true, cacheHost: ReadSurface.Mcp", call);
     }
 
     [Fact]
