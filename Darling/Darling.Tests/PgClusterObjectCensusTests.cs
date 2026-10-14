@@ -73,6 +73,8 @@ public sealed class PgClusterObjectCensusTests
             "lifts the shipped viewer GRANT statements out of the provisioning text and runs them retargeted at a per-run role",
         ["ServerTagMcpRoleLiveTests"] =
             "lifts the shipped mcp GRANT statements out of the provisioning text and runs them retargeted at a per-run role",
+        ["InvestigationRequestStoreLiveTests"] =
+            "lifts the shipped mcp investigation GRANT statements out of the provisioning text and runs them retargeted at a per-run role",
         ["ServerTagViewerRoleLiveTests"] =
             "lifts the shipped viewer GRANT statements out of the provisioning text and runs them retargeted at a per-run role",
         ["ComposeTempFileLimitLiveTests"] =
