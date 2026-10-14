@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// trim, masking under all three <c>mcp.dataDetail</c> levels with a literal, a login and a host canary, the earlier-report
 /// labels, the next-calls name check, and the format numbers.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class InvestigationBriefComposerTests
 {
     private const string LiteralCanary = "987654321";
