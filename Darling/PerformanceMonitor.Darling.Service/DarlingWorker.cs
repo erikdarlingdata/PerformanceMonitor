@@ -3264,6 +3264,8 @@ LIMIT 1";
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
         _registryState.Publish(initialServers);
+        /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
+        PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));
 
         /* Capture-plans is read live (() => config.CapturePlans) so a store reload of
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
@@ -6552,6 +6554,7 @@ LIMIT 1";
         /* #2298: re-publish the server set on every reload, so a server added through add_servers or the
            Viewer reaches the MCP host's plan-fetch resolver on its next resolution — no MCP restart. */
         _registryState.Publish(view.EnabledServers);
+        PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(view.EnabledServers.Select(s => s.ServerId));
         _scheduleOverrides = view.ScheduleOverrides;
         /* Stage 2: honor a pause/resume issued through the store (config_service.paused) — the collection
            loop reads this on its next tick. Single writer (this reload), so no interlock needed. */

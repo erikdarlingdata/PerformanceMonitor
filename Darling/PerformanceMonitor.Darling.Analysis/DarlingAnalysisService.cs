@@ -697,6 +697,9 @@ public sealed class DarlingAnalysisService
             //    exploratory and writes nothing. The findings are still built, enriched and returned in
             //    full; only the row is withheld, because the row would claim to be a current
             //    observation. AnalysisContext.PersistFindings carries the whole argument.
+            //    #5812 (L2): a current on-demand pass persists too, and its PLAN_REGRESSION findings may come from a
+            //    reused read up to PlanRegressionCandidateCache.RefreshAfter (one analysis cadence) old: the same band as
+            //    the scheduled pass's own findings when the next call reads them (see PgFactCollector.PlanRegressionCache).
             if (context.PersistFindings)
             {
                 await _findingStore.InsertFindingsAsync(findings, context);

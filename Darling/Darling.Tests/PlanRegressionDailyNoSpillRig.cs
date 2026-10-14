@@ -128,6 +128,258 @@ FROM generate_series(1, @p) AS n", ("s", ServerA), ("w", watermark), ("p", plans
         }
     }
 
+    /// <summary>
+    /// #5812 M2, the fallback: the exact-bound table read (<see cref="PgFactCollector.PlanRegressionTableSql"/>, which runs while
+    /// no day is built, after a failed built-days read, and in its raw twin for a server without coverage) on the same planted
+    /// size as <see cref="Measure"/>, but as interval rows: fifteen days of <c>DARLING_NOSPILL_RIG_PLANS</c> plans a day, one
+    /// interval each, plus the open hour, and no built day. It runs at the server's own <c>work_mem</c> outside any
+    /// transaction (before M2), then inside a transaction that runs <see cref="PgFactCollector.PlanRegressionDailyWorkMemSql"/>,
+    /// as the collector now does. It prints the temp blocks and the spilling nodes of each and fails if the second spills.
+    /// </summary>
+    [Fact]
+    public async Task MeasureFallback()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        var plansText = Environment.GetEnvironmentVariable("DARLING_NOSPILL_RIG_PLANS");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs) || string.IsNullOrEmpty(plansText),
+            "A manual rig: set DARLING_TEST_PG and DARLING_NOSPILL_RIG_PLANS (plans per day, e.g. 24000) to plant and measure it.");
+        var plans = int.Parse(plansText!, CultureInfo.InvariantCulture);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var today = LiveClock.Now().Date; // #5608
+        var window = today.AddDays(-14);
+        var watermark = today.AddHours(10);
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late");
+        await PlantIntervalsAsync(connection, window, today, plans, everyHours: 24, firstInterval: 1);
+        await PlantOpenHourAsync(connection, watermark, plans, interval: 100);
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late");
+        await ExecAsync(connection, "ANALYZE collect.query_store_interval_latest");
+
+        var bound = window.AddDays(-PgFactCollector.PlanRegressionSkewMarginDays);
+        object[] parameters = [ServerA, window, bound, bound];
+        var before = await ExplainSqlAsync(connection, null, "fallback (table read)", PgFactCollector.PlanRegressionTableSql, parameters, ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await ExecAsync(connection, PgFactCollector.PlanRegressionDailyWorkMemSql);
+        var after = await ExplainSqlAsync(connection, transaction, "fallback (table read)", PgFactCollector.PlanRegressionTableSql, parameters, ct);
+        await transaction.RollbackAsync(ct);
+        Assert.True(after.Spills.Count == 0, "the fallback read spilled with the collector's work_mem: " + after.Line + " (before: " + before.Line + ")");
+    }
+
+    /// <summary>
+    /// #5812, the issue's before and after on the planted busy shape: <see cref="Measure"/>'s plant (fifteen days of totals,
+    /// today built through 10:00, the open hour) plus the three open days' earlier intervals (every four hours, so the read at
+    /// <c>origin/dev</c> has its open days to read). Before is dev's read, its statement text copied from <c>origin/dev</c>
+    /// (<see cref="DevDailyPrefix"/> with the unchanged shared suffix): the twelve closed days from totals and the three open
+    /// days from every interval row, at the server's own <c>work_mem</c> as dev runs it, and again at the collector's.
+    /// After is this branch's read with the collector's <c>work_mem</c>. Three runs each, printed (execution time, client wall
+    /// time, shared and temp blocks); nothing is asserted beyond the plant's shape.
+    /// </summary>
+    [Fact]
+    public async Task CompareWithDev()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        var plansText = Environment.GetEnvironmentVariable("DARLING_NOSPILL_RIG_PLANS");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs) || string.IsNullOrEmpty(plansText),
+            "A manual rig: set DARLING_TEST_PG and DARLING_NOSPILL_RIG_PLANS (plans per day, e.g. 24000) to plant and measure it.");
+        var plans = int.Parse(plansText!, CultureInfo.InvariantCulture);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var today = LiveClock.Now().Date; // #5608
+        var window = today.AddDays(-14);
+        var watermark = today.AddHours(10);
+        var floor = PgFactCollector.PlanRegressionWindowFloor(window);
+
+        await ExecAsync(connection, @"
+INSERT INTO collect.plan_regression_daily
+    (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash, execs, cpu_us_sum, dur_us_sum, last_exec, is_forced_plan, force_failure_count)
+SELECT @s, d.d::date, 'spilldb', (n + 1) / 2, n, NULL, 'hash' || n, 100, 100 * 10000 * (1 + (n % 2) * 3), 100 * 30000, d.d + interval '12 hours', false, 0
+FROM generate_series(@f::timestamp, @t::timestamp, interval '1 day') AS d (d)
+CROSS JOIN generate_series(1, @p) AS n",
+            ("s", ServerA), ("f", window), ("t", today), ("p", plans));
+        await ExecAsync(connection, @"
+INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, built_at, source_rows, built_through)
+SELECT @s, d.d::date, 0, 0, d.d, 0, CASE WHEN d.d = @t THEN @w ELSE d.d + interval '1 day' END
+FROM generate_series(@f::timestamp, @t::timestamp, interval '1 day') AS d (d)",
+            ("s", ServerA), ("f", window), ("t", today), ("w", watermark));
+        await ExecAsync(connection,
+            "INSERT INTO collect.query_store_interval_latest_coverage (server_id, filled_since, applied_through) VALUES (@s, @f, @f)",
+            ("s", ServerA), ("f", window.AddDays(-5)));
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late");
+        await PlantIntervalsAsync(connection, today.AddDays(-2), today.AddDays(-1), plans, everyHours: 4, firstInterval: 1);
+        await PlantIntervalsAsync(connection, today, today, plans, everyHours: 4, firstInterval: 50, untilHour: 10);
+        await PlantOpenHourAsync(connection, watermark, plans, interval: 100);
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late");
+        await ExecAsync(connection, "ANALYZE collect.plan_regression_daily");
+        await ExecAsync(connection, "ANALYZE collect.plan_regression_daily_built");
+        await ExecAsync(connection, "ANALYZE collect.query_store_interval_latest");
+
+        /* Dev's inputs: the closed days only (T-14 through T-3), and its live floor one day below the first unbuilt day. */
+        var closed = Enumerable.Range(0, 12).Select(i => DateOnly.FromDateTime(window.AddDays(i))).ToArray();
+        var devFloor = DateOnly.FromDateTime(today.AddDays(-2)).ToDateTime(TimeOnly.MinValue).AddDays(-1);
+        object[] devParameters = [ServerA, floor, closed, devFloor, floor.AddDays(-1)];
+
+        var built = new List<PlanRegressionDaily.BuiltDay>();
+        await using (var days = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection))
+        {
+            days.Parameters.AddWithValue(ServerA);
+            days.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor);
+            await using var reader = await days.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                built.Add(new PlanRegressionDaily.BuiltDay(reader.GetFieldValue<DateOnly>(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1)));
+            }
+        }
+
+        Assert.Equal(15, built.Count);
+        object[] branchParameters =
+        [
+            ServerA, floor, built.Select(b => b.Day).ToArray(), PgFactCollector.PlanRegressionLiveFloorWithWatermarks(floor, built),
+            floor.AddDays(-1), built.Select(b => b.ThroughOrDayEnd).ToArray(),
+        ];
+
+        var suffix = PgFactCollector.PlanRegressionDailySql[PgFactCollector.PlanRegressionDailySql.IndexOf("plan_dedup AS", StringComparison.Ordinal)..];
+        var devSql = DevDailyPrefix + suffix;
+        for (var run = 1; run <= 3; run++)
+        {
+            await ExplainSqlAsync(connection, null, $"dev read, server work_mem, run {run}", devSql, devParameters, ct);
+        }
+
+        foreach (var (label, sql, parameters) in new[] { ("dev read, collector work_mem", devSql, devParameters), ("branch read, collector work_mem", PgFactCollector.PlanRegressionDailySql, branchParameters) })
+        {
+            for (var run = 1; run <= 3; run++)
+            {
+                await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+                await ExecAsync(connection, PgFactCollector.PlanRegressionDailyWorkMemSql);
+                await ExplainSqlAsync(connection, transaction, $"{label}, run {run}", sql, parameters, ct);
+                await transaction.RollbackAsync(ct);
+            }
+        }
+    }
+
+    /// <summary>One interval per plan every <paramref name="everyHours"/> hours of each day from <paramref name="first"/>
+    /// through <paramref name="last"/> (up to <paramref name="untilHour"/>), with the same two-plans-a-query costs as the totals.</summary>
+    private static Task PlantIntervalsAsync(NpgsqlConnection connection, DateTime first, DateTime last, int plans, int everyHours, int firstInterval, int untilHour = 24) =>
+        ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_latest
+(
+    server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+    collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+    last_execution_time, is_forced_plan, force_failure_count
+)
+SELECT @s, 'spilldb', (n + 1) / 2, n, NULL, @i + row_number() OVER (PARTITION BY n ORDER BY h.h) - 1, h.h, h.h + interval '55 minutes',
+       'hash' || n, 'qh' || ((n + 1) / 2), 10, 10000 * (1 + (n % 2) * 3), 30000, h.h + interval '5 minutes', false, 0
+FROM generate_series(@f::timestamp, @t::timestamp + (@u - @e) * interval '1 hour', @e * interval '1 hour') AS h (h)
+CROSS JOIN generate_series(1, @p) AS n
+WHERE extract(hour FROM h.h) < @u",
+            ("s", ServerA), ("f", first), ("t", last), ("e", everyHours), ("u", untilHour), ("i", firstInterval), ("p", plans));
+
+    /// <summary>The open hour: every plan ran again after <paramref name="watermark"/>, as in <see cref="Measure"/>.</summary>
+    private static Task PlantOpenHourAsync(NpgsqlConnection connection, DateTime watermark, int plans, int interval) =>
+        ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_latest
+(
+    server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+    collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+    last_execution_time, is_forced_plan, force_failure_count
+)
+SELECT @s, 'spilldb', (n + 1) / 2, n, NULL, @i, @w + (n % 50) * interval '1 minute', @w + interval '55 minutes',
+       'hash' || n, 'qh' || ((n + 1) / 2), 10, 10000 * (1 + (n % 2) * 3), 30000, @w + (n % 50) * interval '1 minute' + interval '5 minutes', false, 0
+FROM generate_series(1, @p) AS n", ("s", ServerA), ("w", watermark), ("i", interval), ("p", plans));
+
+    /// <summary>A statement under <c>EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)</c>: execution time, client wall time, the root's
+    /// shared and temp blocks, and the nodes that went to disk.</summary>
+    private static async Task<Run> ExplainSqlAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, string label, string sql, object[] parameters, System.Threading.CancellationToken ct)
+    {
+        var workMem = await TextAsync(connection, "SHOW work_mem");
+        await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, connection, transaction) { CommandTimeout = 600 };
+        foreach (var value in parameters)
+        {
+            command.Parameters.Add(value switch
+            {
+                DateTime t => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = t },
+                DateOnly[] d => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = d },
+                DateTime[] t => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = t },
+                _ => new NpgsqlParameter { Value = value },
+            });
+        }
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var root = JsonDocument.Parse((string)(await command.ExecuteScalarAsync(ct))!).RootElement[0];
+        clock.Stop();
+        var plan = root.GetProperty("Plan");
+        var nodes = new List<string>();
+        var spills = new List<string>();
+        Walk(plan, nodes, spills);
+        var line = string.Create(CultureInfo.InvariantCulture,
+            $"{label}: work_mem={workMem} execution_ms={root.GetProperty("Execution Time").GetDouble():F0} wall_ms={clock.ElapsedMilliseconds} shared_hit={Number(plan, "Shared Hit Blocks")} shared_read={Number(plan, "Shared Read Blocks")} temp_read={Number(plan, "Temp Read Blocks")} temp_written={Number(plan, "Temp Written Blocks")} spill={(spills.Count > 0 ? string.Join("+", spills) : "no")}");
+        TestContext.Current.SendDiagnosticMessage(line);
+        Console.WriteLine(line);
+        return new Run(line, spills);
+    }
+
+    /// <summary>The daily read's prefix at <c>origin/dev</c> before #5812 (its open days read whole), verbatim; the suffix
+    /// from <c>plan_dedup</c> down is unchanged by #5812.</summary>
+    private const string DevDailyPrefix = @"
+WITH plan_agg AS
+(
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        replica_role,
+        any_value(query_plan_hash) AS query_plan_hash,
+        SUM(execs) AS execs,
+        SUM(cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS cpu_per_exec,
+        SUM(dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        CASE WHEN COUNT(*) = COUNT(rowcount_sum)
+             THEN SUM(rowcount_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0)
+        END AS rows_per_exec,
+        MAX(last_exec) AS last_exec,
+        bool_or(is_forced_plan) AS is_forced_plan,
+        MAX(force_failure_count) AS force_failure_count
+    FROM
+    (
+        SELECT
+            d.database_name, d.query_id, d.plan_id, d.replica_role, d.query_plan_hash,
+            d.execs, d.cpu_us_sum, d.dur_us_sum, d.rowcount_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
+        FROM plan_regression_daily AS d
+        WHERE d.server_id = $1::integer
+        AND   d.day = ANY($3::date[])
+
+        UNION ALL
+
+        SELECT
+            l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
+            SUM(l.execution_count),
+            SUM(l.avg_cpu_time_us::numeric * l.execution_count),
+            SUM(l.avg_duration_us::numeric * l.execution_count),
+            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END,
+            MAX(l.last_execution_time),
+            bool_or(l.is_forced_plan),
+            MAX(l.force_failure_count)
+        FROM query_store_interval_latest AS l
+        WHERE l.server_id = $1::integer
+        AND   l.last_execution_time >= $2::timestamp
+        AND   l.collection_time >= $5::timestamp
+        AND   l.first_execution_time >= $4::timestamp
+        AND   l.last_execution_time::date <> ALL($3::date[])
+        GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
+    ) AS u
+    GROUP BY database_name, query_id, plan_id, replica_role
+),
+";
+
     private sealed record Run(string Line, List<string> Spills);
 
     private static async Task<Run> ExplainAsync(

@@ -549,7 +549,8 @@ WITH plan_agg AS
 ";
 
     /// <summary>
-    /// The work memory for the PLAN_REGRESSION snapshot transaction (#5812, bound 2), set with <c>SET LOCAL</c> so it ends with
+    /// The work memory for every PLAN_REGRESSION read (#5812, bound 2): the daily read's snapshot transaction and the short
+    /// transaction each exact-bound read (table or raw) now runs in (M2). Set with <c>SET LOCAL</c> so it ends with
     /// that transaction and touches no other statement on the pooled connection. The daily read groups every built day's
     /// totals plus the live rows by plan. At the default 4MB the planner sorts them all, and on a planted busy server (15
     /// built days, about 384,000 rows) that sort went to disk (an external merge of about 15MB). From 32MB up it hashes in
@@ -766,6 +767,21 @@ ORDER BY c.regression_factor DESC";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
+            /* #5812 (bound 2, M2): every PLAN_REGRESSION read runs read-only with PlanRegressionDailyWorkMemSql, set here only,
+               on whichever transaction holds it (the daily read's snapshot or the exact-bound read's own). */
+            async Task BoundTheReadAsync()
+            {
+                await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
+                }
+
+                await using (var workMem = new NpgsqlCommand(PlanRegressionDailyWorkMemSql, connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    await workMem.ExecuteNonQueryAsync(context.CancellationToken);
+                }
+            }
+
             /* #2387: the chunk-exclusion bound, one CLOCK-SKEW MARGIN below the comparison window. Bound as
                its own parameter rather than written as "$2 - INTERVAL '1 day'" so the planner compares
                against a bare parameter, which is the form runtime chunk exclusion handles most reliably. */
@@ -791,15 +807,7 @@ ORDER BY c.regression_factor DESC";
                 /* One REPEATABLE READ READ ONLY transaction for the built-days read and the daily read: both see the same
                    built set and the same totals, and the live floor below stays a bound parameter. */
                 snapshot = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, context.CancellationToken);
-                await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
-                {
-                    await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
-                }
-
-                await using (var workMem = new NpgsqlCommand(PlanRegressionDailyWorkMemSql, connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
-                {
-                    await workMem.ExecuteNonQueryAsync(context.CancellationToken);
-                }
+                await BoundTheReadAsync();
 
                 builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
                     connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
@@ -807,7 +815,7 @@ ORDER BY c.regression_factor DESC";
                 if (builtDays.Count == 0)
                 {
                     /* No built day, or the read failed (which leaves this transaction aborted): the exact-bound read runs
-                       outside it, on an ordinary statement. */
+                       outside it, in the short transaction below. */
                     await snapshot.DisposeAsync();
                     snapshot = null;
                 }
@@ -818,6 +826,16 @@ ORDER BY c.regression_factor DESC";
             }
 
             var readsDays = builtDays.Count > 0;
+            if (snapshot is null)
+            {
+                /* #5812 (M2): the exact-bound reads (the table read while no day is built or after a failed built-days read,
+                   and the raw read of a server without coverage) take the same work memory as the daily read, in a short
+                   transaction of their own. They group the whole 14-day window by plan, and at the default work_mem that
+                   grouping went to disk. SET LOCAL ends with this transaction, which is disposed right after the read, so
+                   the plan reads below and the next user of the pooled connection keep the server's own value. */
+                snapshot = await connection.BeginTransactionAsync(context.CancellationToken);
+                await BoundTheReadAsync();
+            }
 
             using var cmd = new NpgsqlCommand(
                 readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)
@@ -862,12 +880,28 @@ ORDER BY c.regression_factor DESC";
                cadence (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
                stays as fresh as before. Everything below the read (the input check, the cut, the fact) still runs every time. */
             var readStartedUtc = DateTime.UtcNow;
+            /* The daily read's leading five parameters stand for the window and the built days; $6, the watermarks, goes in
+               last so a moved watermark is reported as one. An exact-bound read's shape carries its exact window start
+               (rawWindowStart), so a call with a different window length never takes another pass's read (L3). */
             var shape = context.ReusePlanRegressionCandidates || context.RefreshPlanRegressionCandidates
-                ? PlanRegressionCandidateCache.ShapeOf(cmd, readsDays ? 5 : readsTable ? 4 : 3, windowFloor, builtDays.Select(b => b.Day).ToList())
+                ? PlanRegressionCandidateCache.ShapeOf(
+                    cmd, readsDays ? 5 : readsTable ? 4 : 3, windowFloor, builtDays.Select(b => b.Day).ToList(),
+                    exactWindowStart: readsDays ? null : rawWindowStart, watermarkParameter: readsDays ? 5 : null)
                 : null;
+            var decision = PlanRegressionCandidateCache.ReuseDecision.NoEntry;
             var reused = shape is null || context.RefreshPlanRegressionCandidates
                 ? null
-                : PlanRegressionCache.TryGet(StoreIdentity, context.ServerId, shape, context.TimeRangeEnd, readStartedUtc);
+                : PlanRegressionCache.TryGet(StoreIdentity, context.ServerId, shape, context.TimeRangeEnd, readStartedUtc, out decision);
+            if (shape is not null && context.RefreshPlanRegressionCandidates)
+            {
+                _logger?.LogDebug("PLAN_REGRESSION candidates for server {ServerId}: the scheduled pass reads live and refills the cache", context.ServerId);
+            }
+            else if (shape is not null)
+            {
+                _logger?.LogDebug("PLAN_REGRESSION candidates for server {ServerId}: {Decision} ({Outcome})",
+                    context.ServerId, decision, reused is null ? "read live" : "reused");
+            }
+
             var candidates = reused is null ? new List<PlanRegressionCandidate>() : new List<PlanRegressionCandidate>(reused);
             if (reused is null)
             {

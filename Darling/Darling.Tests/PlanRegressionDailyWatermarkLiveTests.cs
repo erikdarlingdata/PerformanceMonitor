@@ -31,8 +31,10 @@ namespace Darling.Tests;
 /// tampered with, are invisible to it, and its answer equals the interval-table read.</para>
 ///
 /// <para><b>Fourteen days with three partial ones.</b> The closed days are built whole and the three open days partially. The
-/// interval scan's index condition is <c>first_execution_time</c> at or above the lowest watermark, it returns exactly the
-/// rows after each day's watermark, and the daily scan returns exactly the built days' totals.</para>
+/// interval scan reads no more rows than start at or above the lowest watermark, it returns exactly the rows after each
+/// day's watermark, and the daily scan returns exactly the built days' totals. Each is counted from the executed plan's
+/// JSON nodes (rows returned plus rows a filter or recheck removed, times loops), exact with parallelism off, so the test
+/// does not depend on how the planner prints its index condition (#5812, L7).</para>
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to
    CREATE and DROP its own database through ScratchPostgres and then works entirely inside it. */
@@ -215,16 +217,14 @@ AND   (   (last_execution_time::date = @d2 AND first_execution_time >= @w2)
         Assert.True(liveRows >= 400 && liveRows < afterLowest && afterLowest < windowRows / 3,
             $"seed shape: {liveRows} live rows, {afterLowest} at or above the lowest watermark, {windowRows} in the window");
 
-        /* Sequential scans off so a CI-sized table still shows the index path the field store takes; the bound itself is
-           what is asserted. */
+        /* Sequential scans off so a CI-sized table still shows the index path the field store takes. What is asserted is
+           the rows the plan's nodes read, not the text of its index condition (L7). */
         var plan = await ExplainAsync(connection, window, built, ct, noSeqScan: true);
         var live = ScansOf(plan, "query_store_interval_latest").ToList();
         var daily = ScansOf(plan, "plan_regression_daily").ToList();
         Assert.NotEmpty(live);
         Assert.NotEmpty(daily);
 
-        var bound = "first_execution_time >= '" + lowest.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "'";
-        Assert.All(live, s => Assert.Contains(bound, s.IndexCond ?? "", StringComparison.Ordinal));
         Assert.Equal(liveRows, live.Sum(s => s.RowsReturned));
         Assert.True(live.Sum(s => s.RowsRead) <= afterLowest,
             $"the interval scan read {live.Sum(s => s.RowsRead)} rows; {afterLowest} start at or above the lowest watermark, {windowRows} are in the window");
@@ -617,10 +617,10 @@ CROSS JOIN generate_series(1, 2) AS p", ct, ("s", ServerA), ("f", first), ("l", 
         return JsonDocument.Parse(json).RootElement[0].GetProperty("Plan").Clone();
     }
 
-    private readonly record struct Scan(string Relation, string NodeType, string? IndexCond, double RowsRead, double RowsReturned);
+    private readonly record struct Scan(string Relation, string NodeType, double RowsRead, double RowsReturned);
 
     /// <summary>Every scan of a relation whose name contains <paramref name="relationPart"/>: rows returned times loops, rows
-    /// read adding what the filter and recheck threw away, and the index condition (a bitmap heap scan's is on its child).</summary>
+    /// read adding what the filter and recheck threw away.</summary>
     private static IEnumerable<Scan> ScansOf(JsonElement node, string relationPart)
     {
         if (node.TryGetProperty("Relation Name", out var relation)
@@ -630,8 +630,7 @@ CROSS JOIN generate_series(1, 2) AS p", ct, ("s", ServerA), ("f", first), ("l", 
             var loops = node.GetProperty("Actual Loops").GetDouble();
             var returned = node.GetProperty("Actual Rows").GetDouble() * loops;
             var removed = (Number(node, "Rows Removed by Filter") + Number(node, "Rows Removed by Index Recheck")) * loops;
-            var cond = node.TryGetProperty("Index Cond", out var c) ? c.GetString() : ChildIndexCond(node);
-            yield return new Scan(relation.GetString()!, node.GetProperty("Node Type").GetString()!, cond, returned + removed, returned);
+            yield return new Scan(relation.GetString()!, node.GetProperty("Node Type").GetString()!, returned + removed, returned);
         }
 
         if (node.TryGetProperty("Plans", out var plans))
@@ -641,17 +640,6 @@ CROSS JOIN generate_series(1, 2) AS p", ct, ("s", ServerA), ("f", first), ("l", 
                 foreach (var scan in ScansOf(child, relationPart)) yield return scan;
             }
         }
-    }
-
-    private static string? ChildIndexCond(JsonElement node)
-    {
-        if (!node.TryGetProperty("Plans", out var plans)) return null;
-        foreach (var child in plans.EnumerateArray())
-        {
-            if (child.TryGetProperty("Index Cond", out var c)) return c.GetString();
-        }
-
-        return null;
     }
 
     private static double Number(JsonElement node, string name) => node.TryGetProperty(name, out var v) ? v.GetDouble() : 0;
