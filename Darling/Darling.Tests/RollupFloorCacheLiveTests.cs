@@ -270,11 +270,12 @@ public sealed class RollupFloorCacheLiveTests
         Assert.True(truthAfter > truthBefore, "the recreated store's floor must be later, or a stale floor would go unnoticed");
         Assert.Equal(oldestChunkBefore, await OldestChunkAsync(store.ConnectionString, ct));
 
-        /* #5808: the changed database is never served the old floor. The caller gets no floor for the view, flagged
-           pending so no caller caches the answer, and the background drain measures it; the next call has the new floor. */
+        /* #5808: the changed database is never served the old floor. With no floor to serve, the view is measured on
+           the calling thread inside the inline budget (a null floor would route its read to raw as if raw covered the
+           window), so the caller gets the new floor and the answer is not pending. */
         var second = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
-        Assert.Null(second.FloorOf(HourlyView));
-        Assert.True(second.FloorsPending);
+        Assert.Equal(truthAfter, second.FloorOf(HourlyView));
+        Assert.False(second.FloorsPending);
         await TimescaleSupport.RollupFloorDrainFor(dataSource);
         Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
 
@@ -356,10 +357,15 @@ public sealed class RollupFloorCacheLiveTests
         var afterChange = pastTheHourAgain + TimeSpan.FromMinutes(1);
         var lastFloor = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, afterChange, ct);
         Assert.Equal(floorAfterDrop, lastFloor.FloorOf(HourlyView));
-        Assert.False(lastFloor.FloorsPending);
 
-        var measured = await PollForFloorAsync(dataSource, availability, afterChange, floorAfterSecondDrop, ct);
+        /* #5808 ruling: the last floor may be one chunk too early, so that answer is PENDING: neither
+           ComposeStoreAvailability nor the Viewer caches it for its re-probe interval. The next probe after the drain
+           lands the fresh floor is not pending. */
+        Assert.True(lastFloor.FloorsPending);
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
+        var measured = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, afterChange, ct);
         Assert.Equal(floorAfterSecondDrop, measured.FloorOf(HourlyView));
+        Assert.False(measured.FloorsPending);
         Assert.Equal(3, factory.Provider.CountContaining(MinBucketStatement));
     }
 
@@ -530,7 +536,11 @@ public sealed class RollupFloorCacheLiveTests
         Assert.NotNull(second.RawOldestOf("query_store_stats"));
         Assert.Equal(coldAfterFirst, factory.Provider.CountContaining(TimescaleSupport.ColdFloorMarker));
         Assert.Equal(1, factory.Provider.CountContaining(catalogCheck));
-        Assert.Equal(1, factory.Provider.CountContaining(TimescaleSupport.RawFloorMarker));
+
+        /* The raw table with rows (query_store_stats, its oldest chunk unchanged) is not read again. The two empty raw
+           tables have no chunk, and a raw table with no chunk is read on every probe (#5808: the degenerate case, a
+           plain table whose hypertable conversion failed, or an empty one; cheap either way). */
+        Assert.Equal(1, factory.Provider.CountContaining(ChunkedRawRead));
 
         /* Past the hour: served from the cache; the drain refreshes the raw floors once and re-checks the catalog floor,
            still without a min(bucket) sort of the compressed chunk. */
@@ -538,10 +548,13 @@ public sealed class RollupFloorCacheLiveTests
         var third = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheHour, ct);
         Assert.Equal(truth, third.FloorOf(HourlyView));
         await TimescaleSupport.RollupFloorDrainFor(dataSource);
-        Assert.Equal(2, factory.Provider.CountContaining(TimescaleSupport.RawFloorMarker));
+        Assert.Equal(2, factory.Provider.CountContaining(ChunkedRawRead));
         Assert.Equal(2, factory.Provider.CountContaining(catalogCheck));
         Assert.Equal(0, factory.Provider.CountContaining(MinBucketStatement));
     }
+
+    /// <summary>The raw-floor read of query_store_stats, the one raw table this class's store fills.</summary>
+    private const string ChunkedRawRead = "(SELECT min(collection_time) FROM collect.query_store_stats)";
 
     [Fact]
     public async Task AfterTheStartUpWarm_TheFirstCoverageCallOnAnotherDataSource_RunsNoMinBucket()

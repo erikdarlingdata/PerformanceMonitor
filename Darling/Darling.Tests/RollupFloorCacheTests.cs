@@ -276,6 +276,139 @@ public sealed class RollupFloorCacheTests
         Assert.DoesNotContain(TimescaleSupport.ColdFloorMarker, sql, StringComparison.Ordinal);
         Assert.Contains(TimescaleSupport.EarlierFloorMarker, sql, StringComparison.Ordinal);
     }
+
+    /* ─────────── #5808: the cold reason and the planner make ONE identity test ─────────── */
+
+    /// <summary>
+    /// #5808: an entry measured while the view was not in the catalog, from ANOTHER database (a store recreated under
+    /// the same name), is not serveable. The planner always said so; the cold reason used to call it serveable without the
+    /// OID check, and EnqueueRollupFloorWork skips a job whose cold reason is null and whose entry is under the hour,
+    /// so the view was served no floor and never queued.
+    /// </summary>
+    [Fact]
+    public void RollupFloorColdReason_AnUnlistedViewsEntryFromAnotherDatabase_IsNotServeable_AndIsQueued()
+    {
+        var entry = new TimescaleSupport.RollupFloorCacheEntry(null, null, SomeFloor, Now, DatabaseOid: 1);
+        var unlistedNow = new TimescaleSupport.RollupChunkIdentity(null, null, DatabaseOid: 2);
+
+        Assert.NotNull(TimescaleSupport.RollupFloorColdReason(true, entry, unlistedNow, catalogMiss: true));
+        Assert.False(TimescaleSupport.RollupFloorEntryMatches(entry, unlistedNow));
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        var plan = TimescaleSupport.PlanRollupFloorMeasurements(
+            new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal) { [view] = entry },
+            new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal) { [view] = unlistedNow },
+            RollupAvailability.All,
+            Now);
+        Assert.Contains(view, plan.Inline);
+
+        /* The same database: serveable, by both. */
+        var sameDatabase = unlistedNow with { DatabaseOid = 1 };
+        Assert.Null(TimescaleSupport.RollupFloorColdReason(true, entry, sameDatabase, catalogMiss: true));
+        Assert.True(TimescaleSupport.RollupFloorEntryMatches(entry, sameDatabase));
+    }
+
+    /// <summary>#5808: across every combination of chunk, hypertable and OID, the cold reason is null exactly when the
+    /// planner would serve the entry (its helper matches), so no view is "serveable" to one and "changed" to the other.</summary>
+    [Fact]
+    public void RollupFloorColdReason_IsNullExactlyWhenThePlannerServesTheEntry()
+    {
+        string?[] chunks = { null, "_hyper_1_1_chunk", "_hyper_1_2_chunk" };
+        string?[] hypertables = { null, SomeHypertable, AnotherHypertable };
+        long[] oids = { 1, 2 };
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        foreach (var entryChunk in chunks)
+        foreach (var entryHypertable in hypertables)
+        foreach (var entryOid in oids)
+        foreach (var chunk in chunks)
+        foreach (var hypertable in hypertables)
+        foreach (var oid in oids)
+        {
+            var entry = new TimescaleSupport.RollupFloorCacheEntry(entryChunk, entryHypertable, SomeFloor, Now, DatabaseOid: entryOid);
+            var identity = new TimescaleSupport.RollupChunkIdentity(chunk, hypertable, oid);
+            var plan = TimescaleSupport.PlanRollupFloorMeasurements(
+                new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal) { [view] = entry },
+                new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal) { [view] = identity },
+                RollupAvailability.All,
+                Now);
+            var catalogMiss = chunk is null && hypertable is null;
+            Assert.Equal(!plan.Inline.Contains(view), TimescaleSupport.RollupFloorColdReason(true, entry, identity, catalogMiss) is null);
+        }
+    }
+
+    /* ─────────── #5808: the catalog floor ─────────── */
+
+    [Fact]
+    public void IsBucketAligned_IsTrueOnlyOnABucketBoundary()
+    {
+        var hour = TimeSpan.FromHours(1);
+        var day = TimeSpan.FromDays(1);
+
+        Assert.True(TimescaleSupport.IsBucketAligned(new DateTime(2026, 1, 5, 7, 0, 0), hour));
+        Assert.False(TimescaleSupport.IsBucketAligned(new DateTime(2026, 1, 5, 7, 30, 0), hour));
+        Assert.False(TimescaleSupport.IsBucketAligned(new DateTime(2026, 1, 5, 7, 0, 0).AddTicks(1), hour));
+        Assert.True(TimescaleSupport.IsBucketAligned(new DateTime(2026, 1, 5), day));
+        Assert.False(TimescaleSupport.IsBucketAligned(new DateTime(2026, 1, 5, 1, 0, 0), day));
+        Assert.False(TimescaleSupport.IsBucketAligned(new DateTime(2026, 1, 5), TimeSpan.Zero));
+    }
+
+    /// <summary>#5808: the catalog floor check is an EXISTS of a bucket EXACTLY at the bound (a row at the chunk's range
+    /// start is the floor; a chunk with no row there answers false and is measured instead), over the one view it names,
+    /// with the bound bound as $1, never interpolated, and with its own marker, never the cold sort's.</summary>
+    [Fact]
+    public void RollupCatalogFloorCheckSql_IsAnExistsAtExactlyTheBoundParameter_OverItsOwnView()
+    {
+        var view = TimescaleSupport.QueryStatsIoHourlyView;
+        var sql = TimescaleSupport.RollupCatalogFloorCheckSql(view);
+
+        Assert.Equal($"SELECT EXISTS (SELECT 1 FROM collect.{view} WHERE bucket = $1) {TimescaleSupport.CatalogFloorMarker}", sql);
+        Assert.DoesNotContain("bucket <", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("min(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(TimescaleSupport.ColdFloorMarker, sql, StringComparison.Ordinal);
+        foreach (var (other, _, _, _, _) in TimescaleSupport.RollupViews.Where(r => r.View != view))
+        {
+            Assert.DoesNotContain($"collect.{other} ", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /* ─────────── #5808: the raw floors follow the raw tables' oldest chunk ─────────── */
+
+    [Fact]
+    public void RawFloorNeedsRead_ReadsANewOrMovedTable_AndOneWithNoChunk_ButNotAnUnchangedOne()
+    {
+        var table = TimescaleSupport.RolledRawTables[0];
+        var entry = new TimescaleSupport.RawFloorCacheEntry(SomeFloor, Now, 1, "_hyper_5_10_chunk");
+        Dictionary<string, string?> Chunks(string? chunk) => new(StringComparer.Ordinal) { [table] = chunk };
+
+        Assert.True(TimescaleSupport.RawFloorNeedsRead(false, default, 1, Chunks("_hyper_5_10_chunk"), table));
+        Assert.True(TimescaleSupport.RawFloorNeedsRead(true, entry, 2, Chunks("_hyper_5_10_chunk"), table));
+        Assert.False(TimescaleSupport.RawFloorNeedsRead(true, entry, 1, Chunks("_hyper_5_10_chunk"), table));
+
+        /* A drop_chunks retention pass: the oldest chunk is a different one. */
+        Assert.True(TimescaleSupport.RawFloorNeedsRead(true, entry, 1, Chunks("_hyper_5_11_chunk"), table));
+
+        /* No chunk at all (a plain table whose conversion failed, or an empty one): read on every probe. */
+        Assert.True(TimescaleSupport.RawFloorNeedsRead(true, entry with { ChunkName = null }, 1, Chunks(null), table));
+
+        /* A failed catalog read: only a missing or another database's entry is read. */
+        Assert.False(TimescaleSupport.RawFloorNeedsRead(true, entry, 1, null, table));
+    }
+
+    [Fact]
+    public void RollupOldestChunkSql_AlsoReadsEachRawTablesOldestChunk_FlaggedRaw()
+    {
+        var sql = TimescaleSupport.RollupOldestChunkSql(RollupAvailability.All)!;
+
+        foreach (var table in TimescaleSupport.RolledRawTables)
+        {
+            Assert.Contains($"('{table}')", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("c.hypertable_name = raw.table_name", sql, StringComparison.Ordinal);
+        Assert.Contains("false AS is_raw", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("min(collection_time)", sql, StringComparison.Ordinal);
+    }
+
     /// <summary>Every view a cycle does not serve as it stands: <see cref="TimescaleSupport.PlanRollupFloorMeasurements"/>'s
     /// Inline and Background sets together (#5808 removed the production wrapper that did this).</summary>
     private static IReadOnlySet<string> FloorsToMeasure(
