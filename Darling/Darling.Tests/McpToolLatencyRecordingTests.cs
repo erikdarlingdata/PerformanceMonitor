@@ -448,7 +448,9 @@ public sealed class McpToolLatencyRecordingTests
         var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
         /* #5506 part 3: these tests measure admission; with the read cache on, identical calls would share one read. */
         admission.Cache.Enabled = false;
-        admission.SetTable(new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long> { [(surface, route, band)] = 2_000 });
+        /* A pair is heavy only when its p90 is strictly above ReadAdmission.HeavyThresholdMs (2,000), so 2,000 would be light and
+           nothing would queue: plant the next histogram bucket's bound, 3,000. */
+        admission.SetTable(new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long> { [(surface, route, band)] = 3_000 });
         return admission;
     }
 

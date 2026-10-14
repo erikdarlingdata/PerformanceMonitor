@@ -318,7 +318,9 @@ public sealed class ReadAdmissionWebTests
         using var client = app.GetTestServer().CreateClient();
         var response = await client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken);
         Assert.Equal((HttpStatusCode)429, response.StatusCode);
-        Assert.Equal("18", response.Headers.GetValues("Retry-After").Single());
+        /* Retry-After is ceil(ahead * largest p90 / limit / 1,000 ms) with ahead = 2 running + 16 queued = 18, the planted p90 of
+           3,000 ms (heavy is p90 > 2,000, so the next histogram bucket) and limit 2: 18 * 3,000 / 2 = 27,000 ms, so 27 seconds. */
+        Assert.Equal("27", response.Headers.GetValues("Retry-After").Single());
         var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
         Assert.Contains("\"error\":\"The service is running as many long reads as it allows (2), and 16 more are waiting.", body, StringComparison.Ordinal);
 

@@ -85,7 +85,7 @@ public sealed class ReadCacheWebEndToEndTests
         return (app, postgres);
     }
 
-    [Fact(Skip = "Hangs under the test server on the first run (#5506 part 3 fix round 1 handoff): diagnose before enabling.", Timeout = 60_000)]
+    [Fact(Timeout = 60_000)]
     public async Task TwoIdenticalHeavyReads_MakeOneStoreRead_TheSecondIsACacheHitWithNoAdmission_AndAWriteInvalidates()
     {
         const string route = "get_test_cached_read";
@@ -121,8 +121,11 @@ public sealed class ReadCacheWebEndToEndTests
 
     /// <summary>C3 (D6): the caller that starts a shared read leaves; the read keeps running for the caller that joined it,
     /// which gets the answer, and the first caller's own request still sees its own abort (its RequestAborted is never
-    /// replaced by the read's token).</summary>
-    [Fact(Skip = "Hangs under the test server on the first run (#5506 part 3 fix round 1 handoff): diagnose before enabling.", Timeout = 60_000)]
+    /// replaced by the read's token). The first caller that leaves is the flight's lead, and a lead's request stays open
+    /// until the read ends (<c>ReadFlight.WaitAsync</c>: the read records through the lead's scope), so its client call
+    /// completes only after the read does: the read's gate is released before that call is awaited. (Awaiting the first
+    /// call before releasing the gate waited for a read that only the test could end, and hung the run.)</summary>
+    [Fact(Timeout = 60_000)]
     public async Task TheFirstCallerLeaves_TheJoinedCallerStillGetsTheAnswer_AndTheFirstKeepsItsOwnAbort()
     {
         const string route = "get_test_shared_read";
@@ -172,24 +175,36 @@ public sealed class ReadCacheWebEndToEndTests
         var joinedCall = client.GetAsync("/api/read/" + route, TestContext.Current.CancellationToken);
         await Task.Delay(300, TestContext.Current.CancellationToken);
 
-        await firstLeaves.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstCall);
-        Assert.NotNull(readContext);
-        Assert.False(readContext!.RequestAborted.IsCancellationRequested, "the shared read was cancelled while a caller still waited for it");
+        try
+        {
+            await firstLeaves.CancelAsync();
 
-        gate.SetResult();
+            /* The first caller has left and the joined caller still waits: the shared read must not be cancelled. */
+            await Task.Delay(300, TestContext.Current.CancellationToken);
+            Assert.NotNull(readContext);
+            Assert.False(readContext!.RequestAborted.IsCancellationRequested, "the shared read was cancelled while a caller still waited for it");
+            Assert.False(joinedCall.IsCompleted, "the joined caller was answered before the shared read ended");
+        }
+        finally
+        {
+            /* On any path the read ends, so neither request can outlive the test. */
+            gate.TrySetResult();
+        }
+
         using var joined = await joinedCall.WaitAsync(timeout, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, joined.StatusCode);
         Assert.Contains("42", await joined.Content.ReadAsStringAsync(TestContext.Current.CancellationToken), StringComparison.Ordinal);
         Assert.Equal(1, calls);
 
+        /* The lead's request ends once the read has, and its client call reports the cancel. */
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstCall.WaitAsync(timeout, TestContext.Current.CancellationToken));
         Assert.True(await firstDone.Task.WaitAsync(timeout, TestContext.Current.CancellationToken),
             "the first caller's request no longer saw its own abort: its RequestAborted was replaced");
     }
 
     /// <summary>L5: a malformed integer knob is refused at once, before the cache and admission, even when the route is
     /// heavy and every slot is taken.</summary>
-    [Fact(Skip = "Hangs under the test server on the first run (#5506 part 3 fix round 1 handoff): diagnose before enabling.", Timeout = 60_000)]
+    [Fact(Timeout = 60_000)]
     public async Task ANonIntegerWindow_OnAHeavyRouteWithNoFreeSlot_Answers400AtOnce()
     {
         const string route = "get_test_refused_read";
@@ -221,7 +236,7 @@ public sealed class ReadCacheWebEndToEndTests
 
     /// <summary>C1: a composed panel answered from the cache is the stored text itself, on the host that stored it; the
     /// other host's entry is separate (D4). The web route writes the stored bytes unchanged.</summary>
-    [Fact(Skip = "Hangs under the test server on the first run (#5506 part 3 fix round 1 handoff): diagnose before enabling.", Timeout = 60_000)]
+    [Fact(Timeout = 60_000)]
     public async Task AComposedPanel_IsAnsweredFromItsOwnHostsEntry_ByteForByte()
     {
         const string route = "compose:unknown";
@@ -262,7 +277,7 @@ public sealed class ReadAdmissionWrapperTests
 {
     /// <summary>L4: the dedicated web routes admit through <see cref="DarlingWebEndpoints.AdmitWebRouteAsync"/>; a read nested
     /// under one passes at once at a limit of 1, because the wrapper leaves the admission marker in the caller's flow.</summary>
-    [Fact]
+    [Fact(Timeout = 60_000)]
     public async Task AReadNestedUnderAnAdmittedWebRoute_PassesAtOnce_AtALimitOfOne()
     {
         var admission = new ReadAdmission(new TimerTimeProvider(), ReadAdmission.DefaultWaitCap, null, 1);
@@ -288,7 +303,7 @@ public sealed class ReadAdmissionWrapperTests
 
     /// <summary>L7: a read waiting in the admission queue is not counted as running, so <c>max_in_flight</c> counts reads
     /// running; it counts again once the slot is granted.</summary>
-    [Fact]
+    [Fact(Timeout = 60_000)]
     public async Task AQueuedRead_IsNotCountedInFlight_UntilItsSlotIsGranted()
     {
         const string route = "get_wait_stats";
