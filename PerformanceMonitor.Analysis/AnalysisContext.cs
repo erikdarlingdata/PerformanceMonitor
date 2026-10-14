@@ -267,6 +267,13 @@ public class AnalysisContext
     public bool ReusePlanRegressionCandidates { get; set; }
 
     /// <summary>
+    /// Darling only (#5812): true for the scheduled pass with no <c>as_of</c>. It never reuses PLAN_REGRESSION candidates; it
+    /// always reads and refills the cache, so the scheduled pass stays as fresh as before and the MCP and viewer calls that
+    /// follow within one analysis cadence reuse its read. False everywhere else.
+    /// </summary>
+    public bool RefreshPlanRegressionCandidates { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose

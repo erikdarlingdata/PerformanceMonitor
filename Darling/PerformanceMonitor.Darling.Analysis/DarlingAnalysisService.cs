@@ -381,8 +381,11 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            /* #5812: a current pass may reuse fresh PLAN_REGRESSION candidates; a past as_of reads live. */
-            ReusePlanRegressionCandidates = asOfUtc is null,
+            /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than one analysis cadence; the
+               scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
+               live. */
+            ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,
+            RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once

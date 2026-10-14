@@ -4631,6 +4631,9 @@ LIMIT 1";
                stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
                range. */
             var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
+            /* #5812 (ruling R3): an MCP or viewer call reuses PLAN_REGRESSION candidates for one analysis cadence, never
+               longer than the scheduled pass that replaces them. */
+            PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);
             if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
             {
                 server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);

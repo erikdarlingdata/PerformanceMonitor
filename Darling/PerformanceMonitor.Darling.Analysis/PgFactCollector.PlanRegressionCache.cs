@@ -25,17 +25,20 @@ public sealed partial class PgFactCollector
     /// pass of new intervals. A reuse skips that read only; the input check (#5630, #5631: plans compiled for different
     /// inputs are not compared), the cut to the worst 20 and the fact itself still run on every pass.
     ///
-    /// <para><b>When a pass reuses.</b> Only a current pass (<see cref="AnalysisContext.ReusePlanRegressionCandidates"/>,
-    /// no <c>as_of</c>), only within <see cref="RefreshAfter"/> of the read that filled the entry, and only for the same
+    /// <para><b>When a pass reuses.</b> Only a current MCP or viewer call (<see cref="AnalysisContext.ReusePlanRegressionCandidates"/>,
+    /// no <c>as_of</c>), only within <see cref="RefreshAfter"/> (one analysis cadence) of the read that filled the entry, and only for the same
     /// read shape (<see cref="ShapeOf"/>): the same SQL after the secondary-replica scope, the same day-aligned window
     /// start, the same built days and the same scope values. A new day (the window start moves), a built day turning
     /// stale or a new built day, or a scope change is a different shape, so the pass reads live. The read has no upper
     /// time bound, so an entry describes the store at the moment it was read; a pass for a past <c>as_of</c> never reads
-    /// or fills it.</para>
+    /// or fills it. The scheduled pass never reuses (<see cref="AnalysisContext.RefreshPlanRegressionCandidates"/>): it
+    /// always reads, and refills the entry, so its findings and alerts are as fresh as before.</para>
     ///
-    /// <para><b>What an operator sees.</b> A regression that begins after a read can be reported up to
-    /// <see cref="RefreshAfter"/> later than before; a regression that ends stays reported up to as long. No alert
-    /// threshold, severity or policy changes.</para>
+    /// <para><b>What an operator sees.</b> The scheduled pass, its findings and its alerts are unchanged. An
+    /// <c>analyze_server</c> or <c>get_analysis_facts</c> call with no <c>as_of</c> that comes within one analysis cadence
+    /// of the last read answers PLAN_REGRESSION from that read, so it can miss a regression that began after it, or still
+    /// show one that ended, for up to one cadence (30 minutes by default). No alert threshold, severity or policy
+    /// changes.</para>
     /// </summary>
     internal sealed class PlanRegressionCandidateCache
     {
@@ -43,9 +46,19 @@ public sealed partial class PgFactCollector
         /// read it, in the same process.</summary>
         internal static readonly PlanRegressionCandidateCache Shared = new();
 
-        /// <summary>How long a read's candidates serve the passes after it. At the default 30-minute cadence this is one
-        /// read in twelve passes per server.</summary>
-        internal static readonly TimeSpan RefreshAfter = TimeSpan.FromHours(6);
+        /// <summary>The reuse window before the service sets it: the default analysis cadence, 30 minutes (ruling R3 on #5812).</summary>
+        internal static readonly TimeSpan DefaultRefreshAfter = TimeSpan.FromMinutes(30);
+
+        private long _refreshAfterTicks = DefaultRefreshAfter.Ticks;
+
+        /// <summary>How long a read's candidates serve the MCP and viewer calls after it: one analysis cadence, which the
+        /// service sets from the configured interval on every scheduling tick (<c>DarlingWorker</c>), so a call never
+        /// answers from a read older than the scheduled pass that would replace it.</summary>
+        internal TimeSpan RefreshAfter
+        {
+            get => TimeSpan.FromTicks(System.Threading.Interlocked.Read(ref _refreshAfterTicks));
+            set => System.Threading.Interlocked.Exchange(ref _refreshAfterTicks, value.Ticks);
+        }
 
         /// <summary>How far behind the clock a pass's window end may sit and still count as current.</summary>
         internal static readonly TimeSpan CurrentSlack = TimeSpan.FromMinutes(5);
@@ -63,14 +76,14 @@ public sealed partial class PgFactCollector
 
         internal sealed record Entry(string Shape, DateTime ReadAtUtc, IReadOnlyList<PlanRegressionCandidate> Candidates);
 
-        /// <summary>The reuse rule, pure so it can be pinned: the same shape, a current pass, and an entry read no more than
-        /// <see cref="RefreshAfter"/> ago (and not in the future, which a clock step back would make it).</summary>
-        internal static bool CanReuse(Entry? entry, string shape, DateTime timeRangeEndUtc, DateTime nowUtc) =>
+        /// <summary>The reuse rule, pure so it can be pinned: the same shape, a current pass, and an entry read less than
+        /// <paramref name="refreshAfter"/> ago (and not in the future, which a clock step back would make it).</summary>
+        internal static bool CanReuse(Entry? entry, string shape, DateTime timeRangeEndUtc, DateTime nowUtc, TimeSpan refreshAfter) =>
             entry is not null
             && string.Equals(entry.Shape, shape, StringComparison.Ordinal)
             && IsCurrent(timeRangeEndUtc, nowUtc)
             && entry.ReadAtUtc <= nowUtc
-            && nowUtc - entry.ReadAtUtc < RefreshAfter;
+            && nowUtc - entry.ReadAtUtc < refreshAfter;
 
         /// <summary>A pass is current when its window ends within <see cref="CurrentSlack"/> of now.</summary>
         internal static bool IsCurrent(DateTime timeRangeEndUtc, DateTime nowUtc) => timeRangeEndUtc >= nowUtc - CurrentSlack;
@@ -78,7 +91,7 @@ public sealed partial class PgFactCollector
         internal IReadOnlyList<PlanRegressionCandidate>? TryGet(string store, int serverId, string shape, DateTime timeRangeEndUtc, DateTime nowUtc)
         {
             _entries.TryGetValue((store, serverId), out var entry);
-            if (CanReuse(entry, shape, timeRangeEndUtc, nowUtc))
+            if (CanReuse(entry, shape, timeRangeEndUtc, nowUtc, RefreshAfter))
             {
                 System.Threading.Interlocked.Increment(ref _hits);
                 return entry!.Candidates;

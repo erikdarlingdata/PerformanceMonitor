@@ -28,33 +28,59 @@ public sealed class PlanRegressionCandidateReuseRuleTests
 {
     private static readonly DateTime Now = new(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>The reuse window: one analysis cadence, 30 minutes by default (ruling R3 on #5812).</summary>
+    private static readonly TimeSpan Window = PgFactCollector.PlanRegressionCandidateCache.DefaultRefreshAfter;
+
+    [Fact]
+    public void TheReuseWindow_IsOneAnalysisCadence_SetByTheWorker_AndTheScheduledPassAlwaysReads()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(30), PgFactCollector.PlanRegressionCandidateCache.DefaultRefreshAfter);
+        var cache = new PgFactCollector.PlanRegressionCandidateCache();
+        Assert.Equal(Window, cache.RefreshAfter);
+        cache.RefreshAfter = TimeSpan.FromMinutes(15);
+        cache.Store("store", 1, "s", Now.AddMinutes(-14), Array.Empty<PgFactCollector.PlanRegressionCandidate>());
+        Assert.NotNull(cache.TryGet("store", 1, "s", Now, Now));
+        cache.Store("store", 1, "s", Now.AddMinutes(-15), Array.Empty<PgFactCollector.PlanRegressionCandidate>());
+        Assert.Null(cache.TryGet("store", 1, "s", Now, Now));
+
+        /* The worker sets the shared window from the clamped cadence; the scheduled pass (the one caller that persists
+           caveats) refreshes and never reuses; an on-demand current call reuses. */
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Contains("PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);", worker, StringComparison.Ordinal);
+        var service = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "DarlingAnalysisService.cs");
+        Assert.Contains("ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,", service, StringComparison.Ordinal);
+        Assert.Contains("RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,", service, StringComparison.Ordinal);
+        var read = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs");
+        Assert.Contains("var reused = shape is null || context.RefreshPlanRegressionCandidates", read, StringComparison.Ordinal);
+    }
+
     private static PgFactCollector.PlanRegressionCandidateCache.Entry EntryAt(DateTime readAt, string shape = "s") =>
         new(shape, readAt, Array.Empty<PgFactCollector.PlanRegressionCandidate>());
 
     [Fact]
     public void ACurrentPassOfTheSameShape_ReusesAReadYoungerThanTheRefreshPeriod()
     {
-        var entry = EntryAt(Now.AddMinutes(-30));
-        Assert.True(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "s", Now, Now));
+        var entry = EntryAt(Now.AddMinutes(-10));
+        Assert.True(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "s", Now, Now, Window));
         Assert.True(PgFactCollector.PlanRegressionCandidateCache.CanReuse(
-            EntryAt(Now - PgFactCollector.PlanRegressionCandidateCache.RefreshAfter + TimeSpan.FromSeconds(1)), "s", Now, Now));
+            EntryAt(Now - Window + TimeSpan.FromSeconds(1)), "s", Now, Now, Window));
     }
 
     [Fact]
     public void AReadAsOldAsTheRefreshPeriod_IsReadAgain()
     {
         Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(
-            EntryAt(Now - PgFactCollector.PlanRegressionCandidateCache.RefreshAfter), "s", Now, Now));
+            EntryAt(Now - Window), "s", Now, Now, Window));
     }
 
     [Fact]
     public void AnotherShape_NoEntry_APastAsOf_OrAReadFromTheFuture_IsReadLive()
     {
         var entry = EntryAt(Now.AddMinutes(-30));
-        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "other", Now, Now));
-        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(null, "s", Now, Now));
-        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "s", Now.AddHours(-1), Now));
-        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(EntryAt(Now.AddMinutes(1)), "s", Now, Now));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "other", Now, Now, Window));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(null, "s", Now, Now, Window));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(entry, "s", Now.AddHours(-1), Now, Window));
+        Assert.False(PgFactCollector.PlanRegressionCandidateCache.CanReuse(EntryAt(Now.AddMinutes(1)), "s", Now, Now, Window));
     }
 
     [Fact]
@@ -134,6 +160,16 @@ public sealed class PlanRegressionCandidateReuseLiveTests
         Assert.DoesNotContain(await Collector(postgres, cache).CollectFactsAsync(live), f => f.Key == "PLAN_REGRESSION");
         Assert.Equal(1, cache.Hits);
         Assert.Equal(1, cache.Misses);
+
+        /* The scheduled pass (R3): it never reuses, reads the store as it is now, and refills the entry; the on-demand call
+           after it reuses that fresh read, so it no longer shows the regression either. */
+        var scheduled = NewContext(start, end.AddSeconds(2), reuse: false);
+        scheduled.RefreshPlanRegressionCandidates = true;
+        Assert.DoesNotContain(await Collector(postgres, cache).CollectFactsAsync(scheduled), f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(1, cache.Hits);
+        Assert.Equal(1, cache.Misses);
+        Assert.DoesNotContain(await Collector(postgres, cache).CollectFactsAsync(NewContext(start, end.AddSeconds(3), reuse: true)), f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(2, cache.Hits);
     }
 
     [Fact]

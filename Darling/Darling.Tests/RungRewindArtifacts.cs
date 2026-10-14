@@ -118,7 +118,7 @@ ALTER TABLE IF EXISTS collect.slow_reads
 
     /// <summary>
     /// V183 (#5793): the read caller column of <c>collect.slow_reads</c> and the distinct caller count of
-    /// <c>collect.read_latency</c> (the probe's newest sentinel). Safe on a store that never had them.
+    /// <c>collect.read_latency</c>. Safe on a store that never had them.
     /// </summary>
     internal static async Task DropV183SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
@@ -127,6 +127,19 @@ ALTER TABLE IF EXISTS collect.read_latency
     DROP COLUMN IF EXISTS distinct_callers;
 ALTER TABLE IF EXISTS collect.slow_reads
     DROP COLUMN IF EXISTS caller;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V184 (#5812): the partial-day watermark column of <c>collect.plan_regression_daily_built</c> (the probe's newest
+    /// sentinel). Safe on a store that never had it. A day built under V184 keeps its row and reads as a whole-day build, as
+    /// every day built before V184 does.
+    /// </summary>
+    internal static async Task DropV184SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS collect.plan_regression_daily_built
+    DROP COLUMN IF EXISTS built_through;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

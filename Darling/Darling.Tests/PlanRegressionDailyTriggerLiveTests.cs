@@ -67,12 +67,14 @@ public sealed class PlanRegressionDailyTriggerLiveTests
 
         var now = DateTime.UtcNow;
 
-        /* Steady: intervals that started within the last day, and re-collections of them (the ON CONFLICT update arm
-           the writer takes every pass). The WHEN clause is false for every one, so the function body never runs. */
+        /* Steady: intervals that started within the last 40 minutes, and re-collections of them (the ON CONFLICT update arm
+           the writer takes every pass). Since V184 (#5812) the WHEN clause's bound is one hour before the current hour, and a
+           first within the last 40 minutes is at or after it at any minute of the hour, even across the next hour boundary.
+           The WHEN clause is false for every one, so the function body never runs. */
         for (var pass = 0; pass < 3; pass++)
         {
-            await UpsertAsync(connection, ServerA, FirstTimes(now.AddHours(-1), 20, TimeSpan.FromMinutes(-1)), 100 + pass, 1000 + pass, ct);
-            await UpsertAsync(connection, ServerA, FirstTimes(now.AddHours(-20), 20, TimeSpan.FromMinutes(-1)), 100 + pass, 1000 + pass, ct);
+            await UpsertAsync(connection, ServerA, FirstTimes(now, 20, TimeSpan.FromMinutes(-1)), 100 + pass, 1000 + pass, ct);
+            await UpsertAsync(connection, ServerA, FirstTimes(now.AddMinutes(-20), 20, TimeSpan.FromMinutes(-1)), 100 + pass, 1000 + pass, ct);
         }
 
         Assert.Equal(40, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest", ct));
@@ -305,6 +307,14 @@ SET search_path = decoy, pg_catalog;", ct);
            and the whole body must run on one side of its UTC midnight. If the database clock is within the margin of the next
            midnight, wait for it to pass first, then read the clock (#5496). */
         var now = await SettledDatabaseUtcNowAsync(() => ReadDatabaseUtcNowAsync(connection, ct), d => Task.Delay(d, ct), MidnightMargin);
+        /* V184's (#5812) recent edge moves with the hour, so the body must also run inside one UTC hour. */
+        var hourWait = WaitPastTheHour(now, MidnightMargin);
+        if (hourWait > TimeSpan.Zero)
+        {
+            await Task.Delay(hourWait, ct);
+            now = await ReadDatabaseUtcNowAsync(connection, ct);
+        }
+
         var today = now.Date;
 
         /* The clamp is a whole-day edge: the start of the day 17 days back, one day wider than the cleanup's 16, so every day
@@ -333,17 +343,20 @@ SET search_path = decoy, pg_catalog;", ct);
         await UpsertAsync(connection, ServerA, new[] { now.AddDays(-15) }, 1, 1, ct);
         Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));
 
-        /* The recent edge: a first at or after yesterday's midnight is a live interval, never late. One second before
-           it is late. */
+        /* The recent edge (V184, #5812): one hour before the current hour. A first at or after it is an interval still running
+           or the one that just ended, never late. One second before it is late, and marks its day and the next: the open days
+           are built as partial days up to a watermark under this bound, so a write below it can change a built day. */
+        var bound = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(-1);
         await ExecAsync(connection, "TRUNCATE collect.plan_regression_daily_built", ct);
-        await UpsertAsync(connection, ServerA, new[] { today.AddDays(-1), today.AddHours(-1), now }, 1, 1, ct);
+        await UpsertAsync(connection, ServerA, new[] { bound, bound.AddMinutes(30), now }, 1, 1, ct);
         Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));
 
-        await UpsertAsync(connection, ServerA, new[] { today.AddDays(-1).AddSeconds(-1) }, 1, 1, ct);
+        var lateFirst = bound.AddSeconds(-1);
+        await UpsertAsync(connection, ServerA, new[] { lateFirst }, 1, 1, ct);
         var built = await BuiltAsync(connection, ServerA, ct);
         Assert.Equal(2, built.Count);
-        Assert.Equal(1L, built[today.AddDays(-2)]);
-        Assert.Equal(1L, built[today.AddDays(-1)]);
+        Assert.Equal(1L, built[lateFirst.Date]);
+        Assert.Equal(1L, built[lateFirst.Date.AddDays(1)]);
     }
 
     [Fact]
@@ -626,6 +639,18 @@ WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time,
     }
 
     /// <summary>
+    /// How long to wait before a reading of <paramref name="clockUtc"/> has the rest of its UTC hour ahead of it: zero when the
+    /// next hour is at least <paramref name="margin"/> off, otherwise the time to just past it. V184's (#5812) recent edge is
+    /// hour-aligned.
+    /// </summary>
+    internal static TimeSpan WaitPastTheHour(DateTime clockUtc, TimeSpan margin)
+    {
+        var hourStart = new DateTime(clockUtc.Year, clockUtc.Month, clockUtc.Day, clockUtc.Hour, 0, 0, clockUtc.Kind);
+        var untilNextHour = hourStart.AddHours(1) - clockUtc;
+        return untilNextHour >= margin ? TimeSpan.Zero : untilNextHour + TimeSpan.FromMilliseconds(250);
+    }
+
+    /// <summary>
     /// Reads the clock; if it is within <paramref name="margin"/> of the next UTC midnight, waits that midnight out and
     /// reads again, so the caller has a "now" with the rest of the day ahead of it. Both the clock and the delay are
     /// injected so the wait path is testable without waiting.
@@ -671,6 +696,8 @@ WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time,
 
         /* The margin's own edge: exactly 10 seconds out needs no wait, one tick inside it does. */
         Assert.Equal(TimeSpan.Zero, WaitPastMidnight(new DateTime(2026, 3, 1, 23, 59, 50, DateTimeKind.Utc), MidnightMargin));
+        Assert.Equal(TimeSpan.Zero, WaitPastTheHour(new DateTime(2026, 3, 1, 10, 59, 50, DateTimeKind.Utc), MidnightMargin));
+        Assert.True(WaitPastTheHour(new DateTime(2026, 3, 1, 10, 59, 50, DateTimeKind.Utc).AddTicks(1), MidnightMargin) > TimeSpan.Zero);
         Assert.True(WaitPastMidnight(new DateTime(2026, 3, 1, 23, 59, 50, DateTimeKind.Utc).AddTicks(1), MidnightMargin) > TimeSpan.Zero);
     }
 

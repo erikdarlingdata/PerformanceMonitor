@@ -277,16 +277,35 @@ public sealed class PlanRegressionDailyParityLiveTests
         return days;
     }
 
-    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct, List<DateOnly>? days = null)
+    /// <summary>The built days with their watermarks (#5812), as the collector reads them.</summary>
+    private static async Task<List<PlanRegressionDaily.BuiltDay>> BuiltDaysWithWatermarksAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        days ??= await BuiltDaysAsync(connection, ct);
+        var days = new List<PlanRegressionDaily.BuiltDay>();
+        await using var command = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection);
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionWindowFloor(WindowStart));
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            days.Add(new PlanRegressionDaily.BuiltDay(reader.GetFieldValue<DateOnly>(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1)));
+        }
+
+        return days;
+    }
+
+    /// <summary>The daily read, bound the way the collector binds it: the built days, the live floor from their watermarks,
+    /// and the watermarks themselves ($6, #5812).</summary>
+    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var days = await BuiltDaysWithWatermarksAsync(connection, ct);
         var floor = PgFactCollector.PlanRegressionWindowFloor(WindowStart);
         await using var command = new NpgsqlCommand(PgFactCollector.PlanRegressionDailySql, connection);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = days.ToArray() });
-        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionLiveFloor(floor, days));
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = days.Select(b => b.Day).ToArray() });
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionLiveFloorWithWatermarks(floor, days));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor.AddDays(-1));
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = days.Select(b => b.ThroughOrDayEnd).ToArray() });
         return await RowsAsync(command, ct);
     }
 

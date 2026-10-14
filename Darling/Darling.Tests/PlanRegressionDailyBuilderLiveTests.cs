@@ -42,8 +42,10 @@ public sealed class PlanRegressionDailyBuilderLiveTests
     /// <summary>A day with rows in the hand-aggregate fact.</summary>
     private static readonly DateTime Day = new(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
 
-    /// <summary>Closed days for <see cref="Now"/>: T - 14 through T - 3.</summary>
-    private const int ClosedDays = 12;
+    /// <summary>The days the builder plans for <see cref="Now"/> (#5812): T - 14 through T + 1, the closed days and the open
+    /// ones. A build's watermark is read from the store's clock, which is months past <see cref="Now"/>, so every day here is
+    /// built whole; the partial-day facts run on the real clock.</summary>
+    private const int PlannedDays = PlanRegressionDaily.WindowDays + PlanRegressionDaily.NewestBuiltDayAhead + 1;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -144,7 +146,7 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             await using var source = DataSource(scratch);
             var result = await PlanRegressionDaily.RunTickAsync(source, Now, NullLogger.Instance, ct);
 
-            Assert.Equal(ClosedDays, result.Built);
+            Assert.Equal(PlannedDays, result.Built);
             Assert.Equal(0, result.Failed);
             Assert.Equal(0, result.Skipped);
             Assert.Equal(0, result.Deferred);
@@ -158,10 +160,10 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             Assert.Equal(0L, await ScalarAsync(connection, $"SELECT source_rows FROM collect.plan_regression_daily_built WHERE server_id = 1 AND day = DATE '{DateText(empty)}'", ct));
             Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM collect.plan_regression_daily WHERE day = DATE '{DateText(empty)}'", ct));
 
-            /* Every built day is valid (built_seq = late_seq) and the window is T - 14 through T - 3 exactly. */
-            Assert.Equal((long)ClosedDays, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built WHERE built_seq = late_seq", ct));
+            /* Every built day is valid (built_seq = late_seq) and the window is T - 14 through T + 1 exactly. */
+            Assert.Equal((long)PlannedDays, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built WHERE built_seq = late_seq", ct));
             Assert.Equal(DateText(FirstDay), (await ScalarAsync(connection, "SELECT min(day)::text FROM collect.plan_regression_daily_built", ct))!.ToString());
-            Assert.Equal(DateText(Now.AddDays(-3)), (await ScalarAsync(connection, "SELECT max(day)::text FROM collect.plan_regression_daily_built", ct))!.ToString());
+            Assert.Equal(DateText(Now.AddDays(1)), (await ScalarAsync(connection, "SELECT max(day)::text FROM collect.plan_regression_daily_built", ct))!.ToString());
 
             /* Nothing is due now. */
             var again = await PlanRegressionDaily.RunTickAsync(source, Now, NullLogger.Instance, ct);
@@ -219,14 +221,14 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             await using var source = DataSource(scratch);
             var skipped = await PlanRegressionDaily.RunTickAsync(source, Now, NullLogger.Instance, ct);
             Assert.Equal(0, skipped.Built);
-            Assert.Equal(ClosedDays, skipped.Skipped);
+            Assert.Equal(PlannedDays, skipped.Skipped);
             Assert.Equal(0, skipped.Failed);
             Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
             Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built WHERE built_seq IS NOT NULL", ct));
 
             await held.CommitAsync(ct);
             var built = await PlanRegressionDaily.RunTickAsync(source, Now, NullLogger.Instance, ct);
-            Assert.Equal(ClosedDays, built.Built);
+            Assert.Equal(PlannedDays, built.Built);
             Assert.Equal(0, built.Skipped);
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
         });
@@ -248,16 +250,58 @@ public sealed class PlanRegressionDailyBuilderLiveTests
 
             var plan = await PlanRegressionDaily.PlanBuildsAsync(connection, Now, ct);
 
-            Assert.Equal(9, plan.Count(b => b.ServerId == 1));
+            Assert.Equal(13, plan.Count(b => b.ServerId == 1));
             Assert.Equal(new DateOnly(2026, 3, 9), plan.Where(b => b.ServerId == 1).Min(b => b.Day));
-            Assert.Equal(new DateOnly(2026, 3, 17), plan.Where(b => b.ServerId == 1).Max(b => b.Day));
+            Assert.Equal(new DateOnly(2026, 3, 21), plan.Where(b => b.ServerId == 1).Max(b => b.Day));
             Assert.DoesNotContain(plan, b => b.ServerId is 2 or 3);
-            Assert.Equal(ClosedDays, plan.Count(b => b.ServerId == 4));
+            Assert.Equal(PlannedDays, plan.Count(b => b.ServerId == 4));
             Assert.Equal(new DateOnly(2026, 3, 6), plan.Where(b => b.ServerId == 4).Min(b => b.Day));
-            Assert.Equal(new DateOnly(2026, 3, 17), plan.Where(b => b.ServerId == 4).Max(b => b.Day));
+            Assert.Equal(new DateOnly(2026, 3, 21), plan.Where(b => b.ServerId == 4).Max(b => b.Day));
 
             /* Newest day first, then server (#5812: a store that is behind rebuilds the days nearest today first). */
             Assert.Equal(plan.OrderByDescending(b => b.Day).ThenBy(b => b.ServerId).ToList(), plan.ToList());
+        });
+    }
+
+    /// <summary>
+    /// #5812 (ruling R2): the hourly tick rebuilds only a day whose watermark can still advance. At <see cref="Now"/> (12:00)
+    /// a build would stamp 10:00 on today and tomorrow, so both are due while they hold 09:00. A complete day inside the
+    /// closed-day lag (yesterday and T - 2, built through their ends) is not due, exactly like a closed day, until a late row
+    /// moves its <c>late_seq</c> (the #5631 rule). Yesterday built only through 22:00 is due once more, to its end.
+    /// </summary>
+    [Fact]
+    public async Task ThePlan_RebuildsOnlyADayWhoseWatermarkCanAdvance_AndACompleteLaggedDayOnlyAfterALateRow()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await CoverAsync(connection, 2, ct);
+
+            /* Every day of both servers built through its end and valid, then the open days set back. */
+            await ExecAsync(connection, $@"
+INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, built_at, source_rows, built_through)
+SELECT s, g::date, 0, 0, TIMESTAMP '{Now:yyyy-MM-dd HH:mm:ss}', 0, g + interval '1 day'
+FROM generate_series(1, 2) AS s
+CROSS JOIN generate_series(TIMESTAMP '{DateText(FirstDay)}', TIMESTAMP '{DateText(Now.AddDays(1))}', interval '1 day') AS g;
+UPDATE collect.plan_regression_daily_built SET built_through = TIMESTAMP '2026-03-20 09:00:00' WHERE day IN (DATE '2026-03-20', DATE '2026-03-21');
+UPDATE collect.plan_regression_daily_built SET built_through = TIMESTAMP '2026-03-19 22:00:00' WHERE server_id = 2 AND day = DATE '2026-03-19';", ct);
+
+            var plan = await PlanRegressionDaily.PlanBuildsAsync(connection, Now, ct);
+            Assert.Equal(
+                new[] { new PlanRegressionDaily.Build(1, new DateOnly(2026, 3, 21)), new PlanRegressionDaily.Build(2, new DateOnly(2026, 3, 21)),
+                        new PlanRegressionDaily.Build(1, new DateOnly(2026, 3, 20)), new PlanRegressionDaily.Build(2, new DateOnly(2026, 3, 20)),
+                        new PlanRegressionDaily.Build(2, new DateOnly(2026, 3, 19)) },
+                plan.ToArray());
+
+            /* A late row for T - 2 bumps its late_seq: due again, as a closed day would be. */
+            await ExecAsync(connection, "UPDATE collect.plan_regression_daily_built SET late_seq = late_seq + 1 WHERE server_id = 1 AND day = DATE '2026-03-18'", ct);
+            plan = await PlanRegressionDaily.PlanBuildsAsync(connection, Now, ct);
+            Assert.Contains(new PlanRegressionDaily.Build(1, new DateOnly(2026, 3, 18)), plan);
+            Assert.Equal(6, plan.Count);
+
+            /* An hour later the open days are due again; the complete ones still are not. */
+            var nextHour = await PlanRegressionDaily.PlanBuildsAsync(connection, Now.AddHours(1), ct);
+            Assert.DoesNotContain(nextHour, b => b.Day < new DateOnly(2026, 3, 18) || b.Day == new DateOnly(2026, 3, 19) && b.ServerId == 1);
         });
     }
 
@@ -273,7 +317,7 @@ public sealed class PlanRegressionDailyBuilderLiveTests
 
             await using var source = DataSource(scratch);
 
-            /* 11 servers x 12 days = 132 due, cap 120. */
+            /* 11 servers x 16 days = 176 due, cap 120. */
             var late = await PlanRegressionDaily.RunTickAsync(source, Now, NullLogger.Instance, () => PlanRegressionDaily.MaxTickDuration, ct);
             Assert.Equal(0, late.Built);
             Assert.Equal(PlanRegressionDaily.MaxBuildsPerTick, late.Deferred);
@@ -283,7 +327,7 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             Assert.Equal(0, result.Deferred);
 
             var next = await PlanRegressionDaily.RunTickAsync(source, Now, NullLogger.Instance, ct);
-            Assert.Equal(11 * ClosedDays - PlanRegressionDaily.MaxBuildsPerTick, next.Built);
+            Assert.Equal(11 * PlannedDays - PlanRegressionDaily.MaxBuildsPerTick, next.Built);
         });
     }
 
@@ -302,7 +346,7 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             var result = await PlanRegressionDaily.RunTickAsync(source, Now, logger, ct);
 
             Assert.Equal(1, result.Failed);
-            Assert.Equal(ClosedDays - 1, result.Built);
+            Assert.Equal(PlannedDays - 1, result.Built);
             Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
             Assert.Contains("failed and is retried next tick", logger.Joined, StringComparison.Ordinal);
             Assert.IsType<DBNull>(await ScalarAsync(connection, $"SELECT built_seq FROM collect.plan_regression_daily_built WHERE server_id = 1 AND day = DATE '{DateText(Day)}'", ct));
@@ -550,9 +594,11 @@ AND   query ~ '^DELETE FROM collect\.plan_regression_daily(\s|$)';", connection)
         Assert.Contains("sv.is_enabled", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("collect.query_store_interval_latest_pending", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("d.day >= s.filled_since::date + 1", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
-        Assert.Contains("b.built_seq IS NULL OR b.built_seq <> b.late_seq", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
+        Assert.Contains("(b.built_seq IS NULL\n       OR b.built_seq <> b.late_seq", PlanRegressionDaily.PlanSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        /* #5812: T - 14 through T + 1, and a built day is due again only while its watermark can still advance. */
         Assert.Contains("- 14)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
-        Assert.Contains("- 3)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
+        Assert.Contains("+ 1)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
+        Assert.Contains("OR b.built_through < LEAST((d.day + 1)::timestamp, date_trunc('hour', $1::timestamp) - interval '2 hours'))", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
 
         /* Both tables in one transaction: the built rows first, then the totals by key. */
         Assert.Contains("DELETE FROM collect.plan_regression_daily_built", PlanRegressionDaily.GcBuiltSql, StringComparison.Ordinal);

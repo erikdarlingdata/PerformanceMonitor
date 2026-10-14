@@ -845,14 +845,14 @@ ORDER BY c.regression_factor DESC";
 
             /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
                and a second command cannot run while this reader is open. */
-            /* #5812: a current pass reuses the candidates of a fresh read of the same shape, so the 14-day plan_agg read
-               runs once per server per PlanRegressionCandidateCache.RefreshAfter instead of on every pass. Everything below
-               the read (the input check, the cut, the fact) still runs on every pass. */
+            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than one analysis
+               cadence (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
+               stays as fresh as before. Everything below the read (the input check, the cut, the fact) still runs every time. */
             var readStartedUtc = DateTime.UtcNow;
-            var shape = context.ReusePlanRegressionCandidates
+            var shape = context.ReusePlanRegressionCandidates || context.RefreshPlanRegressionCandidates
                 ? PlanRegressionCandidateCache.ShapeOf(cmd, readsDays ? 5 : readsTable ? 4 : 3, windowFloor, builtDays.Select(b => b.Day).ToList())
                 : null;
-            var reused = shape is null
+            var reused = shape is null || context.RefreshPlanRegressionCandidates
                 ? null
                 : PlanRegressionCache.TryGet(StoreIdentity, context.ServerId, shape, context.TimeRangeEnd, readStartedUtc);
             var candidates = reused is null ? new List<PlanRegressionCandidate>() : new List<PlanRegressionCandidate>(reused);
