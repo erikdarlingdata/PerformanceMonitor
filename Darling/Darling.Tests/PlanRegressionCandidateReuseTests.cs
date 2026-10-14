@@ -203,8 +203,9 @@ public sealed class PlanRegressionCandidateReuseLiveTests
     {
         /* #5812: the scheduled pass (AnalyzeAsync with persistCollectionCaveats, as DarlingWorker calls it, hours back 4)
            reads and fills the entry; a get_analysis_facts call (CollectAndScoreFactsAsync, the tool's own entry point) with
-           hours_back 1 and no as_of then makes no interval-table read. Proved two ways: pg_stat_statements' calls for the
-           PLAN_REGRESSION interval read in this database, and the cache's hit counter. */
+           hours_back 1 and no as_of then makes no PLAN_REGRESSION read. Proved two ways: pg_stat_statements' entries for
+           every PLAN_REGRESSION read in this database, each held to its query id and stats_since, and the hit and miss
+           counters of the test's own cache (never the process-wide Shared one, which other classes and the worker touch). */
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 reuse test.");
         var ct = TestContext.Current.CancellationToken;
@@ -230,11 +231,20 @@ VALUES (1, now() - interval '8 days', {ServerId}, '{ServerName}', 'AN5812_WAIT',
         var cache = new PgFactCollector.PlanRegressionCandidateCache();
         ((PgFactCollector)service.EngineFor(null).Collector).PlanRegressionCache = cache;
 
-        var before = await IntervalReadCallsAsync(connection, ct);
+        var before = await PlanRegressionReadsAsync(connection, ct);
+        Assert.Empty(before);
         await service.AnalyzeAsync(ServerId, ServerName, 4, ct, persistCollectionCaveats: true);
-        var afterPass = await IntervalReadCallsAsync(connection, ct);
-        Assert.Equal(before + 1, afterPass);
+
+        /* The pass's read is one entry of one call. Every later check compares against this entry by its query id AND its
+           stats_since: an entry that pg_stat_statements evicted (pg_stat_statements.max) and a later read made again starts
+           over at one call, so a calls count alone can stand still while a read ran. A missing or remade entry fails the
+           test; it never passes it. */
+        var afterPass = await PlanRegressionReadsAsync(connection, ct);
+        var passRead = Assert.Single(afterPass);
+        Assert.Equal("daily", passRead.Variant);
+        Assert.Equal(1, passRead.Calls);
         Assert.Equal(0, cache.Hits);
+        Assert.Equal(0, cache.Misses);
 
         /* The shape carries the day the 14-day window starts on. A 1-hour call and the 4-hour pass start it on the same
            day except in the first four hours of a UTC day; then the call is a different shape and reads live. */
@@ -243,41 +253,73 @@ VALUES (1, now() - interval '8 days', {ServerId}, '{ServerName}', 'AN5812_WAIT',
 
         var (facts, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack: 1, cancellationToken: ct);
         Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
-        var afterFacts = await IntervalReadCallsAsync(connection, ct);
+        var afterFacts = await PlanRegressionReadsAsync(connection, ct);
+        var evidence = $"hits {cache.Hits}, misses {cache.Misses}; entries after the pass [{string.Join("; ", afterPass)}], after the call [{string.Join("; ", afterFacts)}]";
+        Assert.True(afterFacts.Any(e => e.SameEntry(passRead)), $"The pass's pg_stat_statements entry is gone or was remade, so the check cannot speak: {evidence}");
         if (sameDay)
         {
-            Assert.Equal(afterPass, afterFacts);
-            Assert.Equal(1, cache.Hits);
+            /* No PLAN_REGRESSION read of any variant (daily, table or raw): the entries are the pass's, unchanged. */
+            Assert.True(afterPass.SequenceEqual(afterFacts), $"The call made a PLAN_REGRESSION read: {evidence}");
+            Assert.True(cache.Hits == 1 && cache.Misses == 0, $"The call did not reuse the pass's candidates: {evidence}");
         }
         else
         {
-            Assert.Equal(afterPass + 1, afterFacts);
+            Assert.Equal(passRead.Calls + 1, afterFacts.Single(e => e.SameEntry(passRead)).Calls);
             Assert.Equal(0, cache.Hits);
         }
 
-        /* Past RefreshAfter (set to zero, so the entry is already older than it) the same call reads fresh and refills. */
+        /* Past RefreshAfter (set to zero, so the entry is already older than it) the same call reads fresh and refills: one
+           more call on the same entry. */
         var hits = cache.Hits;
         var misses = cache.Misses;
+        var readCalls = afterFacts.Single(e => e.SameEntry(passRead)).Calls;
         cache.RefreshAfter = TimeSpan.Zero;
         var (fresh, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack: 1, cancellationToken: ct);
         Assert.Contains(fresh, f => f.Key == "PLAN_REGRESSION");
-        Assert.Equal(afterFacts + 1, await IntervalReadCallsAsync(connection, ct));
+        var afterFresh = await PlanRegressionReadsAsync(connection, ct);
+        var freshRead = afterFresh.SingleOrDefault(e => e.SameEntry(passRead));
+        Assert.True(freshRead is not null, $"The pass's pg_stat_statements entry is gone or was remade, so the check cannot speak: [{string.Join("; ", afterFresh)}]");
+        Assert.Equal(readCalls + 1, freshRead!.Calls);
         Assert.Equal(hits, cache.Hits);
         Assert.Equal(misses + 1, cache.Misses);
     }
 
-    /// <summary>pg_stat_statements' calls, in this database only, for the PLAN_REGRESSION read that aggregates the interval
-    /// table (the daily read's live half or the table read: both name <c>plan_agg</c> and the table).</summary>
-    private static async Task<long> IntervalReadCallsAsync(NpgsqlConnection connection, CancellationToken ct)
+    /// <summary>One pg_stat_statements entry for a PLAN_REGRESSION candidate read. <see cref="StatsSince"/> is when the entry
+    /// was made, so two reads of it are the same entry only when both match.</summary>
+    private sealed record PlanRegressionReadEntry(long QueryId, string Variant, long Calls, DateTime StatsSince)
+    {
+        public bool SameEntry(PlanRegressionReadEntry other) => QueryId == other.QueryId && StatsSince == other.StatsSince;
+    }
+
+    /// <summary>pg_stat_statements' entries, in this database only, for every PLAN_REGRESSION candidate read: the daily read,
+    /// the table read and the raw read all end <c>FROM plan_agg</c>, so a call that took another source than the pass is
+    /// counted too.</summary>
+    private static async Task<IReadOnlyList<PlanRegressionReadEntry>> PlanRegressionReadsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(@"
-SELECT COALESCE(SUM(calls), 0)::bigint
-FROM pg_stat_statements
-WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-AND   query LIKE '%plan_agg%'
-AND   query LIKE '%FROM query_store_interval_latest%'
-AND   query NOT LIKE '%pg_stat_statements%'", connection);
-        return (long)(await command.ExecuteScalarAsync(ct))!;
+SELECT
+    s.queryid,
+    CASE
+        WHEN s.query LIKE '%plan_regression_daily%' THEN 'daily'
+        WHEN s.query LIKE '%FROM query_store_interval_latest%' THEN 'table'
+        ELSE 'raw'
+    END,
+    s.calls,
+    s.stats_since
+FROM pg_stat_statements AS s
+WHERE s.dbid = (SELECT d.oid FROM pg_database AS d WHERE d.datname = current_database())
+AND   s.query LIKE '%FROM plan_agg%'
+AND   s.query NOT LIKE '%pg_stat_statements%'
+ORDER BY
+    s.queryid", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var entries = new List<PlanRegressionReadEntry>();
+        while (await reader.ReadAsync(ct))
+        {
+            entries.Add(new PlanRegressionReadEntry(reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), reader.GetDateTime(3)));
+        }
+
+        return entries;
     }
 
     private static async Task<string> ScalarTextAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
