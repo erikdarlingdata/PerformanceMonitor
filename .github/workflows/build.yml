@@ -2293,7 +2293,8 @@ jobs:
       # #5804: the tarball and its checksums leave this job as a same-run artifact rather than as release
       # assets. darling-linux-publish uploads them only after the Windows build job, whose release steps
       # assert every published executable is signed, has succeeded, so a failed guard leaves no Linux
-      # asset or :latest image behind. One day of retention: the publish job reads it minutes later.
+      # asset or :latest image behind. Seven days of retention: the publish job reads it minutes later,
+      # and a "Re-run failed jobs" of a release up to a week later still finds it.
       - name: Hand the linux artifact to the publish job
         if: github.event_name == 'release'
         uses: actions/upload-artifact@v6
@@ -2301,7 +2302,7 @@ jobs:
           name: darling-linux-release
           path: releases/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   # ── Linux release publish (#5804) ─────────────────────────────────────────────────────────────────
   # Release only. Before #5804 darling-linux published the Linux release in parallel with the Windows
@@ -2310,8 +2311,9 @@ jobs:
   # images while the Windows zips never uploaded: a half-published release. This job needs BOTH jobs
   # and starts only when both succeeded, so every blocking check runs before anything is published.
   # The cost is wall clock: the Linux publish now starts after the Windows build finishes instead of
-  # alongside it. `!cancelled()` keeps the old behaviour on a release whose Guard tests job failed:
-  # darling-linux and build both still run then, and so does this job. The steps after the download
+  # alongside it. `!cancelled()` is required: guard-tests and test-map-select are skipped on every
+  # release, and without a status function the implicit success() would skip this job on every
+  # release because of those skipped upstream jobs. The steps after the download
   # are the ones darling-linux ran, unchanged; Get version reads the same Directory.Build.props from
   # the same commit, so steps.version.outputs.VERSION names the version they always did.
   darling-linux-publish:
