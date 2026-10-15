@@ -83,7 +83,7 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     }
 
     private (int ExitCode, JsonElement Result) MapSelect(string map, string[] files, string[]? drift = null,
-        string eventName = "pull_request", string? root = null, string? baseRef = null)
+        string eventName = "pull_request", string? root = null, string? baseRef = null, bool guardStageSeparate = false)
     {
         var psi = new ProcessStartInfo("python")
         {
@@ -101,6 +101,11 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         psi.ArgumentList.Add(root ?? Path.Combine(_dir, "tree"));
         psi.ArgumentList.Add("--event");
         psi.ArgumentList.Add(eventName);
+        if (guardStageSeparate)
+        {
+            psi.ArgumentList.Add("--guard-stage-separate");
+        }
+
         if (baseRef is not null)
         {
             psi.ArgumentList.Add("--base-ref");
@@ -146,6 +151,13 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         }
 
         return map;
+    }
+
+    private static string[] Selected(JsonElement result)
+    {
+        return result.GetProperty("selected").TryGetProperty("lite", out var lite)
+            ? lite.EnumerateArray().Select(e => e.GetString() ?? "").OrderBy(n => n, StringComparer.Ordinal).ToArray()
+            : [];
     }
 
     private static void AssertFull(JsonElement result, string reasonPart)
@@ -219,21 +231,61 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     }
 
     [Fact]
-    public void DocsOnly_SelectsTheClassThatReadsTheDoc_AndOnlyTheAlwaysRunClasses()
+    public void DocsOnly_SelectsOnlyTheClassThatReadsTheDoc()
     {
-        // #5872 (the shape of 1ec666f50): README.md and docs pages. TextTests reads README.md by name; the rest of the
-        // selection is the classes every narrowed run keeps (Stage=Guard, and a test class the map never saw).
+        // #5872 (the shape of 1ec666f50): README.md and docs pages. TextTests reads README.md by name, so it still runs.
+        // #5894: nothing else does: CI's docs fast path runs no test for such a change, so the Guard and new classes
+        // that every other narrowed run keeps are left out.
         var map = WriteMap(textPatterns: "\"README.md\"");
 
         var (_, r) = MapSelect(map, new[] { "README.md", "docs/alerts.md", "llms.txt" }, new[] { "Lite/Services/B.cs" });
 
         Assert.False(r.GetProperty("full").GetBoolean(), r.ToString());
-        Assert.Equal(new Dictionary<string, string>
-        {
-            ["FreshTests"] = "new class",
-            ["GateTests"] = "new class",
-            ["TextTests"] = "text pattern",
-        }, Why(r));
+        Assert.True(r.GetProperty("docs_only").GetBoolean(), r.ToString());
+        Assert.Equal(new Dictionary<string, string> { ["TextTests"] = "text pattern" }, Why(r));
+        Assert.Equal(["TextTests"], Selected(r));
+    }
+
+    [Fact]
+    public void DocsOnly_ThatNoClassReads_SelectsNothing()
+    {
+        // #5894: a docs-only diff (one clause in a skill file) ran 367 classes locally while CI ran none. The guard stage,
+        // the classes the map never saw and the environment-gated classes are not reasons to run for a document.
+        var (_, r) = MapSelect(WriteMap(), new[] { ".claude/skills/lane-orders/SKILL.md" });
+
+        Assert.False(r.GetProperty("full").GetBoolean(), r.ToString());
+        Assert.True(r.GetProperty("docs_only").GetBoolean(), r.ToString());
+        Assert.Contains("documentation-only", r.GetProperty("reason").GetString(), StringComparison.Ordinal);
+        Assert.Empty(Selected(r));
+        Assert.Empty(Why(r));
+    }
+
+    [Fact]
+    public void DocsAndCode_Together_IsNotDocsOnly_AndKeepsTheGuardClass()
+    {
+        var (_, r) = MapSelect(WriteMap(), new[] { ".claude/skills/lane-orders/SKILL.md", "Lite.Tests/Own.cs" });
+
+        Assert.False(r.GetProperty("docs_only").GetBoolean(), r.ToString());
+        Assert.Contains("GateTests", Selected(r));
+        Assert.Contains("OwnTests", Selected(r));
+    }
+
+    [Fact]
+    public void GuardStageSeparate_LeavesGuardClassesOutOfTheSelection_ButOnlyWhenAsked()
+    {
+        // #5894: the pre-push gate runs the whole Stage=Guard trait as its own stage, so the selection's batches ran every
+        // Guard class a second time. With the flag the Guard class is not selected (its `why` entry stays for the
+        // summary); without it, the selection is as before (CI's shards still need it).
+        var files = new[] { "Lite.Tests/Own.cs" };
+
+        var (_, withFlag) = MapSelect(WriteMap(), files, guardStageSeparate: true);
+        var (_, without) = MapSelect(WriteMap(), files);
+
+        Assert.DoesNotContain("GateTests", Selected(withFlag));
+        Assert.Equal("run in the guard stage", Why(withFlag)["GateTests"]);
+        Assert.Equal(["FreshTests", "OwnTests"], Selected(withFlag));
+        Assert.Contains("GateTests", Selected(without));
+        Assert.Equal("new class", Why(without)["GateTests"]);
     }
 
     [Fact]

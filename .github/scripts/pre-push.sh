@@ -12,8 +12,8 @@
 #      by most of the suite is the suite (the laptop never runs a full suite: CI decides).
 #   Stage 2 already ran every Stage=Guard class, so stage 3 leaves them out: map-select gets --guard-stage-separate and
 #   the symbol set drops the classes of `-list classes/json -trait Stage=Guard` (#5894). A diff of documentation files
-#   only selects nothing (CI's docs fast path runs no test for it either) and the gate prints why; its Guard stage
-#   still runs. A map older than the newest nightly's is named in the `map:` header line with both run ids.
+#   only selects just the classes that read a changed document as text (CI's docs fast path runs no test for it) and
+#   the gate prints why; its Guard stage still runs. A map older than the newest nightly's is named in the `map:` header line with both run ids.
 #   The map and the symbol scan both name a class by its simple name; the runner's -class filter matches only the
 #   full name and runs nothing for any other (Total: 0, exit 0), so every name is resolved against the build's own
 #   class listing (-list classes/json), exactly as CI's shard scripts do, and run in batches under the command-line
@@ -121,7 +121,7 @@ except Exception:
     echo "map: nightly run $mapid, built $built$stale"
     fi
     if [ -f "$SCRATCH/selection.json" ] && python -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("docs_only") is True else 1)' "$SCRATCH/selection.json"; then
-      echo "map: $(python -c 'import json, sys; print(json.load(open(sys.argv[1])).get("reason", ""))' "$SCRATCH/selection.json"); the classes batches are skipped"
+      echo "map: $(python -c 'import json, sys; print(json.load(open(sys.argv[1])).get("reason", ""))' "$SCRATCH/selection.json")"
     fi
     for suite in darling lite; do
       python .github/scripts/ci-select.py map-keep --selection "$SCRATCH/selection.json" --suite $suite > "$SCRATCH/keep-$suite.txt" 2>&1

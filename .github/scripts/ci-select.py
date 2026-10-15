@@ -706,7 +706,8 @@ KEEP_FULL = (
 )
 
 # map_select()'s `reason` for a change that holds documentation files only (#5894).
-DOCS_ONLY_REASON = "documentation-only change: no test class selected (CI's docs fast path runs none)"
+DOCS_ONLY_REASON = ("documentation-only change: only a class that reads a changed document as text is selected "
+                    "(CI's docs fast path runs no test)")
 
 # The documentation allowlist (the `docs` filter in build.yml); selection_args() passes the live one.
 DOC_PATTERNS = (
@@ -840,8 +841,9 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     so a selection never shrinks for it. With `guard_stage_separate` (#5894) the caller runs the whole Stage=Guard
     trait as a stage of its own (the pre-push gate does), so a Stage=Guard class is left out of `selected` and
     `seconds`: `why` keeps it, marked "run in the guard stage", and the answer says `guard_stage_separate`. A pull
-    request whose every changed file is documentation (`doc_patterns`) selects no class at all, the answer says
-    `docs_only` and `reason` says why: CI's docs fast path runs nothing for it either (#5894). A file changed since the map counts as changed too (it may have grown new
+    request whose every changed file is documentation (`doc_patterns`) selects only the classes that read a changed
+    document as text (no Guard, new or environment-gated class, no changed symbol); the answer says `docs_only` and
+    `reason` says why: CI's docs fast path runs nothing for it either (#5894). A file changed since the map counts as changed too (it may have grown new
     call edges), but only when the change holds a product source file the map knows (#5872). `via` names, per
     "covers a changed file" class, the changed file the walk came from; `unknown` names each file the map did not know
     and the rule that took it; `drift` is how many drifted files counted.
@@ -859,16 +861,6 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         return _full(f"event {event or '(none)'} always runs everything")
     if not narrows(event, base_ref):
         return _full("a pull request into main always runs everything")
-    if changed and all(any(matches(p, f) for p in doc_patterns) for f in changed):
-        # #5894: CI's `docs` filter takes the docs fast path for such a change (decide(): docs_fastpath, no guard run, no
-        # shards), so nothing runs there; the same answer holds whatever the map says, so it comes before the map checks.
-        suites = set(discovered)
-        if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
-            suites |= set(test_map["classes"])
-        return {"full": False, "reason": DOCS_ONLY_REASON, "selected": {s: [] for s in sorted(suites)},
-                "why": {s: {} for s in sorted(suites)}, "seconds": {s: 0.0 for s in sorted(suites)},
-                "total": {s: len(discovered.get(s, {})) for s in sorted(suites)}, "via": {}, "drift": 0, "unknown": {},
-                "docs_only": True, "guard_stage_separate": guard_stage_separate}
     if test_map is None:
         return _full("no test map")
     if not isinstance(test_map, dict):
@@ -938,6 +930,12 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             return bool(live)
         return _pattern_hit(g, live, docs_changed)
 
+    # #5894: a change of documentation files only. CI's `docs` filter takes the docs fast path for it (decide():
+    # docs_fastpath, no guard run, no shards) and runs nothing, so the selection holds only the classes that read a
+    # changed document as text (#5872: a class pinned to README.md still runs for it): no Guard class, no "new class",
+    # no class gated on an environment, no changed symbol.
+    docs_only = bool(changed) and not live
+
     new_classes = any(cls not in parsed.get(suite, {}) for suite, found in discovered.items() for cls in found)
     # A file the map does not know is named with the rule that caught it (#5872), in the FULL reason or in `unknown`.
     unknown: dict[str, str] = {}
@@ -985,7 +983,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                 via.setdefault(suite, {})[cls] = sorted(live_set & covered)[0]
             elif text_hit(cls):
                 reasons[cls] = "reads the tree" if globs.get(cls) == "tree" else "text pattern"
-        for cls, traits in found.items():
+        for cls, traits in ([] if docs_only else found.items()):
             if cls not in mapped:
                 # #5872: a helper type (a fake, a logger, a harness) declares no test, so the map never has it and the
                 # runner runs nothing for it; only a class that holds or inherits a test is new.
@@ -1014,7 +1012,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         # the files it RAN; a class that only reads a source file as text, or reflects over a catalog, has no such
         # link, and a small pull request whose files the map knows would leave it out. Last, with setdefault, so a
         # class keeps the reason it already had and the selection only grows.
-        for cls in sorted((named or {}).get(suite, ())):
+        for cls in sorted({} if docs_only else (named or {}).get(suite, ())):
             if cls in mapped or cls in found:
                 reasons.setdefault(cls, "names a changed symbol")
         # #5894: the caller runs the whole Stage=Guard trait on its own, so a Guard class in the selection would run twice.
@@ -1025,8 +1023,9 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         why[suite] = {c: ("run in the guard stage" if c in in_guard_stage else reasons[c]) for c in sorted(reasons)}
         seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in kept if c in mapped), 3)
         total[suite] = len(set(mapped) | set(found))
-    return {"full": False, "reason": "", "selected": selected, "why": why, "seconds": seconds, "total": total,
-            "via": via, "drift": len(drift) if drift_applies else 0, "unknown": unknown, "docs_only": False,
+    return {"full": False, "reason": DOCS_ONLY_REASON if docs_only else "", "selected": selected, "why": why,
+            "seconds": seconds, "total": total, "via": via, "drift": len(drift) if drift_applies else 0,
+            "unknown": unknown, "docs_only": docs_only,
             "guard_stage_separate": guard_stage_separate}
 
 
