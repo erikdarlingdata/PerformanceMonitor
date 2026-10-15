@@ -444,13 +444,12 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal + 12, arity - 1);
+        Assert.Equal(ProbeOrdinal + 13, arity - 1);
         Assert.Equal("hasQueryStoreComposeStamp", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
@@ -472,6 +471,7 @@ public sealed class QueryStoreComposeStampTests
         behind[ProbeOrdinal + 10] = false;
         behind[ProbeOrdinal + 11] = false;
         behind[ProbeOrdinal + 12] = false;
+        behind[ProbeOrdinal + 13] = false;
         Assert.Equal(172, (int)method.Invoke(null, behind)!);
 
         /* Everything through V173's sentinel true and the newer one false maps to V173 itself. */
@@ -488,6 +488,7 @@ public sealed class QueryStoreComposeStampTests
         atThisRung[ProbeOrdinal + 10] = false;
         atThisRung[ProbeOrdinal + 11] = false;
         atThisRung[ProbeOrdinal + 12] = false;
+        atThisRung[ProbeOrdinal + 13] = false;
         Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var arm = viewer.IndexOf("if (hasQueryStoreComposeStamp)", StringComparison.Ordinal);
