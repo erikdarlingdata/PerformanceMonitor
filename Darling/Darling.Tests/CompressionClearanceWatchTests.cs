@@ -714,8 +714,7 @@ public sealed class CompressionClearanceWatchTests
     /// Marks a verification failure caused by a PATTERN no longer matching, so
     /// <see cref="EveryClearancePin_ReportsAnInjectedDrift"/> can tell "the pin caught the drift" from "the
     /// pin went blind" — which are otherwise the same exception, and the second of which would let the sweep
-    /// report success for a guard that had stopped seeing anything. Borrowed shape from
-    /// <c>RefreshCeilingProvenancePinTests</c>, which is where this discipline is argued at length.
+    /// report success for a guard that had stopped seeing anything.
     /// </summary>
     private const string ParseMiss = "CLEARANCE PIN PARSE MISS";
 

@@ -2553,8 +2553,7 @@ LIMIT 1", connection))
            while STILL PASSING, because 4 and ceil(226.8 / 60) are both 4 - an equality between a declared
            width and a rounded measurement certifies a derivation the code does not have as soon as the two
            coincide. What replaces it is the requirement the width actually has to meet, which is an
-           inequality no coincidence satisfies, plus the code-shape check in
-           RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement. */
+           inequality no coincidence satisfies. */
         Assert.Equal(4, TimescaleSupport.CompressionPhaseGuardMinutes);
         Assert.True(
             TimescaleSupport.CompressionPhaseGuardMinutes

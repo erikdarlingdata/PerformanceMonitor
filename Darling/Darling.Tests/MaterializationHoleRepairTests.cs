@@ -635,8 +635,7 @@ public sealed class MaterializationHoleRepairTests
     }
 
     /// <summary>The worker's source, raw — every anchor here sits on one line. Through <see cref="RepoFile"/>
-    /// rather than a private root walk (#3756 retired this file's own; RepoFileAdoptionTests says why one
-    /// authority).</summary>
+    /// rather than a private root walk (#3756 retired this file's own).</summary>
     private static string ReadWorkerSource() =>
         RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 }

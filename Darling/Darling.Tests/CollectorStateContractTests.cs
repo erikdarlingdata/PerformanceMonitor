@@ -537,7 +537,7 @@ public sealed class CollectorStateContractTests
 
     /// <summary>
     /// Walks up from the test output directory to the repo root — the directory holding
-    /// <c>PerformanceMonitor.sln</c>. Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.
+    /// <c>PerformanceMonitor.sln</c>.
     /// </summary>
     private static string? FindRepoRoot()
     {

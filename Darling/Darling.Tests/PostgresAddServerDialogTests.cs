@@ -252,9 +252,8 @@ public sealed class PostgresAddServerDialogTests
 
     /* ─────────────────────────────── helpers ─────────────────────────────── */
 
-    /* The shared reader, not a private walk-up: RepoFileAdoptionTests holds the census that exactly one
-       file declares the reader and everyone else adopts it — the same helper-proliferation rule the #3489
-       review nit asked for, enforced. */
+    /* The shared reader, not a private walk-up: one file declares the reader and everyone else adopts it,
+       the helper-proliferation rule the #3489 review nit asked for. */
     private static string ReadDialogSource() =>
         RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml.cs");
 }

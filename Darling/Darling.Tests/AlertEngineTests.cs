@@ -3763,7 +3763,7 @@ public sealed class AlertEngineTests
     {
         /* The RAW reader, deliberately: none of the anchors below spans a line break (the row is found by its
            prefix and searched with Contains, and a trailing '\r' on a CRLF checkout changes neither), so by
-           RepoFileAdoptionTests' own rule this file does not belong in s_lfReaders and must not read as if
+           RepoFile's rule for its line-ending-normalised read, this file does not need that read and must not read as if
            it did. */
         var readme = ReadRepoFile("README.md");
 

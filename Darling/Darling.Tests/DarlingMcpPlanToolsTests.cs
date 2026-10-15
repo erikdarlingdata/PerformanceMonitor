@@ -175,7 +175,7 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
     /// risk for other plans; test it). #3696 had them say "no CREATE INDEX text — the suggestion is a hint, not a
     /// design" on a rule that was never made — suppression; the maintainer's reframing is honesty, "corroboration,
     /// with caveats", and the suppression sentence must not come back. Lite's three are pinned in <c>Lite.Tests</c>
-    /// (<c>McpDescriptionTruthPinTests</c>) with the same fragments, so the two SKUs describe one field in one voice.
+    /// with the same fragments, so the two SKUs describe one field in one voice.
     /// #3898 D3, as on Lite: the fragments must be in the SERVED head, because a caller needs these caveats from
     /// tools/list before acting on a missing-index row, so they may not move into get_tool_guide's tail. The
     /// suppression sentence is checked against the whole description, head and tail, so it cannot come back in

@@ -190,8 +190,8 @@ public sealed class McpToolGuideHeadsPgBAuditIoWaitTests
 /// <summary>
 /// #3898 D3 head pins for the rest of the "pgB" family: <c>get_pg_blocking</c> (<c>DarlingMcpPgBlockingTools</c>),
 /// <c>get_pg_wait_stats</c> (<c>DarlingMcpPgWaitTools</c>) and <c>get_pg_index_usage</c>
-/// (<c>DarlingMcpPgIndexUsageTools</c>). Darling only - none of the three has a Lite twin (see
-/// <c>CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools</c>). A separate class from
+/// (<c>DarlingMcpPgIndexUsageTools</c>). Darling only - none of the three has a Lite twin.
+/// A separate class from
 /// <see cref="McpToolGuideHeadsPgBTests"/> and <see cref="McpToolGuideHeadsPgBAuditIoWaitTests"/> so parallel
 /// lanes converting different files in the same family never conflict on one class body.
 /// </summary>

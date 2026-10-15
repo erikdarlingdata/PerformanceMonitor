@@ -1200,7 +1200,7 @@ WHERE NOT is_compressed";
 
         /* Ruling 3 (#4214 part 2b): the cloud identity probe is reached from HERE only — never from
            GatherStartupProfileAsync below, so a service start never pays an outbound HTTP call on every host,
-           managed or not. DarlingCloudIdentityProbeSourcePinTests pins that claim against the source text. */
+           managed or not. */
         var cloud = await DarlingCloudIdentityProbe.ProbeAsync(cancellationToken);
 
         return new HostProfile

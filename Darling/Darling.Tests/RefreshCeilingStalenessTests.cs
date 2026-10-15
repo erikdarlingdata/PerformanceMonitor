@@ -448,7 +448,7 @@ public sealed class RefreshCeilingStalenessTests
     /// site in <c>TimescaleSupport.cs</c> to say the relationship in the past tense. It did not sweep the
     /// CALL SITE, which sat in another project and went on telling a reader that the ceiling was arithmetic
     /// INPUT to the width. That is the drift the whole change is about, one file over — and the prose pins
-    /// in <c>RefreshCeilingProvenancePinTests</c> could not see it, because they read the doc runs of the
+    /// on the declaration could not see it, because they read the doc runs of the
     /// declaration rather than the comments of its callers. This file already reads the real worker source
     /// for the wiring case above, so the check goes where the reader already is.</para>
     ///
@@ -463,7 +463,7 @@ public sealed class RefreshCeilingStalenessTests
     ///
     /// <para><b>What it does NOT cover, stated because "the file I happened to sweep" is how this got
     /// here.</b> It reads the worker and nothing else — <c>TimescaleSupport.cs</c>' half is
-    /// <c>RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement</c>, which forbids
+    /// unpinned, and so is
     /// the expression itself, and every other project is unchecked. And it flags ANY unqualified
     /// <c>rounded up</c> in the worker rather than only one about this width: there is exactly one such
     /// mention today and it is about this width, so the broader rule costs nothing and fails toward

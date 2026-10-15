@@ -109,8 +109,8 @@ public sealed class LivePostgresCollectionHygieneTests
     /// True when any whole SEGMENT of <paramref name="relativePath"/> is <c>bin</c> or <c>obj</c>, reading
     /// both separator characters on every platform.
     ///
-    /// <para>Same shape and the same reasoning as <c>DocCommentHygieneTests.HasBuildOutputSegment</c>, which
-    /// records why at length: a substring test for a backslash-delimited segment matches nothing where the
+    /// <para>The reasoning, in full:
+    /// a substring test for a backslash-delimited segment matches nothing where the
     /// separator is <c>/</c>, so the sweep above reads every generated <c>.AssemblyInfo.cs</c> and
     /// <c>.g.cs</c> off Windows while skipping them on it — and a guard whose scope depends on the host is
     /// two guards. Whole segments rather than a substring, because <c>Objects</c>, <c>obj-cache</c> and
@@ -174,7 +174,7 @@ public sealed class LivePostgresCollectionHygieneTests
     {
         var directory = FindTestProjectDirectory();
 
-        /* FAIL rather than skip when the source tree cannot be found — the DocCommentHygieneTests rule: a guard
+        /* FAIL rather than skip when the source tree cannot be found: a guard
            that silently skips is a guard that silently stops guarding. */
         Assert.True(directory is not null,
             "Could not locate the Darling.Tests source directory (walked up from the test binary looking for "
@@ -314,8 +314,7 @@ public sealed class LivePostgresCollectionHygieneTests
 
     /// <summary>
     /// Walks up from the test output directory to the repo root (the directory holding
-    /// <c>PerformanceMonitor.sln</c>) and returns this project's source directory. Same walk-up idiom as
-    /// <c>DocCommentHygieneTests.FindRepoRoot</c>.
+    /// <c>PerformanceMonitor.sln</c>) and returns this project's source directory.
     /// </summary>
     private static string? FindTestProjectDirectory()
     {

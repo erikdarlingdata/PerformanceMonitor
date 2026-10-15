@@ -2053,7 +2053,7 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     /// method the grid documents, not by anyone renumbering it — and LC's freeze re-derives it AGAIN, back to
     /// the pre-Q12 six-member figures, because six is what this list holds once more (the successors now
     /// occupy the fourth, fifth and sixth slots the legacy trio held, rather than joining behind them); the
-    /// pins in TimescaleSupportTests and RefreshCeilingProvenancePinTests carry both derivations. The raw
+    /// pins in TimescaleSupportTests carry both derivations. The raw
     /// source of each successor is a hypertable, so none carries an ordering requirement against the corrected
     /// Query Store pair.</para>
     /// </summary>
@@ -2076,8 +2076,8 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
         /* The two hourly rollups that CARRY LOGICAL READS (#5329), appended after the interval pair they copy.
            The query one groups by statement (query_hash, sql_handle), so it is an UNBOUNDED-cardinality refresh
            like its sibling; the procedure one has no per-statement column and is deployment-bounded. The
-           phase grid RE-DERIVES from this list (LightHourlyRefreshCount 12 -> 14 and the rest, see
-           RefreshCeilingProvenancePinTests), and because the compression band is keyed on registry position,
+           phase grid RE-DERIVES from this list (LightHourlyRefreshCount 12 -> 14 and the rest),
+           and because the compression band is keyed on registry position,
            APPENDING here moves the compression hour of every DAILY and BASELINE member after these by +2:
            ConvergeCompressionScheduleAsync re-phases them on an existing store (the same proven path as every
            earlier registration; TimescaleAggregateCompressionTests pins the re-phase). The band is 22 of 23. */
@@ -4334,7 +4334,7 @@ WITH NO DATA";
     /// overtaken is the estimator working rather than the estimator failing — and
     /// <see cref="ClassifyRefreshCeilingFreshness"/> is what reports the run that overtakes it (#3183).
     /// What a prefix maximum may NOT do is call its population closed, or read as a bound on what the job
-    /// will do next; RefreshCeilingProvenancePinTests holds this paragraph identical between the two
+    /// will do next; this paragraph is kept identical between the two
     /// constants, so the decision cannot be re-taken on one of them alone.</para>
     ///
     /// <para><b>AND THIS CONSTANT IS NOT IN THE FEEDBACK LOOP ITS SIBLING IS, which is the asymmetry the
@@ -4388,9 +4388,8 @@ WITH NO DATA";
     /// every run that started at or before the narrowing boundary of <c>13:44:23</c> is out, whatever its
     /// duration — membership is decided by position against the boundary, never by whether a reading looks
     /// like it belongs. SPAN: the boundary day's remaining hours, plus the days after it. ESTIMATOR: the
-    /// maximum. RefreshCeilingProvenancePinTests holds this constant equal to the maximum of the population
-    /// published below and TimescaleSupportTests holds the grid clear of it, so the value and the method
-    /// cannot drift apart without a red test.</para>
+    /// maximum. This constant is the maximum of the population
+    /// published below, and TimescaleSupportTests holds the grid clear of it.</para>
     ///
     /// <para><b>THE READ IS A CENSUS, and that is what changed (#3166).</b> Every run of this job since the
     /// boundary, one row per run, from <c>timescaledb_information.job_history</c> — the read this comment
@@ -4585,10 +4584,8 @@ WITH NO DATA";
     /// reading is worth: it is a lower bound, and the classifier can be run against it. What
     /// remains is the reading itself: short of the window width, so the grid's stated precondition holds —
     /// but the residual is D wide and D is that maximum, so nothing here can be described as completing well
-    /// inside its slot. RefreshCeilingProvenancePinTests derives every figure stated against that maximum
-    /// from the grid's own constants and takes the band from the shipped classifier, so a re-derived grid
-    /// moves them all and a reading that started classifying as a warning goes red rather than sitting here
-    /// as prose.</para>
+    /// inside its slot. Every figure stated against that maximum is derived
+    /// from the grid's own constants, with the band from the shipped classifier.</para>
     ///
     /// <para><b>THE CONSEQUENCE THIS CONSTANT DID NOT SETTLE, and where it was settled (#3166, #3174).</b>
     /// Against the 750 s watch line a 15-minute slot produced, a sizing figure of 896 s was ABOVE it, so
@@ -5092,7 +5089,7 @@ WITH NO DATA";
     /// overtaken is the estimator working rather than the estimator failing — and
     /// <see cref="ClassifyRefreshCeilingFreshness"/> is what reports the run that overtakes it (#3183).
     /// What a prefix maximum may NOT do is call its population closed, or read as a bound on what the job
-    /// will do next; RefreshCeilingProvenancePinTests holds this paragraph identical between the two
+    /// will do next; this paragraph is kept identical between the two
     /// constants, so the decision cannot be re-taken on one of them alone.</para>
     ///
     /// <para><b>THE POPULATION IS DOWNSTREAM OF THE CONSTANT, so no estimator over it is stable and moving
@@ -5216,8 +5213,8 @@ WITH NO DATA";
     /// from <c>2026-09-08 23:07Z</c> and read at <c>2026-09-09 01:55:41Z</c> — which would leave
     /// <b>163.365</b> s of the declared width instead of 13.2 s. It is not adopted here because the figures
     /// every other sentence in this summary is stated against have not been read for that population, and a
-    /// constant moved ahead of the prose that explains it is the drift RefreshCeilingProvenancePinTests
-    /// exists to stop.</para>
+    /// constant moved ahead of the prose that explains it is a drift
+    /// worth avoiding.</para>
     /// </summary>
     public const double OtherHourlyRefreshObservedCeilingSeconds = 226.8;
 

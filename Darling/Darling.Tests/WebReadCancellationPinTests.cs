@@ -24,8 +24,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4203: a superseded or abandoned <c>/api/read/{tool}</c> request must stop its store query, not just stop
-/// answering it. Both halves of the ratchet read the CODE, never a hand-written tool list — the same shape
-/// <see cref="LiveCleanupConversionRatchetTests"/> uses for its own conversion sweep — and the one hand-kept
+/// answering it. Both halves of the ratchet read the CODE, never a hand-written tool list —
+/// and the one hand-kept
 /// list, <see cref="DarlingWebEndpoints.CancellationAllowlist"/>, may only shrink: a PR converts a tool's
 /// dispatch entry AND its <c>[McpServerTool]</c> method together and removes the name here, never adds one.
 ///
@@ -189,8 +189,7 @@ public sealed class WebReadCancellationPinTests
     /// <summary>
     /// A name stays on the allowlist only while its tool method has nowhere to put a token. Once BOTH halves
     /// convert — the method gains a <see cref="CancellationToken"/> parameter and its dispatch entry passes
-    /// <c>RequestAborted</c> — the entry is stale and must be removed, the discipline
-    /// <see cref="LiveCleanupConversionRatchetTests"/> holds for its own ceiling.
+    /// <c>RequestAborted</c> — the entry is stale and must be removed.
     /// </summary>
     [Fact]
     public void CancellationAllowlist_HasNoStaleEntry()

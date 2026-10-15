@@ -18,7 +18,7 @@ namespace Darling.Tests;
 /// inside a comment and a brace inside a literal are neither of them code (#2913, #3052).</para>
 ///
 /// <para><b>Two pins were carrying byte-identical copies of a broken resolver, and one of them was making
-/// a DECISION with it.</b> #3094 is about the copy in <c>TsqlConventionGuardTests</c>, where a wrong member
+/// a DECISION with it.</b> #3094 is about the copy in a T-SQL convention guard (deleted in #5833), where a wrong member
 /// name only mislabelled an offender — costly, because that list is the guard's whole output when it reds,
 /// but inert. <c>StoreSqlClockDisciplineTests</c> had the same regex and fed its answer into
 /// <c>Waived.Contains(file + ":" + member)</c>, so a wrong name there could break a legitimate waiver into
@@ -59,14 +59,14 @@ internal static class CSharpMemberMap
     /// access modifier (an <c>enum</c> or <c>interface</c> member, or a field written
     /// <c>static readonly …</c>) is not a declaration here, and neither is an attribute argument, which
     /// sits above its own member's declaration line. A literal in one of those resolves to
-    /// <see cref="Unknown"/> — and <c>TsqlConventionGuardTests.EveryTsqlLiteralInTheCorpus_IsAttributedToADeclaredMember</c>
+    /// <see cref="Unknown"/> — and a census that requires every literal attributed to a declared member
     /// reds on it by name. Widening the modifier list to admit a bare <c>const</c> or <c>static</c> would
     /// re-admit the local-variable case, so the resolution fails toward the worse label instead: an honest
     /// <c>&lt;unknown&gt;</c> a reader escalates, not a plausible name a reader trusts.</para>
     ///
     /// <para><b>That widening is guarded by this comment and by five fixture rows, and by nothing else.</b>
     /// A re-admitted local produces an identifier-shaped label, and
-    /// <c>TsqlConventionGuardTests.EveryTsqlLiteralInTheCorpus_IsAttributedToADeclaredMember</c> can only see a label that
+    /// a census that requires every literal attributed to a declared member can only see a label that
     /// is a keyword or nothing — so it would report a clean run across the rest of the corpus. Its doc
     /// comment states the same bound from the other side; if you are here to widen the list, read
     /// it.</para>
@@ -75,7 +75,7 @@ internal static class CSharpMemberMap
     /// appears INSIDE another member's body. <c>ArchiveService.IsArchiving</c> is the whole population and
     /// the reason the exclusion is here rather than in a comment: its <c>private set =&gt; …</c> matched as
     /// a declaration of its own, which put a declaration start inside the property that holds it and made
-    /// <c>TsqlConventionGuardTests.TheMemberScan_ReadsEveryDeclarationWhole</c> report the property as over-extended. It is
+    /// a scan that reads every declaration whole report the property as over-extended. It is
     /// the only accessor in the scanned trees carrying an access modifier — which is why the exclusion is
     /// here rather than in a note saying it might one day be needed, and why no count of them is written
     /// down: that number changes on any commit and nothing would hold it true. An accessor is not a member
@@ -100,7 +100,7 @@ internal static class CSharpMemberMap
     /// bounded by the NEXT declaration of either kind, and a nested type is the next thing after the member
     /// above it. They are also what <see cref="EnclosingType"/> answers from. They are excluded from MEMBER
     /// attribution and from
-    /// <c>TsqlConventionGuardTests.TheMemberScan_ReadsEveryDeclarationWhole</c>: a type's body legitimately contains every
+    /// a scan that reads every declaration whole: a type's body legitimately contains every
     /// declaration below it, which is the exact shape that assertion calls an over-run.</para>
     /// </summary>
     internal enum DeclarationKind
@@ -325,10 +325,7 @@ internal static class CSharpMemberMap
     /// four shapes arrived as cases nobody had enumerated, so the fifth will too, and a detector covers a
     /// shape this method has never been taught.</para>
     ///
-    /// <para><c>Auto</c> in <c>TsqlConventionGuardTests.TheResolver_AttributesByScope_NotByTheNearestNameAbove</c> pins the
-    /// accessor-list case; found in review of #3097, where it resolved to <see cref="Unknown"/> in silence.
-    /// <c>TsqlConventionGuardTests.TheMemberScan_ReadsEveryDeclarationWhole</c> pins the other three over
-    /// the whole scanned tree, by set, against its <c>KnownTruncatedRanges</c>.</para>
+    /// <para>The accessor-list case was found in review of #3097, where it resolved to <see cref="Unknown"/> in silence.</para>
     /// </summary>
     private static int DeclarationEnd(string code, int from)
     {
@@ -623,8 +620,8 @@ internal static class CSharpMemberMap
     /// arm above and read as <see cref="RangeShape.WholeMember"/>. The members this finds strand content
     /// inside their own declaration, and where that content is a string literal
     /// <see cref="EnclosingMember"/> answers <c>&lt;unknown&gt;</c> for it — a site that is in the source
-    /// and outside every range a census resolves through. How many there are is not written here: the live
-    /// figure is <c>TsqlConventionGuardTests.KnownTruncatedRanges</c>, which a test holds to the tree, and a
+    /// and outside every range a census resolves through.
+    /// A count repeated in prose goes stale the first time an unrelated PR rewrites one of those members —
     /// count repeated in prose goes stale the first time an unrelated PR rewrites one of those members —
     /// which happened to this comment's own numbers within an hour of it being written.
     /// <see cref="RangeShape.Truncated"/> is that arm, and it is the reason
@@ -644,37 +641,4 @@ internal static class CSharpMemberMap
     /// </summary>
     internal static int LineOf(string text, int offset) =>
         text.AsSpan(0, Math.Clamp(offset, 0, text.Length)).Count('\n') + 1;
-
-    /// <summary>
-    /// The declaration walk over RAW source. <b>Not a resolution path — a control fixture.</b>
-    ///
-    /// <para>It exists so a test can assert that <see cref="CSharpSourceWalker"/> is what saves the scan,
-    /// in both directions, with a one-token difference from the shipped path: <see cref="Of"/> is this
-    /// function with <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> applied first. Named for what
-    /// it is so nobody reaches for it as an alternative to <see cref="Of"/>, which is what a plausible name
-    /// like <c>RawDeclarations</c> invites. Its only caller is
-    /// <c>TsqlConventionGuardTests.TheMemberScan_ReadsABodyWhoseLiteralHoldsABrace_AndARawCountDoesNot</c>.</para>
-    /// </summary>
-    internal static MemberMap OfRawSourceForControlTestsOnly(string text)
-    {
-        var heads = DeclarationHead.Matches(text);
-        var declarations = new List<DeclaredRange>(heads.Count);
-
-        for (var i = 0; i < heads.Count; i++)
-        {
-            var head = heads[i];
-            var after = head.Index + head.Length;
-            var (name, kind) = DeclaredName(text, after);
-
-            declarations.Add(new DeclaredRange(
-                name,
-                kind,
-                head.Index,
-                DeclarationEnd(text, after),
-                i + 1 < heads.Count ? heads[i + 1].Index : text.Length,
-                StatementEnd(text, after)));
-        }
-
-        return new MemberMap(text, declarations);
-    }
 }

@@ -156,7 +156,7 @@ public sealed class SharedBaselineModelPinTests
 
             /* The floor that stops an empty scan passing. A body located but read as nothing satisfies a set
                comparison against nothing, and this whole census then reports clean on three empty strings —
-               the same failure RepoFileAdoptionTests floors its own sweep against. */
+               the failure the floor below guards against. */
             Assert.True(
                 body.Length > 200,
                 $"AddBaselineContext in {relativePath} read as {body.Length} characters. The declaration was "

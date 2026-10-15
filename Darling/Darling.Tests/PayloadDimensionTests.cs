@@ -921,7 +921,7 @@ public sealed class PayloadDimensionTests
         var root = FindRepoRoot();
 
         /* FAIL rather than skip when the tree cannot be found — a guard that silently skips is a guard
-           that silently stopped guarding. Same reasoning (and same walk-up) as DocCommentHygieneTests. */
+           that silently stopped guarding. */
         Assert.True(root is not null, RepoRootNotFound);
 
         var darling = Path.Combine(root!, "Darling");
@@ -1132,7 +1132,7 @@ public sealed class PayloadDimensionTests
     /// True when any whole SEGMENT of <paramref name="relativePath"/> is build output or this test
     /// project, reading both separator characters on every platform.
     ///
-    /// <para>The reasoning is <c>DocCommentHygieneTests.HasBuildOutputSegment</c>'s, which records it at
+    /// <para>The reasoning, at
     /// length: a substring test for a backslash-delimited segment matches nothing where the separator is
     /// <c>/</c>, so a guard whose scope depends on the host is two guards. Here the stakes are higher than
     /// for build output alone — the skip also covers <c>Darling.Tests</c>, whose files legitimately seed
@@ -1707,7 +1707,7 @@ public sealed class PayloadDimensionTests
 
     /// <summary>
     /// Walks up from the test output directory to the repo root — the directory holding
-    /// <c>PerformanceMonitor.sln</c>. Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.
+    /// <c>PerformanceMonitor.sln</c>.
     /// </summary>
     private static string? FindRepoRoot()
     {

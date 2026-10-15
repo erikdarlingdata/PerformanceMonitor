@@ -24,8 +24,7 @@ namespace Darling.Tests;
    the protocol (see its own remarks), and a second copy of a protocol responder is a second thing to get
    subtly wrong. Driven by AlertDeliveryChannelTests (#3169/#3297/#3303) and IncidentDeliveryFilterTests
    (#3313). A block comment rather than an XML doc block: a file-level summary with no member of its own
-   stacks against the first type's, which DocCommentHygieneTests.NoMemberCarriesTwoStackedSummaryBlocks
-   forbids and which CI caught here. */
+   stacks against the first type's summary, so the type would carry two. */
 /// <summary>
 /// A loopback endpoint that records the bodies posted to it. <see cref="System.Net.Sockets.TcpListener"/>
 /// rather than <c>HttpListener</c> on purpose: HttpListener wants a URL ACL on Windows, and the four

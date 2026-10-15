@@ -283,8 +283,8 @@ public sealed class PgAlertFailedSendRetryTests
 
     /* ---------------- source pins: each arm keeps the send's answer and reports it ---------------- */
 
-    /* Every anchor below sits on one line, so the plain read is enough (RepoFileAdoptionTests reserves the
-       line-ending-normalised read for pins whose anchors span a line break). */
+    /* Every anchor below sits on one line, so the plain read is enough (the
+       line-ending-normalised read is for pins whose anchors span a line break). */
     private static string Worker() =>
         RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 

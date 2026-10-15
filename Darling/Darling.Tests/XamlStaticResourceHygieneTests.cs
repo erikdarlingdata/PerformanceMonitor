@@ -144,7 +144,7 @@ public sealed class XamlStaticResourceHygieneTests
         return keys;
     }
 
-    /// <summary>Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.</summary>
+    /// <summary>Walks up from the test binary to the repository root.</summary>
     private static string? FindRepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

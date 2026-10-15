@@ -164,8 +164,8 @@ public static class DarlingWebEndpoints
 
     /// <summary>
     /// #4203: every read-only tool NOT yet converted to observe cancellation all the way to Npgsql — the
-    /// ratchet <c>WebReadCancellationPinTests</c> holds in both directions, the same shape
-    /// <c>LiveCleanupConversionRatchetTests</c> uses for its own conversion sweep. A name here may only be
+    /// ratchet <c>WebReadCancellationPinTests</c> holds in both directions.
+    /// A name here may only be
     /// REMOVED, on the PR that finishes threading its <see cref="ReadToolHandler"/> entry AND its
     /// <c>[McpServerTool]</c> method's own <c>CancellationToken</c> parameter down to every store call — never
     /// added, because every tool on the <c>/api/read/*</c> surface is in scope for the same fix and none is

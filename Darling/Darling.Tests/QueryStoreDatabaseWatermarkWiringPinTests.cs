@@ -17,7 +17,6 @@ namespace Darling.Tests;
 /// <summary>
 /// Source-position pins for the per-database Query Store watermark cache (#4661). The cache is exact only
 /// while it advances strictly AFTER the item's COPY transaction commits,.
-/// The writer set is pinned in <c>QueryStoreWriterSetPinTests</c>.
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class QueryStoreDatabaseWatermarkWiringPinTests

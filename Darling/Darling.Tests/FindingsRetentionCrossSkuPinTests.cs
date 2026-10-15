@@ -13,9 +13,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The cross-edition half of the findings-retention pin. Lite's own half lives in
-/// <c>Lite.Tests.FindingsRetentionHorizonPinTests</c>, which pins the value and the wiring of the three
-/// sites in its cleanup chain; this pins the claim the two editions make ABOUT EACH OTHER.
+/// The cross-edition findings-retention pin: the claim the two editions make ABOUT EACH OTHER.
 ///
 /// <para>Both SKUs purge <c>analysis_findings</c> on the same window on purpose — Lite's scheduler
 /// comment says so in as many words, and the service's daily purge rides it. That was prose either side

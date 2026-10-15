@@ -130,8 +130,7 @@ public sealed class HostObjectRollupLiveTests
             /* #1902: teardown on its OWN connection, never the body's. A finally that cleans up on the
                body's connection throws from the finally and REPLACES the body's exception with the
                teardown's — and it is the body's failure that closed the connection, so the teardown fails
-               because of the very thing it then hides. Enforced by
-               LiveCleanupConversionRatchetTests.NoLiveTestCleansUpOnItsOwnBodysConnection. */
+               because of the very thing it then hides. */
             await LiveStoreCleanup.RunAsync(connectionString!, succeeded, async (cleanup, cleanupCt) =>
                 await CleanupAsync(cleanup, cleanupCt));
         }

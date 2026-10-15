@@ -71,8 +71,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// points at the workload.</para>
 ///
 /// <para><b>What it does NOT do.</b> No Lite twin: Lite has every input and no port, which is why
-/// <c>get_query_store_clutter</c> sits on <c>CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools</c>
-/// with the port written out rather than being quietly absent. The fleet reference is opt-in
+/// <c>get_query_store_clutter</c> is Darling-only by decision
+/// rather than by omission. The fleet reference is opt-in
 /// (<c>include_fleet_median</c>): it costs a fleet-wide walk of two raw hypertables over the window, which
 /// the default call keeps off so the per-server answer stays inside the read deadline (30 s client-side on
 /// the shared storage reader, 15 s <c>statement_timeout</c> on the managed store's <c>mcp</c> role).</para>
@@ -468,7 +468,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
 
     /// <summary>Rounds a nullable figure, keeping null as null — an unmeasured quantity never becomes 0. Spelled
     /// with <c>HasValue</c> rather than a property pattern so the T-SQL guard's member walk reads it whole
-    /// (<c>TsqlConventionGuardTests.KnownTruncatedRanges</c> names the <c>is { }</c> shape as where it stops).</summary>
+    /// (a <c>is { }</c> property pattern is where that walk stops).</summary>
     private static double? Round(double? value, int digits) => value.HasValue ? Math.Round(value.Value, digits) : null;
 
     /// <summary>A stored naive-UTC stamp as round-trip ISO-8601 with its offset, or null — the

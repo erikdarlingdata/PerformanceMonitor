@@ -407,8 +407,8 @@ public sealed class ViewerPostgresTabsTests
         /* The ONE stated exemption: pg_database_size_stats (V136, #3691) is written by its collector and read by
            nothing yet — the analysis consumer (lane 32) and its Viewer panel are follow-on lanes on #3691. It is
            PLACED on the Storage tab (the placement census above has no exemption path, deliberately) and the
-           tab's note tells the operator it is collected and not yet drawn; PgRegistryPanelPlacementTests and
-           ViewerCollectorCoverageTests carry the matching entries. All three come off in the panel's PR. */
+           tab's note tells the operator it is collected and not yet drawn; PgRegistryPanelPlacementTests carries
+           the matching entry. Both come off in the panel's PR. */
         var placedNotDrawn = new HashSet<string>(StringComparer.Ordinal) { "pg_database_size_stats" };
 
         var unasked = ViewerPostgresTabs.All

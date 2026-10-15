@@ -162,7 +162,7 @@ public sealed class StoreToastAndCheckpointerTests
     [Fact]
     public void TheSweepDoc_StatesThePerKindMeaningOfTheCheckpointerColumns()
     {
-        /* Single-line anchors only (the RepoFileAdoptionTests rule), each the load-bearing clause of one
+        /* Single-line anchors only (so the plain reader is enough), each the load-bearing clause of one
            paragraph: the per-kind mapping, the raw-vs-delta decision, the reset idiom, the extension fence. */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs");
         foreach (var phrase in new[]

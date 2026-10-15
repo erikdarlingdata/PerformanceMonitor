@@ -429,7 +429,7 @@ public sealed class PgCpuCapacityHeadroomTests
     ///
     /// <para>The declaration itself is excluded by requiring an <c>=</c> that is not <c>=&gt;</c>, and a
     /// READ is excluded by refusing a preceding <c>.</c> — the same receiver rule
-    /// <c>RepoFileAdoptionTests</c>'s call regex uses, and for the same reason.</para>
+    /// any call regex over C# source needs.</para>
     /// </summary>
     private static IEnumerable<string> MetricBundleInitializers(string code)
     {

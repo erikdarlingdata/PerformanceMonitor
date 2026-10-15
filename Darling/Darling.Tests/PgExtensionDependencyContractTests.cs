@@ -18,8 +18,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The contract behind <see cref="ICollectorSchemaInfo.RequiredPgExtensions"/> (#3187):
-/// <c>Darling/README.md</c>'s permissions paragraph is pinned to that declaration by
-/// <c>ReadmeDerivedCountPinTests</c>, so a declaration nobody makes is a paragraph nothing holds.
+/// <c>Darling/README.md</c>'s permissions paragraph states that declaration.
 ///
 /// <para><b>What this file adds that the README pin cannot.</b> The README pin fires when the declaration
 /// and the paragraph disagree. It says nothing when a NEW collector reads an extension and simply never

@@ -74,8 +74,7 @@ namespace Darling.Tests;
 /// <para>Read with a raw <c>Directory.EnumerateFiles</c> walk and <c>XDocument</c>, the
 /// <c>XamlGridRowRangeTests</c> idiom, rather than through <see cref="RepoFile"/>: this pin reads the tree
 /// by GLOB rather than by naming files, so it has no repo-relative paths to resolve, and staying off the
-/// shared reader keeps it out of <c>RepoFileAdoptionTests</c>' rosters — which are shared censuses under
-/// concurrent edit, and a roster entry is a merge conflict this rule does not need.</para>
+/// shared reader costs nothing.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 [Trait("Reads", "Lite")]

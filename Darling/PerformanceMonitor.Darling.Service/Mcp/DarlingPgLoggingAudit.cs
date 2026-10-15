@@ -577,7 +577,7 @@ public static class DarlingPgLoggingAudit
     /// </summary>
     private static long? Threshold(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row)
     {
-        /* A block body, not an expression with a property pattern: TsqlConventionGuardTests' member scan
+        /* A block body, not an expression with a property pattern: a C# member scan
            reads a `{ }` pattern as the member's body and stops short, which strands everything after it. */
         var text = row?.Setting;
         if (text is null)
@@ -673,7 +673,7 @@ public static class DarlingPgLoggingAudit
     private static string? RestartNote(DarlingPgLoggingAuditReader.PgLoggingSettingRow? row)
     {
         /* A block body for the reason Threshold has one: a `{ }` property pattern reads as the member's
-           body to TsqlConventionGuardTests' scan. */
+           body to a C# member scan. */
         if (row is null || !row.PendingRestart)
         {
             return null;

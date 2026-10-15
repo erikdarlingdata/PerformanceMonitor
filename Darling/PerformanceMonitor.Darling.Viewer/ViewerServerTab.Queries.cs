@@ -57,7 +57,7 @@ public partial class ViewerServerTab
     private const int QueryStoreRegressionsSubTabIndex = 6;
     /* #3797, inserted after Query Store Regressions: the per-database clutter view answers the question the
        two Query Store grids above raise, and it is Darling-only for now — Lite has every input and no port
-       (CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools carries the port, written out). */
+       */
     private const int QueryStoreClutterSubTabIndex = 7;
     private const int PlanCorrectionsSubTabIndex = 8;
     private const int QueryHeatmapSubTabIndex = 9;

@@ -42,8 +42,7 @@ namespace Darling.Tests;
 /// read presented as the number's lineage.</para>
 ///
 /// <para>Reads the LF-normalised source (<see cref="RepoFile.ReadRepoFileLf"/>) because a comment block spans
-/// lines and is collapsed to one string before its citation is matched; declared in
-/// <c>RepoFileAdoptionTests.s_lfReaders</c> for that reason.</para>
+/// lines and is collapsed to one string before its citation is matched.</para>
 /// </summary>
 public sealed class PgTargetMeasuredLineageTests
 {

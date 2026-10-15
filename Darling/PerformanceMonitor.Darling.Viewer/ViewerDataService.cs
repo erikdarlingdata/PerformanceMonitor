@@ -1267,15 +1267,7 @@ SELECT
            rung always needs one, whatever it happens to be, because RequiredStoreSchemaVersion is
            StorageVersion.SchemaVersion and a fully-migrated store must map to EXACTLY that or the version
            banner reports a mismatch on a store that is current. Being a collector table makes it no less
-           reliable as a sentinel; it simply is not interesting for any other reason.
-
-           Deliberately NOT spelled with its collect.<table> name here, and this is the only place in the
-           file where that matters. ViewerCollectorCoverageTests scans this reader layer for collector table
-           names by plain substring to decide which tables the viewer actually reads; it strips the probe's
-           information_schema lines precisely so a migration sentinel cannot fake coverage, but a PROSE
-           mention has no such line to strip. Naming the table in this comment made the table look read,
-           which silently exempted it from the coverage ratchet — the exact failure that pin exists to
-           catch, reported as a stale allow-list entry. */
+           reliable as a sentinel; it simply is not interesting for any other reason. */
         /* V72 (the Query Store plan map, #2210): table-existence sentinel, and it has to sit ABOVE the V71
            arm because these are evaluated newest-first — a V72 store also has V71's table, so testing V71
            first would report every V72 store as V71 and the viewer would show a spurious upgrade banner
@@ -2874,10 +2866,7 @@ SELECT
         }
 
         /* V34 (#991 Availability Group collectors): engine-agnostic table-existence sentinel, newest-first
-           arm. The AG database-grain collector table exists only at V34 or later. (Named only in the probe
-           SQL, deliberately not repeated here: ViewerCollectorCoverageTests scans this layer by substring
-           and strips the probe's information_schema lines, so spelling the table in prose would make it
-           read as "covered" and quietly exempt it from the coverage ratchet.) */
+           arm. The AG database-grain collector table exists only at V34 or later. */
         if (hasAgCollectors)
         {
             return 34;

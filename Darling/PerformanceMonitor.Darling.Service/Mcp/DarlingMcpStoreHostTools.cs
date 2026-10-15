@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para>Deliberately NOT a block on <c>get_store_metrics</c> (ruling 1): that tool is sized to
 /// <see cref="McpResponseBudget.DefaultBytes"/> already, and every one of its calls would pay for a read that
 /// most questions about the store never need. Lite has no managed PostgreSQL store, so this tool has no Lite
-/// twin — see <c>Lite.Tests/CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools</c>.</para>
+/// twin.</para>
 ///
 /// <para>The <c>mcp</c> role reads this exactly as least-privilege as every other MCP read (ruling 2) —
 /// nothing here widens it. The settings' FILE attribution is read off local disk by the service process

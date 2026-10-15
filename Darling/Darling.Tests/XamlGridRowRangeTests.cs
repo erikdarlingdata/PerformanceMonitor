@@ -278,7 +278,7 @@ public sealed class XamlGridRowRangeTests
             .Any(segment => string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
                             || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.</summary>
+    /// <summary>Walks up from the test binary to the repository root.</summary>
     private static string? FindRepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

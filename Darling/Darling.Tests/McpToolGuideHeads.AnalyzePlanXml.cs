@@ -25,8 +25,7 @@ namespace Darling.Tests;
 /// </para>
 ///
 /// <para>
-/// <c>Lite.Tests/McpDescriptionTruthPinTests.PlanTools_DescribeTheStatedOperatorCut_AndTheCreateStatement</c>
-/// (and its Darling twin in <c>DarlingMcpPlanToolsTests</c>) already re-points its read to
+/// <c>DarlingMcpPlanToolsTests</c> already re-points its read to
 /// <c>McpToolGuide.Split(...).Head</c> for the three plan tools that enumerate the payload, including this
 /// one — those fragments (impact_basis, create_statement, the corroboration/never-a-diagnosis clause, the
 /// fixed caveat, the regression-risk clause, operators_ranked_by, operators_returned/total_operators/truncated)
@@ -69,7 +68,7 @@ public sealed class McpToolGuideHeadsAnalyzePlanXmlTests
             Assert.Contains(fact, served.Served, StringComparison.Ordinal);
         }
 
-        /* #3696's dropped suppression sentence must not come back (Lite.Tests/McpDescriptionTruthPinTests). */
+        /* #3696's dropped suppression sentence must not come back. */
         Assert.DoesNotContain("no CREATE INDEX text", served.Served, StringComparison.Ordinal);
         Assert.DoesNotContain("a hint, not a design", served.Served, StringComparison.Ordinal);
 

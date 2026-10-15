@@ -381,8 +381,8 @@ public sealed class PlanForceActionAuditRedactionTests
     /// #4346/#4377's exemption contract: the ONE named raw reader (<c>PlanForceActionDetailScrub.RunAsync</c>)
     /// must return no <c>detail</c> text to its caller — its public <c>Summary</c> carries counts only — and
     /// its write path must be built from <c>SanitizeDetailForAudit</c>'s output, not from the raw value it
-    /// read. Reads the scrub's own source text (same technique as <see cref="PlanForceActionDetailCensusTests"/>
-    /// uses) rather than trusting a comment, so a later change that widens the exemption's surface fails this
+    /// read. Reads the scrub's own source text
+    /// rather than trusting a comment, so a later change that widens the exemption's surface fails this
     /// pin directly.
     /// </summary>
     [Fact]

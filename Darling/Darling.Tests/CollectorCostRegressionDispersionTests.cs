@@ -223,7 +223,7 @@ public sealed class CollectorCostRegressionDispersionTests
         /* The window the evaluator passes as $1, read from the source rather than restated, because a
            restated constant is the thing that goes stale. The RAW reader, not the LF one: the anchor below
            sits on one line, so normalising newlines would change nothing about what it can match, and
-           RepoFileAdoptionTests keys membership of the LF set on a pin's anchors CROSSING a line break. */
+           the line-ending-normalised read is only for anchors that CROSS a line break. */
         var evaluator = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
         var declaration = Regex.Match(

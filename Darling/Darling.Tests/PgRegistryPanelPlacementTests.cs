@@ -77,7 +77,7 @@ namespace Darling.Tests;
 /// grids, so prose would otherwise read as an argument or an assignment. The walk also makes the brace
 /// count that finds a method body immune to a brace inside a literal. Where a collector NAME is needed the
 /// call is matched in the walked code and the literal read out of the original text at the same offset,
-/// because the walk blanks literal text — the idiom <c>CommentFilterAdoptionTests</c> uses, sound because
+/// because the walk blanks literal text, which is sound because
 /// the two are character-aligned.</para>
 ///
 /// <para><b>Ownership resolves to the OUTERMOST named <c>TabItem</c></b>, because Activity holds a sub-tab
@@ -214,7 +214,7 @@ public sealed class PgRegistryPanelPlacementTests
         /* The ONE stated exemption, and what it is: pg_database_size_stats (V136, #3691) is written by its
            collector and read by nothing yet — the analysis consumer (lane 32) and a Viewer panel are follow-on
            lanes on #3691. It is PLACED on the Storage tab and not yet DRAWN; the tab's own note says so to the
-           operator, and ViewerCollectorCoverageTests / ViewerPostgresTabsTests carry the matching entries. It
+           operator, and ViewerPostgresTabsTests carries the matching entry. It
            is named here rather than silently skipped, and it leaves this list in the same PR as its
            LoadPg…Async loader. Do not let a second collector join it: a series landing ahead of its screen is
            a sequencing choice a PR states, not a category. */
@@ -750,8 +750,8 @@ public sealed class PgRegistryPanelPlacementTests
 
     /// <summary>
     /// The plain <c>"…"</c> literal opening an argument list at <paramref name="at"/>, read out of the
-    /// ORIGINAL source at an offset matched in the walked text — the idiom
-    /// <c>CommentFilterAdoptionTests.PrefixFilterSites</c> uses, sound because
+    /// ORIGINAL source at an offset matched in the walked text, which is
+    /// sound because
     /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> is character-aligned with its input.
     ///
     /// <para>Only a plain literal is recognised: a collector named through a <c>const</c>, a verbatim

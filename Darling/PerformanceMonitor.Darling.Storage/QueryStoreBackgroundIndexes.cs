@@ -354,7 +354,7 @@ SELECT EXISTS
     private static string IndexNames(IReadOnlyList<IndexSpec> specs) => string.Join(", ", specs.Select(spec => spec.IndexName));
 
     /* ", SQLSTATE 53100" for a server error that carries a SQLSTATE (a full disk reads differently from a lock timeout),
-       nothing otherwise. A block body, because TsqlConventionGuardTests' member scan stops short of an expression-bodied
+       nothing otherwise. A block body, because a C# member scan stops short of an expression-bodied
        member that has a property pattern in it. */
     private static string SqlStateSuffix(Exception ex)
     {

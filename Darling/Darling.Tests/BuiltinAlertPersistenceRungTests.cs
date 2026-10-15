@@ -348,7 +348,7 @@ public sealed class BuiltinAlertPersistenceRungTests
     /// without parsing comments at all. Two earlier spellings of this pin are the reason it is shaped this
     /// way. Scoped to the file, it flagged nine correct citations — those files cite V32, V40, V44, V50,
     /// V60, V61, V80 and V81 for their own tables, all right. Scoped to comment BLOCKS instead, it needed a
-    /// hand-rolled line-prefix comment filter, which <c>CommentFilterAdoptionTests</c> correctly refuses
+    /// hand-rolled line-prefix comment filter, which is unsound
     /// without a stated bound — and the bound I measured for it came back unreliable on its own terms. A
     /// phrase that names both the table and the rung needs neither: it cannot match another rung's citation
     /// because it does not describe another rung's subject.</para>

@@ -398,7 +398,7 @@ public class StoreCopyPhaseLivePostgresTests
     /// <c>await using</c> puts it at the end of the test method, after every assertion about the fault has
     /// run — so a dispose that throws can only fail a test whose measurement is already complete, rather
     /// than destroy the measurement. Same family of hazard as the one
-    /// <c>LiveCleanupConversionRatchetTests</c> exists to stamp out, differing in what is at risk.
+    /// <c>LiveStoreCleanup</c> exists to stamp out, differing in what is at risk.
     /// <c>LiveStoreCleanup</c> is not the remedy here because there is nothing to clean: the COPY always
     /// faults, so no attempt commits a row.</para>
     /// </summary>

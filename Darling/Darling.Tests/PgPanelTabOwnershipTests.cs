@@ -755,7 +755,7 @@ public sealed class PgPanelTabOwnershipTests
     private static int LineOf(string code, int offset) =>
         code.AsSpan(0, Math.Clamp(offset, 0, code.Length)).Count('\n') + 1;
 
-    /// <summary>Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.</summary>
+    /// <summary>Walks up from the test binary to the repository root.</summary>
     private static string? FindRepoRoot()
     {
         var dir = AppContext.BaseDirectory;

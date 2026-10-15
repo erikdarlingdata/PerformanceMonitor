@@ -178,8 +178,7 @@ internal static class ViewerPostgresTabs
                is the Storage tab's question ("where is the space going") asked over time, and its panel lands
                with the object-growth slice. Placing it now keeps the placement census truthful about which
                screen owns it; the note below tells the operator it is collected and not yet shown, so the
-               registry does not claim a panel that is not there. ViewerCollectorCoverageTests carries the
-               matching UNBUILT UI entry, and both come off in the same PR as the panel. */
+               registry does not claim a panel that is not there. It comes off in the same PR as the panel. */
             new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_index_bloat", "pg_column_stats", "pg_predicate_stats", "pg_database_size_stats" },
             /* One tab, because both panels answer the same question — where is the space going and is it
                earning its keep — and the two remedies compete for the same maintenance window. Bloat is

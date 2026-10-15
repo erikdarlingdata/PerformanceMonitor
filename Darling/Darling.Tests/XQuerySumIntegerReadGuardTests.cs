@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// are in <c>PerformanceMonitor.Collectors</c> (<c>LongQueryCompletionsCollector</c>, <c>DeadlocksCollector</c>, <c>AttentionCollector</c>,
 /// <c>BlockedProcessReportCollector</c>, <c>SystemHealthEventsCollector</c>, <c>MemoryPressureEventsCollector</c>,
 /// <c>IndexObjectStatsCollector</c>, <c>CpuUtilizationCollector</c>). The other four trees are belt and braces; the only <c>.value(</c>
-/// outside them is in <c>install/</c> and <c>deprecated/</c>, the retired SKUs that <c>TsqlConventionGuardTests</c> also treats as out of scope.</para>
+/// outside them is in <c>install/</c> and <c>deprecated/</c>, the retired SKUs.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 [Trait("Reads", "Lite")]

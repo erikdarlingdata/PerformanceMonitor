@@ -408,9 +408,7 @@ public sealed class DarlingCloudIdentityProbeTests
        Task.Delay regardless of what Azure gets, so on a loaded machine EC2's delay can itself lose the race
        to that shared budget before completing "naturally" — 2 of 3 runs against a deliberately-reverted,
        per-request-timeout build still finished under the bound, for a reason unrelated to what the test meant
-       to check. DarlingCloudIdentityProbeSourcePinTests.CreateHandler_ArmsExactlyOneBudget_NotAPerRequestTimeout
-       pins the same "one shared budget" property deterministically instead: a per-request-timeout
-       implementation needs a SECOND call to CancelAfter(, so counting them is exact where a clock is not. */
+       to check. */
 
     [Fact]
     public void CreateHandler_ReturnsASocketsHttpHandler()

@@ -38,7 +38,7 @@ namespace Darling.Tests;
 ///
 /// <para><b>This reports; it does not repair.</b> #3206 owns the MCP payload defects and #3207 the desktop
 /// render ones. <see cref="Inventory"/> carries every offending site instead, labelled, in the shape
-/// <c>DocCommentHygieneTests</c> uses for its unresolved cref targets: pinned at SET EQUALITY, which is a
+/// of an allow-list pinned at SET EQUALITY, which is a
 /// ratchet in BOTH directions. A new offender fails, and so does a FIXED one whose row is still here —
 /// that second direction is the only thing keeping an inventory from becoming a permanent excuse list.</para>
 ///

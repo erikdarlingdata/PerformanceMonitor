@@ -115,8 +115,7 @@ public static class PgServerLogTail
 
     /// <summary>
     /// <see cref="TailBytes"/> spelled for splicing into SQL. A const string keeps every consumer's query a
-    /// compile-time constant and keeps the number in ONE place; <c>LogTailOverlapThresholdPinTests</c>
-    /// asserts the two agree.
+    /// compile-time constant and keeps the number in ONE place.
     /// </summary>
     public const string TailBytesLiteral = "4194304";
 

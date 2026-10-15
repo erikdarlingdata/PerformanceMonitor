@@ -485,8 +485,8 @@ public static partial class PgTargetScorer
         SeqScanTopStatementBadActorFired(facts) || SeqScanTopStatementRegressed(facts);
 
     /* Block bodies, not expression bodies: a `is { } id` property pattern in an expression-bodied member stops the
-       TsqlConventionGuardTests member walk at its braces (#3799 reshaped the buffer drill-down's Round for the same
-       reason), and a block the walk reads whole needs no KnownTruncatedRanges line. */
+       C# member walk at its braces (#3799 reshaped the buffer drill-down's Round for the same
+       reason). */
     internal static bool SeqScanTopStatementBadActorFired(IReadOnlyDictionary<string, Fact> facts)
     {
         var id = SeqScanTopStatement(facts);

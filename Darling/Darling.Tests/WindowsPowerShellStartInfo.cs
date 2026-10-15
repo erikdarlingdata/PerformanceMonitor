@@ -15,8 +15,8 @@ namespace Darling.Tests;
 /// A test host started from PowerShell 7 (CI's step shell) hands down a <c>PSModulePath</c> that points
 /// 5.1 at PowerShell 7's modules, and 5.1 then cannot autoload the ones it ships: Get-Acl and Set-Acl, in
 /// Microsoft.PowerShell.Security, fail with "the module could not be loaded". Without the variable, 5.1
-/// builds its own default, as an operator's console does. <c>PowerShellStartInfoCensusTests</c> holds every
-/// other test file to this helper.</summary>
+/// builds its own default, as an operator's console does. Tests that start powershell.exe
+/// use this helper.</summary>
 internal static class WindowsPowerShellStartInfo
 {
     /// <summary>Runs <paramref name="scriptPath"/> under <c>powershell.exe</c> with the streams redirected.</summary>

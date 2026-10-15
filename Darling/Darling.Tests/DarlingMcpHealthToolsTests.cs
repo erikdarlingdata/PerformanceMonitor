@@ -139,7 +139,7 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         /* #3541 A9: the presence count is the LAST projection, after collection_runs, so the thirteen positional
            reads before it stay put — and it counts the seven signal joins, never the collection log or the
            alert log, whose survival is the reason a day can outlive its signals. The same pin is written for
-           Lite's copy in DailySummaryCpuBarPinTests' neighbourhood by construction: both SQLs are read by the
+           Lite's copy by construction: both SQLs are read by the
            SAME ordinal (13) and judged by the SAME DailySummaryRetention.StateFor. */
         Assert.True(sql.IndexOf("AS collection_runs", StringComparison.Ordinal) < sql.IndexOf("AS signal_sources_present", StringComparison.Ordinal),
             "signal_sources_present must trail collection_runs so the positional reads before it stay put");

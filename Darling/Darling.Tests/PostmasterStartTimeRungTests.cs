@@ -137,7 +137,7 @@ public sealed class PostmasterStartTimeRungTests
     [Fact]
     public void TheRungDocSaysWhatItDoesAndWhatItDoesNot_AndNoCensusMoved()
     {
-        /* Every phrase below sits on one line, so the plain reader (RepoFileAdoptionTests' rule: the LF reader is for
+        /* Every phrase below sits on one line, so the plain reader (the LF reader is for
            pins whose anchors cross a line break). */
         var storage = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "PgMigrations.cs");
         var start = storage.IndexOf("/// V139 —", StringComparison.Ordinal);
