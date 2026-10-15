@@ -101,7 +101,6 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Details" FontWeight="SemiBold" FontSize="13"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>

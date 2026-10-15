@@ -74,6 +74,46 @@ public sealed class AlertDetailCopyTextTests
         Assert.EndsWith(Environment.NewLine + Environment.NewLine + "Blocked for 204 s in Tenant1" + Environment.NewLine, text);
     }
 
+    private static readonly AlertNewestSample Sample =
+        new("CPU", new DateTime(2026, 10, 15, 8, 55, 0, DateTimeKind.Utc), TimeSpan.FromSeconds(320));
+
+    private static int Occurrences(string text, string line) => text.Split(line).Length - 1;
+
+    [Fact]
+    public void Build_WithANewestSample_PutsTheAgeLineOnce_UnderStatus_AsTheWindowDoes()
+    {
+        var json = AlertContextSerializer.Serialize(new AlertContext
+        {
+            NewestSample = Sample,
+            Details = new List<AlertDetailItem>
+            {
+                new() { Heading = "Blocking Chain 1", Fields = new List<(string Label, string Value)> { ("Database", "Tenant1") } }
+            }
+        });
+        var ageLine = AlertDetailText.SampleAgeLine(Sample)!;
+
+        var text = AlertDetailCopyText.Build(Header with { Muted = true }, json, detailText: null);
+
+        Assert.Equal(1, Occurrences(text, ageLine));
+        Assert.Contains(
+            "Status: Sent" + Environment.NewLine + ageLine + Environment.NewLine + "This alert was muted by a mute rule"
+            + Environment.NewLine + Environment.NewLine + "Blocking Chain 1",
+            text);
+    }
+
+    [Fact]
+    public void Build_WhenTheFlatTextAlreadyCarriesTheAgeLine_DoesNotRepeatIt()
+    {
+        /* CPU's shape (#5642): a context with the sample and no Details, and a detail_text that already ends in the line. */
+        var json = AlertContextSerializer.Serialize(new AlertContext { NewestSample = Sample });
+        var ageLine = AlertDetailText.SampleAgeLine(Sample)!;
+
+        var text = AlertDetailCopyText.Build(Header, json, "CPU at 98%" + Environment.NewLine + ageLine);
+
+        Assert.Equal(1, Occurrences(text, ageLine));
+        Assert.EndsWith("CPU at 98%" + Environment.NewLine + ageLine + Environment.NewLine, text);
+    }
+
     [Theory]
     [InlineData("Blocking Detected", AlertChainView.Blocking)]
     [InlineData("Deadlocks Detected", AlertChainView.Deadlocks)]

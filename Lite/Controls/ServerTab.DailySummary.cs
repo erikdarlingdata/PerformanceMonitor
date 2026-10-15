@@ -85,16 +85,16 @@ public partial class ServerTab : UserControl
                 switch (e.Target)
                 {
                     case DayDrillTarget.Deadlocks:
-                        MainTabControl.SelectedIndex = 8;        // Blocking
-                        BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
+                        MainTabControl.SelectedIndex = BlockingTabIndex;
+                        BlockingSubTabControl.SelectedIndex = DeadlocksSubTabIndex;
                         break;
                     case DayDrillTarget.Blocking:
-                        MainTabControl.SelectedIndex = 8;        // Blocking
-                        BlockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
+                        MainTabControl.SelectedIndex = BlockingTabIndex;
+                        BlockingSubTabControl.SelectedIndex = BlockedProcessReportsSubTabIndex;
                         break;
                     case DayDrillTarget.TopQueries:
-                        MainTabControl.SelectedIndex = 2;        // Queries
-                        QueriesSubTabControl.SelectedIndex = 2;  // Top Queries by Duration
+                        MainTabControl.SelectedIndex = QueriesTabIndex;
+                        QueriesSubTabControl.SelectedIndex = TopQueriesByDurationSubTabIndex;
                         break;
                 }
             }

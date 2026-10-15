@@ -210,7 +210,7 @@ public partial class ServerTab : UserControl
 
             /* Always keep the alert badge current even when the Blocking tab is not visible.
                RefreshAlertCountsAsync reads this tab's own held UTC window (GetCurrentWindowUtc). */
-            if (MainTabControl.SelectedIndex != 8)
+            if (MainTabControl.SelectedIndex != BlockingTabIndex)
                 await RefreshAlertCountsAsync();
 
             /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on the Collection

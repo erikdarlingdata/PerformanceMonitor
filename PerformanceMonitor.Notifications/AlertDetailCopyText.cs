@@ -46,14 +46,24 @@ public static class AlertDetailCopyText
         AppendLine(text, "Threshold", header.Threshold);
         AppendLine(text, "Notification", header.Notification);
         AppendLine(text, "Status", header.Status);
+
+        /* The same choice the window makes: the structured items when the context deserializes with any, else the
+           flat detail_text. */
+        var structured = AlertContextSerializer.TryDeserialize(contextJson, out var context) && context.Details.Count > 0;
+
+        /* #5642's fire-time sample age, once, where both windows show it: the header row under Status. The flat text
+           may already carry the line, and then it is not repeated. */
+        var ageLine = AlertDetailText.SampleAgeLineFromJson(contextJson, structured ? null : detailText);
+        if (ageLine is not null)
+        {
+            text.AppendLine(ageLine);
+        }
+
         if (header.Muted)
         {
             text.AppendLine("This alert was muted by a mute rule");
         }
 
-        /* The same choice the window makes: the structured items when the context deserializes with any, else the
-           flat detail_text. */
-        var structured = AlertContextSerializer.TryDeserialize(contextJson, out var context) && context.Details.Count > 0;
         if (structured)
         {
             foreach (var item in context.Details)
@@ -79,14 +89,6 @@ public static class AlertDetailCopyText
         {
             text.AppendLine();
             text.AppendLine(detailText.TrimEnd());
-        }
-
-        /* #5642's fire-time sample age, once: the flat text may already carry it. */
-        var ageLine = AlertDetailText.SampleAgeLineFromJson(contextJson, structured ? null : detailText);
-        if (ageLine is not null)
-        {
-            text.AppendLine();
-            text.AppendLine(ageLine);
         }
 
         return text.ToString().TrimEnd() + Environment.NewLine;

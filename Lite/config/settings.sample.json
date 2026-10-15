@@ -167,6 +167,11 @@
   "color_theme": "Dark",               // "Dark" | "Light" | "CoolBreeze"
   "default_time_range_hours": 4,       // initial range on every chart, in whole hours (older builds read only this)
   "default_time_range": "",            // optional (#5562), wins over the hours key: "30m" | "2d" | "1mo" | "today" | "previous-week" ... ("" = use the hours key)
+  // The Alert Details window's last size (#5847), written by the app when the window closes. 0 = the
+  // window's own default size; values are kept within 0-10000, and a size below the window's minimum
+  // (480 x 360) is not restored.
+  "alert_detail_window_width": 0,
+  "alert_detail_window_height": 0,
 
   // ---- Auto-refresh (#3479) ------------------------------------------------------------------------
   // The server-tab toolbar's Auto-refresh checkbox and interval picker, written by the app when

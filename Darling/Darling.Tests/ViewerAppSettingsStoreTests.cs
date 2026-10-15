@@ -185,6 +185,27 @@ public sealed class ViewerAppSettingsStoreTests : IDisposable
         Assert.Contains(settings.CsvSeparator, new[] { ",", ";", "\t" }); // unknown -> a valid locale default
     }
 
+    /// <summary>#5847: a hand-edited Alert Details size is bounded as Lite's loader bounds it (0..10000), so the window
+    /// the size store restores cannot open 99999 pixels wide; a negative size reads as never resized (the default).</summary>
+    [Theory]
+    [InlineData(99999, 99999, 10000, 10000)]
+    [InlineData(-5, 700, 0, 700)]
+    [InlineData(900, 650, 900, 650)]
+    public void Load_BoundsTheAlertDetailWindowSize(double storedWidth, double storedHeight, double width, double height)
+    {
+        File.WriteAllText(
+            _tempFile,
+            $$"""{ "AlertDetailWindowWidth": {{storedWidth}}, "AlertDetailWindowHeight": {{storedHeight}} }""");
+        var store = new ViewerAppSettingsStore(_tempFile);
+
+        var settings = store.Load();
+        var restored = new AlertDetailWindow.SettingsSizeStore(store).Load();
+
+        Assert.Equal(width, settings.AlertDetailWindowWidth);
+        Assert.Equal(height, settings.AlertDetailWindowHeight);
+        Assert.Equal(width > 0 && height > 0 ? new System.Windows.Size(width, height) : null, restored);
+    }
+
     [Fact]
     public void Load_WhenFileCorrupt_ReturnsDefaults()
     {

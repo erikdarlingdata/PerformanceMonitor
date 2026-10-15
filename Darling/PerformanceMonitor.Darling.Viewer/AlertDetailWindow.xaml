@@ -49,6 +49,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Time:" FontWeight="SemiBold"
@@ -85,6 +86,14 @@
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
             <TextBox Grid.Row="6" Grid.Column="1" x:Name="StatusValueText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4"/>
+
+            <!-- #5642: how old the newest sample was when the alert fired, from the persisted context; shown only when
+                 the alert persisted it. A header row, as in Lite (#5847), so an alert with an age and no detail items
+                 does not open a tall empty Details panel just to hold this line at its bottom. -->
+            <TextBlock Grid.Row="7" Grid.Column="0" x:Name="SampleAgeLabel" Text="Newest sample:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" Visibility="Collapsed"/>
+            <TextBox Grid.Row="7" Grid.Column="1" x:Name="SampleAgeText"
+                     Style="{StaticResource SelectableValueText}" Margin="0,4" Visibility="Collapsed"/>
         </Grid>
 
         <!-- Muted indicator -->
@@ -104,7 +113,6 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Details" FontWeight="SemiBold" FontSize="13"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>
@@ -173,11 +181,6 @@
                          Foreground="{DynamicResource ForegroundBrush}" FontFamily="Consolas"
                          FontSize="12"
                          VerticalScrollBarVisibility="Auto"/>
-
-                <!-- #5642: how old the newest sample was when the alert fired, from the persisted context. -->
-                <TextBlock Grid.Row="2" x:Name="SampleAgeText" Visibility="Collapsed" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundBrush}" FontFamily="Consolas"
-                           FontSize="12" Margin="0,8,0,0"/>
             </Grid>
         </Border>
 
@@ -197,7 +200,8 @@
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0">
                 <TextBlock x:Name="FullChainLinkText" Visibility="Collapsed" TextWrapping="Wrap">
-                    <Hyperlink x:Name="FullChainLink" Click="FullChainLink_Click">
+                    <Hyperlink x:Name="FullChainLink" Click="FullChainLink_Click"
+                               Foreground="{DynamicResource AccentBrush}">
                         <Run x:Name="FullChainLinkRun"/>
                     </Hyperlink>
                 </TextBlock>

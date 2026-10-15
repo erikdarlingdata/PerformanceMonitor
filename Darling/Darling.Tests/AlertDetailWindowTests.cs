@@ -109,6 +109,44 @@ public sealed class AlertDetailWindowTests
         });
     }
 
+    /// <summary>#5847 review: an alert that carries a sample age and no detail items shows the age as a header row, as
+    /// Lite does, and leaves the Details panel closed instead of opening it just to hold that line at its bottom.</summary>
+    [Fact]
+    public void SampleAge_WithNoDetailItems_IsAHeaderRow_AndOpensNoDetailsPanel()
+    {
+        var sample = new AlertNewestSample("CPU", new DateTime(2026, 10, 15, 8, 55, 0, DateTimeKind.Utc), TimeSpan.FromSeconds(320));
+        var row = new ViewerAlertRow
+        {
+            AlertTime = new DateTime(2026, 10, 15, 9, 0, 0),
+            ServerName = "SQL01",
+            MetricName = "High CPU",
+            CurrentValue = 98,
+            ThresholdValue = 80,
+            AlertSent = true,
+            NotificationType = "Email",
+            Muted = false,
+            ContextJson = AlertContextSerializer.Serialize(new AlertContext { NewestSample = sample })
+        };
+
+        StaTestThread.Run(() =>
+        {
+            var window = new AlertDetailWindow(row);
+            try
+            {
+                LayOut(window);
+
+                Assert.Equal(AlertDetailText.SampleAgeLine(sample), window.SampleAgeText.Text);
+                Assert.Equal(Visibility.Visible, window.SampleAgeText.Visibility);
+                Assert.Equal(Visibility.Visible, window.SampleAgeLabel.Visibility);
+                Assert.Equal(Visibility.Collapsed, window.DetailPanel.Visibility);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+    }
+
     [Fact]
     public void CopyText_CarriesTheHeader_AndBothItems()
     {
