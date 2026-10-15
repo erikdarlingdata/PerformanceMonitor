@@ -116,6 +116,10 @@ public partial class MainWindow : Window
     private readonly MuteRuleService _muteRuleService;
     /// <summary>#5750: the scoped notification-route store, for the Settings window (its writes invalidate the route cache).</summary>
     internal DuckDbNotificationRouteStore NotificationRouteStore { get; private set; } = null!;
+
+    /// <summary>The Level 1 investigation store (#5820): Lite's DuckDB twin of Darling's, behind the shared interface the
+    /// route list (its use counts), the dispatcher and the MCP tools read.</summary>
+    internal IInvestigationRequestStore InvestigationStore { get; private set; } = null!;
     private EmailAlertService _emailAlertService;
 
     /// <summary>The webhook service the email service fans out to, held so the status timer can read each
@@ -161,6 +165,7 @@ public partial class MainWindow : Window
             _databaseInitializer,
             _serverManager.GetKnownServerIds,
             RouteSecretAccess.CredentialManager());
+        InvestigationStore = new DuckDbInvestigationStore(_databaseInitializer);
         var routeStore = NotificationRouteStore;
         NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());
         /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read
