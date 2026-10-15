@@ -563,7 +563,7 @@ public sealed class DarlingMcpAlertTools
                DISTINCT from the top-level cooldown_minutes, which gates AlertEngine's FIRE decision: two
                stages, two numbers, and only one of them used to be visible. */
             cooldown_minutes = delivery.CooldownMinutes,
-            /* #5825 (V186): whether each channel also sends the message that an alert has cleared, to the destinations
+            /* #5825 (V187): whether each channel also sends the message that an alert has cleared, to the destinations
                its fire reached. Off by default; a notification route can override it (get_notification_routes,
                send_resolutions). "webhook" is the generic webhook, as in Settings. */
             send_resolutions = new
@@ -2558,7 +2558,7 @@ public sealed class DarlingMcpAlertTools
                                ceiling is therefore an engine change across both SKUs, not a bound edit; see
                                the PR for why long suppression belongs to create_mute_rule instead. */
                             case "cooldown_minutes": AddInt(DeliveryCooldownColumn, n, "delivery.cooldown_minutes", 1, 120, NotificationTable); break;
-                            /* #5825 (V186): the four per-channel resolution flags, each its own column on the notification row. */
+                            /* #5825 (V187): the four per-channel resolution flags, each its own column on the notification row. */
                             case "send_resolutions":
                                 if (n is not JsonObject flags)
                                 {

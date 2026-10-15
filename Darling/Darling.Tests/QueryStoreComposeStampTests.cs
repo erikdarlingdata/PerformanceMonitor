@@ -438,7 +438,7 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) is next and V185's (#5812) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, and V187's (#5825) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
@@ -454,7 +454,7 @@ public sealed class QueryStoreComposeStampTests
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        /* Every later rung's sentinel (V174 up to the top, #5825's V186 included) sits above V173's, so a store missing V173 is
+        /* Every later rung's sentinel (V174 up to the top, #5825's V187 included) sits above V173's, so a store missing V173 is
            missing them too; leaving any true would map the store to that rung. */
         var behind = (object[])all.Clone();
         for (var i = ProbeOrdinal; i < arity; i++)

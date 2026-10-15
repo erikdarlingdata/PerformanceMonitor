@@ -1766,7 +1766,7 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             From = reader.GetString(5),
             To = reader.GetString(6),
             EmailCooldownMinutes = reader.GetInt32(7),
-            /* V186 (#5825): appended after V166's column, like it. */
+            /* V187 (#5825): appended after V166's column, like it. */
             SendResolutions = reader.GetBoolean(23),
         };
         var webhooks = new WebhooksConfig
@@ -2191,7 +2191,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     AgentMaxPerDay = reader.GetInt32(12),
                     AgentLeaseMinutes = reader.GetInt32(13),
                     AgentExpiryMinutes = reader.GetInt32(14),
-                    /* V186 (#5825): null follows the channel's setting. */
+                    /* V187 (#5825): null follows the channel's setting. */
                     SendResolutions = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
                 });
             }

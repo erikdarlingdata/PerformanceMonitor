@@ -231,7 +231,7 @@ public static class DarlingManagedRoles
                    to the read roles and the live security gate fails until someone decides which side it
                    is on. */
                 "pagerduty_auto_resolve",
-                /* V186 (#5825): whether each channel sends an alert's resolution. Behaviour, not a credential, the
+                /* V187 (#5825): whether each channel sends an alert's resolution. Behaviour, not a credential, the
                    same as pagerduty_auto_resolve above. */
                 "slack_send_resolutions", "teams_send_resolutions", "generic_send_resolutions", "email_send_resolutions",
             },
@@ -257,7 +257,7 @@ public static class DarlingManagedRoles
                 "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at",
                 "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes",
                 "agent_expiry_minutes",
-                /* V186 (#5825): the route's override of the channels' "send resolutions" flags. Non-secret. */
+                /* V187 (#5825): the route's override of the channels' "send resolutions" flags. Non-secret. */
                 "send_resolutions",
             },
             SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" }),
@@ -1570,7 +1570,7 @@ REVOKE UPDATE ON {config}.config_monitored_servers FROM {viewer};
 -- The BEACON is already covered: config_notification carries trg_bump_notification -> config_bump_version
 -- (SECURITY INVOKER), which UPDATEs config_service.config_version AS mcp, and the column grant above serves it.
 GRANT UPDATE (email_cooldown_minutes) ON {config}.config_notification TO {mcp};
--- #5825 (V186): update_alert_settings writes delivery.send_resolutions, the four per-channel resolution flags on the
+-- #5825 (V187): update_alert_settings writes delivery.send_resolutions, the four per-channel resolution flags on the
 -- same row. Behaviour toggles beside the cooldown, never a destination or a credential.
 GRANT UPDATE (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions) ON {config}.config_notification TO {mcp};
 -- #3598 (V131): notification routes. The parent row's posture is that a network token-holder never READS a

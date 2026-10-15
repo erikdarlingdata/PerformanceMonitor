@@ -21,7 +21,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #5825 L3 gated live reads (DARLING_TEST_PG): the three resolution history columns (V186) reach every reader. A
+/// #5825 L3 gated live reads (DARLING_TEST_PG): the three resolution history columns (V187) reach every reader. A
 /// resolution row carries <c>resolution_sent_at</c>, <c>resolution_channels</c> and <c>resolution_outcome</c>; a fire row
 /// carries none. <c>get_alert_history</c> answers them (null on the fire row), and the viewer's
 /// <see cref="ViewerDataService.GetAlertHistoryAsync"/> rows carry them into the grid's Resolution cell and the Alert

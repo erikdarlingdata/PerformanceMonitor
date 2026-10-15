@@ -151,7 +151,7 @@ public sealed class McpConfigReadAvoidsSecretColumnsTests
             .Where(c => c.Length > 0)
             .ToArray();
 
-        /* #5825 (V186): the four per-channel resolution flags are read beside the cooldown; each is on the non-secret carve. */
+        /* #5825 (V187): the four per-channel resolution flags are read beside the cooldown; each is on the non-secret carve. */
         Assert.Equal(new[] { "email_cooldown_minutes", "slack_send_resolutions", "teams_send_resolutions", "generic_send_resolutions", "email_send_resolutions" }, selected);
         Assert.All(selected, column => Assert.Contains(column, acl.NonSecretColumns));
     }

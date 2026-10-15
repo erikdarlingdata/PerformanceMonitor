@@ -3296,9 +3296,52 @@ internal static class DarlingDataReader
     /// (<c>CollectionHealthKeyedLookupParityTests</c> holds each to the pre-change statement). The aggregates
     /// still read the window's raw columns: p95 is an exact <c>PERCENTILE_DISC</c>, which the hourly rollup
     /// cannot give.</para>
+    ///
+    /// <para><b>p95 from a duration histogram, not an ordered-set aggregate (#5810).</b> A
+    /// <c>PERCENTILE_DISC ... WITHIN GROUP</c> in <c>health</c> made the whole aggregate a serial GroupAggregate
+    /// that fed every row of the window into a per-collector tuplesort: over a planted week (TimescaleDB, 1-day
+    /// chunks, compressed after a day, warm cache) 1.69 s for a 1,030,000-row server, where the same aggregate
+    /// without it is a parallel HashAggregate at about 0.5 s. <c>p95</c> below is the same exact value from a narrow
+    /// GROUP BY (collector, duration) count, itself a parallel HashAggregate, and a running sum over the much smaller
+    /// histogram: 0.85 s on that server (medians of seven alternating runs), about 0.25 s either way on a
+    /// 117,000-row one, every column identical (<c>CollectionHealthP95HistogramLiveTests</c>). The floor left is one
+    /// scan of the window's rows, which only an hourly rollup removes.</para>
     /// </summary>
     public const string CollectionHealthSql = $"""
-        WITH health AS
+        WITH p95 AS
+        (
+            -- #5810: PERCENTILE_DISC(0.95) over the collector's non-NULL durations, computed from their
+            -- histogram. PERCENTILE_DISC returns the value at 1-based sorted position ceil(0.95 * n), which is the
+            -- smallest duration whose running count reaches 95% of n; "running * 20 >= timed * 19" is that test
+            -- in integers, so no float rounding can move it off the exact answer. A collector with no timed run
+            -- has no row here and reads NULL through the LEFT JOIN, as the aggregate did.
+            SELECT
+                collector_name,
+                MIN(duration_ms) FILTER (WHERE running_runs * 20 >= timed_runs * 19) AS p95_duration_ms
+            FROM
+            (
+                SELECT
+                    collector_name,
+                    duration_ms,
+                    SUM(runs) OVER (PARTITION BY collector_name ORDER BY duration_ms) AS running_runs,
+                    SUM(runs) OVER (PARTITION BY collector_name) AS timed_runs
+                FROM
+                (
+                    SELECT
+                        collector_name,
+                        duration_ms,
+                        COUNT(*) AS runs
+                    FROM v_collection_log
+                    WHERE server_id = $1
+                    AND   collection_time >= $2
+                    AND   {CollectionCycleRow.NotCycleRowSql}
+                    AND   duration_ms IS NOT NULL
+                    GROUP BY collector_name, duration_ms
+                ) histogram
+            ) running
+            GROUP BY collector_name
+        ),
+        health AS
         (
             SELECT
                 collector_name,
@@ -3327,9 +3370,9 @@ internal static class DarlingDataReader
                 -- throw away. DISC rather than CONT so the answer is a duration some run actually took
                 -- instead of an interpolation between the two modes, which would be a number describing
                 -- no run at all — the exact defect this column exists to end. Both engines ignore NULL
-                -- duration_ms here, as AVG already does. Byte-identical to Lite's DuckDB read.
+                -- duration_ms here, as AVG already does. The same value as Lite's DuckDB read, which still
+                -- calls PERCENTILE_DISC; here it comes from the p95 CTE above (#5810).
                 MAX(duration_ms) AS max_duration_ms,
-                PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_duration_ms,
                 MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
                 MAX(collection_time) AS last_run_time,
                 -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
@@ -3489,6 +3532,12 @@ internal static class DarlingDataReader
             AND   {CollectionCycleRow.NotCycleRowSql}
             GROUP BY collector_name
         )
+        """ + "\n" + CollectionHealthFinalSelectSql;
+
+    /// <summary><see cref="CollectionHealthSql"/>'s final SELECT: the columns, in their positional order, over the CTEs
+    /// <c>health</c> and <c>p95</c>, and the keyed LATERAL lookups on the raw log (#4955). Its own constant so
+    /// <see cref="CollectionHealthComposedSql"/> runs the same text over its own <c>health</c> and <c>p95</c> (#5810).</summary>
+    private const string CollectionHealthFinalSelectSql = $"""
         SELECT
             h.collector_name,
             h.total_runs,
@@ -3496,7 +3545,7 @@ internal static class DarlingDataReader
             h.error_count,
             h.avg_duration_ms,
             h.max_duration_ms,
-            h.p95_duration_ms,
+            p95.p95_duration_ms,
             h.last_success_time,
             h.last_run_time,
             -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest
@@ -3593,6 +3642,8 @@ internal static class DarlingDataReader
             -- ordinal.
             COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs
         FROM health h
+        LEFT JOIN p95
+          ON p95.collector_name = h.collector_name
         -- #4955: the keyed lookups. Each reads ONE collector's rows through
         -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
         -- aggregate above already found, instead of ranking every run of the window to reach them. The
@@ -3708,6 +3759,184 @@ internal static class DarlingDataReader
         ORDER BY h.collector_name
         """;
 
+
+    /// <summary>
+    /// The 7-day health read served from the hourly rollup (V186, #5810): the production statement behind
+    /// <see cref="GetCollectionHealthAsync"/>. Same parameters, columns, order and types as <see cref="CollectionHealthSql"/>;
+    /// every column but <c>p95_duration_ms</c> has the same value.
+    ///
+    /// <para><b>Where each hour comes from.</b> A closed hour the rollup holds for this server, from the window's first
+    /// whole hour on, is read from <c>collect.collection_log_hourly</c> (about 168 rows per collector for the week). Every
+    /// other part of the window is read from the raw log: the partial first hour, any closed hour the table does not hold
+    /// (the first passes after the upgrade, which backfill a day at a time, or passes that failed), and everything after
+    /// the newest rolled hour, the open hour included. Those slices are found as ranges of consecutive hours, so the raw
+    /// read is a few range scans, not a filter over the week, and an empty table reads the whole window raw. The raw
+    /// slices are aggregated with <see cref="CollectionLogHourly.AggregatesSql"/>, the expressions the writer uses, and the
+    /// parts are merged per collector: counts and sums add, maxima and instants take the MAX, and the average is
+    /// <c>sum::numeric / count</c>, which is what <c>AVG(integer)</c> computes. The keyed LATERAL lookups (#4955) and
+    /// the final column list are <see cref="CollectionHealthFinalSelectSql"/>, the text <see cref="CollectionHealthSql"/> ends with, so they stay on the raw log.</para>
+    ///
+    /// <para><b>p95 is bucketed.</b> An exact percentile cannot be rebuilt from hourly rows, so the read sums the
+    /// duration histograms and reports the upper bound of the slot that holds the run at position <c>ceil(0.95 n)</c>
+    /// (<see cref="CollectionLogHourly.DurationBucketBounds"/>, within 47% of the exact value), capped at the window's
+    /// maximum duration so p95 never exceeds the max. The slot above an hour has no upper bound and reads the maximum.
+    /// NULL for a collector with no timed run, as before.</para>
+    /// </summary>
+    public static readonly string CollectionHealthComposedSql = ComposeCollectionHealthSql();
+
+    private static string ComposeCollectionHealthSql()
+    {
+        var values = CollectionLogHourly.ValueColumns;
+        return $"""
+        WITH rolled AS MATERIALIZED
+        (
+            SELECT
+                hr.collector_name,
+                hr.hour_start,
+                {values}
+            FROM collect.collection_log_hourly hr
+            WHERE hr.server_id = $1
+            AND   hr.hour_start >= $2
+        ),
+        rolled_hours AS
+        (
+            SELECT DISTINCT rh.hour_start
+            FROM rolled rh
+        ),
+        raw_ranges AS
+        (
+            -- The hours the table does not hold, as islands of consecutive hours: the partial first hour, and any
+            -- missing closed hour up to the newest rolled one.
+            SELECT GREATEST(MIN(gap.hour_start), $2) AS range_start,
+                   MAX(gap.hour_start) + interval '1 hour' AS range_end
+            FROM
+            (
+                SELECT g.hour_start,
+                       g.hour_start - ROW_NUMBER() OVER (ORDER BY g.hour_start) * interval '1 hour' AS island
+                FROM generate_series(date_trunc('hour', $2),
+                                     (SELECT MAX(m.hour_start) FROM rolled_hours m),
+                                     interval '1 hour') AS g(hour_start)
+                WHERE NOT EXISTS (SELECT 1 FROM rolled_hours r WHERE r.hour_start = g.hour_start)
+            ) gap
+            GROUP BY gap.island
+            UNION ALL
+            -- Everything after the newest rolled hour, the open hour included; the whole window when nothing is rolled.
+            SELECT COALESCE(MAX(t.hour_start) + interval '1 hour', $2),
+                   'infinity'::timestamp
+            FROM rolled_hours t
+        ),
+        raw (collector_name, {values}) AS
+        (
+            SELECT
+                w.collector_name,
+                {CollectionLogHourly.AggregatesSql}
+            FROM
+            (
+                SELECT
+                    l.collector_name,
+                    l.collection_time,
+                    l.status,
+                    l.error_message,
+                    l.rows_collected,
+                    l.duration_ms,
+                    l.slowest_item_ms,
+                    width_bucket(l.duration_ms - 1, {CollectionLogHourly.BoundsArraySql}) AS slot
+                FROM raw_ranges rr
+                JOIN v_collection_log l
+                  ON  l.collection_time >= rr.range_start
+                  AND l.collection_time < rr.range_end
+                WHERE l.server_id = $1
+                AND   l.collection_time >= $2
+                AND   l.{CollectionCycleRow.NotCycleRowSql}
+            ) w
+            GROUP BY w.collector_name
+        ),
+        parts AS
+        (
+            SELECT collector_name, {values} FROM rolled
+            UNION ALL
+            SELECT collector_name, {values} FROM raw
+        ),
+        slots AS
+        (
+            SELECT p.collector_name,
+                   s.slot,
+                   SUM(s.runs) AS runs
+            FROM parts p
+            CROSS JOIN LATERAL unnest(p.duration_histogram) WITH ORDINALITY AS s(runs, slot)
+            GROUP BY p.collector_name, s.slot
+        ),
+        p95_slot AS
+        (
+            -- The slot (1-based, so slot s's upper bound is bounds[s]) holding the run at position ceil(0.95 n), in the
+            -- same integer test as CollectionHealthSql's exact p95.
+            SELECT collector_name,
+                   MIN(slot) FILTER (WHERE timed_runs > 0 AND running_runs * 20 >= timed_runs * 19) AS slot
+            FROM
+            (
+                SELECT collector_name,
+                       slot,
+                       SUM(runs) OVER (PARTITION BY collector_name ORDER BY slot) AS running_runs,
+                       SUM(runs) OVER (PARTITION BY collector_name) AS timed_runs
+                FROM slots
+            ) running
+            GROUP BY collector_name
+        ),
+        health AS
+        (
+            SELECT
+                collector_name,
+                SUM(total_runs)::bigint AS total_runs,
+                SUM(success_count)::bigint AS success_count,
+                SUM(error_count)::bigint AS error_count,
+                SUM(duration_sum)::numeric / NULLIF(SUM(duration_count), 0)::numeric AS avg_duration_ms,
+                MAX(max_duration_ms) AS max_duration_ms,
+                MAX(last_success_time) AS last_success_time,
+                MAX(last_run_time) AS last_run_time,
+                MAX(last_error_time) AS last_error_time,
+                MAX(last_failure_text_time) AS last_failure_text_time,
+                SUM(permission_denied_count)::bigint AS permission_denied_count,
+                SUM(yield_count)::bigint AS yield_count,
+                MAX(last_note_time) AS last_note_time,
+                SUM(note_count)::bigint AS note_count,
+                CASE
+                    WHEN EXISTS
+                         (
+                             SELECT 1
+                             FROM v_database_size_stats
+                             WHERE server_id = $1
+                             AND   collection_time >= $2
+                             AND   (database_id > 4 OR database_id IS NULL)
+                         )
+                    THEN 1
+                    ELSE 0
+                END AS has_user_databases,
+                MAX(max_slowest_item_ms) AS dearest_item_ms,
+                SUM(abandoned_count)::bigint AS abandoned_count,
+                MAX(last_denied_time) AS last_denied_time,
+                SUM(rows_stored)::bigint AS rows_stored,
+                SUM(runs_with_rows)::bigint AS runs_with_rows,
+                SUM(extension_missing_count)::bigint AS extension_missing_count,
+                SUM(session_missing_count)::bigint AS session_missing_count,
+                MAX(last_non_skip_time) AS last_non_skip_time,
+                MAX(last_productive_time) AS last_productive_time,
+                MAX(last_streak_break_time) AS last_streak_break_time
+            FROM parts
+            GROUP BY collector_name
+        ),
+        p95 AS
+        (
+            SELECT ps.collector_name,
+                   CASE WHEN ps.slot IS NOT NULL
+                        THEN LEAST(({CollectionLogHourly.BoundsArraySql})[ps.slot], hb.max_duration_ms)
+                   END AS p95_duration_ms
+            FROM p95_slot ps
+            JOIN health hb
+              ON hb.collector_name = ps.collector_name
+        )
+        """ + "\n" + CollectionHealthFinalSelectSql;
+    }
+
     /// <summary>How long a completed per-server collection-health read is served from memory before the next
     /// caller re-reads it (#3856) — 60 seconds, the SAME figure as the fleet rollup's
     /// <see cref="DarlingFleetReader.CollectionHealthMemoLifetime"/> and deliberately not an independent
@@ -3789,7 +4018,8 @@ internal static class DarlingDataReader
         var rows = new List<CollectorHealth>();
         /* #4999: the schedule read finishes before the health statement's reader opens, so one call never holds two. */
         var scheduleOverrides = await ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
-        await using var command = postgres.CreateCommand(CollectionHealthSql);
+        /* #5810: the rollup-backed statement; it reads every hour the rollup does not hold from the raw log. */
+        await using var command = postgres.CreateCommand(CollectionHealthComposedSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, windowStartUtc);
@@ -3805,6 +4035,8 @@ internal static class DarlingDataReader
                 AvgDurationMs = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4)),
                 MaxDurationMs = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5)),
                 P95DurationMs = reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6)),
+                /* #5810 review: CollectionHealthComposedSql's p95 is always the upper bound of a duration bucket. */
+                P95Bucketed = true,
                 LastSuccessTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 LastRunTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                 LastError = reader.IsDBNull(9) ? null : reader.GetString(9),
@@ -5032,6 +5264,17 @@ internal sealed class CollectorHealth
     /// collector describes neither of its populations.
     /// </summary>
     public double P95DurationMs { get; set; }
+
+    /// <summary>
+    /// #5810: true when <see cref="P95DurationMs"/> is the upper bound of a log-spaced duration bucket (the rollup read's
+    /// histogram, up to about 47% above the exact p95) rather than the exact value. The peak-cycle arithmetic then charges
+    /// the bucket's lower bound (<see cref="CollectionLogHourly.P95FloorMs"/>), the smallest value the exact p95 can have.
+    /// </summary>
+    public bool P95Bucketed { get; set; }
+
+    /// <summary>#5810 review: the p95 the sweep's peak-cycle arithmetic charges: <see cref="P95DurationMs"/> when exact,
+    /// its bucket's lower bound when <see cref="P95Bucketed"/>.</summary>
+    public double P95ChargedMs => P95Bucketed ? CollectionLogHourly.P95FloorMs(P95DurationMs) : P95DurationMs;
 
     public DateTime? LastSuccessTime { get; set; }
     public DateTime? LastRunTime { get; set; }

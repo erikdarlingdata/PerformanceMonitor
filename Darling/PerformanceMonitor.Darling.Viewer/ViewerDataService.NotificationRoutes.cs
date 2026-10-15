@@ -292,7 +292,7 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.AgentMaxPerDay });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.AgentLeaseMinutes });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.AgentExpiryMinutes });
-        /* #5825 (V186): the resolution override, bound right after the agent columns in every insert and update. NULL is
+        /* #5825 (V187): the resolution override, bound right after the agent columns in every insert and update. NULL is
            "use the channel's setting". */
         AddNullableBool(command, row.SendResolutions);
     }

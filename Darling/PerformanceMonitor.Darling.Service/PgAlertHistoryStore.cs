@@ -45,7 +45,7 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore, IDeliveredFireRead
 INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 
-    /// <summary>#5825: <see cref="InsertSql"/> plus the three resolution columns (V186), for a resolution row whose send
+    /// <summary>#5825: <see cref="InsertSql"/> plus the three resolution columns (V187), for a resolution row whose send
     /// had an outcome.</summary>
     private const string InsertResolutionSql = @"
 INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json, resolution_sent_at, resolution_channels, resolution_outcome)
@@ -76,7 +76,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
-            /* #5825: a resolution that was sent, failed or muted also writes its three V186 columns. Every other row keeps
+            /* #5825: a resolution that was sent, failed or muted also writes its three V187 columns. Every other row keeps
                the twelve-column insert it always had. */
             var resolution = record.ResolutionOutcome is not null;
             using var command = new NpgsqlCommand(resolution ? InsertResolutionSql : InsertSql, connection)

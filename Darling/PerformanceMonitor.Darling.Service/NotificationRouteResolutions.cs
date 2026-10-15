@@ -13,7 +13,7 @@ using PerformanceMonitor.Notifications;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// The fleet's "send resolutions" flags, one per channel (V186, #5825), as the send path reads them. PagerDuty is not
+/// The fleet's "send resolutions" flags, one per channel (V187, #5825), as the send path reads them. PagerDuty is not
 /// one of them: its closing event is governed by <c>pagerduty_auto_resolve</c> (V166), which this carries as is.
 /// </summary>
 public sealed record ResolutionChannelFlags(bool Slack, bool Teams, bool Generic, bool Email, bool PagerDutyAutoResolve)
@@ -64,7 +64,7 @@ public static class NotificationRouteResolutions
         return route?.SendResolutions ?? flags.ForChannel(channel);
     }
 
-    /// <summary>The history row's columns a sent resolution writes on <c>config.config_alert_log</c> (V186).</summary>
+    /// <summary>The history row's columns a sent resolution writes on <c>config.config_alert_log</c> (V187).</summary>
     public const string SentAtColumn = "resolution_sent_at";
 
     /// <summary>The channels the resolution went to, comma-separated <see cref="NotificationRouter"/> channel names.</summary>

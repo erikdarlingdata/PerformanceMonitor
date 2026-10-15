@@ -66,7 +66,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
     public void TheRungsAreRegistered_DenseAndTheTop_AndShareOneBuilder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-        Assert.Equal(new[] { 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186 }, versions.OrderBy(v => v).TakeLast(16).ToArray());
+        Assert.Equal(Enumerable.Range(171, StorageVersion.SchemaVersion - 171 + 1).ToArray(), versions.OrderBy(v => v).Where(v => v >= 171).ToArray());
         Assert.Equal("query-store-interval-wide-partitioned", WideRung.Name);
         Assert.Equal("query-store-interval-latest-partitioned", LatestRung.Name);
         /* No longer the top rung: the Query Store compose rollup rung (V173, #5582), the service version rung (V174, #5655), the plan regression rowcount rung (V175, #5631), the external alert rung (V180, #5654), the read latency capacity rung (V182, #5506) the read caller rung (V183, #5793), the investigation rung (V184, #5632) and the plan regression partial-day rung (V185, #5812) landed above it. */
@@ -660,6 +660,7 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
         }
 
         /* V185 (#5812), V184 (#5632), V183 (#5793), V182 (#5506) and V181 (#5750): the plan regression watermark column, the investigation tables, the read caller columns, the read latency capacity columns and the route scope columns are above V170 too (V185's is the probe's newest sentinel). */
+        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);

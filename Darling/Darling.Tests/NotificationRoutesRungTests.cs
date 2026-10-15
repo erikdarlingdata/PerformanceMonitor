@@ -47,7 +47,7 @@ public sealed class NotificationRoutesRungTests
 
     private static readonly string[] DestinationColumns = { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "smtp_recipients" };
 
-    /* The agent channel's five columns (V184, #5632) and the resolution override (V186, #5825), last in every reader. */
+    /* The agent channel's five columns (V184, #5632) and the resolution override (V187, #5825), last in every reader. */
     private static readonly string[] AgentColumns = { "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions" };
 
     private static PgMigrations.Migration V131 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);

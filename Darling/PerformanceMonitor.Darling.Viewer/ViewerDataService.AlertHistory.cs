@@ -66,7 +66,7 @@ public sealed class ViewerAlertRow
 
     public string? ContextJson { get; init; }
 
-    /// <summary>#5825 (V186): when a resolution's send delivered (UTC); null on every other row.</summary>
+    /// <summary>#5825 (V187): when a resolution's send delivered (UTC); null on every other row.</summary>
     public DateTime? ResolutionSentAt { get; init; }
 
     /// <summary>#5825: the channels a resolution went to, or would have gone to when muted; null on every other row.</summary>
@@ -307,7 +307,7 @@ AND    dismissed = FALSE";
                 DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ContextJson = reader.IsDBNull(11) ? null : reader.GetString(11),
                 StoredServerName = reader.IsDBNull(12) ? "" : reader.GetString(12),
-                /* #5825 (V186): what a resolution row's send did; null on every other row. */
+                /* #5825 (V187): what a resolution row's send did; null on every other row. */
                 ResolutionSentAt = reader.IsDBNull(13) ? null : DateTime.SpecifyKind(reader.GetDateTime(13), DateTimeKind.Utc),
                 ResolutionChannels = reader.IsDBNull(14) ? null : reader.GetString(14),
                 ResolutionOutcome = reader.IsDBNull(15) ? null : reader.GetString(15),

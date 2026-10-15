@@ -1345,7 +1345,7 @@ public sealed class SmtpConfig
     public int EmailCooldownMinutes { get; set; } = 15;
 
     /// <summary>
-    /// Opt-in (V186, #5825, <c>config_notification.email_send_resolutions</c>): when an alert clears, email the
+    /// Opt-in (V187, #5825, <c>config_notification.email_send_resolutions</c>): when an alert clears, email the
     /// resolution to the recipients its fire reached. Off by default. A notification route can override it for its
     /// own destinations (<see cref="NotificationRouteResolutions"/>).
     /// </summary>
@@ -2366,7 +2366,7 @@ public sealed class WebhooksConfig
     [JsonPropertyName("pagerDutyAutoResolve")]
     public bool PagerDutyAutoResolve { get; set; } = false;
 
-    /* V186 (#5825): send an alert's resolution to the channels its fire reached, one opt-in per channel, all off by
+    /* V187 (#5825): send an alert's resolution to the channels its fire reached, one opt-in per channel, all off by
        default. Stored on the singleton notification row beside the destinations they govern. A route can override
        each for its own destinations; NotificationRouteResolutions holds that rule. */
 

@@ -28,13 +28,13 @@ namespace Darling.Tests;
    rows, so the class is deliberately NOT [Collection("live-postgres")]. */
 
 /// <summary>
-/// The "send resolutions" setting (V186, #5825): the rule that decides whether a channel sends a resolution for a route, and
+/// The "send resolutions" setting (V187, #5825): the rule that decides whether a channel sends a resolution for a route, and
 /// on a live store the rung's columns and defaults (fresh and upgraded), and the setting's round trips through the viewer, the
 /// service's config provider, the MCP settings tools and the route store.
 /// </summary>
 public sealed class AlertResolutionSettingsRungTests
 {
-    private const int RungVersion = 186;
+    private const int RungVersion = 187;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -97,7 +97,7 @@ public sealed class AlertResolutionSettingsRungTests
     [Fact]
     public async Task OnALiveStore_AFreshAndAnUpgradedStore_EndWithTheColumnsAndTheirDefaults()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V186 rung's live test (it mints its own scratch database).");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V187 rung's live test (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
@@ -113,8 +113,8 @@ public sealed class AlertResolutionSettingsRungTests
             Assert.Equal(RungVersion, await ProbedVersionAsync(connection, ct));
 
             /* A store one rung behind, holding a notification row, a route and an alert-history row from before the rung. */
-            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 186", ct);
+            await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
+            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 187", ct);
             await ExecAsync(connection, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
             await ExecAsync(connection, "INSERT INTO config.config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
             await ExecAsync(connection,
@@ -135,7 +135,7 @@ public sealed class AlertResolutionSettingsRungTests
                 "SELECT count(*) FROM config.config_alert_log WHERE resolution_sent_at IS NULL AND resolution_channels IS NULL AND resolution_outcome IS NULL", ct));
 
             /* The rung runs again on a store that already has everything. */
-            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 186", ct);
+            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 187", ct);
             await PgMigrations.MigrateAsync(connection, ct);
             await AssertColumnsAsync(connection, ct);
             bodySucceeded = true;
@@ -149,7 +149,7 @@ public sealed class AlertResolutionSettingsRungTests
     [Fact]
     public async Task OnALiveStore_TheSettingAndTheOverride_RoundTripThroughEverySurface()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V186 round trips (they mint their own scratch database).");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V187 round trips (they mint their own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);

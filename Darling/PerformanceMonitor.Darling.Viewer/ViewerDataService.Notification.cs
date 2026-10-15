@@ -263,7 +263,7 @@ public sealed class NotificationRow
        so it stays in the read-only roles' grants. */
     public bool PagerDutyAutoResolve { get; set; }
 
-    /* V186 (#5825): whether each channel also sends an alert's resolution to the destinations its fire reached.
+    /* V187 (#5825): whether each channel also sends an alert's resolution to the destinations its fire reached.
        Non-secret behaviour toggles, off by default. */
     public bool SlackSendResolutions { get; set; }
     public bool TeamsSendResolutions { get; set; }

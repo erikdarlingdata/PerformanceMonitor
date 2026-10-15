@@ -126,7 +126,7 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) is next and V185's (#5812) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, and V187's (#5825) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
@@ -170,7 +170,7 @@ public sealed class PlanRegressionRowcountRungTests
         /* V184 (#5632) and V185 (#5812) sit above V183 and go absent too. */
         withoutLater[ProbeOrdinal + 9] = false;
         withoutLater[ProbeOrdinal + 10] = false;
-        /* V186 (#5825) and any later rung's sentinel go absent too. */
+        /* V187 (#5825) and any later rung's sentinel go absent too. */
         for (var i = ProbeOrdinal + 11; i < withoutLater.Length; i++)
         {
             withoutLater[i] = false;

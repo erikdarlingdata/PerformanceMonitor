@@ -50,7 +50,7 @@ internal static class DarlingAlertReader
         double CurrentValue, double ThresholdValue, bool AlertSent, string NotificationType,
         string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null, string? StoredServerName = null)
     {
-        /// <summary>#5825 (V186): when a resolution's send delivered (UTC); null on every other row.</summary>
+        /// <summary>#5825 (V187): when a resolution's send delivered (UTC); null on every other row.</summary>
         public DateTime? ResolutionSentAt { get; init; }
 
         /// <summary>#5825: the channels a resolution went to, or would have gone to when muted, comma-separated.</summary>
@@ -566,7 +566,7 @@ SELECT email_cooldown_minutes,
 FROM config_notification
 WHERE id = 1";
 
-    /// <summary>The four per-channel "send resolutions" flags (V186, #5825), as get_alert_settings reports them under
+    /// <summary>The four per-channel "send resolutions" flags (V187, #5825), as get_alert_settings reports them under
     /// <c>delivery.send_resolutions</c>. Non-secret columns of the same row, granted to the read roles.</summary>
     public sealed record SendResolutionsRead(bool Slack, bool Teams, bool Webhook, bool Email);
 
