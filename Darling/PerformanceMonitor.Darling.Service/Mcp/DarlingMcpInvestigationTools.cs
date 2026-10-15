@@ -554,16 +554,21 @@ public sealed class DarlingMcpInvestigationTools
     internal static async Task<string> ReportsAsync(NpgsqlDataSource postgres, McpDataDetail mode, string? server_name,
         string? request_id, int hours_back, CancellationToken cancellationToken)
     {
-        var windowRefusal = McpHelpers.ValidateHoursBack(hours_back);
-        if (windowRefusal is not null)
-            return windowRefusal;
-
         Guid? requestId = null;
         if (!string.IsNullOrWhiteSpace(request_id))
         {
             if (!Guid.TryParse(request_id, out var parsed))
                 return Status("not_found", $"request_id '{request_id}' is not a request id.");
             requestId = parsed;
+        }
+        else
+        {
+            /* Only the window arm reads hours_back, so only it validates it and notes the window on the slow-read row
+               (#5844, the #5814 rule). One request_id reads that request whatever its age: hours_back is ignored, and no
+               window is noted. */
+            var windowRefusal = DarlingReadWindow.ValidateHoursBack(hours_back);
+            if (windowRefusal is not null)
+                return windowRefusal;
         }
 
         try
