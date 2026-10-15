@@ -288,9 +288,10 @@ public sealed class McpEndpointLossReportingTests
     [Fact]
     public void TheSettingsWindow_ReconsidersTheEndpointStateAfterASave()
     {
+        /* #5846: SaveButton_Click now awaits SaveCoreAsync, which holds the write and the re-read after it. */
         var body = MethodBody(
             File.ReadAllText(FindRepoFile(Path.Combine("Lite", "Windows", "SettingsWindow.xaml.cs"))),
-            "private async void SaveButton_Click(");
+            "private async Task SaveCoreAsync(");
 
         Assert.Contains("_mcpSettingsProblem", body, StringComparison.Ordinal);
         Assert.Contains("UpdateMcpStatus()", body, StringComparison.Ordinal);
