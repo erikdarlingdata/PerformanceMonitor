@@ -305,6 +305,37 @@ _CLASS_DECL = re.compile(
     r"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*class\s+(\w+)")
 _TRAIT = re.compile(r'Trait\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)')
 
+# #5872: scan_classes() marks a class that neither holds nor inherits a [Fact]/[Theory] (a fake, a logger, a harness a
+# test file also declares). The map never has such a class, because it runs nothing, so map_select() must not count it
+# as a "new class": 377 Darling and 143 Lite helper types were selected on every pull request that way.
+NO_TESTS_TRAIT = "Tests=None"
+_HOLDS_MARK = "\x00holds"
+_BASE_MARK = "\x00base="
+_TEST_ATTR_LINE = re.compile(r"^\[(?:[^\]]*[\s,(])?(?:Fact|Theory)\b")
+COLLECTION_PREFIX = "Collection="
+COLLECTION_MATE_CAP = 60
+_COLLECTION_ATTR = re.compile(r'\bCollection\(\s*"([^"]+)"\s*\)')
+_BASE_LIST = re.compile(r"^\s*(?:<[^>]*>\s*)?(?:\([^)]*\)\s*)?:\s*([\w.]+)")
+
+
+def _holders_of(lines: list[str]) -> set[str]:
+    """The classes of one file that hold a test: a [Fact] or [Theory] attribute belongs to the nearest class declared
+    above it and indented less than it (the same walk as _test_holders())."""
+    out: set[str] = set()
+    stack: list[tuple[int, str]] = []
+    for line in lines:
+        indent = len(line) - len(line.lstrip(" \t"))
+        m = _CLASS_DECL.match(line)
+        is_test = not m and bool(_TEST_ATTR_LINE.match(line.strip()))
+        if m or is_test:
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+        if m:
+            stack.append((indent, m.group(1)))
+        elif is_test and stack:
+            out.add(stack[-1][1])
+    return out
+
 # The test map is built on shards that set only DARLING_TEST_PG and DARLING_TEST_PGRUNTIME (nightly.yml's "Run this
 # shard's classes" step; a test pins that env block to MAP_SHARD_ENV). A class that gates its tests on any OTHER
 # DARLING_TEST_PG_* or DARLING_TEST_PGRUNTIME_* variable (the log-format targets, the log-rotation targets, the
@@ -380,16 +411,27 @@ def _walk_classes(root: str):
                     continue
                 relfile = os.path.relpath(path, root).replace(os.sep, "/")
                 gated = any(GATE_ENV_LITERAL.search(line) for line in lines)
+                holders = _holders_of(lines)
                 for n, line in enumerate(lines):
                     m = _CLASS_DECL.match(line)
                     if not m:
                         continue
                     traits: set[str] = {GATE_TRAIT} if gated else set()
+                    # scan_classes() turns these two markers into NO_TESTS_TRAIT and drops them (#5872).
+                    if m.group(1) in holders:
+                        traits.add(_HOLDS_MARK)
+                    tail = line[m.end():]
+                    if ":" not in tail and "{" not in tail and n + 1 < len(lines):
+                        tail += " " + lines[n + 1]
+                    b = _BASE_LIST.match(tail)
+                    if b:
+                        traits.add(_BASE_MARK + b.group(1).split(".")[-1])
                     j = n - 1
                     while j >= 0:
                         s = lines[j].strip()
                         if s.startswith(("[", "///", "//", "*", "/*")) or s.endswith("*/") or s == "" and False:
                             traits.update(f"{k}={v}" for k, v in _TRAIT.findall(s))
+                            traits.update(COLLECTION_PREFIX + c for c in _COLLECTION_ATTR.findall(s))
                             j -= 1
                         else:
                             break
@@ -401,6 +443,21 @@ def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
     out: dict[str, dict[str, set[str]]] = {suite: {} for suite in SUITE_DIRS}
     for suite, _file, name, traits in _walk_classes(root):
         out[suite].setdefault(name, set()).update(traits)
+    # #5872: a class holds a test when it (any declaration of the name) carries a [Fact] or [Theory], or its base class
+    # does, followed through the suite's own classes; every other class gets NO_TESTS_TRAIT.
+    for classes in out.values():
+        holds = {c for c, t in classes.items() if _HOLDS_MARK in t}
+        grew = True
+        while grew:
+            grew = False
+            for c, t in classes.items():
+                if c not in holds and any(x[len(_BASE_MARK):] in holds for x in t if x.startswith(_BASE_MARK)):
+                    holds.add(c)
+                    grew = True
+        for c, t in classes.items():
+            t.difference_update({x for x in t if x == _HOLDS_MARK or x.startswith(_BASE_MARK)})
+            if c not in holds:
+                t.add(NO_TESTS_TRAIT)
     return out
 
 
@@ -775,8 +832,12 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
 
     A class is selected when it carries Stage=Guard, its own file changed, it covers a changed file, a text pattern
     of it matches a changed file, it reads the whole tree and any non-documentation file changed, the map has
-    never seen it, or its source names a changed symbol (`named`). The last reason only adds classes, so a selection
-    never shrinks for it. A file changed since the map counts as changed too (it may have grown new call edges).
+    never seen it and it holds a test, it shares an xunit collection (of at most COLLECTION_MATE_CAP classes) with a
+    class whose own file changed, or its source names a changed symbol (`named`). The last reason only adds classes,
+    so a selection never shrinks for it. A file changed since the map counts as changed too (it may have grown new
+    call edges), but only when the change holds a product source file the map knows (#5872). `via` names, per
+    "covers a changed file" class, the changed file the walk came from; `unknown` names each file the map did not know
+    and the rule that took it; `drift` is how many drifted files counted.
     A keep-full file forces FULL only when the pull request's own change holds it: one that changed on dev since
     the map goes through the class links like any other drifted file.
 
@@ -820,10 +881,6 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     for f in changed:
         if any(matches(p, f) for p in keep_full):
             return _full(f"{f} is a keep-full file")
-    effective = list(dict.fromkeys(list(changed) + list(drift)))
-    live = [f for f in effective if not any(matches(p, f) for p in doc_patterns)]
-    live_names = set(live)
-
     known: set[str] = {u for u in universe if isinstance(u, str)}
     parsed: dict[str, dict[str, tuple[set[str], set[str]]]] = {}
     for suite, entries in classes.items():
@@ -843,6 +900,19 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         else:
             return _full("test map unreadable")
 
+    # #5872: the drift (files changed on dev between the map's commit and the merge base) counts as changed only when
+    # this pull request's own change holds a product source file the map knows. Drift is there to catch a drifted file
+    # that grew a call edge INTO the change, which the map's links cannot show yet; nothing grows an edge into a doc,
+    # a script or workflow under .github/, or a test file. A drifted test that newly calls a changed test helper
+    # names one of its symbols, so `named` (the changed-symbol reason below) still selects it, and a test class added
+    # since the map runs as a "new class" whatever the drift. Counting the drift for every change made a one-file test,
+    # docs or script change select nearly the whole tree (52-84 drifted files: about 2,300 of 2,870 Darling classes).
+    # A miss here is caught by the push to dev, which runs everything (narrows() is False for a push).
+    drift_applies = any(f in known and not _TEST_PROJECT_FILE.search(f) and not f.startswith(".github/")
+                        and not any(matches(p, f) for p in doc_patterns) for f in changed)
+    effective = list(dict.fromkeys(list(changed) + (list(drift) if drift_applies else [])))
+    live = [f for f in effective if not any(matches(p, f) for p in doc_patterns)]
+    live_names = set(live)
     docs_changed = [f for f in effective if f not in live_names]
 
     def text_hit(cls: str) -> bool:
@@ -852,6 +922,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         return _pattern_hit(g, live, docs_changed)
 
     new_classes = any(cls not in parsed.get(suite, {}) for suite, found in discovered.items() for cls in found)
+    # A file the map does not know is named with the rule that caught it (#5872), in the FULL reason or in `unknown`.
+    unknown: dict[str, str] = {}
     for f in live:
         if f in known:
             continue
@@ -859,9 +931,17 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             continue
         if f.endswith(".cs"):
             if _TEST_PROJECT_FILE.search(f) and new_classes:
+                unknown[f] = "selecting the new test classes the tree scan finds"
                 continue  # a new test file: its classes are found through `discovered`
-            return _full(f"new file not in the map: {f}")
-        return _full(f"{f} is in no class, no text pattern and not in the map")
+            # Types found by reflection, DI or attribute scanning change what a census class sees with no covered
+            # file changing, so a new product .cs file still runs everything.
+            return _full(f"unknown file: {f}: selecting everything (new file not in the map)")
+        if f.startswith(".github/"):
+            # A script or workflow under .github/ that no class covers and no text pattern reads cannot change a test
+            # class's outcome (the keep-full build.yml returned FULL above), so it selects nothing of its own.
+            unknown[f] = "selecting the classes that read it as text (none)"
+            continue
+        return _full(f"unknown file: {f}: selecting everything (in no class, no text pattern and not in the map)")
 
     # A class the map has never seen runs because `discovered` lists it. If the tree scan found no class at all for a
     # suite the map has classes for, the scan itself is broken and every new class would be silently left out.
@@ -870,6 +950,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             return _full(f"no test class was found in the tree for suite {suite}")
 
     live_set = set(live)
+    via: dict[str, dict[str, str]] = {}
     selected: dict[str, list[str]] = {}
     why: dict[str, dict[str, str]] = {}
     seconds: dict[str, float] = {}
@@ -883,15 +964,35 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                 reasons[cls] = "own file changed"
             elif live_set & covered:
                 reasons[cls] = "covers a changed file"
+                # #5872: the changed file (a shared base class, fixture or product file) the dependency walk came from.
+                via.setdefault(suite, {})[cls] = sorted(live_set & covered)[0]
             elif text_hit(cls):
                 reasons[cls] = "reads the tree" if globs.get(cls) == "tree" else "text pattern"
         for cls, traits in found.items():
             if cls not in mapped:
-                reasons[cls] = "new class"
+                # #5872: a helper type (a fake, a logger, a harness) declares no test, so the map never has it and the
+                # runner runs nothing for it; only a class that holds or inherits a test is new.
+                if NO_TESTS_TRAIT not in traits:
+                    reasons[cls] = "new class"
             elif "Stage=Guard" in traits:
                 reasons.setdefault(cls, "guard stage")
-            if GATE_TRAIT in traits:
+            if GATE_TRAIT in traits and NO_TESTS_TRAIT not in traits:
                 reasons.setdefault(cls, "gated on an environment the map shards lack")
+        # #5872: a changed test class's xunit collection mates run too: they share its fixture and its serialized
+        # statics, and moving a class into a collection (a changed [Collection] attribute) changes what runs beside
+        # them. A collection over COLLECTION_MATE_CAP classes (live-postgres, about 650) is a serialization bucket for
+        # one shared store, not a fixture its members read state from, so its mates are not added.
+        members: dict[str, list[str]] = {}
+        for cls, traits in found.items():
+            if NO_TESTS_TRAIT not in traits:
+                for t in traits:
+                    if t.startswith(COLLECTION_PREFIX):
+                        members.setdefault(t, []).append(cls)
+        for cls in [c for c, r in reasons.items() if r == "own file changed"]:
+            for t in sorted(x for x in found.get(cls, ()) if x.startswith(COLLECTION_PREFIX)):
+                if len(members.get(t, ())) <= COLLECTION_MATE_CAP:
+                    for mate in members.get(t, ()):
+                        reasons.setdefault(mate, "shares a collection with a changed class")
         # #5776: a class whose source names a symbol the change declares or edits runs too. The map links a class to
         # the files it RAN; a class that only reads a source file as text, or reflects over a catalog, has no such
         # link, and a small pull request whose files the map knows would leave it out. Last, with setdefault, so a
@@ -903,7 +1004,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         why[suite] = {c: reasons[c] for c in sorted(reasons)}
         seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in reasons if c in mapped), 3)
         total[suite] = len(set(mapped) | set(found))
-    return {"full": False, "reason": "", "selected": selected, "why": why, "seconds": seconds, "total": total}
+    return {"full": False, "reason": "", "selected": selected, "why": why, "seconds": seconds, "total": total,
+            "via": via, "drift": len(drift) if drift_applies else 0, "unknown": unknown}
 
 
 def load_map(path: str) -> "dict | None":
@@ -1801,6 +1903,8 @@ def main(argv: list[str]) -> int:
                             named=named, **selection_args(Rules()))
         if result["full"]:
             print(f"::notice::test map: running everything ({result['reason']})")
+        for f, rule in sorted((result.get("unknown") or {}).items()):
+            print(f"::notice::test map: unknown file: {f}: {rule}")
         print(json.dumps(result, indent=1))
         if args.out:
             with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
