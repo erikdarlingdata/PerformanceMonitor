@@ -79,22 +79,26 @@ public sealed class InvestigationRungTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        /* V185's sentinel (#5812) is the last parameter; this one is just below it. */
-        Assert.Equal("hasReadCaller", parameters[^3].Name);
+        /* Found by name, not by distance from the top: every later rung's sentinel moved that distance (#5812, #5825). */
+        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasInvestigations");
+        Assert.True(ownOrdinal > 0, "MapProbedSchemaVersion takes this rung's sentinel");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        /* A store stopped here: every sentinel but V185's. */
+        /* A store stopped here: this rung's sentinel and every one below it, none above it. */
         var atThisRung = (object[])all.Clone();
-        atThisRung[^1] = false;
-        atThisRung[^2] = false; /* V185 (#5812) sits below V186 (#5825) now. */
+        for (var i = ownOrdinal + 1; i < atThisRung.Length; i++)
+        {
+            atThisRung[i] = false;
+        }
+
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var behind = (object[])atThisRung.Clone();
-        behind[^2] = false;
+        behind[ownOrdinal] = false;
         Assert.Equal(183, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasInvestigations)", StringComparison.Ordinal);

@@ -71,8 +71,9 @@ CREATE TRIGGER trg_plan_regression_daily_late
         Assert.Equal("query-store-interval-latest-partitioned", LatestRung.Name);
         /* No longer the top rung: the Query Store compose rollup rung (V173, #5582), the service version rung (V174, #5655), the plan regression rowcount rung (V175, #5631), the external alert rung (V180, #5654), the read latency capacity rung (V182, #5506) the read caller rung (V183, #5793), the investigation rung (V184, #5632) and the plan regression partial-day rung (V185, #5812) landed above it. */
         Assert.True(LatestRungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(LatestRungVersion, PgMigrations.Scripts[^14].Version);
-        Assert.Equal(WideRungVersion, PgMigrations.Scripts[^15].Version);
+        /* Registered once each, found by version: the distance from the top moved with every new rung (#5825). */
+        Assert.Single(PgMigrations.Scripts, m => m.Version == LatestRungVersion);
+        Assert.Single(PgMigrations.Scripts, m => m.Version == WideRungVersion);
 
         /* Every statement is catalog-only, in the shipped text: the indexes are ON ONLY, nothing copies rows, and the
            parent has no WITH clause (PostgreSQL refuses storage parameters on a partitioned table). */

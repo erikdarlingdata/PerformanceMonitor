@@ -281,15 +281,17 @@ public sealed class ViewerNotificationRouteScopeLivePostgresTests
             await viewer.UpdateNotificationRouteAsync(edited, ct);
             Assert.Equal(prod, (await viewer.GetNotificationRoutesAsync(ct)).Single(r => r.RouteId == serverRoute).ScopeTagId);
 
-            /* The read-only seat's projection names the scope columns too, then the five agent columns (V184, #5632): 13. */
+            /* The read-only seat's projection names the scope columns too, then the five agent columns (V184, #5632),
+               then the route's send-resolutions override (V186, #5825): 14. */
             await using (var noSecret = new NpgsqlCommand(ViewerDataService.NotificationRoutesSelectNoSecretSql, connection))
             await using (var reader = await noSecret.ExecuteReaderAsync(ct))
             {
-                Assert.Equal(13, reader.FieldCount);
+                Assert.Equal(14, reader.FieldCount);
                 Assert.Equal("scope_server_id", reader.GetName(6));
                 Assert.Equal("scope_tag_id", reader.GetName(7));
                 Assert.Equal("agent_level", reader.GetName(8));
                 Assert.Equal("agent_expiry_minutes", reader.GetName(12));
+                Assert.Equal("send_resolutions", reader.GetName(13));
             }
 
             /* The viewer's inputs are the service's inputs, read from the same store. */
