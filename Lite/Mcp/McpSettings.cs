@@ -170,7 +170,7 @@ internal sealed class McpSettings
                 settings.AllowWrites = allowWrites.GetBoolean();
             }
 
-            if (root.TryGetProperty(McpInvestigationPolicy.InvestigationsSetting, out var allowInvestigations))
+            if (root.TryGetProperty("mcp_allow_investigations", out var allowInvestigations))
             {
                 if (allowInvestigations.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 {
@@ -180,7 +180,7 @@ internal sealed class McpSettings
                 settings.AllowInvestigations = allowInvestigations.GetBoolean();
             }
 
-            if (root.TryGetProperty(DataDetailSetting, out var dataDetail))
+            if (root.TryGetProperty("mcp_data_detail", out var dataDetail))
             {
                 if (dataDetail.ValueKind != JsonValueKind.String)
                 {
