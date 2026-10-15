@@ -90,6 +90,10 @@ public sealed class ViewerAppSettings
     /// <summary>Overview tile sort: "Cpu" (CPU% descending, default) or "Name".</summary>
     public string OverviewSortMode { get; set; } = "Cpu";
 
+    /// <summary>The Settings window tab open when it last closed (#5846), by the tab's name ("AlertRulesTab").
+    /// Empty, or a name no tab has any more, opens the first tab.</summary>
+    public string SettingsWindowTab { get; set; } = "";
+
     /// <summary>Color theme: "Dark" (default), "Light", or "CoolBreeze". Mirrors Lite's <c>App.ColorTheme</c>;
     /// applied at startup and live-previewed from the Settings window via the shared <c>ThemeManager</c>.</summary>
     public string ColorTheme { get; set; } = "Dark";
