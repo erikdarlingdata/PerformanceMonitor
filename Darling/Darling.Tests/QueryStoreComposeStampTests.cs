@@ -38,7 +38,7 @@ public sealed class QueryStoreComposeStampTests
     public void TheFailuresRungVersion_IsTheVersionOfTheMigrationThatCreatesTheFailureTable()
     {
         var rung = Assert.Single(PgMigrations.Scripts, s => s.Sql == QueryStoreComposeStamp.FailuresCreateSql);
-        Assert.Equal(rung.Version, QueryStoreComposeStamp.FailuresRungVersion);
+        Assert.Equal(QueryStoreComposeStamp.FailuresRungVersion, rung.Version);
     }
 
     [Fact]
