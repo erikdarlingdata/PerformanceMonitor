@@ -128,17 +128,6 @@ public sealed class CommentFilterAdoptionTests
             + "comment-stripping - and its cref rule DOES ask for the walker, for the identifier universe it "
             + "resolves targets against.",
 
-        ["Darling.Tests/RefreshCeilingProvenancePinTests.cs"] =
-            "COLLECTS a doc run. DocProseFor walks the contiguous /// run above a named declaration and "
-            + "collapses it, so that a pattern can span the wrapping of the prose it reads figures out of. "
-            + "The prefix defines the run rather than approximating comment-stripping, and asking for the "
-            + "walker would leave nothing to read - the figures being pinned live only in comments. Stated "
-            + "bound: the walk STOPS at the first line that is not /// -prefixed, so a block comment between "
-            + "the doc run and its declaration would truncate it. That direction is loud rather than quiet, "
-            + "because the collected prose is then asserted to open at <summary> and close at </summary> "
-            + "before any figure is compared - a truncated walk fails there instead of silently pinning half "
-            + "a comment.",
-
         ["Lite.Tests/FactScorerTests.cs"] =
             "COLLECTS a doc run. GetWaitThresholds_EveryEntryCarriesItsMeasurementLineage (#3538 A5) gathers the "
             + "contiguous // run above each entry of FactScorer.GetWaitThresholds and asks it for a percentile, "
