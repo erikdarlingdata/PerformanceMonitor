@@ -57,6 +57,24 @@ public static class ComposeLimits
     public const long MaxQueryStoreWideRowsTwoScans = 5_400_000;
 
     /// <summary>
+    /// The most raw <c>collect.query_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811),
+    /// judged from the collection log before the statement runs. DERIVED, not measured: no field read of this table has a row count.
+    /// The #5582 cold cost of a Query Store wide row, 6.53 us for 1,088 bytes (8,457,483 rows, 9.2 GB), scaled by row width to a
+    /// query_stats row of 740 bytes (a field store's heap, see <c>PgTableTuning</c>) is 4.44 us; the same 45 s budget over it is 10.13
+    /// million, rounded down to 10.1 million. Deliberately permissive: a false refusal breaks a panel that would have finished, while a
+    /// panel over the real limit only reaches the 60 s timeout it reached before. So there is no tighter two-scan limit for a
+    /// RankedTimeSeries panel, as there is for the wide table. Replace it from a field measurement when one exists.
+    /// </summary>
+    public const long MaxRawQueryStatsRows = 10_100_000;
+
+    /// <summary>
+    /// The most raw <c>collect.procedure_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811).
+    /// DERIVED like <see cref="MaxRawQueryStatsRows"/>: 6.53 us per 1,088-byte wide row scaled to a 386-byte procedure_stats row is
+    /// 2.32 us, and 45 s over it is 19.4 million. Permissive for the same reason, with no two-scan limit.
+    /// </summary>
+    public const long MaxRawProcedureStatsRows = 19_400_000;
+
+    /// <summary>
     /// The weight of an hour served from the rollup of the wide table (<c>collect.query_store_compose_stamp</c>), against 1.0
     /// for an hour read from the wide table itself (#5582). An estimate: the closest measurement is a read at the composer's grain
     /// of 7,040,921 rows of 205 bytes, which took 5.493 s warm, 1.556 s of it I/O. That read is 0.02505 blocks per row; at 22,121

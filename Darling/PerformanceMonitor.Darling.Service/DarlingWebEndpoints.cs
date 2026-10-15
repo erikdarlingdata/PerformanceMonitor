@@ -3490,6 +3490,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var registryLookupFailed = false;
         var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken, logger, () => registryLookupFailed = true);
 
+        /* #5811: a raw-route object_name panel reads module names from collect.module_map, which the worker creates at start. Where that
+           create failed, the compile keeps the window-wide ranking CTE, which needs no map. Asked here, before the hourly-edges snapshot
+           takes its connection, and only for a panel that joins modules. */
+        var moduleMapMissing = plan!.UsesModuleJoin && await ModuleMapMissingAsync(postgres, logger, cancellationToken);
+
         /* #4605: only a panel the hourly-plus-raw-edges route could serve pays for the count guard. It runs on one
            connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
            commits after the guard cannot add a row the guard never saw. Every other panel opens its own connection
@@ -3524,11 +3529,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMapMissing);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
             return ComposeRunOutcome.BadRequest(compileError);
+        }
+
+        /* #5811: a query_stats or procedure_stats panel read raw for its whole window, whose collection log says the read cannot finish
+           inside the statement timeout, is refused here in milliseconds instead of after a minute of reading. Decided on the compiled
+           route, so a panel the hourly-raw-edges route or a rollup serves is never counted. A panel whose hourly-edges guard did not pass
+           holds the snapshot's connection, and the estimate reads there under a savepoint. Fails open, like the Query Store guard above. */
+        if (QueryStoreWideReadGuard.RawCollectorFor(plan!.Measure.SourceTable, compiled!.Route) is { } rawCollector
+            && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, cancellationToken) is { } rawTooBig)
+        {
+            return ComposeRunOutcome.BadRequest(rawTooBig);
         }
 
         ReadScope.NoteSource(
@@ -3960,6 +3975,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>#4605: a savepoint around the module map watermark read, so a fault in that read (the map's state table missing, say)
     /// is undone and the panel statement still runs on the same connection and snapshot.</summary>
     private const string HourlyEdgesModuleMapSavepointSql = "SAVEPOINT hourly_edges_module_map";
+
+    /// <summary>#5811: whether <c>collect.module_map</c> exists, as a catalog lookup.</summary>
+    internal const string ModuleMapExistsSql = "SELECT to_regclass('collect.module_map') IS NOT NULL";
+
+    /// <summary>
+    /// #5811: true when <c>collect.module_map</c> is missing from this store, so a raw-route module join compiles the window-wide
+    /// ranking CTE that needs no map. A lookup that faults also answers true: the old CTE is slower, but it runs on any store.
+    /// </summary>
+    private static async Task<bool> ModuleMapMissingAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(ModuleMapExistsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            return await command.ExecuteScalarAsync(cancellationToken) is not true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "The #5811 module map lookup failed; the panel ranks procedure_stats over its window instead.");
+            return true;
+        }
+    }
 
     /// <summary>#4605: undoes the watermark read's savepoint, whether the read succeeded or failed.</summary>
     private const string HourlyEdgesModuleMapRollbackSql = "ROLLBACK TO SAVEPOINT hourly_edges_module_map";

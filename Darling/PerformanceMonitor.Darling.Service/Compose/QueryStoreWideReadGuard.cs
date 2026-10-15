@@ -32,6 +32,10 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para>The counted range is an INPUT of <see cref="EstimateAsync"/> and <see cref="Refusal"/>, not the window: a later
 /// change that leaves only the newest hours on the wide table passes the hours the wide table will still be read for.</para>
+///
+/// <para>#5811 adds the raw route's twin: a <c>query_stats</c> or <c>procedure_stats</c> panel read raw for its whole window is estimated
+/// from the collection log (<see cref="RawCollectorRowsSql"/>) through the same <see cref="Estimate"/> and reader, and refused by
+/// <see cref="RawRefusal"/> over the per-collector limit.</para>
 /// </summary>
 internal static class QueryStoreWideReadGuard
 {
@@ -90,19 +94,7 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            await using var command = new NpgsqlCommand(PerServerRowsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
-            command.Parameters.Add(new NpgsqlParameter
-            {
-                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
-                Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
-            });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken))
-            {
-                return null;
-            }
-
-            return new Estimate(reader.GetInt64(0), reader.GetInt32(1));
+            return await ReadEstimateAsync(connection, PerServerRowsSql, serverScope, null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -110,6 +102,159 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
             return null;
         }
     }
+
+    /// <summary>
+    /// #5811: the raw-route twin of <see cref="PerServerRowsSql"/>. The raw collector tables have no daily summary, so each server's daily
+    /// rows come from the collection log: the rows its collector ($2) stored over the day that ends at its newest log row for that
+    /// collector, which is the rows per collection times the collections in a day. Read through
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>: one short range per server. A server with no
+    /// log row for the collector adds nothing, so the guard fails open exactly as the Query Store estimate does. No <c>is_enabled</c>
+    /// predicate, for the reason <see cref="PerServerRowsSql"/> gives: the raw read takes a disabled server's retained rows too.
+    /// </summary>
+    internal const string RawCollectorRowsSql = @"
+SELECT COALESCE(SUM(b.daily_rows), 0)::bigint, COUNT(*)::integer
+FROM collect.servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT SUM(l.rows_collected)::bigint AS daily_rows
+    FROM collect.collection_log AS l
+    WHERE l.server_id = s.server_id
+      AND l.collector_name = $2
+      AND l.collection_time >
+      (
+          SELECT n.collection_time - interval '1 day'
+          FROM collect.collection_log AS n
+          WHERE n.server_id = s.server_id
+            AND n.collector_name = $2
+          ORDER BY n.collection_time DESC
+          LIMIT 1
+      )
+) AS b
+WHERE b.daily_rows IS NOT NULL
+  AND ($1::text[] IS NULL OR s.server_name = ANY($1));";
+
+    /// <summary>The savepoint the raw estimate takes when it reads inside the hourly-edges snapshot's transaction (#5811).</summary>
+    private const string RawEstimateSavepointSql = "SAVEPOINT compose_raw_read_guard";
+
+    /// <summary>Undoes <see cref="RawEstimateSavepointSql"/> after a fault, so the panel statement still runs in that transaction.</summary>
+    private const string RawEstimateRollbackSql = "ROLLBACK TO SAVEPOINT compose_raw_read_guard";
+
+    /// <summary>
+    /// The collector whose rows a panel reads raw for its whole window (#5811), or null when the guard does not apply: the
+    /// <c>query_stats</c> and <c>procedure_stats</c> raw tables only, and only on the raw route. A CAGG route reads the rollup and the
+    /// hourly-raw-edges route reads raw only at its two edges. The collector name is the table name.
+    /// </summary>
+    internal static string? RawCollectorFor(string sourceTable, ComposeRoute route) =>
+        route.Tier == ComposeSourceTier.Raw && sourceTable is "query_stats" or "procedure_stats" ? sourceTable : null;
+
+    /// <summary>The raw-route limit for a collector (#5811): <see cref="ComposeLimits.MaxRawQueryStatsRows"/> or
+    /// <see cref="ComposeLimits.MaxRawProcedureStatsRows"/>.</summary>
+    internal static long RawLimitFor(string collector) =>
+        collector == "procedure_stats" ? ComposeLimits.MaxRawProcedureStatsRows : ComposeLimits.MaxRawQueryStatsRows;
+
+    /// <summary>
+    /// Reads the raw-route estimate (#5811) for <paramref name="collector"/> and the servers in <paramref name="serverScope"/>. With
+    /// <paramref name="snapshotConnection"/> (the hourly-edges snapshot's connection, inside its open transaction) the read runs there
+    /// under a savepoint, so the run never asks the pool for a second connection and a fault leaves the transaction usable; otherwise it
+    /// opens its own. Null on any fault other than cancellation: a lookup that cannot answer never refuses a panel.
+    /// </summary>
+    internal static async Task<Estimate?> EstimateRawAsync(
+        NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (snapshotConnection is not null)
+        {
+            await ExecuteAsync(snapshotConnection, RawEstimateSavepointSql, cancellationToken);
+        }
+
+        try
+        {
+            if (snapshotConnection is not null)
+            {
+                return await ReadEstimateAsync(snapshotConnection, RawCollectorRowsSql, serverScope, collector, cancellationToken);
+            }
+
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await ReadEstimateAsync(connection, RawCollectorRowsSql, serverScope, collector, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (snapshotConnection is not null)
+            {
+                await ExecuteAsync(snapshotConnection, RawEstimateRollbackSql, cancellationToken);
+            }
+
+            logger?.LogDebug(ex, "The #5811 raw-route read estimate could not be read; the panel runs without it.");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The raw-route refusal (#5811) for a read of <paramref name="countedStart"/>..<paramref name="countedEnd"/>, or null when the
+    /// estimate is under <paramref name="limit"/> (or there is none). It states the estimate, the limit and the longest window that fits
+    /// for these servers, so a refusal reported from the field can be checked against the collection log.
+    /// </summary>
+    internal static string? RawRefusal(Estimate? estimate, string collector, DateTime countedStart, DateTime countedEnd, long limit)
+    {
+        if (estimate is not { } found || found.Servers == 0)
+        {
+            return null;
+        }
+
+        var rows = found.RowsOver(countedStart, countedEnd);
+        if (rows <= limit)
+        {
+            return null;
+        }
+
+        var noun = collector == "procedure_stats" ? "procedure statistics" : "query statistics";
+        var fitHours = found.DailyRows > 0 ? (long)Math.Floor(limit * 24d / found.DailyRows) : 0;
+        var shorter = fitHours >= 1
+            ? $"Choose fewer servers or a window of {Window(TimeSpan.FromHours(fitHours))} or less."
+            : "Choose fewer servers.";
+        return $"This panel needs about {Million(rows)} million {noun} rows ({Servers(found.Servers)}, {Window(countedEnd - countedStart)}), "
+            + $"over the limit of {Million(limit)} million. {shorter}";
+    }
+
+    /// <summary>The raw-route guard end to end (#5811): estimate, then refuse. Null means the panel runs.</summary>
+    internal static async Task<string?> CheckRawAsync(
+        NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
+        DateTime countedStart, DateTime countedEnd, ILogger? logger, CancellationToken cancellationToken) =>
+        RawRefusal(
+            await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, logger, cancellationToken),
+            collector, countedStart, countedEnd, RawLimitFor(collector));
+
+    /// <summary>The one reader both estimates share: $1 the scoped names (or NULL), and $2 the collector when the text has one.</summary>
+    private static async Task<Estimate?> ReadEstimateAsync(
+        NpgsqlConnection connection, string sql, IReadOnlyList<string>? serverScope, string? collector, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+            Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
+        });
+        if (collector is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = collector });
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new Estimate(reader.GetInt64(0), reader.GetInt32(1));
+    }
+
+    private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static string Million(long rows) => (rows / 1_000_000d).ToString("0.#", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// The refusal for a read of <paramref name="countedStart"/>..<paramref name="countedEnd"/> on the wide table, or null when the

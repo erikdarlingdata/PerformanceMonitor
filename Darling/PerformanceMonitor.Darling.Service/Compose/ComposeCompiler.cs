@@ -40,8 +40,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="ModuleMapThrough"/> is the module map's watermark (naive UTC, <see cref="DateTimeKind.Unspecified"/>): the
 /// largest procedure_stats <c>collection_time</c> the last map refresh read. The runner supplies it only for a panel that
 /// joins modules and takes the hourly-raw-edges route; with it, that route resolves names from the map plus a recent
-/// overlay of procedure_stats instead of ranking the whole window. Null (the default, and every other route) keeps the
-/// window-wide ranking CTE.
+/// overlay of procedure_stats instead of ranking the whole window. Null (the default, and every other route) takes the
+/// map-first module CTE instead (#5811).
+/// <see cref="ModuleMapMissing"/> (#5811) is the runner's finding that <c>collect.module_map</c> does not exist in this store (its
+/// startup ensure failed). Then a raw-route module join ranks the whole window of procedure_stats, as it did before #5811, because
+/// the map-first CTE would fail on the missing relation. False (the default) compiles the map-first CTE.
 /// <see cref="UnregisteredServers"/> (#5525) is the part of <see cref="Servers"/> that names no <c>collect.servers</c> row, found by
 /// the runner (<see cref="ComposeServerScope.FindUnregisteredAsync"/>) before it compiles. The compiler scopes a read by
 /// <c>server_id</c>, resolved from the registry by name; a name with no registry row resolves to no id, so those names alone are
@@ -71,7 +74,8 @@ public sealed record ComposeRunContext(
     DateTime? ModuleMapThrough = null,
     IReadOnlyList<string>? UnregisteredServers = null,
     long? QueryStoreGroupMembers = null,
-    DateTime? QueryStoreStampThrough = null)
+    DateTime? QueryStoreStampThrough = null,
+    bool ModuleMapMissing = false)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -652,8 +656,9 @@ public static class ComposeCompiler
         if (plan.UsesModuleJoin && !route.IsCagg)
         {
             /* The hourly-raw-edges route with a map watermark ranks only the recent overlay [floor, end] and takes every
-               older handle from collect.module_map. Without a watermark (or on any other route) the CTE ranks the whole
-               window, exactly as before.
+               older handle from collect.module_map. Without a watermark (or on any other route) the same shape takes its
+               overlay from each server's last collection in the window instead (#5811, AppendMapFirstModuleCte); a
+               store without the map (ModuleMapMissing) ranks the whole window, as every raw route did before #5811.
 
                Each (server_name, sql_handle) appears once in m: the overlay keeps rn = 1 per pair, the map's primary key
                is that pair, and the NOT EXISTS drops a map row the overlay already carries, so the outer LEFT JOIN and
@@ -663,44 +668,51 @@ public static class ComposeCompiler
                A rename inside the last minute (the gap between the window end and now) can show the newer name, and so can a handle whose only procedure_stats row is in that
                minute (it can show a name where the raw route shows (ad hoc)). */
             var fromMap = moduleOverlayFloorParam is not null;
-            sql.Append("WITH ").Append(fromMap ? "m_recent" : ModuleAlias).Append(" AS (\n");
-            sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name\n");
-            sql.Append("    FROM (\n");
-            sql.Append("        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n");
-            sql.Append("               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n");
-            sql.Append("        FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".procedure_stats\n");
-            sql.Append("        WHERE collection_time >= ").Append(fromMap ? moduleOverlayFloorParam : startParam).Append('\n');
-            sql.Append("          AND collection_time <= ").Append(endParam).Append('\n');
-            if (hasServerScope)
+            if (!fromMap && !context.ModuleMapMissing)
             {
-                sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam)).Append('\n');
+                AppendMapFirstModuleCte(sql, startParam, endParam, hasServerScope ? serverScopeParam : null);
             }
-
-            sql.Append("          AND sql_handle IS NOT NULL\n");
-            sql.Append("          AND sql_handle <> ''\n");
-            sql.Append("    ) ranked_modules\n");
-            sql.Append("    WHERE rn = 1\n");
-            if (fromMap)
+            else
             {
-                sql.Append("),\n");
-                sql.Append(ModuleAlias).Append(" AS (\n");
-                sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_recent\n");
-                sql.Append("    UNION ALL\n");
-                sql.Append("    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n");
-                sql.Append("    FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS mm\n");
-                sql.Append("    WHERE mm.last_seen >= ").Append(startParam).Append('\n');
+                sql.Append("WITH ").Append(fromMap ? "m_recent" : ModuleAlias).Append(" AS (\n");
+                sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name\n");
+                sql.Append("    FROM (\n");
+                sql.Append("        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n");
+                sql.Append("               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n");
+                sql.Append("        FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".procedure_stats\n");
+                sql.Append("        WHERE collection_time >= ").Append(fromMap ? moduleOverlayFloorParam : startParam).Append('\n');
+                sql.Append("          AND collection_time <= ").Append(endParam).Append('\n');
                 if (hasServerScope)
                 {
-                    /* module_map is a small table keyed (server_name, sql_handle) with no server_id column, so it stays scoped by the
-                       scoped names (#5525). The fact rows are scoped by id, so a renamed server's pre-rename handles resolve through
-                       m_recent when the overlay covers them and read '(ad hoc)' when only this map would. */
-                    sql.Append("      AND mm.server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                    sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam)).Append('\n');
                 }
 
-                sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_recent AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n");
-            }
+                sql.Append("          AND sql_handle IS NOT NULL\n");
+                sql.Append("          AND sql_handle <> ''\n");
+                sql.Append("    ) ranked_modules\n");
+                sql.Append("    WHERE rn = 1\n");
+                if (fromMap)
+                {
+                    sql.Append("),\n");
+                    sql.Append(ModuleAlias).Append(" AS (\n");
+                    sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_recent\n");
+                    sql.Append("    UNION ALL\n");
+                    sql.Append("    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n");
+                    sql.Append("    FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS mm\n");
+                    sql.Append("    WHERE mm.last_seen >= ").Append(startParam).Append('\n');
+                    if (hasServerScope)
+                    {
+                        /* module_map is a small table keyed (server_name, sql_handle) with no server_id column, so it stays scoped by the
+                           scoped names (#5525). The fact rows are scoped by id, so a renamed server's pre-rename handles resolve through
+                           m_recent when the overlay covers them and read '(ad hoc)' when only this map would. */
+                        sql.Append("      AND mm.server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                    }
 
-            sql.Append(")\n");
+                    sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_recent AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n");
+                }
+
+                sql.Append(")\n");
+            }
         }
 
         /* The #2734 rank pass: RankedTimeSeries prepends a CTE that IS the Ranked query minus the time
@@ -945,6 +957,81 @@ public static class ComposeCompiler
     /// registry row resolves to no id (the runner finds those, <see cref="ComposeRunContext.UnregisteredServers"/>), so those
     /// names alone also match on the row's stored <c>server_name</c> through <paramref name="unregisteredParam"/>.</para>
     /// </summary>
+    /// <summary>
+    /// The #5811 module CTE of a raw-route <c>object_name</c> join: the rows of each server's last collection in the window, and
+    /// <c>collect.module_map</c> for every other handle. Before #5811 the CTE ranked every procedure_stats row of the window per (server,
+    /// handle) with <c>ROW_NUMBER</c>, a sort of the whole wide table before the fact scan started (on a 10-server plant of 2.88 million
+    /// rows: an external merge of about 120 MB, 2.5 to 5.6 s of a 6.8 to 15.5 s panel; this CTE takes about 30 ms there).
+    ///
+    /// <para>It is the <c>m_recent</c> shape of the hourly-raw-edges route with the overlay bounded to the last collection instead of the
+    /// watermark: each (server_name, sql_handle) appears once in m, because <c>DISTINCT ON</c> keeps one last-collection row per pair, the
+    /// map's primary key is that pair, and the NOT EXISTS drops a map row the last collection already carries. So the outer LEFT JOIN and
+    /// the group references are unchanged, and a handle in the last collection reads the name it has there, a rename included. A map row
+    /// with <c>last_seen</c> before the window start is skipped, so a handle with no procedure_stats row in the window still reads
+    /// '(ad hoc)'.</para>
+    ///
+    /// <para>What reads differently from the window-wide ranking: a handle outside the last collection reads the map's name, its newest,
+    /// which can be newer than the window's end (a rename the map has seen) or older (a rename after the map's last refresh, until the
+    /// hourly refresh). A handle in neither reads '(ad hoc)', as does one the map lacks on a server with no registry row (a removed
+    /// server's history). A scope over a renamed server resolves its old-name handles from the map only when the map row carries a
+    /// scoped name, as <c>m_recent</c> does.</para>
+    /// </summary>
+    private static void AppendMapFirstModuleCte(StringBuilder sql, string startParam, string endParam, string? serverScopeParam)
+    {
+        var schema = PgSchemaGenerator.CollectSchema;
+
+        /* m_last holds the rows of each server's last collection in the window: one short backward index scan per server finds the
+           collection, and a LATERAL read of that collection's rows by (server_id, collection_time) takes them. The OFFSET 0 keeps
+           that read a LATERAL subquery the planner cannot flatten into a join, and MATERIALIZED keeps the anti-join on the map
+           over m_last's rows only. Measured on the plant (10 servers, 2.88 million rows): flattened, the planner hash-joined a seq
+           scan of the window's whole procedure_stats (0.9 s for 2.88 million rows when collect.servers had no statistics), and
+           with the anti-join inlined it estimated that at one row and seq-scanned the window before joining (0.52 to 0.70 s). */
+        sql.Append("WITH m_last AS MATERIALIZED (\n");
+        sql.Append("    SELECT DISTINCT ON (rows_ps.server_name, rows_ps.sql_handle)\n");
+        sql.Append("           rows_ps.server_name, rows_ps.sql_handle, rows_ps.object_name, rows_ps.schema_name, rows_ps.database_name\n");
+        sql.Append("    FROM ").Append(schema).Append(".servers AS srv\n");
+        sql.Append("    CROSS JOIN LATERAL (\n");
+        sql.Append("        SELECT p.collection_time\n");
+        sql.Append("        FROM ").Append(schema).Append(".procedure_stats AS p\n");
+        sql.Append("        WHERE p.server_id = srv.server_id\n");
+        sql.Append("          AND p.collection_time >= ").Append(startParam).Append('\n');
+        sql.Append("          AND p.collection_time <= ").Append(endParam).Append('\n');
+        sql.Append("        ORDER BY p.collection_time DESC\n");
+        sql.Append("        LIMIT 1\n");
+        sql.Append("    ) AS last_ps\n");
+        sql.Append("    CROSS JOIN LATERAL (\n");
+        sql.Append("        SELECT ps.server_name, ps.sql_handle, ps.object_name, ps.schema_name, ps.database_name\n");
+        sql.Append("        FROM ").Append(schema).Append(".procedure_stats AS ps\n");
+        sql.Append("        WHERE ps.server_id = srv.server_id\n");
+        sql.Append("          AND ps.collection_time = last_ps.collection_time\n");
+        sql.Append("          AND ps.collection_time >= ").Append(startParam).Append('\n');
+        sql.Append("          AND ps.collection_time <= ").Append(endParam).Append('\n');
+        sql.Append("          AND ps.sql_handle IS NOT NULL\n");
+        sql.Append("          AND ps.sql_handle <> ''\n");
+        sql.Append("        OFFSET 0\n");
+        sql.Append("    ) AS rows_ps\n");
+        if (serverScopeParam is not null)
+        {
+            sql.Append("    WHERE srv.server_name = ANY(").Append(serverScopeParam).Append(")\n");
+        }
+
+        sql.Append("    ORDER BY rows_ps.server_name, rows_ps.sql_handle\n");
+        sql.Append("),\n");
+        sql.Append(ModuleAlias).Append(" AS (\n");
+        sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_last\n");
+        sql.Append("    UNION ALL\n");
+        sql.Append("    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n");
+        sql.Append("    FROM ").Append(schema).Append(".module_map AS mm\n");
+        sql.Append("    WHERE mm.last_seen >= ").Append(startParam).Append('\n');
+        if (serverScopeParam is not null)
+        {
+            sql.Append("      AND mm.server_name = ANY(").Append(serverScopeParam).Append(")\n");
+        }
+
+        sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_last AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n");
+        sql.Append(")\n");
+    }
+
     internal static string ServerScope(string prefix, string namesParam, string? unregisteredParam) =>
         ServerScopeSql.Predicate(prefix, namesParam, unregisteredParam);
 

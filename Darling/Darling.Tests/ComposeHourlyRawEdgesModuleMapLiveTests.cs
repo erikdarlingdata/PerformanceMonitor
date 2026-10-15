@@ -198,7 +198,9 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
 
             var (hybrid, raw) = await RunBothAsync(store, PanelByDatabaseAndObject);
             Assert.Contains(Hybrid, (string)hybrid["sql"]!, StringComparison.Ordinal);
-            Assert.DoesNotContain(Overlay, (string)hybrid["sql"]!, StringComparison.Ordinal);
+            /* #5811: with no watermark there is no recent overlay; the last-collection CTE serves the hybrid as it serves raw */
+            Assert.DoesNotContain("m_recent", (string)hybrid["sql"]!, StringComparison.Ordinal);
+            Assert.StartsWith("WITH m_last AS MATERIALIZED (", (string)hybrid["sql"]!, StringComparison.Ordinal);
             Assert.Equal(raw.ToJsonString(), HybridRows(hybrid));
             Assert.Equal(100 + 1000, ValueOf(raw, Database, "usp_Renamed"), 6);
         });
