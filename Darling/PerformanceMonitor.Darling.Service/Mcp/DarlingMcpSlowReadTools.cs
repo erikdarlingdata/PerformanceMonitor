@@ -52,7 +52,7 @@ public sealed class DarlingMcpSlowReadTools
         + "here, however long the caller waited; get_read_latency counts them. Each row carries surface, route, outcome, total_ms, the server it named (server_name, null for "
         + "a store-wide read), the arguments (short scalars only: numbers, booleans and strings of 128 characters or fewer; "
         + "any longer string or JSON-bearing string is shown as [omitted], and a key naming a secret is [redacted] at any "
-        + "depth; the server replaced by its id, a window lifted into window_start and window_end, 4,096 bytes at most), the source that answered (raw, interval_table, hourly_edges) with its reason "
+        + "depth; the server replaced by its id, 4,096 bytes at most), window_start and window_end (the window the read ran with, its default included), the source that answered (raw, interval_table, hourly_edges) with its reason "
         + "where the read noted one, error_class (a type name or SQLSTATE, never message text), and statements: the "
         + "slowest 5 by ms, with statements_omitted saying how many more were left out; full_detail=true returns all stored "
         + "statements in the order they ran (50 at most, statements_truncated says more ran). A statement's ms runs until "
@@ -82,7 +82,7 @@ public sealed class DarlingMcpSlowReadTools
         [Description("True returns every stored statement, in run order.")] bool full_detail = false,
         CancellationToken cancellationToken = default)
     {
-        var hoursError = McpHelpers.ValidateHoursBack(hours);
+        var hoursError = DarlingReadWindow.ValidateHoursBack(hours);
         if (hoursError != null)
         {
             return hoursError;

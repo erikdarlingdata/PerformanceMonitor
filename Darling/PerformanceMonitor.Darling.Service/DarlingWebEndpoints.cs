@@ -134,6 +134,10 @@ public static class DarlingWebEndpoints
         "run_custom_view_panel",
         "update_alert_settings",
         "set_notification_route_enabled",
+        /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two
+           investigation reads only (/api/read). */
+        "claim_investigation_request",
+        "submit_investigation_report",
         "delete_notification_route",
         "create_mute_rule",
         "update_mute_rule",
@@ -3183,7 +3187,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// the default <see cref="CatalogDescriptors"/> declares for that read, else <c>none</c>. Internal so a test can pin a
     /// request that sends no window against the catalog's default.</summary>
     internal static string WebWindowBand(string name, Func<string, string?> sent) =>
-        ReadWindowBand.Of(ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key)));
+        ReadWindowBand.OrFixed(ReadWindowBand.Of(ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key))), name);
 
     /// <summary>The default the catalog row of read <paramref name="name"/> declares for parameter <paramref name="key"/>,
     /// as text; null when the read is not in the catalog, does not take that parameter, or declares no default.</summary>
@@ -5172,6 +5176,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
                fetched when its Analysis row is first expanded. The key is the page's own row identity. */
             ["get_alert_details"] = R(CatAlerts, "One fired alert's advice: the heading, fields, advice text and fix script the desktop's Alert Detail shows (never the Apply payload), found by server_id, metric_name and alert_time exactly as get_alert_history reports them. An alert with no advice, or no match, answers an empty details list.", new CatalogParam("server_id", TypeInt, true, null), PReqText("metric_name"), PReqText("alert_time")),
+            ["list_investigation_requests"] = R(CatAlerts, "Level 1 investigation requests alerts opened for an agent, newest first, with the state computed from the lease and expiry.",
+                PText("state"), PServer(), PText("family"), PLimit(20)),
+            ["get_investigation_reports"] = R(CatAlerts, "Investigation requests with their agent reports and journal: one request by id (with its brief), or those opened in the window.",
+                PServer(), PText("request_id"), PHours(24)),
             ["get_mute_rules"] = R(CatAlerts, "The alert mute rules (enabled-only by default).", PBool("enabled_only", true)),
             /* #3598: a read the web host's viewer role can serve — the tool selects only the non-secret carve
                (route_id, metric_match, the GENERATED configured_channels presence column, smtp_recipients,
@@ -6098,6 +6106,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, c.RequestAborted),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
+            ["list_investigation_requests"] = (c, pg, an) => DarlingMcpInvestigationTools.ListInvestigationRequests(pg, Str(c, "state"), Server(c), Str(c, "family"), QueryInt(c, "limit", null, 20), c.RequestAborted),
+            ["get_investigation_reports"] = (c, pg, an) => DarlingMcpInvestigationTools.ReportsAsync(pg, McpDataDetail.Full, Server(c), Str(c, "request_id"), Hours(c, 24), c.RequestAborted),
 
             /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
                routes, the /api/fleet + /api/read/get_fleet_overview coexistence: the page reads its own
@@ -7063,7 +7073,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static string? FleetParamRefusal(int hours, int worstCount, Func<string, string?> lookup)
     {
-        var window = McpHelpers.ValidateHoursBack(hours);
+        /* The note this makes is inert today (#5814): /api/fleet calls this before its ReadScope opens, so there is no scope
+           to note on, and the route is never offered to the slow-read log. A route that starts offering it a row must note
+           its window inside the scope. */
+        var window = DarlingReadWindow.ValidateHoursBack(hours);
         if (window is not null)
         {
             return NameWindowParameterTheCallerSent(window, lookup);

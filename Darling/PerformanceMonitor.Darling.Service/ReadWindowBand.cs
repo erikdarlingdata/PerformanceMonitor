@@ -26,6 +26,27 @@ internal static class ReadWindowBand
     internal const string SevenDays = "7d";
     internal const string Longer = "7d+";
 
+    /// <summary>The window <c>get_collection_health</c> reads, fixed in code: the trailing 7 days (#5814).</summary>
+    internal const int CollectionHealthHours = 24 * 7;
+
+    /// <summary>
+    /// The reads whose window is fixed in code rather than taken from an argument (#5814), by route: the MCP tool name and
+    /// the <c>/api/read</c> name, which are the same. The band of such a read is known before it runs, so admission, the
+    /// read cache and the read-latency row all use one key (today's only entry is a health read, which admission and the cache
+    /// skip, so its band reaches only the read-latency row), and the tool notes the same window on its
+    /// <see cref="ReadScope"/> for the slow-read row.
+    /// </summary>
+    internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, int> FixedHours =
+        new System.Collections.Generic.Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["get_collection_health"] = CollectionHealthHours,
+        };
+
+    /// <summary><paramref name="band"/>, or the band of the window <paramref name="route"/> fixes in code when the
+    /// arguments named none (#5814).</summary>
+    internal static string OrFixed(string band, string? route) =>
+        band == None && route is not null && FixedHours.TryGetValue(route, out var hours) ? Of(hours) : band;
+
     /// <summary>The band of a window <paramref name="hours"/> wide. Null, zero, negative or not a number is <c>none</c>.
     /// Each band includes its upper boundary: exactly 1 hour is <c>1h</c>, exactly 24 is <c>24h</c>, exactly 168 is
     /// <c>7d</c>.</summary>

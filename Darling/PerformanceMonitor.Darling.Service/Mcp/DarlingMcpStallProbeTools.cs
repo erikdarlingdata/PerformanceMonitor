@@ -56,7 +56,7 @@ public sealed class DarlingMcpStallProbeTools
     {
         /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
            tool's (the samples' own retention). */
-        var daysError = McpHelpers.ValidateDaysBack(days_back, MaxDaysBack);
+        var daysError = DarlingReadWindow.ValidateDaysBack(days_back, MaxDaysBack);
         if (daysError != null)
         {
             return daysError;

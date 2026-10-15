@@ -255,6 +255,7 @@ public sealed class DarlingMcpHealthTools
             var lastDay = windowEnd.Date;
             var fromDate = lastDay.AddDays(-(days_back - 1));
             var toDate = lastDay.AddDays(1);
+            ReadScope.NoteWindow(fromDate, toDate); // #5814: the whole days this range reads, ending on the anchor day
 
             /* The anchor is also the clock the still-forming day's window clamps against (#3525 review):
                a backdated as_of must clamp its own "today" against ITSELF, not the process clock. */

@@ -64,7 +64,7 @@ public sealed class MuteRuleExternalSourceSurfaceTests
 
         Assert.Equal("created", DarlingMcpTestData.StatusOf(json));
         Assert.Equal("nagios", Payload(json)["external_source"]!.GetValue<string>());
-        Assert.Contains("from nagios", Payload(json)["summary"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("from nagios", Payload(json)["match_summary"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
     [Theory]

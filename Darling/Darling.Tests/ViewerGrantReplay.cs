@@ -26,7 +26,12 @@ namespace Darling.Tests;
 /// </summary>
 internal static class ViewerGrantReplay
 {
-    public static List<string> StatementsFor(string roleName, string scratchDatabase)
+    public static List<string> StatementsFor(string roleName, string scratchDatabase) =>
+        StatementsFor(roleName, scratchDatabase, "viewer");
+
+    /// <summary>The same replay for another managed role (<c>admin</c>, the role a desktop viewer seat with
+    /// <c>postgres.connectAs = "admin"</c> connects as; #5632 Phase A's investigation writes are its grants).</summary>
+    public static List<string> StatementsFor(string roleName, string scratchDatabase, string managedRole)
     {
         var provisioning = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
@@ -50,7 +55,7 @@ internal static class ViewerGrantReplay
             }
 
             var targets = statement[(at + marker.Length)..].Split(',').Select(t => t.Trim()).ToList();
-            if (!targets.Contains("viewer", StringComparer.Ordinal))
+            if (!targets.Contains(managedRole, StringComparer.Ordinal))
             {
                 continue;
             }

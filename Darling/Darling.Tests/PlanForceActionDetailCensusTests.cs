@@ -295,9 +295,14 @@ public sealed class PlanForceActionDetailCensusTests
     /// with an unrelated <c>ALTER TABLE config.config_monitored_servers</c> but joins onward into more DDL
     /// naming <c>plan_force_actions</c> without the word "detail" appearing near it — a joined-literal
     /// artifact of how migrations concatenate adjacent rungs, not a second reader.</para>
+    ///
+    /// <para><b>Darling/PerformanceMonitor.Darling.Service/Investigations/PgInvestigationBriefSourceReader.cs = 1:</b>
+    /// the investigation brief's recent-changes read (#5632 Phase A): action, decision, outcome, database and the
+    /// query and plan ids of the last seven days' actions. It never selects <c>detail</c>, so (b) does not count it.</para>
     /// </summary>
     private static readonly Dictionary<string, int> ExpectedTableMentionCountsByPath = new()
     {
+        ["Darling/PerformanceMonitor.Darling.Service/Investigations/PgInvestigationBriefSourceReader.cs"] = 1,
         ["Darling/PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs"] = 4,
         ["Darling/PerformanceMonitor.Darling.Service/PlanForceActionDetailScrub.cs"] = 2,
         ["Darling/PerformanceMonitor.Darling.Service/DarlingRetention.cs"] = 2,

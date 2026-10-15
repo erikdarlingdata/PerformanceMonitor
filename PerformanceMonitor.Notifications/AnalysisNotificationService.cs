@@ -471,7 +471,10 @@ public sealed class AnalysisNotificationService : IDisposable
                        config_alert_log.detail_text, which is the sole copy of these facts on the surfaces
                        that render no structured context, and the input the mute pre-fill parses. */
                     DeliverDetailText: false,
-                    Route: route);
+                    Route: route,
+                    /* #5632 Phase A: the metric name keeps eight characters of the hash; an investigation request
+                       records the whole one. */
+                    StoryPathHash: string.IsNullOrEmpty(lead.StoryPathHash) ? null : lead.StoryPathHash);
 
                 /* #3916: the PAGE road queues. The page waits out the hold-back window with every other page
                    the fleet raises in it, and the flush decides — against the cap — whether it goes as its

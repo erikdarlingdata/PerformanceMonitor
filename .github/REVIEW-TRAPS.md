@@ -73,12 +73,13 @@ reviewer is reading. Keep each line one line — the review quotes them.
 
 ## Tests and censuses
 
-- A census fires on any NEW string constant in `PgTargetFactKeys`: `PgTargetMcpSurfaceTests.EveryPgRecommendation_NamesARegisteredTool_…` requires a `PgTargetToolRecommendations.ByFactKey` row for every key, and `PgTargetKnobsTests`' "other lanes' keys fall to 0" pin grades every key (#3688). A non-key alias is excluded by predicate, with the reason inline.
+- **Ruling (#5833): tests are load-bearing.** The censuses, pins and rosters named in this section are being deleted under #5833. Never add one, and never answer a trap with a test that reads source text or asserts how code is spelled (a signature at a line, a SQL fragment's wording, a comment's text, a trait roster, a coverage percentage). A trap is answered with a behaviour test that fails on the defect and passes on the fix, or with one sentence in the PR body saying why none is needed.
+- A NEW string constant in `PgTargetFactKeys` without a `PgTargetToolRecommendations.ByFactKey` row is a fact whose recommendation names no registered tool (#3688); `PgTargetMcpSurfaceTests.EveryPgRecommendation_NamesARegisteredTool_…` and `PgTargetKnobsTests`' "other lanes' keys fall to 0" check fail on it. The fix is the row the fact needs; a non-key alias is not a fact and is excluded by predicate, with the reason inline.
 - `InternalsVisibleTo` on PerformanceMonitor.Analysis names Lite.Tests only — a helper Darling.Tests must call has to be public (#3688).
-- A pin that encodes the lie: `ACappedResult_WithholdsTheUnsatisfiedSummary_…` handed the builder two facets at `limit = 2` and asserted `truncated` — the `>= limit` inference as its own proof (#3699). Ask what a pin would fail ON.
-- A roster-based census does not see the file it does not roster: `EveryPagedTool_ObservesTruncation_…` walked ten tools and missed three in another file (#3699). An anti-pattern census sweeps the class (every tool body); rosters are for the positive contract only.
+- A test that encodes the lie: `ACappedResult_WithholdsTheUnsatisfiedSummary_…` handed the builder two facets at `limit = 2` and asserted `truncated` — the `>= limit` inference as its own proof (#3699). Ask what defect a test would fail ON.
+- A roster-based census does not see the file it does not roster: `EveryPagedTool_ObservesTruncation_…` walked ten tools and missed three in another file (#3699). A wider roster or a class-sweeping census is not the answer: each tool gets a behaviour test that fails when its page is cut without `truncated`.
 - A test that reads the clock twice measures the CI scheduler: the delta-seeder tests failed at 123 and 243 on unrelated PRs (#3676). One anchor owns both ends of an interval.
-- An expression-bodied member holding a `{ }` property pattern is read SHORT by the T-SQL convention guard's member walk (#3667; the #3607 precedent) — a member the walk cannot read whole is one no census can see into.
+- An expression-bodied member holding a `{ }` property pattern is read SHORT by the T-SQL convention guard's member walk (#3667; the #3607 precedent) — a source-reading guard is blind to any shape it cannot parse, which is one reason it is not coverage.
 - A test that constructs a "four maintenance anomalies in one run" fixture is testing a shape no live run produces (#3709, the one-profile-per-run line above). Fixtures should carry the population the engine actually emits, or say they do not.
 
 ## Workflows and CI

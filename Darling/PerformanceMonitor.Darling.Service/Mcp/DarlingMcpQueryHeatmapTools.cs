@@ -100,7 +100,7 @@ public sealed class DarlingMcpQueryHeatmapTools
 
         /* #5562: stays at 168 h. This reads raw query_stats, which a TimescaleDB store drops at four days (TimescaleSupport.RawRetentionInterval), so a
            longer reach would be a window the table cannot fill, so this keeps the 168-hour overload (its WebReadReach row says the same). */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd)
             ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 

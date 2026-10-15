@@ -56,6 +56,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     private readonly ILogger _logger;
     private readonly DarlingAlertSettings _settings;
     private readonly Func<string, AlertNotificationMode?> _resolveServerOverride;
+    private readonly InvestigationDispatcher? _investigations;
 
     /// <param name="resolveServerOverride">
     /// Maps a fired alert's <see cref="AlertOutcome.ServerKey"/> to that server's
@@ -63,13 +64,19 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// null (the default) means every server inherits the global <see cref="DarlingAlertSettings.DeliveryMode"/>,
     /// which is also correct for incident-free self-alerts. The service passes a resolver over its live server set.
     /// </param>
+    /// <param name="investigationDispatcher">
+    /// #5632 Phase A: called after each history row is written, so an alert whose route sends it to an agent opens or joins
+    /// an investigation request. Optional: null (the default, and every test that predates it) dispatches nothing.
+    /// </param>
     public DarlingAlertDeliverer(
         DarlingAlertSettings settings,
         IAlertHistoryStore historyStore,
         WebhookAlertService webhookAlertService,
         ILogger logger,
-        Func<string, AlertNotificationMode?>? resolveServerOverride = null)
+        Func<string, AlertNotificationMode?>? resolveServerOverride = null,
+        InvestigationDispatcher? investigationDispatcher = null)
     {
+        _investigations = investigationDispatcher;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _historyStore = historyStore ?? throw new ArgumentNullException(nameof(historyStore));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -251,12 +258,23 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
         string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
-        await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+        /* #5632 Phase A: the row's time is stamped here, so the investigation link row below names this exact row. */
+        var record = new AlertHistoryRecord(
             outcome.ServerKey, outcome.ServerName, outcome.MetricName,
             currentValue, outcome.ThresholdValue,
             numericCurrentValue, numericThresholdValue,
             delivery,
-            outcome.Muted, detailText, contextJson));
+            outcome.Muted, detailText, contextJson)
+        {
+            AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+        };
+        await _historyStore.RecordAlertAsync(record);
+        /* #5632 Phase A: after the row, per row (a Per-event split comes through here once per incident). A muted row, a
+           report, a recovery or an alert with no agent route dispatches nothing; the dispatcher never throws. */
+        if (_investigations is not null)
+        {
+            await _investigations.DispatchAsync(record, context, cancellationToken: cancellationToken);
+        }
 
         return delivery;
     }
