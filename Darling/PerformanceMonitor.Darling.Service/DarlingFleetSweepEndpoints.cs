@@ -19,6 +19,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -102,7 +103,7 @@ internal static class DarlingFleetSweepEndpoints
 
         /* The ceiling is get_sweep_reports' WebReadReach row, the number the sweeps page reads from the catalog, so the page and this
            endpoint share one source (#5562 review r1 L7). The row stays at the default, so this is not an opted-in validator. */
-        return McpHelpers.ValidateWindow(hours, asOf, WebReadReach.All["get_sweep_reports"].MaxHours, out endUtc);
+        return DarlingReadWindow.Validate(hours, asOf, WebReadReach.All["get_sweep_reports"].MaxHours, out endUtc);
     }
 
     /// <summary>

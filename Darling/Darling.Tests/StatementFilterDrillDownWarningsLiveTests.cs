@@ -105,5 +105,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
         {
             Assert.DoesNotContain(needle, text, StringComparison.Ordinal);
         }
+
+        /* #5632 (R3): the keyed mcp.dataDetail census. The kept warning's predicate literal is the canary: in the drill-down
+           as get_analysis_findings answers it, no field may still carry it under maskLiterals or metadataOnly. */
+        using var host = await StatementFilterCensus.BuildHostAsync();
+        var found = await StatementFilterCensus.AssertKeyedMaskingAsync(
+            host, "get_analysis_findings drill_down", JsonSerializer.Serialize(new { drill_down = finding.DrillDown }));
+        StatementFilterCensus.AssertPlanted(found, "kept-predicate-ssf");
     }
 }

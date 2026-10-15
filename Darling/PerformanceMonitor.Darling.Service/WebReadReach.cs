@@ -209,6 +209,8 @@ internal static class WebReadReach
         ["get_analysis_facts"] = List(null),
         ["get_analysis_findings"] = List(null),
         ["get_alert_history"] = List(null, AlertHistoryHours),
+        /* #5632 Phase A: the investigation requests and reports, by when a request opened; a list, so the default reach. */
+        ["get_investigation_reports"] = List(null),
         ["get_fleet_overview"] = List(null),
         ["get_sweep_reports"] = List(null),
         ["get_store_log"] = List(null),

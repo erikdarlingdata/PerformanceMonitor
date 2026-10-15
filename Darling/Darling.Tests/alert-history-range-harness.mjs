@@ -59,8 +59,24 @@ globalThis.fetch = async (url) => {
   else if (u.includes("/api/catalog")) body = { reads: [{ name: "get_alert_history", params: [{ name: "hours", collector: null, collector_interval_minutes: null, max_hours: 2160 }] }] };
   else if (u.includes("/list_servers")) body = servers;
   else if (u.includes("/get_alert_history")) body = typeof alertsReply === "function" ? alertsReply(u) : alertsReply;
+  else if (u.includes("/list_investigation_requests")) body = investigationsReply;
+  else if (u.includes("/get_investigation_reports")) body = u.includes("request_id=") ? journalReply : reportsReply;
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
+/* #5632 Phase A: the Investigations panel's two reads, in the shapes plan v1 section 6 names. */
+const REQ = "11111111-1111-1111-1111-111111111111";
+let investigationsReply = { status: "ok", requests: [
+  { request_id: REQ, opened_at: "2026-10-14T12:00:00.0000000", server_name: "srv-a", family: "blocking", state: "reported", alert_count: 3 },
+  { request_id: "22222222-2222-2222-2222-222222222222", opened_at: "2026-10-14T11:00:00.0000000", server_name: "srv-b", family: "resources", state: "open", alert_count: 1 },
+] };
+const reportsReply = { status: "ok", reports: [
+  { request_id: REQ, submitted_at: "2026-10-14T12:05:00", verdict: "false_positive", summary: "older report" },
+  { request_id: REQ, submitted_at: "2026-10-14T12:10:00", verdict: "real", summary: "a long blocking chain from the nightly ETL" },
+] };
+const journalReply = { status: "ok", journal: [
+  { request_id: REQ, event_time: "2026-10-14T12:00:00", event: "opened", actor: "service" },
+  { request_id: REQ, event_time: "2026-10-14T12:10:00", event: "reported", actor: "agent:agent-a" },
+] };
 const readsOf = () => urls.filter((u) => u.includes("/get_alert_history")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 
 const T0 = Date.now();
@@ -206,6 +222,26 @@ try {
       pickRange(main, "Time range", "30m"); await settle(); out.thirtyMinutes = metrics(main);
       pickRange(main, "Time range", "4h"); await settle(); out.fourHours = metrics(main);
       out.tzOffsetMinutes = new Date().getTimezoneOffset();
+    },
+    async investigations() {
+      alertsReply = { alerts: [row(1)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      const invReads = () => urls.filter((u) => u.includes("investigation"));
+      out.readsBeforeOpen = invReads().length;
+      const panel = main.all("details").find((d) => d.textContent.startsWith("Investigations"));
+      out.panelFound = !!panel;
+      panel.open = true; panel.fire("toggle"); await settle();
+      out.reads = invReads().map((u) => u.split("?")[0]);
+      out.alertTableFirst = main.all("table")[0].textContent.includes("High CPU 1");
+      const table = panel.all("table")[0];
+      out.rows = table ? table.children[1].children.map((tr) => tr.textContent) : [];
+      const journal = table.children[1].children[0].all("details")[0];
+      journal.open = true; journal.fire("toggle"); await settle();
+      out.journal = journal.textContent;
+      out.journalRead = invReads().filter((u) => u.includes("request_id=")).length;
+      urls.length = 0; await renderAlerts(main); out.pollReads = invReads().length;
+      panel.open = false; urls.length = 0; await renderAlerts(main); out.closedPollReads = invReads().length;
+      out.writes = urls.filter((u) => !u.startsWith("/api/read") && !u.startsWith("/api/session") && !u.includes("/api/catalog"));
     },
     async mute() {
       alertsReply = { alerts: [row(1)], truncated: false };

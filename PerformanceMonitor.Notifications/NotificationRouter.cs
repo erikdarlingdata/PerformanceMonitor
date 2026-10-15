@@ -34,6 +34,10 @@ public enum RouteSource
     /// <summary>A scoped route whose <c>metric_match</c> is <c>*</c> (#5750): every metric for its server or tag.
     /// The lowest metric level; added last so the existing names keep their meaning.</summary>
     Wildcard,
+
+    /// <summary>A route whose <c>metric_match</c> is <c>Analysis: {category}</c> (#5632, ruling R5): every analysis
+    /// finding of that category. Between the exact level and the family level; added last because the names persist.</summary>
+    Category,
 }
 
 /// <summary>
@@ -151,7 +155,8 @@ public sealed record NotificationRouteDecision(
 ///
 /// <para><b>Resolution order, per channel (#5750 adds the scope tiers):</b> routes are tried by SCOPE TIER first -
 /// server-scoped, then tag-scoped, then fleet-wide - and inside a tier by METRIC LEVEL: a route matching the metric
-/// EXACTLY (its delivered name first, then the firing a recovery pairs with), then its FAMILY, then <c>*</c>.
+/// EXACTLY (its delivered name first, then the firing a recovery pairs with), then an analysis finding's CATEGORY
+/// (<c>Analysis: {category}</c>, #5632), then its FAMILY, then <c>*</c>.
 /// Inside the tag tier at one metric level the DEEPER tag (more ancestors) wins, then the lowest <c>route_id</c>;
 /// elsewhere the lowest <c>route_id</c> wins. After every route comes the parent row's default. A scoped route
 /// matches only when the firing's server id is in its expanded set, so a firing with no server id can only be
@@ -200,48 +205,7 @@ public static class NotificationRouter
         }
 
         var family = AlertFamily.Of(metricName);
-
-        /* One candidate list, ordered (scope tier, metric level, deeper tag first, route id) so "first matching
-           route wins, per channel" is a statement about the ordering and not about the order a reader happened to
-           return rows in. Disabled, orphaned, wrong-server and fleet-wide-`*` routes are dropped here, once, so no
-           level below can see one. The metric level is also the RouteSource the destination reports: the exact
-           level spans the delivered name then the firing a recovery pairs with (so "Server Restored" lands where
-           "Server Unreachable" did unless the operator named the recovery), and both report RouteSource.Exact. */
-        var candidates = new List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)>();
-        if (routes is not null)
-        {
-            foreach (var route in routes)
-            {
-                if (route is null || !route.CanMatch || !route.AppliesTo(serverId))
-                {
-                    continue;
-                }
-
-                if (route.MatchesName(metricName))
-                {
-                    candidates.Add((route, route.ScopeTier, 0, RouteSource.Exact));
-                }
-                else if (route.MatchesFiring(metricName))
-                {
-                    candidates.Add((route, route.ScopeTier, 1, RouteSource.Exact));
-                }
-                else if (route.MatchesFamily(metricName))
-                {
-                    candidates.Add((route, route.ScopeTier, 2, RouteSource.Family));
-                }
-                else if (route.IsWildcard)
-                {
-                    candidates.Add((route, route.ScopeTier, 3, RouteSource.Wildcard));
-                }
-            }
-        }
-
-        var ordered = candidates
-            .OrderBy(c => (int)c.Tier)
-            .ThenBy(c => c.Level)
-            .ThenByDescending(c => c.Tier == RouteScopeTier.Tag ? c.Route.ScopeTagDepth : 0)
-            .ThenBy(c => c.Route.RouteId)
-            .ToList();
+        var ordered = OrderedCandidates(metricName, routes, serverId);
 
         /* The winning route for the ledger's headline: the most specific one that matched at all, whether
            or not it ended up supplying every channel. Per-channel provenance sits on each destination. */
@@ -271,6 +235,94 @@ public static class NotificationRouter
         {
             RouteTier = routeTier,
         };
+    }
+
+    /// <summary>
+    /// The route whose agent channel answers for one firing (#5632), or null when no investigation is due. Reuses
+    /// <see cref="Resolve"/>'s order (scope tier, metric level, deeper tag, route id): the FIRST matching route whose
+    /// <see cref="NotificationRoute.AgentLevel"/> is set answers. Level <see cref="NotificationRoute.AgentLevelInvestigate"/>
+    /// returns that route (its limits, lease and expiry are the ones that apply); level
+    /// <see cref="NotificationRoute.AgentLevelOff"/> stops the lookup and returns null, so a specific route can turn
+    /// investigations off for metrics a broader route sends to agents. A route with no level is transparent, as a
+    /// route with no destination is for a channel. There is no parent default: no route, no investigation.
+    /// </summary>
+    public static NotificationRoute? ResolveAgent(
+        string metricName,
+        IReadOnlyList<NotificationRoute>? routes,
+        int? serverId = null)
+    {
+        if (metricName is null)
+        {
+            throw new ArgumentNullException(nameof(metricName));
+        }
+
+        foreach (var (route, _, _, _) in OrderedCandidates(metricName, routes, serverId))
+        {
+            if (route.AgentLevel is { } level)
+            {
+                return level == NotificationRoute.AgentLevelInvestigate ? route : null;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The matching routes for one firing, most specific first: the one order both <see cref="Resolve"/> and
+    /// <see cref="ResolveAgent"/> read. Ordered (scope tier, metric level, deeper tag first, route id) so "first
+    /// matching route wins" is a statement about the ordering and not about the order a reader happened to return
+    /// rows in. Disabled, orphaned, wrong-server and fleet-wide-<c>*</c> routes are dropped here, once, so no level
+    /// below can see one.
+    /// <para>The metric levels, each also the <see cref="RouteSource"/> a destination reports: 0 the delivered name and
+    /// 1 the firing a recovery pairs with (both <see cref="RouteSource.Exact"/>, so "Server Restored" lands where
+    /// "Server Unreachable" did unless the operator named the recovery); 2 the analysis finding's category,
+    /// <c>Analysis: {category}</c> (#5632, ruling R5: after the finding's own name with its hash, before the family);
+    /// 3 the family; 4 <c>*</c>.</para>
+    /// </summary>
+    private static List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)> OrderedCandidates(
+        string metricName,
+        IReadOnlyList<NotificationRoute>? routes,
+        int? serverId)
+    {
+        var candidates = new List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)>();
+        if (routes is not null)
+        {
+            foreach (var route in routes)
+            {
+                if (route is null || !route.CanMatch || !route.AppliesTo(serverId))
+                {
+                    continue;
+                }
+
+                if (route.MatchesName(metricName))
+                {
+                    candidates.Add((route, route.ScopeTier, 0, RouteSource.Exact));
+                }
+                else if (route.MatchesFiring(metricName))
+                {
+                    candidates.Add((route, route.ScopeTier, 1, RouteSource.Exact));
+                }
+                else if (route.MatchesCategory(metricName))
+                {
+                    candidates.Add((route, route.ScopeTier, 2, RouteSource.Category));
+                }
+                else if (route.MatchesFamily(metricName))
+                {
+                    candidates.Add((route, route.ScopeTier, 3, RouteSource.Family));
+                }
+                else if (route.IsWildcard)
+                {
+                    candidates.Add((route, route.ScopeTier, 4, RouteSource.Wildcard));
+                }
+            }
+        }
+
+        return candidates
+            .OrderBy(c => (int)c.Tier)
+            .ThenBy(c => c.Level)
+            .ThenByDescending(c => c.Tier == RouteScopeTier.Tag ? c.Route.ScopeTagDepth : 0)
+            .ThenBy(c => c.Route.RouteId)
+            .ToList();
     }
 
     /// <summary>Parses the string server id the send paths carry (Lite: the hash id; Darling: the registry id) into

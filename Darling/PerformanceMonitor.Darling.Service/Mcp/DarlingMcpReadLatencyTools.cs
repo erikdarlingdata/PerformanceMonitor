@@ -103,7 +103,7 @@ public sealed class DarlingMcpReadLatencyTools
         ReadAdmission? admission = null,
         CancellationToken cancellationToken = default)
     {
-        var hoursError = McpHelpers.ValidateHoursBack(hours);
+        var hoursError = DarlingReadWindow.ValidateHoursBack(hours);
         if (hoursError != null)
         {
             return hoursError;

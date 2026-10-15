@@ -377,6 +377,7 @@ public sealed class McpPayloadContractCensusTests
         @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync|LoadEnabledOrFaultAsync)\("
         + @"|\bResolveMuteScope\("
         + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateBaselineWindow|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
+        + @"|\bDarlingReadWindow\.(?:Validate|ValidateUncapped|ValidateHoursBack|ValidateDaysBack)\(" // #5814: McpHelpers' checks plus the window note
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
         + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
         + @"|\b(?:Darling|Mcp)EngineCapability\.NotCollectedStatusAsync\("
@@ -469,7 +470,7 @@ public sealed class McpPayloadContractCensusTests
                 {
                     fromResolver++;
                 }
-                else if (producer.Contains("McpHelpers.", StringComparison.Ordinal))
+                else if (producer.Contains("McpHelpers.", StringComparison.Ordinal) || producer.Contains("DarlingReadWindow.", StringComparison.Ordinal))
                 {
                     fromValidator++;
                 }
@@ -1042,13 +1043,15 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string File, string Tool)[] InlineLimitRefusals =
     [
         ("DarlingMcpFinOpsInventoryTools.cs", "get_finops_inventory"),
+        ("DarlingMcpInvestigationTools.cs", "list_investigation_requests"),
     ];
 
     private static readonly Regex InlineLimitRefusal = new(
         @"if \(limit < 1 \|\| limit > [\w.]+\)", RegexOptions.Compiled);
 
     private static readonly Regex SharedValidatorCall = new(
-        @"\bMcpHelpers\.(ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate)\(",
+        @"\bMcpHelpers\.(ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate)\("
+        + @"|\bDarlingReadWindow\.(Validate|ValidateUncapped|ValidateHoursBack|ValidateDaysBack)\(", // #5814: the shared checks plus the window note
         RegexOptions.Compiled);
 
     private static readonly Regex InlineDaysBackRefusal = new(

@@ -92,7 +92,11 @@ public sealed class DarlingRoutePayloadTests
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs").ReplaceLineEndings("\n");
 
-        Assert.Contains("routes = routes.Select(RoutePayload)", source, StringComparison.Ordinal);
+        /* #5632: the list passes each route's agent use, so the projection takes it as a second argument; the one-argument
+           form the write tools call must still delegate to that same body, never build a second one. */
+        Assert.Contains("routes = routes.Select(r => RoutePayload(r, agentUse))", source, StringComparison.Ordinal);
+        Assert.Contains("internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => RoutePayload(r, null);", source, StringComparison.Ordinal);
+        Assert.Equal(2, source.Split("internal static object RoutePayload(", StringSplitOptions.None).Length - 1);
         Assert.Equal(1, source.Split("scope_unreadable = ", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("exact_metric", source,StringComparison.Ordinal);
     }

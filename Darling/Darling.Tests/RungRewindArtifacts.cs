@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -127,6 +127,29 @@ ALTER TABLE IF EXISTS collect.read_latency
     DROP COLUMN IF EXISTS distinct_callers;
 ALTER TABLE IF EXISTS collect.slow_reads
     DROP COLUMN IF EXISTS caller;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V184 (#5632): the investigation tables (the probe's newest sentinel is the request table) and the agent columns of
+    /// <c>config.config_notification_routes</c>. Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV184SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+DROP TABLE IF EXISTS config.investigation_reports;
+DROP TABLE IF EXISTS config.investigation_request_alerts;
+DROP TABLE IF EXISTS config.investigation_requests;
+DROP TABLE IF EXISTS config.investigation_journal;
+DROP TABLE IF EXISTS config.investigation_notes;
+DROP TABLE IF EXISTS config.agent_environment_profiles;
+ALTER TABLE IF EXISTS config.config_notification_routes
+    DROP CONSTRAINT IF EXISTS ck_config_notification_routes_agent,
+    DROP COLUMN IF EXISTS agent_level,
+    DROP COLUMN IF EXISTS agent_max_per_hour,
+    DROP COLUMN IF EXISTS agent_max_per_day,
+    DROP COLUMN IF EXISTS agent_lease_minutes,
+    DROP COLUMN IF EXISTS agent_expiry_minutes;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

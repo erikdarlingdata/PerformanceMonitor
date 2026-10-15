@@ -85,7 +85,7 @@ public sealed class DarlingMcpDataTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 0.62 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_cpu_utilization"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_cpu_utilization"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -122,7 +122,7 @@ public sealed class DarlingMcpDataTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
@@ -197,7 +197,7 @@ public sealed class DarlingMcpDataTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -263,7 +263,7 @@ public sealed class DarlingMcpDataTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 0.70 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_wait_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_wait_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -558,7 +558,7 @@ public sealed class DarlingMcpDataTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 0.90 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_tempdb_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_tempdb_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -694,7 +694,7 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.Refusal("order_by", $"order_by must be {TopRankings.Accepted} (got '{order_by}').");
         }
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
@@ -1088,7 +1088,7 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.Refusal("order_by", $"order_by must be {TopRankings.Accepted} (got '{order_by}').");
         }
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
@@ -1337,7 +1337,7 @@ public sealed class DarlingMcpDataTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
@@ -1682,8 +1682,12 @@ public sealed class DarlingMcpDataTools
                GetCollectionHealthMemoizedAsync), and that is why this is its own memo rather than a filter over
                that one. */
             var nowUtc = DateTime.UtcNow;
+            /* #5814: the window is fixed in code, so the tool notes it; the slow-read row and the read-latency band
+               (ReadWindowBand.FixedHours) both carry these 7 days. */
+            var windowStartUtc = nowUtc.AddHours(-ReadWindowBand.CollectionHealthHours);
+            ReadScope.NoteWindow(windowStartUtc, nowUtc);
             var (rows, collectionHealthAgeSeconds) = await DarlingDataReader.GetCollectionHealthMemoizedAsync(
-                postgres, resolved.ServerId, nowUtc.AddDays(-7), nowUtc, cancellationToken);
+                postgres, resolved.ServerId, windowStartUtc, nowUtc, cancellationToken);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No collection health data available.");
 
@@ -2659,7 +2663,7 @@ public sealed class DarlingMcpDataTools
            than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
            ends before it starts is a caller error, and flipping the sign answered a different question with
            nothing to say so. Refused, like every other unusable parameter here. */
-        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
+        var anchorError = DarlingReadWindow.ValidateUncapped(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
@@ -3002,7 +3006,7 @@ public sealed class DarlingMcpDataTools
             status, CollectionLogStatuses, "status");
         if (invalidStatus != null) return invalidStatus;
 
-        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
+        var anchorError = DarlingReadWindow.ValidateUncapped(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
@@ -3154,7 +3158,7 @@ public sealed class DarlingMcpDataTools
            than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
            ends before it starts is a caller error, and flipping the sign answered a different question with
            nothing to say so. Refused, like every other unusable parameter here. */
-        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
+        var anchorError = DarlingReadWindow.ValidateUncapped(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try
@@ -3253,7 +3257,7 @@ public sealed class DarlingMcpDataTools
            than the default. What they no longer do is Math.Abs() a negative span (#3541 A13): a window that
            ends before it starts is a caller error, and flipping the sign answered a different question with
            nothing to say so. Refused, like every other unusable parameter here. */
-        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
+        var anchorError = DarlingReadWindow.ValidateUncapped(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
         try

@@ -78,6 +78,7 @@ export const ROUTE_COLUMNS = [
   { key: "applies_to", label: "Applies to" },
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
+  { key: "agent", label: "Agent" },
   { key: "smtp_recipients", label: "Email to", wrap: true },
   { key: "modified_at_utc", label: "Modified", format: "time" },
 ];
@@ -255,6 +256,15 @@ export function routeStatusText(r) {
   return r.enabled === false ? ROUTE_STATUS_DISABLED : ROUTE_STATUS_OK;
 }
 
+/** The Agent column (#5632): whether a matching alert opens an investigation request for an agent. agent_level null
+    inherits from a broader route, 0 is off (and stops the lookup), 1 investigates within the route's hourly and daily
+    limits. A read with no agent_level (Lite's shape, or an older service) reads as Inherit. */
+export function routeAgentText(r) {
+  if (!r || r.agent_level === null || r.agent_level === undefined) return "Inherit";
+  if (r.agent_level === 1) return `Investigate (${r.agent_max_per_hour}/h, ${r.agent_max_per_day}/day)`;
+  return "Off";
+}
+
 /** Route rows: only the columns above, with the channel names joined. A destination field is never copied. */
 export function routeRows(data) {
   const routes = data && Array.isArray(data.routes) ? data.routes : [];
@@ -267,6 +277,7 @@ export function routeRows(data) {
     applies_to: routeScopeText(r),
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
+    agent: routeAgentText(r),
     smtp_recipients: Array.isArray(r.smtp_recipients) ? r.smtp_recipients.join(", ") : r.smtp_recipients ?? null,
     modified_at_utc: r.modified_at_utc,
   }));
