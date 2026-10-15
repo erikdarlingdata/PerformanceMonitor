@@ -182,10 +182,11 @@ public static class StoreSelfMetrics
     /// <see cref="TimescaleInventoriedPredicateSql"/> documents, identical on 2.28.1 and 2.30.1). The
     /// chunks come from the public <c>chunks</c> view and the relations from a name join to
     /// <c>pg_class</c>, because the chunk catalog was rebuilt in 2.29.0 (#3918) and a join on its columns
-    /// fails on one side of it. The pre- and post-compression bytes read
-    /// <c>_timescaledb_internal.compressed_chunk_stats</c>, the view <c>chunk_compression_stats</c> itself
-    /// reads (same name and columns on 2.28.1 and 2.30.1): it holds stored catalog sizes and makes no file
-    /// call, and it has zero rows for a hypertable whose compression is off, as the function had.</para>
+    /// fails on one side of it. The pre- and post-compression bytes still come from the public
+    /// <c>chunk_compression_stats</c>, once per hypertable: it reads stored catalog sizes and makes no file
+    /// call (0.1 s across 72 hypertables and 1,904 chunks on store A), and naming no internal object keeps the
+    /// statement from failing after a TimescaleDB upgrade renames one. It has zero rows for a hypertable
+    /// whose compression is off, so the sums stay NULL there.</para>
     ///
     /// <para><b>What stays exact, and what could not be made cheaper.</b> Totals equal
     /// <c>hypertable_detailed_size</c> byte for byte (the equality test in StoreSelfMetricsTests). An
@@ -233,12 +234,10 @@ sizes AS (
 ),
 compression AS (
     SELECT t.hypertable_schema, t.hypertable_name,
-           sum(s.uncompressed_total_size)::bigint AS before_bytes,
-           sum(s.compressed_total_size)::bigint AS after_bytes
+           sum(s.before_compression_total_bytes)::bigint AS before_bytes,
+           sum(s.after_compression_total_bytes)::bigint AS after_bytes
     FROM targets t
-    JOIN _timescaledb_internal.compressed_chunk_stats s
-        ON  s.hypertable_schema = t.hypertable_schema
-        AND s.hypertable_name = t.hypertable_name
+    CROSS JOIN LATERAL chunk_compression_stats(format('%I.%I', t.hypertable_schema, t.hypertable_name)::regclass) s
     GROUP BY t.hypertable_schema, t.hypertable_name
 )";
 
