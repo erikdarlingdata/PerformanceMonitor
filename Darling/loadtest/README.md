@@ -92,9 +92,9 @@ Keep every monitored server enabled. A disabled server drops out of the reads an
 
 The copy gets no new Query Store rows, because its production servers cannot be reached. The reads of the test end at the newest Query Store row of the server (see "Measure at each N"), so their windows stay full. But the service still purges rows by their age each day. You cannot change the purge age: it is fixed in the code, at 10 days for `collect.query_store_interval_wide` and 15 days for `collect.query_store_interval_latest`. No setting raises it. So:
 
-- The 7-day reads stay complete for 2 days after the newest row of the copy. The 1-day reads stay complete for 8 days.
+- The 7-day reads stay complete for 3 days after the newest row of the copy. The 1-day reads stay complete for 9 days.
 - The Reads step prints a `WARNING` line for each window that starts before the purge edge. When it does, the times of that window are too fast. Restore a newer copy, and start the sequence of N again.
-- Plan the whole sequence of N to finish within 2 days of the backup, or restore a new copy in the middle of it.
+- Plan the whole sequence of N to finish within 3 days of the backup, or restore a new copy in the middle of it.
 
 ### Inflate to N
 

@@ -200,13 +200,23 @@ WHERE a.t IS NOT NULL;
         $asOf = $anchorParts[0]
         $anchorTime = [datetime]::ParseExact($anchorParts[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
         Write-Host "Every window ends at as_of = $asOf, one second after the newest Query Store row of $ServerName."
-        # The service purges wide rows older than 10 days (QueryStoreIntervalPartitions.WideHorizonDays), and the copy
-        # gets no new ones, so a window that starts before that edge has lost rows to the purge.
-        $purgeEdge = (Get-Date).ToUniversalTime().AddDays(-9)
-        foreach ($hours in 24, 168) {
-            if ($anchorTime.AddHours(-$hours) -lt $purgeEdge) {
-                Write-Host "WARNING: the ${hours}h window starts before the purge edge ($($purgeEdge.ToString('yyyy-MM-dd HH:mm')) UTC). The service has removed rows from it, so its reads are faster than on a whole window. Restore a newer copy."
+        # The service purges wide rows older than QueryStoreIntervalPartitions.WideHorizonDays, and the copy gets no
+        # new ones, so a window that starts before that edge has lost rows to the purge. The horizon is read from the
+        # constant itself, so this edge cannot drift from the service's (#5809 moved it from 9 to 10 days).
+        $partitionsSource = Join-Path $here '..\PerformanceMonitor.Darling.Storage\QueryStoreIntervalPartitions.cs'
+        $horizonMatch = if (Test-Path -LiteralPath $partitionsSource) {
+            [regex]::Match((Get-Content -LiteralPath $partitionsSource -Raw), 'public const int WideHorizonDays = (\d+);')
+        }
+        if ($horizonMatch -and $horizonMatch.Success) {
+            $purgeEdge = (Get-Date).ToUniversalTime().AddDays(-[int]$horizonMatch.Groups[1].Value)
+            foreach ($hours in 24, 168) {
+                if ($anchorTime.AddHours(-$hours) -lt $purgeEdge) {
+                    Write-Host "WARNING: the ${hours}h window starts before the purge edge ($($purgeEdge.ToString('yyyy-MM-dd HH:mm')) UTC). The service has removed rows from it, so its reads are faster than on a whole window. Restore a newer copy."
+                }
             }
+        }
+        else {
+            Write-Host "WARNING: WideHorizonDays was not found in $partitionsSource, so the purge-edge check is skipped. Run this script from its place in the repository."
         }
     }
     else {
