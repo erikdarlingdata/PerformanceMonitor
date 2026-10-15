@@ -3379,8 +3379,15 @@ LIMIT 1";
                         EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
+        /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
+           unrecognized value runs at the strictest level, as the MCP host does (it logs that once, so this does not). */
         var investigationDispatcher = new InvestigationDispatcher(
-            investigationStore, alertSettings, _logger, PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared);
+            investigationStore, alertSettings, _logger,
+            McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail dataDetail)
+                ? dataDetail
+                : McpDataDetail.MetadataOnly,
+            /* #5822: the long-poll's wake-up, fired when a request opens. */
+            openSignal: PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared);
 
         /* The shared record-and-send deliverer — hoisted so BOTH the shared alert engine and the Stage 4
            service self-alerts (DarlingSelfAlertEvaluator) fire through the SAME instance: identical

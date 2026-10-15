@@ -1349,6 +1349,25 @@ CREATE TABLE IF NOT EXISTS collect.collection_log_hourly
 CREATE INDEX IF NOT EXISTS idx_collection_log_hourly_hour ON collect.collection_log_hourly (hour_start);";
 
     /// <summary>
+    /// V188 (#5821): <c>config.investigation_request_alerts</c> gains the five values the brief's alerts section reads from
+    /// the alert's history row: <c>current_value</c>, <c>threshold_value</c>, <c>muted</c>, <c>detail_text</c> and
+    /// <c>context_json</c>. An alert with an agent route now opens or joins its request before its page is sent, so the
+    /// generic webhook can name the request, and its history row is written after the send: an agent that claims while the
+    /// page is in flight would compose a brief with no history row to read. The link rows carry the values instead.
+    ///
+    /// <para>Every column is nullable with no default, so each <c>ADD COLUMN</c> is catalog-only and rewrites nothing; a link
+    /// row written before this rung keeps NULLs and its brief reads the history row as before. IF NOT EXISTS, so a second run
+    /// does nothing. No GRANT: the table's grants are table-level. <b>No Lite twin:</b> Lite has no investigation store.</para>
+    /// </summary>
+    private const string V188Sql = @"
+ALTER TABLE config.investigation_request_alerts
+    ADD COLUMN IF NOT EXISTS current_value double precision,
+    ADD COLUMN IF NOT EXISTS threshold_value double precision,
+    ADD COLUMN IF NOT EXISTS muted boolean,
+    ADD COLUMN IF NOT EXISTS detail_text text,
+    ADD COLUMN IF NOT EXISTS context_json text;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1647,6 +1666,7 @@ $rung$;";
         new Migration(185, "plan-regression-partial-days", V185Sql),
         new Migration(186, "collection-log-hourly", V186Sql),
         new Migration(187, "alert-resolution-delivery", V187Sql),
+        new Migration(188, "investigation-alert-facts", V188Sql),
     };
 
     /// <summary>

@@ -46,19 +46,26 @@ WHERE r.request_id = $1";
 
     /* The first alert and the latest three. A request holds a row per alert and per dedup key, so the alerts are made
        distinct first. config_alert_log.alert_time is naive UTC; the link allows five seconds either side and takes the
-       nearest row, so a stamp taken a moment apart from the request row still finds its alert. */
+       nearest row, so a stamp taken a moment apart from the request row still finds its alert.
+       #5821: an alert that opens or joins before its page is sent writes its link rows before its history row, so an agent
+       that claims while the page is in flight finds no history row yet. The link rows carry the history row's values (V188)
+       and are read first; the history row answers only for what the link does not hold (send_error, and every value of a
+       link written before V188). */
     internal const string AlertsSql = @"
 WITH a AS (
-    SELECT DISTINCT alert_time, server_id, metric_name
+    SELECT DISTINCT ON (alert_time, server_id, metric_name)
+           alert_time, server_id, metric_name, current_value, threshold_value, muted, detail_text, context_json
     FROM config.investigation_request_alerts
     WHERE request_id = $1
+    ORDER BY alert_time, server_id, metric_name, request_alert_id
 ), picked AS (
-    (SELECT alert_time, server_id, metric_name FROM a ORDER BY alert_time, metric_name LIMIT 1)
+    (SELECT * FROM a ORDER BY alert_time, metric_name LIMIT 1)
     UNION
-    (SELECT alert_time, server_id, metric_name FROM a ORDER BY alert_time DESC, metric_name LIMIT 3)
+    (SELECT * FROM a ORDER BY alert_time DESC, metric_name LIMIT 3)
 )
-SELECT p.alert_time, p.metric_name, l.current_value, l.threshold_value, coalesce(l.muted, false), l.detail_text,
-       l.send_error, l.context_json
+SELECT p.alert_time, p.metric_name, coalesce(p.current_value, l.current_value), coalesce(p.threshold_value, l.threshold_value),
+       coalesce(p.muted, l.muted, false), coalesce(p.detail_text, l.detail_text), l.send_error,
+       coalesce(p.context_json, l.context_json)
 FROM picked AS p
 LEFT JOIN LATERAL (
     SELECT cal.current_value, cal.threshold_value, cal.muted, cal.detail_text, cal.send_error, cal.context_json

@@ -40,6 +40,7 @@ internal sealed class CapturingWebhookEndpoint : IDisposable
     private readonly int _statusCode;
     private readonly string _responseBody;
     private readonly int[]? _statusSequence;
+    private readonly Func<string, Task>? _onRequest;
 
     /// <param name="statusCode">The status every response carries. 200 by default; a test that needs a channel
     /// to fail (#4750) passes a 4xx or 5xx, which the sender reports as an error string.</param>
@@ -48,11 +49,16 @@ internal sealed class CapturingWebhookEndpoint : IDisposable
     /// <param name="statusSequence">The status of each response in the order the requests arrive, the last one
     /// repeating once they run out, in place of <paramref name="statusCode"/>. A test that needs some sends of
     /// one alert to fail and others to deliver (#4822) passes, say, <c>{ 500, 200 }</c>.</param>
-    public CapturingWebhookEndpoint(int statusCode = 200, string responseBody = "", int[]? statusSequence = null)
+    /// <param name="onRequest">Run with each body after it is captured and BEFORE its response is written, so the sender is
+    /// still waiting on the post: a test that plays a runner acting while the page is in flight (#5821) does its work here.
+    /// It must not throw.</param>
+    public CapturingWebhookEndpoint(int statusCode = 200, string responseBody = "", int[]? statusSequence = null,
+        Func<string, Task>? onRequest = null)
     {
         _statusCode = statusCode;
         _responseBody = responseBody;
         _statusSequence = statusSequence;
+        _onRequest = onRequest;
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start();
         Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/hook";
@@ -76,6 +82,10 @@ internal sealed class CapturingWebhookEndpoint : IDisposable
                 using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
                 using var stream = client.GetStream();
                 _bodies.Add(await ReadRequestBodyAsync(stream));
+                if (_onRequest is not null)
+                {
+                    await _onRequest(_bodies[^1]);
+                }
 
                 var statusCode = _statusSequence is { Length: > 0 }
                     ? _statusSequence[Math.Min(_bodies.Count, _statusSequence.Length) - 1]

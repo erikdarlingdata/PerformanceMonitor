@@ -2335,7 +2335,8 @@ public sealed class WebhooksConfig
     [JsonPropertyName("genericHeaders")]
     public string GenericHeaders { get; set; } = "";
 
-    /// <summary>The JSON body, with <c>{{metric}}</c>/<c>{{server}}</c>/… placeholders; empty uses the shared default.</summary>
+    /// <summary>The JSON body, with <c>{{metric}}</c>/<c>{{server}}</c>/… placeholders; empty uses the shared default.
+    /// <c>{{investigation_json}}</c> (#5821) is the investigation request the alert opened or joined, empty when it opened none.</summary>
     [JsonPropertyName("genericBodyTemplate")]
     public string GenericBodyTemplate { get; set; } = "";
 

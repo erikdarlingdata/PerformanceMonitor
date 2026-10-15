@@ -9,12 +9,14 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -159,9 +161,65 @@ FROM config.investigation_requests AS r", ct));
         });
     }
 
+    /// <summary>
+    /// #5821 review round 1: the request id leaves in the generic webhook before the alert's history row is written, and a
+    /// runner may claim while the POST is in flight. The brief composed then reads its alerts section through
+    /// <see cref="PgInvestigationBriefSourceReader"/>; it must carry the alert's value, threshold, detail text and context from
+    /// the link rows, though the history row does not exist yet. Before V188 the four were null there.
+    /// </summary>
+    [Fact]
+    public async Task ARunnerThatReadsTheBriefDuringThePost_FindsTheAlertsValues_BeforeItsHistoryRowExists()
+    {
+        string? storeString = null;
+        InvestigationBriefSources? during = null;
+        long rowsDuring = -1;
+        Exception? failure = null;
+        using var generic = new CapturingWebhookEndpoint(onRequest: async body =>
+        {
+            try
+            {
+                var id = Guid.Parse(JsonDocument.Parse(body).RootElement
+                    .GetProperty("investigation").GetProperty("request_id").GetString()!);
+                await using var source = NpgsqlDataSource.Create(storeString!);
+                during = await new PgInvestigationBriefSourceReader(source).ReadAsync(id);
+                await using var command = source.CreateCommand("SELECT count(*) FROM config_alert_log");
+                rowsDuring = (long)(await command.ExecuteScalarAsync())!;
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+        });
+
+        await RunAsync(AlertNotificationMode.Summary, async (h, ct) =>
+        {
+            await h.Deliverer.DeliverAsync(Outcome("Deadlocks Detected", incidents: 1), ct);
+
+            Assert.Null(failure);
+            Assert.Single(generic.Bodies);
+            /* The window is real: the post was answered before the history row was written. */
+            Assert.Equal(0, rowsDuring);
+            var alert = Assert.Single(during!.Alerts);
+            Assert.Equal("Deadlocks Detected", alert.MetricName);
+            Assert.Equal(3, alert.CurrentValue);
+            Assert.Equal(1, alert.ThresholdValue);
+            Assert.False(alert.Muted);
+            Assert.Contains("detail", alert.DetailText, StringComparison.Ordinal);
+            Assert.NotEmpty(alert.Context);
+            Assert.Equal("1", await ScalarAsync(h.Connection, "SELECT count(*) FROM config_alert_log", ct));
+            Assert.Equal("0", await ScalarAsync(h.Connection, UnlinkedSql, ct));
+        }, (config, connectionString) =>
+        {
+            storeString = connectionString;
+            config.Webhooks.GenericUrl = generic.Url;
+            config.Webhooks.GenericBodyTemplate = "{\"investigation\": {{investigation_json}}}";
+        });
+    }
+
     private static (int, int) ToPair(InvestigationSweepResult result) => (result.LeasesLapsed, result.Expired);
 
-    private async Task RunAsync(AlertNotificationMode mode, Func<Harness, CancellationToken, Task> body)
+    private async Task RunAsync(
+        AlertNotificationMode mode, Func<Harness, CancellationToken, Task> body, Action<DarlingConfig, string>? configure = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -181,6 +239,7 @@ FROM config.investigation_requests AS r", ct));
         var config = new DarlingConfig();
         config.Alerts.DeliveryMode = mode;
         config.NotificationRoutes = new[] { AgentRoute(1, AlertFamily.Performance), AgentRoute(2, AlertFamily.Reports) };
+        configure?.Invoke(config, storeString);
         var settings = new DarlingAlertSettings(config);
         var history = new PgAlertHistoryStore(historySource);
         var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);

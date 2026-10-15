@@ -782,6 +782,10 @@
                                     <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
                                     <Run FontFamily="Consolas" Text="{}{{context_json}} {{incidents_json}} {{dedup_key}} {{resource_name}} {{database}} {{triage_url}}"/>
                                 </TextBlock>
+                                <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                                    <Run FontFamily="Consolas" Text="{}{{investigation_json}}"/>
+                                    <Run Text=" : the investigation request the alert opened or joined, as one JSON object (unquoted it is the object, inside quotes its escaped text); empty when the alert opened none (no agent level on its route, muted, a report or a recovery). Once an agent has claimed the request it carries the brief, masked at mcp.dataDetail: at full, the shipped default, that is the brief as stored (findings, approved notes, the environment profile, earlier agents' root causes, the alerts' details), sent to this URL."/>
+                                </TextBlock>
                                 <TextBlock Margin="20,6,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run FontWeight="SemiBold" Text="Example — re-run a GitHub Actions workflow when an alert fires:"/>
                                     <LineBreak/>

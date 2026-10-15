@@ -180,6 +180,7 @@ public sealed class NotificationRouteScopeRungTests
         try
         {
             /* A store one rung behind: V181's columns gone, a legacy fleet-wide row and a legacy unscoped '*' row stored. */
+            await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);

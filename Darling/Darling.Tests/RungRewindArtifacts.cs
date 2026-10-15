@@ -197,4 +197,21 @@ ALTER TABLE IF EXISTS config.config_alert_log
     DROP COLUMN IF EXISTS resolution_outcome;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    /// <summary>
+    /// V188 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
+    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
+    /// below V188 reads every alert value from the history row, as it did before.
+    /// </summary>
+    internal static async Task DropV188SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS config.investigation_request_alerts
+    DROP COLUMN IF EXISTS current_value,
+    DROP COLUMN IF EXISTS threshold_value,
+    DROP COLUMN IF EXISTS muted,
+    DROP COLUMN IF EXISTS detail_text,
+    DROP COLUMN IF EXISTS context_json;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
 }

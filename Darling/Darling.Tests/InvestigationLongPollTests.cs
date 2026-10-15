@@ -98,7 +98,7 @@ public sealed class InvestigationLongPollTests
                     AgentRoute(CpuRoute, "High CPU"),
                 ],
             };
-            Dispatcher = new InvestigationDispatcher(Store.OpenOrJoinAsync, new DarlingAlertSettings(config), NullLogger.Instance, Signal);
+            Dispatcher = new InvestigationDispatcher(Store.OpenOrJoinAsync, new DarlingAlertSettings(config), NullLogger.Instance, openSignal: Signal);
         }
 
         public Task<string> WaitAsync(int[]? routes, string? after, int timeoutSeconds, CancellationToken cancellationToken = default) =>
