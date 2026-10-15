@@ -107,7 +107,7 @@ public sealed class EmailSendCore
     /// </param>
     /// <param name="investigationJson">
     /// #5821: the investigation request this alert opened or joined, already composed and masked, for the generic
-    /// webhook's <c>{{investigation_json}}</c> token. Null (Lite, and every alert that opened none) renders it empty.
+    /// webhook's <c>{{investigation_json}}</c> token, from Darling and Lite alike (#5820). Null (every alert that opened none) renders it empty.
     /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
