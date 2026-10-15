@@ -206,14 +206,21 @@ public static class QueryStorePlanXmlState
     /// is <paramref name="plansMeasured"/>, the rows that actually carried XML: dividing real bytes
     /// by a NULL-inflated count would understate the average, which INFLATES the next cap — the
     /// unsafe direction the whole estimator errs away from.</para>
+    ///
+    /// <para><paramref name="timeBound"/> (#5813 review): the pass's time budget ended it with ids still owed. That
+    /// is a backlog whatever it shipped, and the common cut ships nothing (the statement decompresses every requested
+    /// plan before the first row), so the ship count cannot say it: an empty cut read as a drain would clear catch-up
+    /// and release the <see cref="FirstContactAvgPlanBytes"/> floor on the very database that just proved it cannot
+    /// finish.</para>
     /// </summary>
     public static PlanSizeEstimate Learn(
-        PlanSizeEstimate previous, long bytesShipped, int plansShipped, int plansMeasured, int candidateWindow, long budgetBytes)
+        PlanSizeEstimate previous, long bytesShipped, int plansShipped, int plansMeasured, int candidateWindow, long budgetBytes,
+        bool timeBound = false)
     {
-        // A pass that hit a bound (clamped) proves a backlog remains — catch-up. A pass that ships nothing, or
-        // fewer than its cap and under budget, proves caught-up — a DRAIN, and teaches no size (previous
-        // average stands).
-        var catchUp = plansShipped > 0 && (plansShipped >= candidateWindow || bytesShipped >= budgetBytes);
+        // A pass that hit a bound (clamped) or that the time budget cut proves a backlog remains — catch-up. A pass
+        // that ships nothing, or fewer than its cap and under budget, uncut, proves caught-up — a DRAIN, and teaches
+        // no size (previous average stands).
+        var catchUp = timeBound || (plansShipped > 0 && (plansShipped >= candidateWindow || bytesShipped >= budgetBytes));
         var avg = plansShipped > 0
             ? ObservedAvgPlanBytes(bytesShipped, plansMeasured) ?? previous.AvgBytes
             : previous.AvgBytes;

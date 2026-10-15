@@ -36,7 +36,8 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// Supplies the primary reader of the server-wide (not per-database) single-query path instead of a live
-    /// connection (#5320, the twin of <see cref="AzureDatabaseReaderOverrideForTests"/>). Null in production.
+    /// connection (#5320, the twin of <see cref="AzureDatabaseReaderOverrideForTests"/>), and the enumeration and
+    /// per-item readers of the enumerated arm on the same connection (#5813). Null in production.
     /// </summary>
     internal Func<CollectorQuery, DbDataReader>? ServerReaderOverrideForTests { get; set; }
 
@@ -355,6 +356,14 @@ public partial class RemoteCollectorService
                    iteration so a fault cannot leak this database's staged cursor into a sibling's landing.
                    It lands below, after this database's flush, and nowhere else. Mirrors Darling. */
                 context.DropStagedItemState();
+
+                /* #5813 review: hoisted so the catch arms can fold a failed database's SQL slice into sqlMs, as the
+                   enumerated driver's finally does for every item. The fan-out counts that database (a timed-out one
+                   at the budget's milliseconds), so leaving its SQL time out would put the item count and
+                   sql_duration_ms on different denominators, the #2472 shape. Null means the fault came before the
+                   timed region; sliceFolded means the straight path already added it. Mirrors Darling. */
+                Stopwatch? sqlSlice = null;
+                var sliceFolded = false;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -473,15 +482,36 @@ public partial class RemoteCollectorService
                         }
                     }
 
-                    var sqlSlice = Stopwatch.StartNew();
+                    sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
                     /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
                        budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
                        write already in flight would trade a slow cycle for a partially-written one. */
-                    using (var dbRead = await OpenAzureDatabaseReadAsync(server, databaseName, dbPlan, commandTimeout, dbToken))
+                    /* #5813: the per-database budget on the Query Store runtime-stats read, the same as Darling's (null
+                       for every other collector). Here it also covers the per-database connect, which this host
+                       opens inside the read. Linked to dbToken, so the #2150 budget and shutdown win their own cases. */
+                    using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, dbToken);
+                    var readToken = readBudget?.Token ?? dbToken;
+                    AzureDatabaseRead? openedRead = null;
+                    try
+                    {
+                        openedRead = await OpenAzureDatabaseReadAsync(server, databaseName, dbPlan, commandTimeout, readToken);
+                        batch = await definition.ReadAsync(openedRead.Reader, context, readToken);
+                    }
+                    catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, dbToken))
+                    {
+                        openedRead?.Dispose();
+                        throw new QueryStoreReadTimeoutException(databaseName, QueryStoreReadBudgetSpan, ex);
+                    }
+                    catch
+                    {
+                        openedRead?.Dispose();
+                        throw;
+                    }
+
+                    using (var dbRead = openedRead!)
                     {
                         var dbReader = dbRead.Reader;
-                        batch = await definition.ReadAsync(dbReader, context, dbToken);
 
                         /* #1875: the payload path's probe-failure contract, on the path that used to
                            ignore it. blocked_process_report is the declaring collector that also runs per
@@ -500,6 +530,7 @@ public partial class RemoteCollectorService
                        a ratio against (#2472). */
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
+                    sliceFolded = true;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
                     long dbStorageMs = 0;
@@ -601,6 +632,7 @@ public partial class RemoteCollectorService
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' database [{Database}] {Message}",
                         definition.Name, server.DisplayName, databaseName, budgetFailure.Message);
+                    FoldFailedSlice(sqlSlice, sliceFolded, ref sqlMs);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
@@ -620,7 +652,14 @@ public partial class RemoteCollectorService
                         OnQueryStoreItemFailed(serverId, databaseName);
                     }
 
-                    _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+                    /* #5813: a Query Store read that ran out of its budget is the run's slowest item under its marked
+                       name and warns once per database per UTC day; anything else is the routine skip. */
+                    if (!NoteQueryStoreReadTimeout(server, serverId, ex, fanout))
+                    {
+                        _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+                    }
+
+                    FoldFailedSlice(sqlSlice, sliceFolded, ref sqlMs);
                 }
             }
 
@@ -647,6 +686,11 @@ public partial class RemoteCollectorService
             {
                 _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
                     definition.Name, attempted, server.DisplayName);
+
+                /* #5813: the fan-out onto this server's telemetry slot, which RunCollectorAsync's ERROR arm writes, so a
+                   one-database server whose Query Store read timed out names that database in slowest_item. Darling
+                   carries it on the exception (CollectorFaultFanout); Lite's row already reads this slot. */
+                telemetry.Fanout = fanout.Result;
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
             }
         }
@@ -668,7 +712,9 @@ public partial class RemoteCollectorService
                 /* Enumeration always uses the host default timeout, matching the originals —
                    the per-collector override applies only to the heavy per-item commands. */
                 using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
-                using (var enumerationReader = await enumerationCommand.ExecuteReaderAsync(cancellationToken))
+                using (var enumerationReader = ServerReaderOverrideForTests is { } enumerationOverride
+                    ? enumerationOverride(enumerationPlan)
+                    : await enumerationCommand.ExecuteReaderAsync(cancellationToken))
                 {
                     /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
                        enumeration could not probe. Both hosts route through it so the item read, the
@@ -825,9 +871,25 @@ public partial class RemoteCollectorService
                     {
                         var batch = new List<TRow>();
                         context.DropStagedItemState();
-                        using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
-                        using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
-                        await definition.ReadItemAsync(item, itemReader, batch, context, ct);
+                        var itemPlan = definition.BuildPerItemQuery(item, context);
+                        using var itemCommand = CreateCollectorCommand(itemPlan, sqlConnection, itemTimeout);
+                        /* #5813: the per-database budget on this one statement, open through drain (null for every
+                           collector but query_store). A timed-out read ships nothing, so this database's DuckDB
+                           watermark stays and the next pass reads from it; the driver moves on to the next database. */
+                        using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, ct);
+                        var readToken = readBudget?.Token ?? ct;
+                        try
+                        {
+                            using var itemReader = ServerReaderOverrideForTests is { } itemOverride
+                                ? itemOverride(itemPlan)
+                                : await itemCommand.ExecuteReaderAsync(readToken);
+                            await definition.ReadItemAsync(item, itemReader, batch, context, readToken);
+                        }
+                        catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, ct))
+                        {
+                            throw new QueryStoreReadTimeoutException(item, QueryStoreReadBudgetSpan, ex);
+                        }
+
                         return batch;
                     },
                     writeBatch: (batch, ct) => Task.FromResult(WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context)),
@@ -901,6 +963,13 @@ public partial class RemoteCollectorService
                             OnQueryStoreItemFailed(serverId, item);
                         }
 
+                        /* #5813: a read that ran out of its budget is the run's slowest item under its plain name,
+                           and warns once per database per UTC day rather than on every pass. */
+                        if (NoteQueryStoreReadTimeout(server, serverId, ex, fanout))
+                        {
+                            return;
+                        }
+
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
                             definition.Name, item, server.DisplayName, ex.Message);
                     },
@@ -929,6 +998,7 @@ public partial class RemoteCollectorService
                 {
                     _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
                         definition.Name, driverResult.Attempted, server.DisplayName);
+                    telemetry.Fanout = fanout.Result; // #5813, as the Azure loop's rethrow
                     System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(driverResult.FirstError!).Throw();
                 }
 
@@ -1111,6 +1181,22 @@ public partial class RemoteCollectorService
             _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureOverflowLogTemplate,
                 definition.Name, server.DisplayName, probeFailures.Count, probeFailures.Count - shown, shown);
         }
+    }
+
+    /// <summary>
+    /// #5813 review: adds a failed database's SQL slice to the run's blended SQL time, on the Azure per-database loop,
+    /// when the fault came before the straight path folded it. Darling's <c>FoldFailedSlice</c> twin. Null means the
+    /// fault came before the timed region began: nothing to add.
+    /// </summary>
+    private static void FoldFailedSlice(Stopwatch? sqlSlice, bool sliceFolded, ref long sqlMs)
+    {
+        if (sqlSlice is null || sliceFolded)
+        {
+            return;
+        }
+
+        sqlSlice.Stop();
+        sqlMs += sqlSlice.ElapsedMilliseconds;
     }
 
     /// <summary>
