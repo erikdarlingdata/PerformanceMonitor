@@ -84,7 +84,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Eight <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Seven <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. Four read a <b>stated, measured</b> bound off a named file each.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
