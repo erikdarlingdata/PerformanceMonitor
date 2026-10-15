@@ -12838,6 +12838,7 @@ AND   j.hypertable_name = '{relation}'", connection))
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            readClock.Restart();
             failures = await QueryStoreComposeStamp.ReadFailuresAsync(connection, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
