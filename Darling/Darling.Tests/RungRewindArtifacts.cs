@@ -169,11 +169,21 @@ ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     }
 
     /// <summary>
-    /// V186 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
-    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
-    /// below V186 reads every alert value from the history row, as it did before.
+    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's V186 sentinel), with its index. Safe on a store that
+    /// never had it. Nothing before V186 reads it.
     /// </summary>
     internal static async Task DropV186SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.collection_log_hourly;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V187 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
+    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
+    /// below V187 reads every alert value from the history row, as it did before.
+    /// </summary>
+    internal static async Task DropV187SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(@"
 ALTER TABLE IF EXISTS config.investigation_request_alerts

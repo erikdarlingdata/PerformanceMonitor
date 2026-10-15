@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <param name="RouteId">The route whose agent level answered 1; its limits are the next four members.</param>
 /// <param name="DedupKeys">Every incident dedup key of the alert (a row is recorded per key); empty when it has none.</param>
 /// <param name="Facts">
-/// #5821: what the alert's history row will hold, written on its link rows (V186) so the brief's alerts section reads them
+/// #5821: what the alert's history row will hold, written on its link rows (V187) so the brief's alerts section reads them
 /// even when an agent claims the request before that row exists. Null writes NULLs, and the brief then reads the history row.
 /// </param>
 public sealed record InvestigationAlert(
@@ -165,12 +165,17 @@ public sealed record InvestigationJournalRow(
     string? Reason,
     string? DetailJson);
 
-/// <summary>What <see cref="InvestigationRequestStore.ReadReportsAsync"/> read; <see cref="Brief"/> only for one request.</summary>
+/// <summary>What <see cref="InvestigationRequestStore.ReadReportsAsync"/> read; <see cref="Brief"/> only for one request.
+/// <see cref="RequestsTruncated"/> says the window held more requests than the page (the reports and the journal are
+/// those of the page's requests only), and <see cref="JournalTruncated"/> that those requests held more journal rows
+/// than the journal page (#5834).</summary>
 public sealed record InvestigationReportsRead(
     IReadOnlyList<InvestigationRequestRow> Requests,
     IReadOnlyList<InvestigationReportRow> Reports,
     IReadOnlyList<InvestigationJournalRow> Journal,
-    string? Brief);
+    string? Brief,
+    bool RequestsTruncated = false,
+    bool JournalTruncated = false);
 
 /// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.</summary>
 public sealed record InvestigationRequestRow(
@@ -875,7 +880,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// <summary>
     /// Reads requests with their reports and journal (#5632 Phase A, <c>get_investigation_reports</c>): one request by id
     /// (then its stored brief too), or the requests opened since <paramref name="sinceUtc"/>, optionally on one server. The
-    /// state is computed as <see cref="ListAsync"/> computes it. Writes nothing.
+    /// state is computed as <see cref="ListAsync"/> computes it. Writes nothing. Each page is read one row past its limit
+    /// and trimmed, so the read says when the window held more requests, or those requests more journal rows, than it
+    /// returns (#5834, the #3699 shape); the reports and the journal are read for the returned requests only.
     /// </summary>
     public async Task<InvestigationReportsRead> ReadReportsAsync(Guid? requestId, int? serverId, DateTime sinceUtc, int limit,
         int journalLimit, CancellationToken cancellationToken = default)
@@ -887,7 +894,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         string? brief = null;
         await using (var command = Command(connection, null, ReportsRequestsSql,
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
-            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit)))
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -900,12 +907,18 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
         }
 
+        var requestsTruncated = requests.Count > limit;
+        if (requestsTruncated)
+        {
+            requests.RemoveRange(limit, requests.Count - limit);
+        }
+
         var ids = requests.Select(r => r.RequestId).ToArray();
         var reports = new List<InvestigationReportRow>();
         var journal = new List<InvestigationJournalRow>();
         if (ids.Length == 0)
         {
-            return new InvestigationReportsRead(requests, reports, journal, brief);
+            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated);
         }
 
         await using (var command = Command(connection, null, ReportsSql, P(ids)))
@@ -919,7 +932,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
         }
 
-        await using (var command = Command(connection, null, ReportsJournalSql, P(ids), P(journalLimit)))
+        await using (var command = Command(connection, null, ReportsJournalSql, P(ids), P(journalLimit + 1)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -931,7 +944,13 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
         }
 
-        return new InvestigationReportsRead(requests, reports, journal, brief);
+        var journalTruncated = journal.Count > journalLimit;
+        if (journalTruncated)
+        {
+            journal.RemoveRange(journalLimit, journal.Count - journalLimit);
+        }
+
+        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated);
     }
 
     /// <summary>

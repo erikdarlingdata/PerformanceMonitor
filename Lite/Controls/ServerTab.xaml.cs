@@ -536,7 +536,7 @@ public partial class ServerTab : UserControl
         // set/cleared around the tab switch in SelectActiveQueriesForDrillDown().
         if (_suppressActiveQueriesAutoRefresh) return;
 
-        var navContext = MainTabControl.SelectedIndex == 2
+        var navContext = MainTabControl.SelectedIndex == QueriesTabIndex
             ? $"TabNav-Queries.sub{QueriesSubTabControl.SelectedIndex}"
             : $"TabNav-tab{MainTabControl.SelectedIndex}";
         using var _navTimer = Helpers.MethodProfiler.StartTiming(navContext);

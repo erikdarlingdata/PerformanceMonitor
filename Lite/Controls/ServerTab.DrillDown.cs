@@ -13,12 +13,30 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
 {
+    /* #5847: the positions of the tabs the drills and the alert link select, in ServerTab.xaml's order. One copy, so a
+       reordered tab is fixed here once instead of at every site that switched to it by a bare number (the viewer keeps
+       the same names, ViewerServerTab.xaml.cs and ViewerServerTab.Blocking.cs). */
+    internal const int QueriesTabIndex = 2;
+    internal const int BlockingTabIndex = 8;
+    internal const int ActiveQueriesSubTabIndex = 1;
+    internal const int TopQueriesByDurationSubTabIndex = 2;
+    internal const int BlockedProcessReportsSubTabIndex = 2;
+    internal const int DeadlocksSubTabIndex = 3;
+
+    /// <summary>
+    /// The main tab and Blocking sub-tab the Alert Details link opens for <paramref name="view"/> (#5847): the Deadlocks
+    /// grid for a Deadlocks alert, the Blocked Process Reports grid for a Blocking one.
+    /// </summary>
+    internal static (int MainTab, int BlockingSubTab) IncidentTabs(AlertChainView view) =>
+        (BlockingTabIndex, view == AlertChainView.Deadlocks ? DeadlocksSubTabIndex : BlockedProcessReportsSubTabIndex);
+
     /// <summary>
     /// The window a drill opens around a clicked instant: <paramref name="minutesBefore"/> and
     /// <paramref name="minutesAfter"/> real minutes either side of <paramref name="centerUtc"/> (naive UTC), as a UTC
@@ -114,8 +132,8 @@ public partial class ServerTab : UserControl
         _suppressActiveQueriesAutoRefresh = true;
         try
         {
-            MainTabControl.SelectedIndex = 2; // Queries
-            QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+            MainTabControl.SelectedIndex = QueriesTabIndex;
+            QueriesSubTabControl.SelectedIndex = ActiveQueriesSubTabIndex;
         }
         finally
         {
@@ -159,8 +177,8 @@ public partial class ServerTab : UserControl
         var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
-        MainTabControl.SelectedIndex = 8; // Blocking
-        BlockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
+        MainTabControl.SelectedIndex = BlockingTabIndex;
+        BlockingSubTabControl.SelectedIndex = BlockedProcessReportsSubTabIndex;
         var bprRead = await System.Threading.Tasks.Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, 0, fromDate, toDate));
         _blockedProcessFilterMgr!.UpdateData(bprRead.Rows);
         /* The drill window is the naive-UTC pair GetDrillWindow built (#4766), which the grid read above took as it is: the
@@ -173,8 +191,8 @@ public partial class ServerTab : UserControl
         var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
-        MainTabControl.SelectedIndex = 8; // Blocking
-        BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
+        MainTabControl.SelectedIndex = BlockingTabIndex;
+        BlockingSubTabControl.SelectedIndex = DeadlocksSubTabIndex;
         var dlr = await System.Threading.Tasks.Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromDate, toDate));
         _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(dlr));
         /* Same as OnBlockingDrillDown (#4966): the banner follows the drill window's UTC pair. */
@@ -201,6 +219,35 @@ public partial class ServerTab : UserControl
         /* The heatmap drill's window is the same naive-UTC pair the grid read took (see OnActiveQueriesDrillDown):
            the banner follows it, so it stops describing the last range read (#4953). */
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, fromDate, toDate);
+    }
+
+    /// <summary>
+    /// #5847: the Alert Details window's "open the full chain" link: show the Blocked Process Reports or Deadlocks grid over a
+    /// window around the alert's time, where the full statements and the reports are. The day drill's mechanism: hold the
+    /// window on the toolbar, switch the tabs under <see cref="_suppressActiveQueriesAutoRefresh"/>, then one load of the
+    /// visible tab through the refresh coordinator. A tab the shell has just created passes <paramref name="reload"/> false:
+    /// its first refresh, which runs next, reads the held window.
+    /// </summary>
+    internal async Task ShowIncidentAsync(AlertChainView view, DateTime fromUtc, DateTime toUtc, bool reload)
+    {
+        SetDrillDownTimeRange(fromUtc, toUtc);
+
+        _suppressActiveQueriesAutoRefresh = true;
+        try
+        {
+            var (mainTab, blockingSubTab) = IncidentTabs(view);
+            MainTabControl.SelectedIndex = mainTab;
+            BlockingSubTabControl.SelectedIndex = blockingSubTab;
+        }
+        finally
+        {
+            _suppressActiveQueriesAutoRefresh = false;
+        }
+
+        if (reload)
+        {
+            await RefreshVisibleTabOnlyAsync();
+        }
     }
 
     /// <summary>

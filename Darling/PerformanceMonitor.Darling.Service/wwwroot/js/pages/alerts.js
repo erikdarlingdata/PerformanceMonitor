@@ -767,7 +767,10 @@ function journalCell(r) {
     const res = await readTool("get_investigation_reports", { request_id: r.request_id, hours_back: INVESTIGATION_HOURS });
     if (res.kind === "error") { built = false; mount(body, errorStrip(res.message)); return; }
     const rows = res.kind === "empty" ? [] : rowsUnder(res.data, "journal").filter((j) => j && String(j.request_id ?? r.request_id) === String(r.request_id));
-    mount(body, rows.length ? rows.map((j) => el("div", { text: journalLine(j) })) : [emptyStrip("No journal rows for this request.")]);
+    const lines = rows.length ? rows.map((j) => el("div", { text: journalLine(j) })) : [emptyStrip("No journal rows for this request.")];
+    /* #5834: the journal is a page of the newest rows; say so when the request held more. */
+    if (res.data && res.data.journal_truncated) lines.unshift(noticeStrip(`Showing the newest ${rows.length} journal rows; older ones are not listed.`));
+    mount(body, lines);
   });
   return node;
 }
@@ -799,6 +802,11 @@ async function refreshInvestigations(state) {
   if (!rows.length) { mount(state.box, emptyStrip("No investigation requests.")); return; }
   const parts = [VIZ.table({ requests: rows }, { rowsKey: "requests", columns: INVESTIGATION_COLUMNS })];
   if (reports.kind === "error") parts.unshift(noticeStrip("The reports could not be read, so no verdicts are shown: " + reports.message));
+  /* #5834: both reads are pages of the newest requests; say when either one held more than it returned. */
+  if (list.data && list.data.truncated) parts.unshift(noticeStrip(`Showing the newest ${rows.length} requests; older ones are not listed.`));
+  if (reports.kind !== "error" && reports.data && reports.data.truncated) {
+    parts.unshift(noticeStrip(`The last ${INVESTIGATION_HOURS} hours held more requests than one reports read returns, so older requests may show no verdict.`));
+  }
   mount(state.box, parts);
 }
 

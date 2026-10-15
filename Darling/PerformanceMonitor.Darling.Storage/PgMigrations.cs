@@ -1234,25 +1234,6 @@ ALTER TABLE collect.read_latency
     private static readonly string V184Sql = InvestigationTables.CreateSql;
 
     /// <summary>
-    /// V186 (#5821): <c>config.investigation_request_alerts</c> gains the five values the brief's alerts section reads from
-    /// the alert's history row: <c>current_value</c>, <c>threshold_value</c>, <c>muted</c>, <c>detail_text</c> and
-    /// <c>context_json</c>. An alert with an agent route now opens or joins its request before its page is sent, so the
-    /// generic webhook can name the request, and its history row is written after the send: an agent that claims while the
-    /// page is in flight would compose a brief with no history row to read. The link rows carry the values instead.
-    ///
-    /// <para>Every column is nullable with no default, so each <c>ADD COLUMN</c> is catalog-only and rewrites nothing; a link
-    /// row written before this rung keeps NULLs and its brief reads the history row as before. IF NOT EXISTS, so a second run
-    /// does nothing. No GRANT: the table's grants are table-level. <b>No Lite twin:</b> Lite has no investigation store.</para>
-    /// </summary>
-    private const string V186Sql = @"
-ALTER TABLE config.investigation_request_alerts
-    ADD COLUMN IF NOT EXISTS current_value double precision,
-    ADD COLUMN IF NOT EXISTS threshold_value double precision,
-    ADD COLUMN IF NOT EXISTS muted boolean,
-    ADD COLUMN IF NOT EXISTS detail_text text,
-    ADD COLUMN IF NOT EXISTS context_json text;";
-
-    /// <summary>
     /// V185 (#5812): the open days of <c>collect.plan_regression_daily</c> are built too, as partial days.
     /// <c>collect.plan_regression_daily_built</c> gains <c>built_through</c>, the <c>first_execution_time</c> the build covered
     /// (exclusive) by a partial build: a day's totals are its rows (by <c>last_execution_time</c>) whose first execution is
@@ -1289,6 +1270,71 @@ CREATE TRIGGER trg_plan_regression_daily_late
     WHEN (NEW.first_execution_time < date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PlanRegressionDaily.LateTriggerLagHours} hour'
           AND NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days')
     EXECUTE FUNCTION collect.plan_regression_daily_mark_late();";
+
+    /// <summary>
+    /// V186 (#5810): <c>collect.collection_log_hourly</c>, the hourly rollup of <c>collect.collection_log</c> that
+    /// <c>get_collection_health</c> reads for the closed hours of its 7-day window. One row per (server, collector, closed hour)
+    /// with every decomposable aggregate the read's <c>health</c> computes (counts, <c>rows_stored</c>, <c>duration_sum</c> and
+    /// <c>duration_count</c> for the average, the maxima and the newest instants) and <c>duration_histogram</c>, the count of timed
+    /// runs per slot of the shared duration bounds, from which the read takes a bucketed p95. A plain table: about 34 rows per
+    /// server per hour, kept about 7 days by the service's hourly pass, which also fills it (its first pass backfills the window).
+    /// The <c>hour_start</c> index serves that pass's newest-hour lookup and its retention DELETE. Idempotent; it creates
+    /// objects only, so a rewind is a DROP TABLE.
+    /// </summary>
+    private const string V186Sql = @"
+CREATE TABLE IF NOT EXISTS collect.collection_log_hourly
+(
+    server_id integer NOT NULL,
+    collector_name text NOT NULL,
+    hour_start timestamp NOT NULL,
+    total_runs integer NOT NULL,
+    success_count integer NOT NULL,
+    error_count integer NOT NULL,
+    permission_denied_count integer NOT NULL,
+    yield_count integer NOT NULL,
+    abandoned_count integer NOT NULL,
+    extension_missing_count integer NOT NULL,
+    session_missing_count integer NOT NULL,
+    note_count integer NOT NULL,
+    runs_with_rows integer NOT NULL,
+    rows_stored bigint NOT NULL,
+    duration_sum bigint NOT NULL,
+    duration_count integer NOT NULL,
+    max_duration_ms integer,
+    max_slowest_item_ms integer,
+    last_success_time timestamp,
+    last_run_time timestamp NOT NULL,
+    last_error_time timestamp,
+    last_failure_text_time timestamp,
+    last_note_time timestamp,
+    last_denied_time timestamp,
+    last_non_skip_time timestamp,
+    last_productive_time timestamp,
+    last_streak_break_time timestamp,
+    duration_histogram integer[] NOT NULL,
+    CONSTRAINT pk_collection_log_hourly PRIMARY KEY (server_id, collector_name, hour_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_log_hourly_hour ON collect.collection_log_hourly (hour_start);";
+
+    /// <summary>
+    /// V187 (#5821): <c>config.investigation_request_alerts</c> gains the five values the brief's alerts section reads from
+    /// the alert's history row: <c>current_value</c>, <c>threshold_value</c>, <c>muted</c>, <c>detail_text</c> and
+    /// <c>context_json</c>. An alert with an agent route now opens or joins its request before its page is sent, so the
+    /// generic webhook can name the request, and its history row is written after the send: an agent that claims while the
+    /// page is in flight would compose a brief with no history row to read. The link rows carry the values instead.
+    ///
+    /// <para>Every column is nullable with no default, so each <c>ADD COLUMN</c> is catalog-only and rewrites nothing; a link
+    /// row written before this rung keeps NULLs and its brief reads the history row as before. IF NOT EXISTS, so a second run
+    /// does nothing. No GRANT: the table's grants are table-level. <b>No Lite twin:</b> Lite has no investigation store.</para>
+    /// </summary>
+    private const string V187Sql = @"
+ALTER TABLE config.investigation_request_alerts
+    ADD COLUMN IF NOT EXISTS current_value double precision,
+    ADD COLUMN IF NOT EXISTS threshold_value double precision,
+    ADD COLUMN IF NOT EXISTS muted boolean,
+    ADD COLUMN IF NOT EXISTS detail_text text,
+    ADD COLUMN IF NOT EXISTS context_json text;";
 
     /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
@@ -1587,7 +1633,8 @@ $rung$;";
         new Migration(183, "read-caller", V183Sql),
         new Migration(184, "agent-investigations", V184Sql),
         new Migration(185, "plan-regression-partial-days", V185Sql),
-        new Migration(186, "investigation-alert-facts", V186Sql),
+        new Migration(186, "collection-log-hourly", V186Sql),
+        new Migration(187, "investigation-alert-facts", V187Sql),
     };
 
     /// <summary>

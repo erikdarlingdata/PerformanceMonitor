@@ -7,6 +7,28 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Themes/DarkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- #5847: an Alert Details field value. A read-only, borderless TextBox that looks like the TextBlock it replaced
+                 (same brush, wrapping, no focus chrome) so a value can be selected and copied with Ctrl+C. Out of the tab
+                 order so Tab still moves between the window's buttons. The host is a Decorator, not a ScrollViewer, so the
+                 mouse wheel reaches the Details area's own scroll viewer instead of stopping in a value. -->
+            <Style x:Key="SelectableValueText" TargetType="TextBox">
+                <Setter Property="IsReadOnly" Value="True"/>
+                <Setter Property="IsTabStop" Value="False"/>
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Padding" Value="0"/>
+                <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+                <Setter Property="TextWrapping" Value="Wrap"/>
+                <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="TextBox">
+                            <Decorator x:Name="PART_ContentHost"/>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

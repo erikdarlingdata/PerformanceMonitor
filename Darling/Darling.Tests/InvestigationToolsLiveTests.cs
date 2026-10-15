@@ -218,6 +218,58 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /* #5834: both reads are pages, and each says when the window held more than the page (the #3699 shape). At the bound:
+       101 requests answer 100 returned and truncated; 100 answer 100 and not truncated, on the reports read and the list
+       alike; and 201 journal rows on the page's requests answer 200 and journal_truncated, 200 answer 200 and not. */
+    [Fact]
+    public async Task ReportsAndList_SayWhenTheWindowHeldMoreThanThePage()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            await ExecAsync(connection, @"
+INSERT INTO config.investigation_requests
+    (request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, window_until,
+     opened_at, expires_at)
+SELECT gen_random_uuid(), 1, 7, 'srv-7', 'blocking', 'Blocking', now() - make_interval(secs => i), now() - make_interval(secs => i),
+       now(), now() - make_interval(secs => i), now() + interval '4 hours'
+FROM generate_series(1, " + (DarlingMcpInvestigationTools.MaxLimit + 1) + ") AS i", ct);
+            var newest = await ScalarAsync(connection,
+                "SELECT request_id FROM config.investigation_requests ORDER BY opened_at DESC LIMIT 1", ct);
+
+            async Task<(JsonElement Reports, JsonElement List)> ReadAsync() => (
+                Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, null, 24, ct)),
+                Root(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, limit: DarlingMcpInvestigationTools.MaxLimit, cancellationToken: ct)));
+
+            async Task JournalRowsAsync(int count) => await ExecAsync(connection,
+                "INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor) " +
+                $"SELECT now() - make_interval(secs => i), '{newest}', 7, 'opened', 'service' FROM generate_series(1, {count}) AS i", ct);
+
+            var (reports, list) = await ReadAsync();
+            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, reports.GetProperty("requests_returned").GetInt32());
+            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, reports.GetProperty("requests").GetArrayLength());
+            Assert.True(reports.GetProperty("truncated").GetBoolean());
+            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, list.GetProperty("requests_returned").GetInt32());
+            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, list.GetProperty("requests").GetArrayLength());
+            Assert.True(list.GetProperty("truncated").GetBoolean());
+
+            await ExecAsync(connection,
+                "DELETE FROM config.investigation_requests WHERE request_id = (SELECT request_id FROM config.investigation_requests ORDER BY opened_at LIMIT 1)", ct);
+            await JournalRowsAsync(DarlingMcpInvestigationTools.JournalLimit);
+            (reports, list) = await ReadAsync();
+            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, reports.GetProperty("requests_returned").GetInt32());
+            Assert.False(reports.GetProperty("truncated").GetBoolean());
+            Assert.Equal(DarlingMcpInvestigationTools.JournalLimit, reports.GetProperty("journal").GetArrayLength());
+            Assert.False(reports.GetProperty("journal_truncated").GetBoolean());
+            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, list.GetProperty("requests_returned").GetInt32());
+            Assert.False(list.GetProperty("truncated").GetBoolean());
+
+            await JournalRowsAsync(1);
+            (reports, _) = await ReadAsync();
+            Assert.Equal(DarlingMcpInvestigationTools.JournalLimit, reports.GetProperty("journal").GetArrayLength());
+            Assert.True(reports.GetProperty("journal_truncated").GetBoolean());
+        });
+    }
+
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
