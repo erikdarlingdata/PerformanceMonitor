@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// deadline from <see cref="ViewerCommandDeadlines"/> rather than Npgsql's undocumented 30 s default, the defect
 /// class behind three production failures (#2810, #2871, #2796): exceeding that ceiling surfaces as
 /// <c>Exception while reading from stream</c>, which reads as a network fault rather than a deadline. These tests
+/// check that every viewer command sets one, and
 /// pin the deadline values, the fan-out widths they scale with, and the pool size they are derived from.
 ///
 /// <para><b>Values are pinned as BANDS, never as equalities.</b> Each band encodes the reasoning that
@@ -32,6 +33,58 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class ViewerCommandTimeoutTests
 {
+    /// <summary>
+    /// Both ways a command is constructed in this codebase — <c>new NpgsqlCommand(</c> and
+    /// <c>.CreateCommand(</c>. The second is the shape #2874's original census missed entirely, and
+    /// here it is 191 of the 193 sites.
+    /// </summary>
+    private static readonly Regex s_commandCtor = new(
+        @"new\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*NpgsqlCommand\s*\(|\.CreateCommand\s*\(",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Every command the viewer project creates sets an explicit deadline (#2874). Kept as a source scan because a
+    /// new command built without a deadline fails nowhere else: it silently runs on Npgsql's 30 s default, and no
+    /// behavior test can reach a command that does not exist yet.
+    /// </summary>
+    [Fact]
+    public void EveryViewerCommand_SetsAnExplicitDeadline()
+    {
+        var offenders = new List<string>();
+        var total = 0;
+
+        foreach (var path in ViewerSources())
+        {
+            var text = File.ReadAllText(path);
+
+            /* Both halves of the question are asked of STRIPPED text, which is character-aligned with its
+               input so an offset means the same thing in either. A construction named only in prose is not a
+               construction, and a deadline merely SPELLED in a comment is not a deadline - judged raw, a note
+               explaining where the deadline used to be stands in for the deadline. */
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+            foreach (Match ctor in s_commandCtor.Matches(code))
+            {
+                total++;
+
+                if (!CommandDeadlineScanner.SetsAnExplicitDeadline(code, ctor.Index))
+                {
+                    var line = text.Take(ctor.Index).Count(c => c == '\n') + 1;
+                    offenders.Add($"{Path.GetFileName(path)}:{line}");
+                }
+            }
+        }
+
+        /* 193 sites at the time this pin landed; the floor guards against the sweep silently reading
+           an empty or wrong directory, not against refactors that change the count. */
+        Assert.True(total >= 150, $"the viewer scan matched only {total} command constructions — the sweep is not reading the project");
+
+        Assert.True(
+            offenders.Count == 0,
+            $"{offenders.Count} viewer command(s) inherit Npgsql's 30s default instead of an explicit deadline: "
+            + string.Join(", ", offenders));
+    }
+
     /// <summary>
     /// The interactive/refresh deadline, bounded on both sides — full derivation on
     /// <see cref="ViewerCommandDeadlines.InteractiveReadSeconds"/>. Short form: the heaviest shipped
@@ -402,5 +455,55 @@ public sealed class ViewerCommandTimeoutTests
                 $"{count} items split into lanes of {shortest}..{longest} — an unbalanced split makes the whole "
                 + "fan-out as slow as its longest lane for no reason");
         }
+    }
+
+    private static IEnumerable<string> ViewerSources()
+    {
+        var dir = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer");
+
+        Assert.True(Directory.Exists(dir), $"viewer project directory not found: {dir}");
+
+        /* RECURSIVE, unlike the .Storage pin's TopDirectoryOnly, minus the build outputs. The claim
+           is "every command THIS PROJECT creates", and a file added under a future subdirectory is
+           still this project's - the viewer already carries a Themes/ folder, so subdirectories are
+           not hypothetical here. bin/ and obj/ are excluded by path segment rather than by name
+           match, because that is where the generated .AssemblyInfo.cs and .g.cs land during a CI
+           build and they are not source. */
+        var paths = Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
+            .Where(p => !IsBuildOutput(dir, p))
+            .OrderBy(p => p, System.StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(paths.Length >= 150, $"the viewer sweep found only {paths.Length} files — the project has moved");
+
+        return paths;
+    }
+
+    /// <summary>
+    /// True when a path sits under the project's <c>bin</c> or <c>obj</c> tree. Compared as PATH
+    /// SEGMENTS, so a source file that merely has "obj" in its name is not excluded.
+    /// </summary>
+    private static bool IsBuildOutput(string projectDir, string path)
+    {
+        var relative = Path.GetRelativePath(projectDir, path);
+        var segments = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return segments.Any(s =>
+            string.Equals(s, "bin", System.StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s, "obj", System.StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 }

@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// (V141) when this rung landed, and hands them on to <see cref="RawChunkIntervalRungHistoryRungTests"/> (V144,
 /// #4211) when that one did.</para>
 /// </summary>
-[Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
+[Trait("Stage", "Guard")] // #5798: needs no store, so the guard stage runs it on every pull request
 public sealed class QueryStoreIntervalLatestRungTests
 {
     private const int RungVersion = 143;

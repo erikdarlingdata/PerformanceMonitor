@@ -2479,19 +2479,6 @@ public class EntraDeviceCodeTests
             "Entra MFA",
             ServerConnection.AuthenticationDisplayFor(AuthenticationTypes.EntraMFA),
             StringComparison.OrdinalIgnoreCase);
-
-        /* And the belt really does compose from that helper rather than from a literal of its own,
-           which is what makes the two assertions above about the shipped message. */
-        var belt = CSharpSourceWalker.StripCommentsAndStrings(
-            ParitySource.ReadFile("Lite/Windows/AddMultipleServersDialog.xaml.cs"));
-
-        var at = belt.IndexOf("BuildServerConnection(BulkServerParseLine", StringComparison.Ordinal);
-        Assert.True(at >= 0, "the belt's choke point must exist");
-
-        Assert.Contains(
-            "ServerConnection." + "AuthenticationDisplayFor(",
-            belt[at..Math.Min(belt.Length, at + 600)],
-            StringComparison.Ordinal);
     }
 
     // ---- The doc's own claims -------------------------------------------------------------

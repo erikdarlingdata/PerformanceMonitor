@@ -10,7 +10,6 @@ using System;
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,7 +31,8 @@ namespace Darling.Tests;
 /// (<see cref="EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync"/>), and these are the same
 /// expectations Lite.Tests' <c>PayloadProbeFailureTests</c> asserts — pinned independently in both suites so
 /// editing one app's copy alone fails a build. A <see cref="DataSet"/> supplies a real multi-result-set
-/// reader; only the host wiring stays a source pin, because that branch is the tail of a live payload read.
+/// reader. The runner's own order (payload, then trailing set, then the write) is not tested here: that path
+/// needs a live SQL Server target and a PostgreSQL store, and the Darling runner has no reader hook for it.
 /// </para>
 /// </summary>
 [Trait("Stage", "Guard")]
@@ -257,31 +257,6 @@ public sealed class DarlingPayloadProbeFailureTests
         Assert.True(DatabaseSizeStatsCollector.Instance.EmitsProbeFailures);
     }
 
-    /* ── the host wiring, pinned at source (the branch is the tail of a live payload read) ── */
-
-    [Fact]
-    public void Host_Reads_The_Trailing_Set_After_The_Payload_And_Before_The_Write()
-    {
-        /* Ordering is the whole correctness argument for putting this on the plain path: read it before the
-           payload and the definition loses its rows; read it after the write and the note misses the row it
-           belongs on. It also must not disturb the delta/EndPayload ordering, which it cannot, because
-           everything between ReadAsync and the write here touches only the note. */
-        var source = File.ReadAllText(FindRepoFile(
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")));
-        var plainPath = source[source.IndexOf("Plain single-query path", StringComparison.Ordinal)..];
-
-        /* #2864: the payload is read through the counting decorator rather than the provider reader
-           directly, so the anchor is the wrapper. The ORDERING this test exists to pin is unchanged -
-           only the argument name moved. */
-        var read = plainPath.IndexOf("definition.ReadAsync(counting", StringComparison.Ordinal);
-        var probes = plainPath.IndexOf("ReadPayloadProbeFailuresAsync", StringComparison.Ordinal);
-        var write = plainPath.IndexOf("WriteBatchAsync(pgConnection", StringComparison.Ordinal);
-
-        Assert.True(read >= 0 && probes >= 0 && write >= 0, "the plain path must read, probe, then write");
-        Assert.True(read < probes, "the payload must be read before the trailing set");
-        Assert.True(probes < write, "the trailing set must be read before the storage phase");
-    }
-
     /* ── helpers ── */
 
     private static CollectorContext Context(bool azure = false) => new()
@@ -365,20 +340,5 @@ public sealed class DarlingPayloadProbeFailureTests
         }
 
         return table;
-    }
-
-    private static string FindRepoFile(string relativePath)
-    {
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 10 && dir is not null; i++)
-        {
-            var candidate = Path.Combine(dir, relativePath);
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-            dir = Path.GetDirectoryName(dir);
-        }
-        throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
     }
 }

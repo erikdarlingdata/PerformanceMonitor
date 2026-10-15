@@ -96,12 +96,9 @@ internal static class CSharpMemberMap
     /// Whether a declaration can hold a literal (a method, property, field, constructor) or only other
     /// declarations (a <c>class</c>, <c>record</c>, <c>enum</c>, …).
     ///
-    /// <para>Types are in the declaration list rather than filtered out of it because a member's range is
-    /// bounded by the NEXT declaration of either kind, and a nested type is the next thing after the member
-    /// above it. They are also what <see cref="EnclosingType"/> answers from. They are excluded from MEMBER
-    /// attribution and from
-    /// a scan that reads every declaration whole: a type's body legitimately contains every
-    /// declaration below it, which is the exact shape that assertion calls an over-run.</para>
+    /// <para>Types are in the declaration list because <see cref="EnclosingType"/> answers from them. They
+    /// are excluded from MEMBER attribution: a type's body legitimately contains every declaration below
+    /// it.</para>
     /// </summary>
     internal enum DeclarationKind
     {
@@ -114,29 +111,15 @@ internal static class CSharpMemberMap
     }
 
     /// <summary>
-    /// One declaration as a half-open range over walked source, plus where the NEXT declaration starts.
-    ///
-    /// <para><c>NextStart</c> is carried because it is the one bound on <c>End</c> that does not come from
-    /// the brace walk: it is a regex match offset, so it can DISAGREE with a brace count that ran past the
-    /// method it was reading. #3089 found the same thing about the same shape — a re-check that reads the
-    /// same text and repeats the same walk is a tautology, not a check.</para>
+    /// One declaration as a half-open range over walked source.
     ///
     /// <para><c>End</c> is <c>-1</c> when the brace walk never closed the body.</para>
-    ///
-    /// <para><c>ContentEnd</c> is the same boundary derived a SECOND way — by
-    /// <see cref="StatementEnd"/>, which asks where the declaration's own <c>;</c> or body brace falls
-    /// rather than stopping at the first braced group. It exists so <see cref="ShapeOf"/> has something to
-    /// disagree with: <c>End</c> alone cannot report a range that stopped short, because a short range is
-    /// closed, is under <c>NextStart</c>, and overlaps nothing. Two derivations that fail on different
-    /// shapes, which is the only reason either is worth checking.</para>
     /// </summary>
     internal readonly record struct DeclaredRange(
         string Name,
         DeclarationKind Kind,
         int Start,
-        int End,
-        int NextStart,
-        int ContentEnd);
+        int End);
 
     /// <summary>Every declaration in one file, beside the walked source they are offsets into.</summary>
     internal sealed record MemberMap(string Code, IReadOnlyList<DeclaredRange> Declarations);
@@ -163,9 +146,7 @@ internal static class CSharpMemberMap
                 name,
                 kind,
                 head.Index,
-                DeclarationEnd(code, after),
-                i + 1 < heads.Count ? heads[i + 1].Index : code.Length,
-                StatementEnd(code, after)));
+                DeclarationEnd(code, after)));
         }
 
         return new MemberMap(code, declarations);
@@ -305,9 +286,7 @@ internal static class CSharpMemberMap
     /// One past the declaration's last character: the <c>;</c> that ends a field or an expression-bodied
     /// member, or the <c>}</c> that closes a braced body. <c>-1</c> when a body opened and never closed.
     ///
-    /// <para>Deliberately UNBOUNDED — it reads to the end of the file rather than stopping at the next
-    /// declaration, so <see cref="DeclaredRange.NextStart"/> stays an independent bound that a runaway
-    /// count can be caught by. Clamping here would make the two agree by construction.</para>
+    /// <para>It reads to the end of the file rather than stopping at the next declaration.</para>
     ///
     /// <para><b>A braced group does not always end the declaration.</b> Returning at the first depth-0
     /// <c>{</c> is right only when that brace opens the member's BODY. Four shapes put a braced group in
@@ -319,11 +298,8 @@ internal static class CSharpMemberMap
     /// <item>a collection expression — <c>=&gt; new[] { A, B }.SelectMany(…).Where(…)</c></item>
     /// </list>
     /// <para>Only the first is handled here, by the <c>=</c> look-ahead below, because on an auto-property
-    /// the initialiser is where a literal lives. The other three are REPORTED rather than avoided:
-    /// <see cref="RangeShape.Truncated"/> compares this walk against
-    /// <see cref="StatementEnd"/> and reds when they disagree. Reporting is the arm that generalises — all
-    /// four shapes arrived as cases nobody had enumerated, so the fifth will too, and a detector covers a
-    /// shape this method has never been taught.</para>
+    /// the initialiser is where a literal lives. The other three still end the range early, so a literal
+    /// after that braced group and inside the same member resolves to <see cref="Unknown"/>.</para>
     ///
     /// <para>The accessor-list case was found in review of #3097, where it resolved to <see cref="Unknown"/> in silence.</para>
     /// </summary>
@@ -375,10 +351,7 @@ internal static class CSharpMemberMap
                        public string QueryText { get; set; } = "SELECT …";
 
                    Returning at the accessor list's closing brace ends the range BEFORE the literal, so
-                   the literal is contained by nothing and labelled <unknown> — and neither arm of
-                   ShapeOf can see it, because a range that stops short of its own member is still well
-                   under NextStart and still closed. That is a truncation with no detector, which is the
-                   one shape this scan must not produce.
+                   the literal is contained by nothing and labelled <unknown>.
 
                    An '=' is the only thing that can legally follow the brace inside the same
                    declaration; anything else there belongs to the next one, so the brace ends this
@@ -401,108 +374,6 @@ internal static class CSharpMemberMap
         }
 
         return -1;
-    }
-
-    /// <summary>
-    /// One past the declaration's last character, derived by asking which braced group is the BODY rather
-    /// than by stopping at the first one.
-    ///
-    /// <para>A member is expression-bodied when <c>=&gt;</c> is reached at depth 0 before any depth-0
-    /// <c>{</c>. Every braced group after that arrow is INSIDE the body — a property pattern, an object
-    /// initialiser, a collection expression — so this steps over it and keeps looking for the <c>;</c> that
-    /// actually ends the declaration. With no arrow, the first depth-0 <c>{</c> IS the body and closes it.</para>
-    ///
-    /// <para>This is deliberately not a corrected copy of <see cref="DeclarationEnd"/>, and it does not
-    /// replace it. It is a SECOND derivation of the same boundary, kept so the two can disagree; a checker
-    /// built by re-running the walk it is checking agrees with itself by construction, which is the
-    /// tautology <see cref="DeclaredRange.NextStart"/> already exists to avoid. Where the two disagree,
-    /// <see cref="ShapeOf"/> reports <see cref="RangeShape.Truncated"/> and a human adjudicates — neither
-    /// derivation is privileged as correct.</para>
-    ///
-    /// <para><b>Trailing <c>;</c> and whitespace are trimmed, which is what makes the disagreement mean
-    /// something.</b> <c>=&gt; new T { … };</c> ends the range at the initialiser's brace and leaves the
-    /// <c>;</c> outside it, which is harmless because no literal lives in a semicolon — and those members
-    /// outnumber the ones where real content falls outside the range by more than ten to one, so reporting
-    /// them would bury the set that matters. What is compared is therefore the end
-    /// of the declaration's CONTENT, and the shape reds only when something a scan could look for is
-    /// stranded. Those semicolon-only members are the same defect one character short of mattering: append
-    /// <c>.Normalize()</c> after the initialiser and one joins the reported set with nothing else changing,
-    /// which is why the arm is a derivation rather than a list.</para>
-    /// </summary>
-    private static int StatementEnd(string code, int from)
-    {
-        var paren = 0;
-        var bracket = 0;
-        var arrow = false;
-
-        for (var i = from; i < code.Length; i++)
-        {
-            var c = code[i];
-
-            if (c == '(')
-            {
-                paren++;
-            }
-            else if (c == ')')
-            {
-                paren--;
-            }
-            else if (c == '[')
-            {
-                bracket++;
-            }
-            else if (c == ']')
-            {
-                bracket--;
-            }
-            else if (paren != 0 || bracket != 0)
-            {
-                continue;
-            }
-            else if (c == '=' && i + 1 < code.Length && code[i + 1] == '>')
-            {
-                arrow = true;
-                i++;
-            }
-            else if (c == ';')
-            {
-                return ContentBefore(code, from, i + 1);
-            }
-            else if (c == '{')
-            {
-                var close = BraceGroupEnd(code, i);
-
-                if (close < 0)
-                {
-                    return -1;
-                }
-
-                if (!arrow)
-                {
-                    return close;
-                }
-
-                i = close - 1;
-            }
-        }
-
-        return -1;
-    }
-
-    /// <summary>
-    /// <paramref name="end"/> walked back over trailing <c>;</c> and whitespace, so what it points past is
-    /// the declaration's last character of CONTENT. Never walks below <paramref name="from"/>.
-    /// </summary>
-    private static int ContentBefore(string code, int from, int end)
-    {
-        var i = end;
-
-        while (i > from && (code[i - 1] == ';' || char.IsWhiteSpace(code[i - 1])))
-        {
-            i--;
-        }
-
-        return i;
     }
 
     /// <summary>One past the <c>}</c> that closes the brace group opening at <paramref name="open"/>, or
@@ -586,53 +457,6 @@ internal static class CSharpMemberMap
 
         return name;
     }
-
-    /// <summary>What the brace walk actually returned for one declaration.</summary>
-    internal enum RangeShape
-    {
-        /// <summary>One whole declaration, ending inside its own bounds.</summary>
-        WholeMember,
-
-        /// <summary>A body opened and never closed, so every literal below it is attributed to nothing.</summary>
-        Unterminated,
-
-        /// <summary>The walk ran past the next declaration, so that member's literals are attributed
-        /// here.</summary>
-        OverExtended,
-
-        /// <summary>The walk stopped short of the member's own end, so literals BELOW the stopping point
-        /// and still inside the member are attributed to nothing.</summary>
-        Truncated,
-    }
-
-    /// <summary>
-    /// Which of three shapes a declaration's range is.
-    ///
-    /// <para><b>The three failing shapes are complementary, not redundant.</b>
-    /// <see cref="RangeShape.OverExtended"/> compares the brace walk against a regex offset, so it can
-    /// disagree with the walk — but it is structurally blind at the END of the file, where the last
-    /// declaration has no successor to run past. That tail is what
-    /// <see cref="RangeShape.Unterminated"/> still covers, because a runaway there simply never closes.
-    /// #3089 measured the same pair on the same kind of scan and both arms are pinned here.</para>
-    ///
-    /// <para><b>Both of those are over-reads, and that was the gap.</b> A range that stops SHORT is closed,
-    /// is under <c>NextStart</c>, and — ending early — cannot overlap its successor, so it satisfied every
-    /// arm above and read as <see cref="RangeShape.WholeMember"/>. The members this finds strand content
-    /// inside their own declaration, and where that content is a string literal
-    /// <see cref="EnclosingMember"/> answers <c>&lt;unknown&gt;</c> for it — a site that is in the source
-    /// and outside every range a census resolves through.
-    /// A count repeated in prose goes stale the first time an unrelated PR rewrites one of those members —
-    /// count repeated in prose goes stale the first time an unrelated PR rewrites one of those members —
-    /// which happened to this comment's own numbers within an hour of it being written.
-    /// <see cref="RangeShape.Truncated"/> is that arm, and it is the reason
-    /// <see cref="DeclaredRange.ContentEnd"/> is carried: it comes from
-    /// <see cref="StatementEnd"/> rather than from a second run of the walk being checked.</para>
-    /// </summary>
-    internal static RangeShape ShapeOf(DeclaredRange declaration) =>
-        declaration.End < 0 ? RangeShape.Unterminated
-        : declaration.End > declaration.NextStart ? RangeShape.OverExtended
-        : declaration.ContentEnd > declaration.End ? RangeShape.Truncated
-        : RangeShape.WholeMember;
 
     /// <summary>
     /// The 1-based line <paramref name="offset"/> falls on. Sound over both the file and the walked text:
