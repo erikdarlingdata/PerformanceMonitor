@@ -3765,7 +3765,7 @@ public sealed class AlertEngineTests
            prefix and searched with Contains, and a trailing '\r' on a CRLF checkout changes neither), so by
            RepoFile's rule for its line-ending-normalised read, this file does not need that read and must not read as if
            it did. */
-        var readme = ReadRepoFile("README.md");
+        var readme = ReadRepoFile("docs", "alerts.md"); // #5860: the alert catalog moved from the root README to this page
 
         var row = readme
             .Split('\n')
