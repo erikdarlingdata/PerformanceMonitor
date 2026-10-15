@@ -8,7 +8,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Data;
+using System.Data.Common;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -123,9 +123,9 @@ ORDER BY CASE WHEN p.scope_server_id IS NOT NULL THEN 0 WHEN p.scope_tag_id IS N
     /* Mute rules for this server or every server, and analysis mutes for this server or every server, newest first. Both
        tables hold naive UTC. Darling also reads plan-force actions and service starts here; Lite has neither source. */
     internal const string ChangesSql = @"
-SELECT at, kind, text, pattern
+SELECT at_utc, kind, text, pattern
 FROM (
-    SELECT m.created_at_utc AS at, 'mute_rule' AS kind,
+    SELECT m.created_at_utc AS at_utc, 'mute_rule' AS kind,
            concat_ws(' ', CASE WHEN m.enabled THEN 'enabled' ELSE 'disabled' END, 'mute rule',
                      'for ' || coalesce(m.metric_name, 'every metric'),
                      CASE WHEN m.expires_at_utc IS NOT NULL THEN 'until ' || strftime(m.expires_at_utc, '%Y-%m-%dT%H:%M:%SZ') END,
@@ -142,7 +142,7 @@ FROM (
     WHERE (am.server_id IS NULL OR am.server_id = $1)
       AND am.muted_date >= $3
 ) AS c
-ORDER BY at DESC
+ORDER BY at_utc DESC
 LIMIT 15";
 
     private readonly DuckDbInitializer _duckDb;
@@ -389,7 +389,7 @@ LIMIT 15";
     }
 
     /// <summary>A stored TIMESTAMP is naive UTC.</summary>
-    private static DateTime Utc(IDataRecord reader, int ordinal) =>
+    private static DateTime Utc(DbDataReader reader, int ordinal) =>
         DateTime.SpecifyKind(reader.GetDateTime(ordinal), DateTimeKind.Utc);
 
     /// <summary>A time as the store keeps it: to the microsecond, with no kind (a tick below it is not stored).</summary>
