@@ -135,6 +135,7 @@ public sealed class ExternalAlertRungTests
            absent too: a rung back. */
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
+        allPresent[Array.FindIndex(parameters, p => p.Name == "hasStoreMetricsSizeEstimated")] = false; /* V189 (#5857) absent: the cases below are stores below it. */
         allPresent[Array.FindIndex(parameters, p => p.Name == "hasInvestigationAlertFacts")] = false; /* V188 (#5821) absent: the cases below are stores below it. */
         allPresent[Array.FindIndex(parameters, p => p.Name == "hasAlertResolutionDelivery")] = false; /* V187 (#5825) absent: the cases below are stores below it. */
 
@@ -241,6 +242,7 @@ public sealed class ExternalAlertRungTests
             /* An upgraded store: one rung behind (no tables, no column, no version row), then migrated, gets all of it. */
             await ExecAsync(connection, "DROP TABLE config.external_alert_state; DROP TABLE config.external_alert_pending; DROP TABLE config.external_alert_source; ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ExternalAlertTables.RungVersion, ct);
+            await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);

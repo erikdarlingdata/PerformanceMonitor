@@ -199,6 +199,18 @@ ALTER TABLE IF EXISTS config.config_alert_log
     }
 
     /// <summary>
+    /// V189 (#5857): <c>size_estimated</c> on <c>collect.store_metrics</c> (the probe's newest sentinel). Safe on a store
+    /// that never had it. A store below V189 sizes every row exactly, as before.
+    /// </summary>
+    internal static async Task DropV189SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS collect.store_metrics
+    DROP COLUMN IF EXISTS size_estimated;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// V188 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
     /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
     /// below V188 reads every alert value from the history row, as it did before.

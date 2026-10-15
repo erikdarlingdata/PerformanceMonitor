@@ -242,6 +242,105 @@ compression AS (
 )";
 
     /// <summary>
+    /// The ESTIMATE twin of <see cref="HypertableSizingCtesSql"/> (#5857): the same <c>targets</c> contract and the
+    /// same output CTEs (<c>sizes</c>, <c>compression</c>, <c>chunk_counts</c>), but a compressed chunk is not sized
+    /// from the file system. The exact form makes a file call for every chunk and every compressed relation, so its
+    /// insert grows with the chunk count (0.7 s on day 1 to 3.3 s on day 9 of a 2.4 GB store). This form sizes:
+    /// <list type="bullet">
+    /// <item>the root, and every chunk that is NOT compressed (it has no <c>after_compression_total_bytes</c> in
+    /// <c>chunk_compression_stats</c>), with <c>pg_total_relation_size</c>; on a product store that is about two
+    /// chunks per hypertable (<c>TimescaleSupport.CompressAfterDays</c> is 1);</item>
+    /// <item>every compressed chunk by <c>after_compression_total_bytes</c>, which TimescaleDB recorded in its catalog
+    /// when it compressed the chunk (heap, TOAST and indexes of the compressed relation). Reading it makes no file
+    /// call: <c>chunk_compression_stats</c> took 3 to 5 ms for 1,000 chunks on the rig.</item>
+    /// </list>
+    /// The compressed chunks' own relations are NOT sized, and that is both the saving and the only systematic error.
+    /// After compression TimescaleDB truncates the chunk's own relation, so it holds only index metapages (16 KB on
+    /// the rig, two 8 KB pages) plus any rows inserted after compression and not yet recompressed. The estimate is
+    /// therefore a slight underestimate (about 0.7% on a compressed 1,000-chunk fixture, in the PR body). The hourly
+    /// sweep writes this form and marks the rows <c>size_estimated = true</c>; one sweep a day writes the exact form
+    /// (<see cref="ExactSizeIntervalHours"/>). <c>compressed_before_bytes</c>, <c>compressed_after_bytes</c> and
+    /// <c>chunk_count</c> are computed as the exact form computes them. An uncompressed hypertable (compression off)
+    /// has zero stats rows, so every chunk is sized and the estimate equals the exact total.
+    /// </summary>
+    public const string HypertableEstimateSizingCtesSql = @"all_chunks AS MATERIALIZED (
+    SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name
+    FROM timescaledb_information.chunks
+),
+chunk_rels AS (
+    SELECT t.hypertable_schema, t.hypertable_name, ch.chunk_schema, ch.chunk_name, pc.oid
+    FROM targets t
+    JOIN all_chunks ch
+        ON  ch.hypertable_schema = t.hypertable_schema
+        AND ch.hypertable_name = t.hypertable_name
+    LEFT JOIN pg_namespace pn ON pn.nspname = ch.chunk_schema
+    LEFT JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = ch.chunk_name
+),
+chunk_counts AS (
+    SELECT hypertable_schema, hypertable_name, count(*)::integer AS chunk_count
+    FROM chunk_rels
+    GROUP BY hypertable_schema, hypertable_name
+),
+chunk_stats AS MATERIALIZED (
+    SELECT t.hypertable_schema, t.hypertable_name, s.chunk_schema, s.chunk_name,
+           s.before_compression_total_bytes, s.after_compression_total_bytes
+    FROM targets t
+    CROSS JOIN LATERAL chunk_compression_stats(format('%I.%I', t.hypertable_schema, t.hypertable_name)::regclass) s
+),
+sizes AS (
+    SELECT hypertable_schema, hypertable_name, sum(bytes)::bigint AS total_bytes
+    FROM (
+        SELECT t.hypertable_schema, t.hypertable_name, pg_total_relation_size(pc.oid) AS bytes
+        FROM targets t
+        JOIN pg_namespace pn ON pn.nspname = t.hypertable_schema
+        JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = t.hypertable_name
+        UNION ALL
+        SELECT r.hypertable_schema, r.hypertable_name, pg_total_relation_size(r.oid)
+        FROM chunk_rels r
+        LEFT JOIN chunk_stats s
+            ON  s.hypertable_schema = r.hypertable_schema
+            AND s.hypertable_name = r.hypertable_name
+            AND s.chunk_schema = r.chunk_schema
+            AND s.chunk_name = r.chunk_name
+        WHERE s.after_compression_total_bytes IS NULL
+        UNION ALL
+        SELECT hypertable_schema, hypertable_name, after_compression_total_bytes
+        FROM chunk_stats
+        WHERE after_compression_total_bytes IS NOT NULL
+    ) x
+    GROUP BY hypertable_schema, hypertable_name
+),
+compression AS (
+    SELECT hypertable_schema, hypertable_name,
+           sum(before_compression_total_bytes)::bigint AS before_bytes,
+           sum(after_compression_total_bytes)::bigint AS after_bytes
+    FROM chunk_stats
+    GROUP BY hypertable_schema, hypertable_name
+)";
+
+    /// <summary>
+    /// Whether an exact hypertable row exists at or after $1 (#5857). The sweep writes the estimate form when this is
+    /// true and the exact form when it is false (none, or only older ones). The time bound lets the
+    /// <c>idx_store_metrics_time</c> range serve it. $1 is a naive UTC timestamp: the sweep's clock minus
+    /// <see cref="ExactSizeIntervalHours"/>. A pre-rung row has <c>size_estimated</c> NULL and does not count.
+    /// </summary>
+    public const string RecentExactSizeSql = $@"
+SELECT EXISTS (
+    SELECT 1
+    FROM collect.store_metrics
+    WHERE metric_time >= $1
+      AND object_kind = '{HypertableObjectKind}'
+      AND size_estimated = false)";
+
+    /// <summary>
+    /// How old the newest exact hypertable row may be before the sweep writes the exact form again instead of the
+    /// estimate (#5857). 23 hours, not 24: a host that is stopped nightly still gets an exact row on every day it
+    /// runs, and the schedule is not keyed to the 00:00 tick. The first sweep after the upgrade finds no exact row
+    /// and is exact.
+    /// </summary>
+    public const int ExactSizeIntervalHours = 23;
+
+    /// <summary>
     /// The per-hypertable rows — TimescaleDB stores only (the caller gates on the detected flag; the
     /// timescaledb_information views referenced here do not exist on plain PostgreSQL).
     /// Sized in one pass over the catalogs (<see cref="HypertableSizingCtesSql"/>, #5857), not by a
@@ -260,22 +359,39 @@ compression AS (
     /// is the gap <see cref="ContinuousAggregateInsertSql"/> closes: a materialization is a hypertable that holds
     /// real bytes and is enumerated by this view under NO name, internal or otherwise.</para>
     /// </summary>
-    public const string HypertableInsertSql = $@"
+    public const string HypertableInsertSql = $@"{HypertableInsertHeadSql}
+{HypertableSizingCtesSql}
+{HypertableSelectSql}
+    false{HypertableTailSql}";
+
+    /// <summary>
+    /// The hypertable rows sized by the catalog estimate (#5857): <see cref="HypertableInsertSql"/> with
+    /// <see cref="HypertableEstimateSizingCtesSql"/>, and <c>size_estimated = true</c>. The hourly sweep writes this
+    /// one, and <see cref="HypertableInsertSql"/> once a day. Same columns, same row per hypertable, same $1.
+    /// </summary>
+    public const string HypertableEstimateInsertSql = $@"{HypertableInsertHeadSql}
+{HypertableEstimateSizingCtesSql}
+{HypertableSelectSql}
+    true{HypertableTailSql}";
+
+    private const string HypertableInsertHeadSql = @"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count)
+    (metric_time, object_name, object_kind, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count, size_estimated)
 WITH targets AS (
     SELECT hypertable_schema, hypertable_name
     FROM timescaledb_information.hypertables
-),
-{HypertableSizingCtesSql}
-SELECT
+),";
+
+    private const string HypertableSelectSql = $@"SELECT
     $1,
     h.hypertable_name,
     '{HypertableObjectKind}',
     s.total_bytes,
     c.before_bytes,
     c.after_bytes,
-    h.num_chunks
+    h.num_chunks,";
+
+    private const string HypertableTailSql = @"
 FROM timescaledb_information.hypertables h
 LEFT JOIN sizes s
     ON  s.hypertable_schema = h.hypertable_schema
@@ -316,22 +432,39 @@ LEFT JOIN compression c
     /// of the same name in different schemas would share one series. Every aggregate this product creates
     /// lives in <c>collect</c>. $1 metric_time.</para>
     /// </summary>
-    public const string ContinuousAggregateInsertSql = $@"
+    public const string ContinuousAggregateInsertSql = $@"{ContinuousAggregateInsertHeadSql}
+{HypertableSizingCtesSql}
+{ContinuousAggregateSelectSql}
+    false{ContinuousAggregateTailSql}";
+
+    /// <summary>
+    /// The aggregate rows sized by the catalog estimate (#5857): <see cref="ContinuousAggregateInsertSql"/> with
+    /// <see cref="HypertableEstimateSizingCtesSql"/>, and <c>size_estimated = true</c>. See
+    /// <see cref="HypertableEstimateInsertSql"/>.
+    /// </summary>
+    public const string ContinuousAggregateEstimateInsertSql = $@"{ContinuousAggregateInsertHeadSql}
+{HypertableEstimateSizingCtesSql}
+{ContinuousAggregateSelectSql}
+    true{ContinuousAggregateTailSql}";
+
+    private const string ContinuousAggregateInsertHeadSql = @"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count)
+    (metric_time, object_name, object_kind, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count, size_estimated)
 WITH targets AS (
     SELECT materialization_hypertable_schema AS hypertable_schema, materialization_hypertable_name AS hypertable_name
     FROM timescaledb_information.continuous_aggregates
-),
-{HypertableSizingCtesSql}
-SELECT
+),";
+
+    private const string ContinuousAggregateSelectSql = $@"SELECT
     $1,
     ca.view_name,
     '{ContinuousAggregateObjectKind}',
     s.total_bytes,
     c.before_bytes,
     c.after_bytes,
-    coalesce(n.chunk_count, 0)
+    coalesce(n.chunk_count, 0),";
+
+    private const string ContinuousAggregateTailSql = @"
 FROM timescaledb_information.continuous_aggregates ca
 LEFT JOIN sizes s
     ON  s.hypertable_schema = ca.materialization_hypertable_schema
@@ -1339,12 +1472,24 @@ WHERE metric_time < $1";
 
         if (timescaleAvailable)
         {
-            using var hypertables = new NpgsqlCommand(HypertableInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+            /* #5857: the exact sizes cost a file call per chunk, so the hourly rows come from the catalog estimate
+               and one sweep a day (the first without an exact row in the last ExactSizeIntervalHours) is exact.
+               One indexed read decides it, inside the same per-statement budget. */
+            bool exact;
+            using (var recent = new NpgsqlCommand(RecentExactSizeSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+            {
+                recent.Parameters.AddWithValue(metricTime.AddHours(-ExactSizeIntervalHours));
+                exact = !(bool)(await recent.ExecuteScalarAsync(cancellationToken))!;
+            }
+
+            logger?.LogDebug("Store self-metrics sweep sizes hypertables and aggregates with the {SizeForm} form", exact ? "exact" : "catalog estimate");
+
+            using var hypertables = new NpgsqlCommand(exact ? HypertableInsertSql : HypertableEstimateInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
             hypertables.Parameters.AddWithValue(metricTime);
             written += await hypertables.ExecuteNonQueryAsync(cancellationToken);
 
             /* #3582: the materializations the hypertables view structurally omits. */
-            using var aggregates = new NpgsqlCommand(ContinuousAggregateInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+            using var aggregates = new NpgsqlCommand(exact ? ContinuousAggregateInsertSql : ContinuousAggregateEstimateInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
             aggregates.Parameters.AddWithValue(metricTime);
             written += await aggregates.ExecuteNonQueryAsync(cancellationToken);
 
