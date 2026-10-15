@@ -3278,9 +3278,51 @@ internal static class DarlingDataReader
     /// (<c>CollectionHealthKeyedLookupParityTests</c> holds each to the pre-change statement). The aggregates
     /// still read the window's raw columns: p95 is an exact <c>PERCENTILE_DISC</c>, which the hourly rollup
     /// cannot give.</para>
+    ///
+    /// <para><b>p95 from a duration histogram, not an ordered-set aggregate (#5810).</b> A
+    /// <c>PERCENTILE_DISC ... WITHIN GROUP</c> in <c>health</c> made the whole aggregate a serial GroupAggregate
+    /// that fed every row of the window into a per-collector tuplesort: over a planted week (TimescaleDB, 1-day
+    /// chunks, compressed after a day) 0.59 s for a 117,000-row server and 1.47 s for a 1,030,000-row one, where
+    /// the same aggregate without it is a parallel HashAggregate at 0.51 s. <c>p95</c> below is the same exact
+    /// value from a narrow GROUP BY (collector, duration) count, itself a parallel HashAggregate, and a running
+    /// sum over the much smaller histogram: 0.21 s and 0.70 s on those two servers, every column identical
+    /// (<c>CollectionHealthP95HistogramLiveTests</c>). The floor left is one scan of the window's rows.</para>
     /// </summary>
     public const string CollectionHealthSql = $"""
-        WITH health AS
+        WITH p95 AS
+        (
+            -- #5810: PERCENTILE_DISC(0.95) over the collector's non-NULL durations, computed from their
+            -- histogram. PERCENTILE_DISC returns the value at 1-based sorted position ceil(0.95 * n), which is the
+            -- smallest duration whose running count reaches 95% of n; "running * 20 >= timed * 19" is that test
+            -- in integers, so no float rounding can move it off the exact answer. A collector with no timed run
+            -- has no row here and reads NULL through the LEFT JOIN, as the aggregate did.
+            SELECT
+                collector_name,
+                MIN(duration_ms) FILTER (WHERE running_runs * 20 >= timed_runs * 19) AS p95_duration_ms
+            FROM
+            (
+                SELECT
+                    collector_name,
+                    duration_ms,
+                    SUM(runs) OVER (PARTITION BY collector_name ORDER BY duration_ms) AS running_runs,
+                    SUM(runs) OVER (PARTITION BY collector_name) AS timed_runs
+                FROM
+                (
+                    SELECT
+                        collector_name,
+                        duration_ms,
+                        COUNT(*) AS runs
+                    FROM v_collection_log
+                    WHERE server_id = $1
+                    AND   collection_time >= $2
+                    AND   {CollectionCycleRow.NotCycleRowSql}
+                    AND   duration_ms IS NOT NULL
+                    GROUP BY collector_name, duration_ms
+                ) histogram
+            ) running
+            GROUP BY collector_name
+        ),
+        health AS
         (
             SELECT
                 collector_name,
@@ -3309,9 +3351,9 @@ internal static class DarlingDataReader
                 -- throw away. DISC rather than CONT so the answer is a duration some run actually took
                 -- instead of an interpolation between the two modes, which would be a number describing
                 -- no run at all — the exact defect this column exists to end. Both engines ignore NULL
-                -- duration_ms here, as AVG already does. Byte-identical to Lite's DuckDB read.
+                -- duration_ms here, as AVG already does. The same value as Lite's DuckDB read, which still
+                -- calls PERCENTILE_DISC; here it comes from the p95 CTE above (#5810).
                 MAX(duration_ms) AS max_duration_ms,
-                PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_duration_ms,
                 MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
                 MAX(collection_time) AS last_run_time,
                 -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
@@ -3478,7 +3520,7 @@ internal static class DarlingDataReader
             h.error_count,
             h.avg_duration_ms,
             h.max_duration_ms,
-            h.p95_duration_ms,
+            p95.p95_duration_ms,
             h.last_success_time,
             h.last_run_time,
             -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest
@@ -3575,6 +3617,8 @@ internal static class DarlingDataReader
             -- ordinal.
             COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs
         FROM health h
+        LEFT JOIN p95
+          ON p95.collector_name = h.collector_name
         -- #4955: the keyed lookups. Each reads ONE collector's rows through
         -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
         -- aggregate above already found, instead of ranking every run of the window to reach them. The
