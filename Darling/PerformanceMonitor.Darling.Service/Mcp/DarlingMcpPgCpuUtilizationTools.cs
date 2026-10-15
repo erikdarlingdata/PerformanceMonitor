@@ -67,7 +67,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 65 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_cpu_utilization"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_cpu_utilization"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);

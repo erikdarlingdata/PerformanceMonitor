@@ -139,7 +139,7 @@ public sealed class DarlingMcpBlockingTools
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
@@ -396,7 +396,7 @@ public sealed class DarlingMcpBlockingTools
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
@@ -565,7 +565,7 @@ public sealed class DarlingMcpBlockingTools
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
@@ -723,7 +723,7 @@ public sealed class DarlingMcpBlockingTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
@@ -824,7 +824,7 @@ public sealed class DarlingMcpBlockingTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 33.6 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_blocking_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_blocking_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -887,7 +887,7 @@ public sealed class DarlingMcpBlockingTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 13.8 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_deadlock_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_deadlock_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -952,7 +952,7 @@ public sealed class DarlingMcpBlockingTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 5.3 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_lock_wait_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_lock_wait_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);

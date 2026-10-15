@@ -120,7 +120,7 @@ public sealed class DarlingMcpFleetSweepTools
                     : (await BuildDetailAsync(postgres, run, cancellationToken)).ToJsonString();
             }
 
-            var windowError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+            var windowError = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
             if (windowError != null) return windowError;
 
             var stateError = DarlingFleetSweepEndpoints.ValidateWatchState(watch_state, parameterName: "watch_state");

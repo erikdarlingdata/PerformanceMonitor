@@ -641,6 +641,13 @@
                 <TextBlock Text="Send alert families (self-monitor, reports, agent-jobs, performance) or single alerts to different Teams / Slack / PagerDuty / webhook / email destinations than the channels configured below. With no routes every alert goes to every configured channel."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                <!-- #5632 Phase A: the investigations an agent route opens, beside the routes that open them. -->
+                <Button x:Name="ManageInvestigationsButton" Content="Manage _Investigations..."
+                        Click="ManageInvestigationsButton_Click" HorizontalAlignment="Left"
+                        Padding="12,4" Margin="20,8,0,4"/>
+                <TextBlock Text="The requests an agent route hands to your own agent, with their reports and journal; the notes a brief may carry; and the environment profile per fleet, server or tag."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                 <CheckBox x:Name="LogAlertDismissalsCheckBox" Content="Log alert dismiss and mute actions"
                           Margin="20,8,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
 

@@ -1223,6 +1223,17 @@ ALTER TABLE collect.read_latency
     ADD COLUMN IF NOT EXISTS distinct_callers integer NOT NULL DEFAULT 0;";
 
     /// <summary>
+    /// V184 (#5632 Phase A) — the tables for Level 1 investigations that an alert hands to the operator's own agent, and the
+    /// agent columns on <c>config.config_notification_routes</c>. The text is on <see cref="InvestigationTables"/>, which the
+    /// rung embeds. Every table is created empty, so nothing is moved; each route column is nullable or has a constant default,
+    /// so the <c>ADD COLUMN</c> is catalog-only and every stored route keeps its effect (a NULL agent level names no agent).
+    /// No GRANT here: the <c>config</c> schema's blanket SELECT covers the tables, and the narrow writes are provisioning's
+    /// (<c>DarlingManagedRoles</c>, mirrored in <c>Darling/tools/provision-roles.sql</c>), re-asserted on every start.
+    /// <b>No Lite twin</b> in Phase A: Lite Level 1 is a follow-up.
+    /// </summary>
+    private static readonly string V184Sql = InvestigationTables.CreateSql;
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1517,6 +1528,7 @@ $rung$;";
         new Migration(181, "notification-route-scope", V181Sql),
         new Migration(182, "read-latency-capacity-fields", V182Sql),
         new Migration(183, "read-caller", V183Sql),
+        new Migration(184, "agent-investigations", V184Sql),
     };
 
     /// <summary>

@@ -1941,7 +1941,7 @@ public sealed class UpdateMuteRuleTests
 
         Assert.Equal("updated", DarlingMcpTestData.StatusOf(json));
         Assert.True(store.Row(RuleId)!.MatchesEveryAlert);
-        Assert.Equal("(matches all alerts)", (string)Payload(json)["summary"]!);
+        Assert.Equal("(matches all alerts)", (string)Payload(json)["match_summary"]!);
     }
 
     /// <summary>create_mute_rule's expires_at spelling lands on the same field and reports under the
