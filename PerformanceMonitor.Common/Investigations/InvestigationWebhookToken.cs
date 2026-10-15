@@ -9,11 +9,8 @@
 using System;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using PerformanceMonitor.Common;
-using PerformanceMonitor.Darling.Service.Mcp;
-using PerformanceMonitor.Darling.Storage;
 
-namespace PerformanceMonitor.Darling.Service.Investigations;
+namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// The generic webhook's <c>{{investigation_json}}</c> value (#5821): the investigation request an alert opened or joined,
@@ -23,19 +20,19 @@ namespace PerformanceMonitor.Darling.Service.Investigations;
 /// alert opened the request or joined it; <c>claim_tool</c> and <c>report_tool</c> name the MCP tools the runner calls
 /// next, since the claim and the report still go through MCP.
 /// </summary>
-internal static class InvestigationWebhookToken
+public static class InvestigationWebhookToken
 {
     /// <summary>The MCP tool a runner claims the request with.</summary>
-    internal const string ClaimTool = "claim_investigation_request";
+    public const string ClaimTool = "claim_investigation_request";
 
     /// <summary>The MCP tool a runner returns its report with.</summary>
-    internal const string ReportTool = "submit_investigation_report";
+    public const string ReportTool = "submit_investigation_report";
 
     /// <summary>
     /// The token's JSON for <paramref name="requestId"/>. <paramref name="row"/> is null when the request could not be read
     /// back: the object then carries the id, the outcome and the tool names only, which is still enough to claim it.
     /// </summary>
-    internal static string Render(Guid requestId, bool opened, InvestigationRequestRow? row, string? brief, McpDataDetail mode)
+    public static string Render(Guid requestId, bool opened, InvestigationRequestRow? row, string? brief, McpDataDetail mode)
     {
         var node = row is not null
             ? JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(row), McpHelpers.JsonOptions) as JsonObject
