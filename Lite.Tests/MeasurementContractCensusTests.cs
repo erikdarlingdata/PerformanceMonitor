@@ -69,10 +69,7 @@ namespace PerformanceMonitorLite.Tests;
 /// window (<see cref="ICollectorDeltaCalculator.ClearServer"/> / <c>ClearGroups</c>) BEFORE it subtracts,
 /// and leaves a marker the read layer can find (<c>identity_epoch_changes=1</c> on the carrier run's
 /// <c>collection_log</c> note; the replaced pair in <c>collector_state</c>). Landed in #3694 as
-/// <see cref="ServerEpoch"/>; <b>PINNED here as a call-site census</b>: exactly the four carriers observe
-/// (two SQL Server instance carriers, the statements carrier, the Aurora wait carrier), every forget site
-/// in the product is an epoch or a remove path
-/// (<see cref="EveryForgetSite_IsTheEpochComparatorOrAHostRemovePath"/>), both hosts drain the account and
+/// <see cref="ServerEpoch"/>; both hosts drain the account and
 /// carry the marker (<see cref="BothHosts_DrainTheDiscontinuityAccount_AndCarryTheMarkerOntoTheCollectionLog"/>).
 /// The two residuals #3694 left were rostered shrink-only and are now EMPTY, asserted empty from the product:
 /// no SQL Server delta family is scheduled before the first instance carrier (<c>wait_stats</c> carries the

@@ -46,8 +46,7 @@ permissions:
 # workflow's concurrency group, so nothing here cancels them), and a missing map only means
 # the selection is FULL, which runs every class. The selection it yields reaches the shards
 # through this run's own artifact (same run, so nothing here is read across runs). No other cross-run consumer (a
-# download-artifact with run-id, a gh run download, or a workflow_run trigger) exists
-# (CrossAppGuardCiGateTests pins both halves),
+# download-artifact with run-id, a gh run download, or a workflow_run trigger) exists,
 # nightly.yml builds its own tree from its own checkout, and a release compiles fresh on the
 # release event. The accepted
 # trade: push builds are diff-scoped, so a
