@@ -8,6 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -40,7 +43,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="DarlingAlertSettings.PerEventMax"/> with a trailing "+N more"); Summary mode — or any alert
 /// without incidents (CPU, low-disk, jobs) — takes the single combined send unchanged.</para>
 /// </summary>
-public sealed class DarlingAlertDeliverer : IAlertDeliverer
+public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSender
 {
     private static readonly AlertBranding s_branding = new(
         "Performance Monitor Darling",
@@ -57,6 +60,14 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     private readonly DarlingAlertSettings _settings;
     private readonly Func<string, AlertNotificationMode?> _resolveServerOverride;
     private readonly InvestigationDispatcher? _investigations;
+    private readonly Func<AlertMuteContext, bool>? _isAlertMuted;
+    private readonly Func<DateTime> _utcNow;
+
+    /* #5825: where each open alert's delivered fires went, keyed (server key, firing metric name), so its clear goes to
+       those destinations and nowhere else. Written after a fire reaches at least one channel, removed by the clear. In
+       memory only: a restart forgets an open alert, so a clear after a restart sends nothing and writes its history row
+       as before, which is the quiet direction. Guarded by its own lock. */
+    private readonly Dictionary<(string ServerKey, string MetricName), DeliveredFire> _deliveredFires = new();
 
     /// <param name="resolveServerOverride">
     /// Maps a fired alert's <see cref="AlertOutcome.ServerKey"/> to that server's
@@ -68,14 +79,23 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// #5632 Phase A: called after each history row is written, so an alert whose route sends it to an agent opens or joins
     /// an investigation request. Optional: null (the default, and every test that predates it) dispatches nothing.
     /// </param>
+    /// <param name="isAlertMuted">
+    /// #5825: the mute check a resolution consults before it is sent, the same rule set that mutes fires. Optional: null
+    /// (the default) mutes no resolution.
+    /// </param>
+    /// <param name="utcNow">#5825: the clock a fire's and its clear's times are read from. Optional: null is the system clock.</param>
     public DarlingAlertDeliverer(
         DarlingAlertSettings settings,
         IAlertHistoryStore historyStore,
         WebhookAlertService webhookAlertService,
         ILogger logger,
         Func<string, AlertNotificationMode?>? resolveServerOverride = null,
-        InvestigationDispatcher? investigationDispatcher = null)
+        InvestigationDispatcher? investigationDispatcher = null,
+        Func<AlertMuteContext, bool>? isAlertMuted = null,
+        Func<DateTime>? utcNow = null)
     {
+        _isAlertMuted = isAlertMuted;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _investigations = investigationDispatcher;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _historyStore = historyStore ?? throw new ArgumentNullException(nameof(historyStore));
@@ -236,6 +256,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
            "unconfigured", which is the state an operator can act on. */
         var delivery = AlertDelivery.FromFanout(result, outcome.Muted, trayChannelPresent: false);
 
+        /* #5825: remember where a delivered fire went, so its clear can follow it there. */
+        NoteDeliveredFire(outcome, currentValue, context, result);
+
         /* #3598 (design point 3): the ledger says WHERE the post went. The send core reports the routing
            decision the fan-out actually used — resolved once, after the cooldown, so it is the decision and
            not a re-derivation that could disagree with it if the route list reloaded in between — and it
@@ -277,5 +300,306 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         }
 
         return delivery;
+    }
+
+    /// <summary>The channels in fan-out order, so a resolution's channel list reads the same way every time.</summary>
+    private static readonly string[] s_channelOrder =
+    {
+        NotificationRouter.TeamsChannel, NotificationRouter.SlackChannel, NotificationRouter.GenericChannel,
+        NotificationRouter.PagerDutyChannel, NotificationRouter.EmailChannel,
+    };
+
+    /// <summary>One open alert's delivered fires (#5825): when the first one went out, the last value sent, the triage link
+    /// the first carried, each channel's destination and the route that supplied it, and the PagerDuty incidents opened.</summary>
+    private sealed class DeliveredFire
+    {
+        public DeliveredFire(DateTime firedAtUtc) => FiredAtUtc = firedAtUtc;
+
+        public DateTime FiredAtUtc { get; }
+
+        public string LastValue { get; set; } = "";
+
+        public string? TriageUrl { get; set; }
+
+        public Dictionary<string, (string Destination, int? RouteId)> Channels { get; } = new(StringComparer.Ordinal);
+
+        public HashSet<string> PagerDutyDedupKeys { get; } = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Records where a fire that reached at least one channel went (#5825). A closing edge of a recovery pair ("Server
+    /// Restored", "AG Replica Reconnected") is not a fire: it is delivered as an alert of its own and closes nothing here.
+    /// Repeats of an open alert add their channels; the episode keeps its first fire's time and triage link.
+    /// </summary>
+    private void NoteDeliveredFire(AlertOutcome outcome, string currentValue, AlertContext? context, EmailFanoutResult result)
+    {
+        if (outcome.Muted || result.Route is not { } route || result.ChannelOutcomes is not { } outcomes
+            || AlertFamily.RecoveryPairs.ContainsKey(outcome.MetricName))
+        {
+            return;
+        }
+
+        var delivered = new List<(string Channel, string Destination, int? RouteId)>();
+        foreach (var destination in route.All)
+        {
+            if (!outcomes.TryGetValue(destination.Channel, out var sent) || sent != AlertChannelOutcome.Delivered)
+            {
+                continue;
+            }
+
+            /* Email falls back to the parent's list when no route names recipients, as the send itself does. */
+            var where = destination.Destination
+                ?? (destination.Channel == NotificationRouter.EmailChannel ? _settings.SmtpRecipients : null);
+            if (!string.IsNullOrWhiteSpace(where))
+            {
+                delivered.Add((destination.Channel, where, destination.RouteId));
+            }
+        }
+
+        if (delivered.Count == 0)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var serverId = string.IsNullOrEmpty(outcome.ServerKey) ? outcome.ServerName : outcome.ServerKey;
+        var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, outcome.MetricName, context, _settings);
+        lock (_deliveredFires)
+        {
+            var key = (outcome.ServerKey, outcome.MetricName);
+            if (!_deliveredFires.TryGetValue(key, out var fire))
+            {
+                fire = new DeliveredFire(now)
+                {
+                    TriageUrl = TriageLink.Build(_settings.TriageBaseUrl, outcome.ServerName, outcome.MetricName, now, dedupKey),
+                };
+                _deliveredFires[key] = fire;
+            }
+
+            fire.LastValue = currentValue;
+            foreach (var (channel, where, routeId) in delivered)
+            {
+                fire.Channels[channel] = (where, routeId);
+                if (channel == NotificationRouter.PagerDutyChannel)
+                {
+                    fire.PagerDutyDedupKeys.Add(dedupKey);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sends an alert's clear to the destinations its delivered fire reached, then writes the resolution row (#5825).
+    ///
+    /// <para><b>Who gets it.</b> Only a channel a delivered fire of the same alert (server key and firing metric name)
+    /// reached, and only where <see cref="NotificationRouteResolutions.SendsResolutions"/> says yes for the route that
+    /// supplied that destination. PagerDuty follows <c>pagerduty_auto_resolve</c> alone and gets a <c>resolve</c> on each
+    /// incident the fire opened. No delivered fire (muted, digest, throttled, unconfigured) sends nothing, and the row is
+    /// today's <c>none</c> row. No minimum episode length: a delivered fire always gets its clear.</para>
+    ///
+    /// <para><b>Mute rules.</b> A rule that matches the alert stops the clear: nothing is sent, and the row says
+    /// <c>muted</c>. <b>The two recovery pairs</b> ("Server Unreachable" and "AG Replica Disconnected") close through their
+    /// own recovery alert, so their clear sends nothing more.</para>
+    /// </summary>
+    public async Task DeliverResolutionAsync(
+        AlertResolution resolution, AlertResolutionSendOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(resolution);
+        options ??= AlertResolutionSendOptions.Default;
+        var record = DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution);
+        if (options.ContextJson is not null)
+        {
+            record = record with { ContextJson = options.ContextJson };
+        }
+
+        try
+        {
+            record = await SendResolutionAsync(resolution, record, options, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("Alert resolution send failed for {Metric} on {Server}: {Message}",
+                resolution.MetricName, resolution.ServerName, ex.Message);
+        }
+
+        await _historyStore.RecordAlertAsync(record);
+    }
+
+    private async Task<AlertHistoryRecord> SendResolutionAsync(
+        AlertResolution resolution, AlertHistoryRecord record, AlertResolutionSendOptions options,
+        CancellationToken cancellationToken)
+    {
+        DeliveredFire? fire;
+        lock (_deliveredFires)
+        {
+            _deliveredFires.Remove((resolution.ServerKey, resolution.MetricName), out fire);
+        }
+
+        if (fire is null || AlertFamily.RecoveryPairs.Values.Contains(resolution.MetricName, StringComparer.Ordinal))
+        {
+            return record;
+        }
+
+        var flags = _settings.ResolutionFlags;
+        var routes = _settings.NotificationRoutes;
+        var targets = new List<(string Channel, string Destination)>();
+        foreach (var channel in s_channelOrder)
+        {
+            if (!fire.Channels.TryGetValue(channel, out var reached))
+            {
+                continue;
+            }
+
+            if (channel == NotificationRouter.PagerDutyChannel
+                && (!options.ClosePagerDuty || fire.PagerDutyDedupKeys.Count == 0))
+            {
+                continue;
+            }
+
+            var route = reached.RouteId is { } routeId ? routes.FirstOrDefault(r => r.RouteId == routeId) : null;
+            if (NotificationRouteResolutions.SendsResolutions(route, channel, flags))
+            {
+                targets.Add((channel, reached.Destination));
+            }
+        }
+
+        if (targets.Count == 0)
+        {
+            return record;
+        }
+
+        var channels = string.Join(",", targets.Select(t => t.Channel));
+        if (IsMuted(resolution, options))
+        {
+            _logger.LogInformation("Alert resolution for {Metric} on {Server} muted by a mute rule",
+                resolution.MetricName, resolution.ServerName);
+            return record with
+            {
+                Delivery = AlertDelivery.FromFanout(
+                    new EmailFanoutResult(AlertChannelOutcome.NotAttempted, null, AlertChannelOutcome.NotAttempted, null, true),
+                    muted: true, trayChannelPresent: false),
+                Muted = true,
+                ResolutionChannels = channels,
+                ResolutionOutcome = "muted",
+            };
+        }
+
+        var clearedAt = _utcNow();
+        var detail = ResolutionDetailText(resolution, fire, clearedAt);
+        var serverId = string.IsNullOrEmpty(resolution.ServerKey) ? resolution.ServerName : resolution.ServerKey;
+        var outcomes = new Dictionary<string, AlertChannelOutcome>(StringComparer.Ordinal);
+        string? emailError = null;
+        string? webhookError = null;
+        foreach (var (channel, destination) in targets)
+        {
+            string? error;
+            if (channel == NotificationRouter.EmailChannel)
+            {
+                error = await _core.TrySendResolutionEmailAsync(destination, resolution.Title, resolution.ServerName, detail, fire.TriageUrl);
+                emailError ??= error;
+            }
+            else if (channel == NotificationRouter.PagerDutyChannel)
+            {
+                error = null;
+                foreach (var dedupKey in fire.PagerDutyDedupKeys)
+                {
+                    error ??= await _webhooks.TrySendPagerDutyResolveAsync(
+                        destination, dedupKey, resolution.MetricName, resolution.ServerName, serverId, detail, cancellationToken);
+                }
+            }
+            else
+            {
+                error = await _webhooks.TrySendResolutionAsync(
+                    channel, destination, resolution.Title, resolution.ServerName, serverId, detail, fire.TriageUrl, cancellationToken);
+            }
+
+            outcomes[channel] = error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
+            if (error is not null && channel != NotificationRouter.EmailChannel)
+            {
+                webhookError ??= $"{channel}: {error}";
+            }
+        }
+
+        var webhookOutcomes = outcomes.Where(o => o.Key != NotificationRouter.EmailChannel).Select(o => o.Value).ToList();
+        var fanout = new EmailFanoutResult(
+            outcomes.GetValueOrDefault(NotificationRouter.EmailChannel, AlertChannelOutcome.NotAttempted), emailError,
+            webhookOutcomes.Contains(AlertChannelOutcome.Delivered) ? AlertChannelOutcome.Delivered
+                : webhookOutcomes.Contains(AlertChannelOutcome.Failed) ? AlertChannelOutcome.Failed
+                : AlertChannelOutcome.NotAttempted,
+            webhookError, AnyChannelConfigured: true);
+        var failed = outcomes.Where(o => o.Value == AlertChannelOutcome.Failed).Select(o => o.Key).ToList();
+        /* Channel names only: a webhook's error text can carry its URL, so the reason stays in send_error. */
+        return record with
+        {
+            Delivery = AlertDelivery.FromFanout(fanout, muted: false, trayChannelPresent: false),
+            ResolutionSentAtUtc = outcomes.ContainsValue(AlertChannelOutcome.Delivered)
+                ? AlertHistoryEscalationSeed.TruncateToMicroseconds(clearedAt)
+                : null,
+            ResolutionChannels = channels,
+            ResolutionOutcome = failed.Count == 0 ? "sent" : "failed: " + string.Join(",", failed),
+        };
+    }
+
+    private bool IsMuted(AlertResolution resolution, AlertResolutionSendOptions options)
+    {
+        if (_isAlertMuted is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return _isAlertMuted(new AlertMuteContext
+            {
+                ServerName = resolution.ServerName,
+                ServerId = int.TryParse(resolution.ServerKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) ? id : null,
+                ExternalSource = options.ExternalSource,
+                MetricName = resolution.MetricName,
+            });
+        }
+        catch (Exception ex)
+        {
+            /* A mute check that throws mutes nothing, as on the fire side. */
+            _logger.LogWarning("Mute check for the resolution of {Metric} on {Server} failed: {Message}",
+                resolution.MetricName, resolution.ServerName, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>The clear's prose (#5825): the resolution's own line, then when the alert fired and cleared, how long it
+    /// lasted and the last value its fire sent.</summary>
+    internal static string ResolutionDetailText(AlertResolution resolution, DateTime firedAtUtc, DateTime clearedAtUtc, string lastValue)
+    {
+        var text = new StringBuilder(resolution.Message);
+        text.Append(CultureInfo.InvariantCulture, $"\nFired: {firedAtUtc:yyyy-MM-dd HH:mm:ss} UTC");
+        text.Append(CultureInfo.InvariantCulture, $"\nCleared: {clearedAtUtc:yyyy-MM-dd HH:mm:ss} UTC");
+        text.Append(CultureInfo.InvariantCulture, $"\nLasted: {DurationText(clearedAtUtc - firedAtUtc)}");
+        if (!string.IsNullOrWhiteSpace(lastValue))
+        {
+            text.Append(CultureInfo.InvariantCulture, $"\nLast value: {lastValue}");
+        }
+
+        return text.ToString();
+    }
+
+    private static string ResolutionDetailText(AlertResolution resolution, DeliveredFire fire, DateTime clearedAtUtc) =>
+        ResolutionDetailText(resolution, fire.FiredAtUtc, clearedAtUtc, fire.LastValue);
+
+    private static string DurationText(TimeSpan lasted)
+    {
+        if (lasted < TimeSpan.Zero)
+        {
+            lasted = TimeSpan.Zero;
+        }
+
+        return lasted.TotalHours >= 1
+            ? string.Create(CultureInfo.InvariantCulture, $"{(int)lasted.TotalHours}h {lasted.Minutes}m")
+            : lasted.TotalMinutes >= 1
+                ? string.Create(CultureInfo.InvariantCulture, $"{lasted.Minutes}m {lasted.Seconds}s")
+                : string.Create(CultureInfo.InvariantCulture, $"{lasted.Seconds}s");
     }
 }

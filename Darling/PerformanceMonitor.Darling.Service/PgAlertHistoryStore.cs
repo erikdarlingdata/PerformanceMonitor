@@ -40,6 +40,16 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore
         _logger = logger;
     }
 
+    private const string InsertSql = @"
+INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
+
+    /// <summary>#5825: <see cref="InsertSql"/> plus the three resolution columns (V186), for a resolution row whose send
+    /// had an outcome.</summary>
+    private const string InsertResolutionSql = @"
+INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json, resolution_sent_at, resolution_channels, resolution_outcome)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
+
     public async Task RecordAlertAsync(AlertHistoryRecord record)
     {
         if (record is null)
@@ -65,9 +75,11 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(@"
-INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            /* #5825: a resolution that was sent, failed or muted also writes its three V186 columns. Every other row keeps
+               the twelve-column insert it always had. */
+            var resolution = record.ResolutionOutcome is not null;
+            using var command = new NpgsqlCommand(resolution ? InsertResolutionSql : InsertSql, connection)
+                { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
             /* #5632 Phase A: a stamped AlertTimeUtc is written as is, so the investigation link row that names this alert
                carries the same instant; otherwise the store's own clock, as before. */
@@ -88,6 +100,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { Comma
                instance, so the stored row is unchanged. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)DerivedStoreScrub.Text(record.DetailText) ?? DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)DerivedStoreScrub.Json(record.ContextJson) ?? DBNull.Value });
+            if (resolution)
+            {
+                command.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlDbType.Timestamp,
+                    Value = record.ResolutionSentAtUtc is { } sentAt ? DateTime.SpecifyKind(sentAt, DateTimeKind.Unspecified) : DBNull.Value,
+                });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.ResolutionChannels ?? DBNull.Value });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = record.ResolutionOutcome! });
+            }
 
             await command.ExecuteNonQueryAsync();
 

@@ -155,7 +155,15 @@ internal static class AlertSeverity
             "AG Replica Reconnected" => ("#16A34A", "RESOLVED", "\U0001F7E2"),
             "AG Sync Fell Behind" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Database Suspended" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #5825: a resolution's own name ("CPU Resolved", "Blocking Cleared", "Capture Restored") headlines the
+               clear Darling now sends, and a clear reads green like the two recovery edges above, not INFO-blue. */
+            _ when IsResolutionTitle(metricName) => ("#16A34A", "RESOLVED", "\U0001F7E2"),
             _ => ("#2eaef1", "INFO", "\U0001F535")
         }
     };
+
+    private static bool IsResolutionTitle(string metricName) =>
+        metricName.EndsWith(" Resolved", System.StringComparison.Ordinal)
+        || metricName.EndsWith(" Cleared", System.StringComparison.Ordinal)
+        || metricName.EndsWith(" Restored", System.StringComparison.Ordinal);
 }
