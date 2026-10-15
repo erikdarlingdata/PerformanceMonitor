@@ -169,12 +169,22 @@ ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     }
 
     /// <summary>
-    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's newest sentinel), with its index. Safe on a store that
+    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's sentinel for V186), with its index. Safe on a store that
     /// never had it. Nothing before V186 reads it.
     /// </summary>
     internal static async Task DropV186SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.collection_log_hourly;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V187 (#5867): <c>collect.query_store_compose_stamp_failures</c> (the probe's newest sentinel), the compose builder's
+    /// failure record. Safe on a store that never had it. Nothing before V187 reads it.
+    /// </summary>
+    internal static async Task DropV187SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.query_store_compose_stamp_failures;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

@@ -70,11 +70,12 @@ public sealed class ReadCallerRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         /* V185's sentinel (#5812) is the last parameter and V184's (#5632) the one before it; this one is just below them. */
-        Assert.Equal("hasCollectionLogHourly", parameters[^1].Name);
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^2].Name);
-        Assert.Equal("hasInvestigations", parameters[^3].Name);
-        Assert.Equal("hasReadCaller", parameters[^4].Name);
-        Assert.Equal("hasReadLatencyCapacityFields", parameters[^5].Name);
+        Assert.Equal("hasComposeStampFailures", parameters[^1].Name);
+        Assert.Equal("hasCollectionLogHourly", parameters[^2].Name);
+        Assert.Equal("hasPlanRegressionPartialDays", parameters[^3].Name);
+        Assert.Equal("hasInvestigations", parameters[^4].Name);
+        Assert.Equal("hasReadCaller", parameters[^5].Name);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[^6].Name);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({parameters.Length - 3})", viewer, StringComparison.Ordinal);
@@ -86,10 +87,11 @@ public sealed class ReadCallerRungTests
         atThisRung[^1] = false;
         atThisRung[^2] = false;
         atThisRung[^3] = false;
+        atThisRung[^4] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var behind = (object[])atThisRung.Clone();
-        behind[^4] = false;
+        behind[^5] = false;
         Assert.Equal(182, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasReadCaller)", StringComparison.Ordinal);
@@ -113,6 +115,7 @@ public sealed class ReadCallerRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V182 shape and the ladder back to 182. */
+        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
