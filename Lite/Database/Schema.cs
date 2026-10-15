@@ -279,6 +279,11 @@ CREATE TABLE IF NOT EXISTS notification_routes (
     slack_secret_gen VARCHAR,
     generic_secret_gen VARCHAR,
     pagerduty_secret_gen VARCHAR,
+    agent_level INTEGER,
+    agent_max_per_hour INTEGER,
+    agent_max_per_day INTEGER,
+    agent_lease_minutes INTEGER,
+    agent_expiry_minutes INTEGER,
     CHECK (scope_server_id IS NULL OR scope_tag_id IS NULL),
     CHECK (metric_match <> '*' OR scope_server_id IS NOT NULL OR scope_tag_id IS NOT NULL)
 )";

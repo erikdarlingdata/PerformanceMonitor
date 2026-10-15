@@ -3020,6 +3020,13 @@ public partial class DuckDbInitializer : IDisposable
         (69, "notification_routes", "slack_secret_gen", "VARCHAR"),
         (69, "notification_routes", "generic_secret_gen", "VARCHAR"),
         (69, "notification_routes", "pagerduty_secret_gen", "VARCHAR"),
+        /* #5820: the five agent settings of a route, the Lite twins of Darling's V184 columns. NULL is no agent (the level)
+           or the default (a limit); the route store reads a NULL limit as NotificationRoute's default. v69 is unreleased. */
+        (69, "notification_routes", "agent_level", "INTEGER"),
+        (69, "notification_routes", "agent_max_per_hour", "INTEGER"),
+        (69, "notification_routes", "agent_max_per_day", "INTEGER"),
+        (69, "notification_routes", "agent_lease_minutes", "INTEGER"),
+        (69, "notification_routes", "agent_expiry_minutes", "INTEGER"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
