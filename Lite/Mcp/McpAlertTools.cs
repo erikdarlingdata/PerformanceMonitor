@@ -446,15 +446,18 @@ public sealed class McpAlertTools
     public static async Task<string> GetNotificationRoutes(
         LocalDataService dataService,
         ServerManager serverManager,
-        IInvestigationRequestStore? requests = null)
+        IEnumerable<IInvestigationRequestStore> investigationStores)
     {
+        /* #5820: the request store is optional, and the host does not register one until the investigation store ships. A
+           parameter typed as the store itself would be read as a tool argument when nothing is registered, so the tool takes
+           "every registered one" (a container resolves that to an empty list, never to nothing) and uses the first. */
         try
         {
             return await ReadNotificationRoutesAsync(
                 CreateRouteStore(dataService, serverManager),
                 serverManager.GetAllServers(),
                 await dataService.GetServerTagsAsync(),
-                requests);
+                investigationStores.FirstOrDefault());
         }
         catch (Exception ex)
         {
