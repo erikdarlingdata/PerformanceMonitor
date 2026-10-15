@@ -45,7 +45,7 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
     private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime baselineStart, DateTime start, CancellationToken ct)
     {
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
-        var context = new CollectorContext { ServerId = ServerId, ServerName = "qsreg-host", CollectionTime = DateTime.UtcNow, Deltas = new CollectorDeltaCalculator() };
+        var context = new CollectorContext { ServerId = ServerId, ServerName = "qsreg-host", CollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
         var server = new ServerRuntime
         {
             Config = new MonitoredServer { Name = "qsreg", Host = "qsreg-host" },
@@ -240,12 +240,12 @@ INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major
 VALUES (@server_id, 'qsreg', 'qsreg', TRUE, 16, now(), now())
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
-        var start = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-24), DateTimeKind.Unspecified);
+        var start = LiveClock.Now().AddHours(-24);
         start = start.AddTicks(-(start.Ticks % TimeSpan.TicksPerSecond));
         var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
         await SeedAsync(postgres, baselineStart, start, ct);
         /* The window ends now, as the MCP tool's does: at or after the coverage row's applied_through (the gate's clause 4). */
-        var end = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var end = LiveClock.Now();
         end = end.AddTicks(-(end.Ticks % TimeSpan.TicksPerSecond)).AddSeconds(1);
         await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, baselineStart.AddDays(-5), end, null, null, ct);
         await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, baselineStart.AddDays(-3), ct);
