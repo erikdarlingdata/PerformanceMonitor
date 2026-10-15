@@ -194,7 +194,9 @@ public static class StoreSelfMetrics
     /// bytes: relpages is 0 until a relation is vacuumed or analysed, and a gap that size is not a size
     /// column's meaning. So the file calls remain, and the cost still grows with chunk count, about 1.6 times
     /// lower than the function's. <c>chunk_counts</c> counts the <c>chunks</c> view's rows, the way the
-    /// aggregate arm always did.</para>
+    /// aggregate arm always did. The hourly sweep therefore does not use this form: it writes
+    /// <see cref="HypertableEstimateSizingCtesSql"/>, whose cost does not grow with the compressed chunk count, and runs
+    /// this exact form once a day (#5857).</para>
     /// </summary>
     public const string HypertableSizingCtesSql = @"all_chunks AS MATERIALIZED (
     SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name
@@ -257,7 +259,8 @@ compression AS (
     /// The compressed chunks' own relations are NOT sized, and that is both the saving and the only systematic error.
     /// After compression TimescaleDB truncates the chunk's own relation, so it holds only index metapages (16 KB on
     /// the rig, two 8 KB pages) plus any rows inserted after compression and not yet recompressed. The estimate is
-    /// therefore a slight underestimate (about 0.7% on a compressed 1,000-chunk fixture, in the PR body). The hourly
+    /// therefore a slight underestimate: 16 KB per compressed chunk on the rig, a fixed amount, so its share shrinks as
+    /// chunks grow (7.3% on the live test's few-KB chunks, 18% on the rig's 1,000-chunk bench). The hourly
     /// sweep writes this form and marks the rows <c>size_estimated = true</c>; one sweep a day writes the exact form
     /// (<see cref="ExactSizeIntervalHours"/>). <c>compressed_before_bytes</c>, <c>compressed_after_bytes</c> and
     /// <c>chunk_count</c> are computed as the exact form computes them. An uncompressed hypertable (compression off)

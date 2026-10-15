@@ -1197,41 +1197,7 @@ LIMIT 1", connection))
             "the dev fixture is expected to have TimescaleDB installed");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        /* The hypertable: four one-day chunks, each seed midday-anchored (#1972) so none straddles midnight. */
-        await ExecAsync(connection,
-            $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
-        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{Table}", "collection_time"), ct);
-        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Table}"), ct);
-        for (var day = 1; day <= 4; day++)
-        {
-            await SeedTickRowsAsync(connection, Table, daysBack: day, rows: 5_000, ct);
-        }
-
-        /* The aggregate over it, materialized by hand rather than by a refresh policy (a policy fires on
-           creation, #1788, and would move the materialization while the test measures it), then compressed. */
-        await ExecAsync(connection, $@"
-CREATE MATERIALIZED VIEW collect.{Aggregate} WITH (timescaledb.continuous) AS
-SELECT time_bucket(INTERVAL '1 hour', collection_time) AS bucket, server_id, count(*) AS samples, sum(value) AS total
-FROM collect.{Table}
-GROUP BY 1, 2
-WITH NO DATA", ct);
-        await ExecAsync(connection, $"CALL refresh_continuous_aggregate('collect.{Aggregate}', NULL, NULL)", ct);
-        await ExecAsync(connection, $"ALTER MATERIALIZED VIEW collect.{Aggregate} SET (timescaledb.compress = true)", ct);
-
-        /* The three OLDEST hypertable chunks, chosen by range rather than by age so the count cannot depend on
-           the hour the test runs, and every materialization chunk. */
-        await ExecAsync(connection, $@"
-SELECT count(compress_chunk(format('%I.%I', s.chunk_schema, s.chunk_name)::regclass))
-FROM (SELECT chunk_schema, chunk_name
-      FROM timescaledb_information.chunks
-      WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
-      ORDER BY range_start
-      LIMIT 3) AS s", ct);
-        await ExecAsync(connection, $"SELECT count(compress_chunk(c)) FROM show_chunks('collect.{Aggregate}') AS c", ct);
-
-        /* Settle before measuring: a relation's first VACUUM adds free-space and visibility-map forks, which
-           pg_total_relation_size counts, so autovacuum must find nothing to do between the sweep and the check. */
-        await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
+        await CreateCompressedHypertableAndAggregateFixtureAsync(connection, Table, Aggregate, ct);
 
         /* Precondition: compressed data on BOTH sides, through the public stats function rather than the
            catalog column under test. */
@@ -1335,6 +1301,51 @@ FROM named, removed", connection))
 
         var logging = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(dataSource, ct);
         Assert.NotNull(await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(dataSource, logging, ct));
+    }
+
+    /// <summary>
+    /// The compressed fixture the #3918 and #5857 live tests share: a hypertable of four one-day chunks with its three
+    /// oldest compressed, and a hand-materialized continuous aggregate over it with every chunk compressed, then settled
+    /// by a VACUUM so no autovacuum fork appears between a sweep and the check.
+    /// </summary>
+    private static async Task CreateCompressedHypertableAndAggregateFixtureAsync(
+        NpgsqlConnection connection, string Table, string Aggregate, CancellationToken ct)
+    {
+        /* The hypertable: four one-day chunks, each seed midday-anchored (#1972) so none straddles midnight. */
+        await ExecAsync(connection,
+            $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
+        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{Table}", "collection_time"), ct);
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Table}"), ct);
+        for (var day = 1; day <= 4; day++)
+        {
+            await SeedTickRowsAsync(connection, Table, daysBack: day, rows: 5_000, ct);
+        }
+
+        /* The aggregate over it, materialized by hand rather than by a refresh policy (a policy fires on
+           creation, #1788, and would move the materialization while the test measures it), then compressed. */
+        await ExecAsync(connection, $@"
+CREATE MATERIALIZED VIEW collect.{Aggregate} WITH (timescaledb.continuous) AS
+SELECT time_bucket(INTERVAL '1 hour', collection_time) AS bucket, server_id, count(*) AS samples, sum(value) AS total
+FROM collect.{Table}
+GROUP BY 1, 2
+WITH NO DATA", ct);
+        await ExecAsync(connection, $"CALL refresh_continuous_aggregate('collect.{Aggregate}', NULL, NULL)", ct);
+        await ExecAsync(connection, $"ALTER MATERIALIZED VIEW collect.{Aggregate} SET (timescaledb.compress = true)", ct);
+
+        /* The three OLDEST hypertable chunks, chosen by range rather than by age so the count cannot depend on
+           the hour the test runs, and every materialization chunk. */
+        await ExecAsync(connection, $@"
+SELECT count(compress_chunk(format('%I.%I', s.chunk_schema, s.chunk_name)::regclass))
+FROM (SELECT chunk_schema, chunk_name
+      FROM timescaledb_information.chunks
+      WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
+      ORDER BY range_start
+      LIMIT 3) AS s", ct);
+        await ExecAsync(connection, $"SELECT count(compress_chunk(c)) FROM show_chunks('collect.{Aggregate}') AS c", ct);
+
+        /* Settle before measuring: a relation's first VACUUM adds free-space and visibility-map forks, which
+           pg_total_relation_size counts, so autovacuum must find nothing to do between the sweep and the check. */
+        await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
     }
 
     /* ---------------- #5857 one-pass sizing ---------------- */
@@ -1464,6 +1475,20 @@ CROSS JOIN LATERAL (
 
         Assert.NotEmpty(compared);
 
+        /* #5857: this oracle is the EXACT form's, so the rows it just compared must say they are exact. The first sweep
+           of a store (an empty table, or none with size_estimated = false in the last 23 hours) writes the exact form. */
+        await using (var marked = new NpgsqlCommand($@"
+SELECT count(*) FILTER (WHERE m.size_estimated IS DISTINCT FROM false), count(*)
+FROM collect.store_metrics AS m
+WHERE m.object_kind IN ('{StoreSelfMetrics.HypertableObjectKind}', '{StoreSelfMetrics.ContinuousAggregateObjectKind}')
+AND   m.metric_time = (SELECT max(metric_time) FROM collect.store_metrics WHERE object_kind = '{StoreSelfMetrics.StoreObjectKind}')", connection))
+        {
+            await using var markedReader = await marked.ExecuteReaderAsync(ct);
+            Assert.True(await markedReader.ReadAsync(ct));
+            Assert.True(markedReader.GetInt64(1) > 0, "the sweep wrote no hypertable or aggregate rows");
+            Assert.True(markedReader.GetInt64(0) == 0, $"{markedReader.GetInt64(0)} of {markedReader.GetInt64(1)} exact-form rows are not marked size_estimated = false");
+        }
+
         /* The hypertable arm is UNFILTERED (the omission is the view's, not a predicate of ours): one row per
            hypertable and per aggregate the views list, none dropped by a size join. */
         await using var counts = new NpgsqlCommand($@"
@@ -1475,6 +1500,194 @@ SELECT
         Assert.Equal(countReader.GetInt64(0), compared.Count(r => r.Kind == StoreSelfMetrics.HypertableObjectKind));
         Assert.Equal(countReader.GetInt64(1), compared.Count(r => r.Kind == StoreSelfMetrics.ContinuousAggregateObjectKind));
         return compared;
+    }
+
+    /// <summary>
+    /// The hourly sweep sizes hypertables and aggregates from the compression catalog and one sweep a day is exact
+    /// (#5857). On the compressed fixture: the first sweep (empty table) is exact and marked <c>size_estimated = false</c>;
+    /// a sweep an hour later writes <c>size_estimated = true</c> rows whose <c>total_bytes</c> equal the estimate computed here
+    /// from the catalogs (root + uncompressed chunks by <c>pg_total_relation_size</c> + <c>after_compression_total_bytes</c> of
+    /// the compressed chunks) and whose compression bytes and chunk counts equal the exact rows'; a sweep 24 hours after the
+    /// first is exact again. The byte gap between the two forms is sent as a diagnostic message.
+    /// </summary>
+    [Fact]
+    public async Task Sweep_HourlyWritesTheCatalogEstimate_AndTheDailySweepWritesExactAgain_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5857 estimate test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        const string Table = "tick5857_estimate";
+        const string Aggregate = "tick5857_estimate_hourly";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await CreateCompressedHypertableAndAggregateFixtureAsync(connection, Table, Aggregate, ct);
+
+        var first = DateTime.UtcNow;
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, first, null, null, null, ct);
+        await AssertSweepRowsEqualTheSizeFunctionsAsync(connection, ct);
+
+        /* An hour later: the estimate. */
+        var hourly = first.AddHours(1);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, hourly, null, null, null, ct);
+
+        var exactRows = await ReadSizeRowsAsync(connection, first, ct);
+        var estimateRows = await ReadSizeRowsAsync(connection, hourly, ct);
+        Assert.NotEmpty(exactRows);
+        Assert.Equal(exactRows.Keys.OrderBy(k => k).ToList(), estimateRows.Keys.OrderBy(k => k).ToList());
+        Assert.All(exactRows, r => Assert.False(r.Value.SizeEstimated, $"{r.Key} first sweep is not marked exact"));
+        Assert.All(estimateRows, r => Assert.True(r.Value.SizeEstimated, $"{r.Key} an hour later is not marked estimated"));
+
+        var expected = await ReadCatalogEstimatesAsync(connection, ct);
+        long gap = 0;
+        long exactBytes = 0;
+        foreach (var (key, estimate) in estimateRows)
+        {
+            var exact = exactRows[key];
+            Assert.True(expected.TryGetValue(key, out var oracle), $"{key} has no catalog estimate");
+            Assert.True(estimate.TotalBytes == oracle, $"{key}: estimate total_bytes {estimate.TotalBytes} != the catalog estimate {oracle}");
+            Assert.True(estimate.CompressedBefore == exact.CompressedBefore && estimate.CompressedAfter == exact.CompressedAfter,
+                $"{key}: compressed bytes differ between the two forms");
+            Assert.True(estimate.ChunkCount == exact.ChunkCount, $"{key}: chunk_count {estimate.ChunkCount} != {exact.ChunkCount}");
+            Assert.True(estimate.TotalBytes <= exact.TotalBytes, $"{key}: the estimate {estimate.TotalBytes} is above the exact {exact.TotalBytes}");
+            gap += exact.TotalBytes!.Value - estimate.TotalBytes!.Value;
+            exactBytes += exact.TotalBytes.Value;
+        }
+
+        Assert.True(gap > 0, "the compressed fixture should read lower in the estimate (the compressed chunks' own relations are not sized)");
+        TestContext.Current.SendDiagnosticMessage(
+            $"#5857 byte gap on the compressed fixture: estimate is {gap} bytes ({100.0 * gap / exactBytes:F1}%) below the exact {exactBytes} bytes");
+
+        /* 24 hours after the first sweep: no exact row in the last 23 hours, so exact again. */
+        var daily = first.AddHours(24);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, daily, null, null, null, ct);
+        await AssertSweepRowsEqualTheSizeFunctionsAsync(connection, ct);
+        var dailyRows = await ReadSizeRowsAsync(connection, daily, ct);
+        Assert.Equal(exactRows.Count, dailyRows.Count);
+        Assert.All(dailyRows, r => Assert.False(r.Value.SizeEstimated, $"{r.Key} 24 hours later is not marked exact"));
+    }
+
+    /// <summary>
+    /// The readers over <c>collect.store_metrics</c> carry the estimate marker and never grow an exact size by an estimate
+    /// (#5857). A hypertable's daily point is its newest EXACT row when the day holds one, so the window growth subtracts
+    /// exact from exact (the estimate reads lower by the compressed chunks' own relations, and a day-end estimate minus a
+    /// day-start exact would show a shrink that did not happen); a kind with no estimate flag keeps its newest row; the
+    /// latest row is the newest whichever form wrote it, with the flag.
+    /// </summary>
+    [Fact]
+    public async Task StoreMetricReaders_SurfaceSizeEstimated_AndTheDailyPointPrefersTheExactRow_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5857 reader test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await ExecAsync(connection, $@"
+INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) VALUES
+    ('2026-03-01 02:00', 'h1', '{StoreSelfMetrics.HypertableObjectKind}', 1000, false),
+    ('2026-03-01 23:00', 'h1', '{StoreSelfMetrics.HypertableObjectKind}',  900, true),
+    ('2026-03-02 02:00', 'h1', '{StoreSelfMetrics.HypertableObjectKind}', 1100, false),
+    ('2026-03-02 12:00', 'h1', '{StoreSelfMetrics.HypertableObjectKind}', 1050, true),
+    ('2026-03-03 02:00', 'h1', '{StoreSelfMetrics.HypertableObjectKind}', 1070, false),
+    ('2026-03-03 12:00', 'h1', '{StoreSelfMetrics.HypertableObjectKind}', 1040, true),
+    ('2026-03-01 02:00', 'd1', '{StoreSelfMetrics.DimensionObjectKind}', 5, NULL),
+    ('2026-03-01 23:00', 'd1', '{StoreSelfMetrics.DimensionObjectKind}', 6, NULL)", ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var daily = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetDailyAsync(dataSource, new DateTime(2026, 2, 28), ct);
+        var h1 = daily.Where(p => p.ObjectName == "h1").OrderBy(p => p.Day).ToList();
+        Assert.Equal(new long?[] { 1000, 1100, 1070 }, h1.Select(p => p.TotalBytes).ToArray());
+        Assert.Equal(new bool?[] { false, false, false }, h1.Select(p => p.SizeEstimated).ToArray());
+        var d1 = Assert.Single(daily, p => p.ObjectName == "d1");
+        Assert.Equal(6, d1.TotalBytes);
+        Assert.Null(d1.SizeEstimated);
+
+        /* Window growth runs from the first day's exact row to the last day's exact row (70), not to the last day's
+           estimate (which would read 40: the estimate sits below the exact size by the compressed chunks' relations). */
+        var deltas = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeWindowDeltas(daily);
+        Assert.Equal(70, deltas[(StoreSelfMetrics.HypertableObjectKind, "h1")].GrowthBytes);
+
+        var latest = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
+        var latestH1 = Assert.Single(latest, r => r.ObjectName == "h1");
+        Assert.Equal(1040, latestH1.TotalBytes);
+        Assert.True(latestH1.SizeEstimated);
+        Assert.Null(Assert.Single(latest, r => r.ObjectName == "d1").SizeEstimated);
+    }
+
+    private sealed record SizeRow(long? TotalBytes, long? CompressedBefore, long? CompressedAfter, int? ChunkCount, bool? SizeEstimated);
+
+    /// <summary>The hypertable and aggregate rows one sweep wrote, by kind and name.</summary>
+    private static async Task<Dictionary<string, SizeRow>> ReadSizeRowsAsync(NpgsqlConnection connection, DateTime metricTime, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand($@"
+SELECT object_kind || '/' || object_name, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count, size_estimated
+FROM collect.store_metrics
+WHERE metric_time = $1
+AND   object_kind IN ('{StoreSelfMetrics.HypertableObjectKind}', '{StoreSelfMetrics.ContinuousAggregateObjectKind}')", connection);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(metricTime, DateTimeKind.Unspecified));
+        var rows = new Dictionary<string, SizeRow>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows[reader.GetString(0)] = new SizeRow(
+                reader.IsDBNull(1) ? null : reader.GetInt64(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetBoolean(5));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The estimate the way the issue words it, computed here from the catalogs and the public stats function rather than by
+    /// the statement under test: the root, plus every chunk that is NOT compressed, by <c>pg_total_relation_size</c>, plus
+    /// <c>after_compression_total_bytes</c> of the compressed chunks. Keyed like <see cref="ReadSizeRowsAsync"/>.
+    /// </summary>
+    private static async Task<Dictionary<string, long?>> ReadCatalogEstimatesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand($@"
+WITH subjects AS (
+    SELECT '{StoreSelfMetrics.HypertableObjectKind}/' || h.hypertable_name AS key,
+           format('%I.%I', h.hypertable_schema, h.hypertable_name)::regclass AS rel
+    FROM timescaledb_information.hypertables AS h
+    UNION ALL
+    SELECT '{StoreSelfMetrics.ContinuousAggregateObjectKind}/' || ca.view_name,
+           format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass
+    FROM timescaledb_information.continuous_aggregates AS ca
+)
+SELECT s.key,
+       pg_total_relation_size(s.rel)
+       + coalesce((SELECT sum(pg_total_relation_size(c))
+                     FROM show_chunks(s.rel) AS c
+                    WHERE c NOT IN (SELECT format('%I.%I', st.chunk_schema, st.chunk_name)::regclass
+                                      FROM chunk_compression_stats(s.rel) AS st
+                                     WHERE st.compression_status = 'Compressed')), 0)
+       + coalesce((SELECT sum(st.after_compression_total_bytes)
+                     FROM chunk_compression_stats(s.rel) AS st
+                    WHERE st.compression_status = 'Compressed'), 0)
+FROM subjects AS s", connection);
+        var rows = new Dictionary<string, long?>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows[reader.GetString(0)] = reader.IsDBNull(1) ? null : (long?)Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+        }
+
+        return rows;
     }
 
     /* ---------------- #2136 synthetic scale test ---------------- */
