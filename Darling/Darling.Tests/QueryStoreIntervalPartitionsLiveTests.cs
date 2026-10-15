@@ -475,7 +475,9 @@ DO UPDATE SET execution_count = EXCLUDED.execution_count;";
         Assert.Equal(new DateTime(2026, 9, 28), (await QueryStoreIntervalPartitions.ReadStateAsync(connection, Wide, ct)).LegacyUpper);
         await QueryStoreIntervalPartitions.CreateAheadAsync(connection, Wide, now, logger, ct);
 
-        /* Rows: legacy (before S), day 9-28 (whole day expired by 10-08), day 9-29 (ends 9-30 00:00; the cutoff is 9-28 14:55 on 10-08 under the 10-day horizon, #5809, so it is a partial day). */
+        /* Rows: legacy (before S), day 9-28 at its last microsecond, day 9-29 at both ends, and 9-30 00:00. The drops below run at
+           `edge`, not at `now`: under the 10-day horizon (#5809) the cutoff one microsecond before 10-10 00:00 is one microsecond
+           before 9-30 00:00, so legacy and the 9-28 day are whole expired days and the 9-29 day is the partial one that stays. */
         await InsertAsync(connection, Wide, new DateTime(2026, 9, 20), 1, ct);
         await InsertAsync(connection, Wide, new DateTime(2026, 9, 28, 23, 59, 59).AddTicks(9999990), 2, ct);
         await InsertAsync(connection, Wide, new DateTime(2026, 9, 29, 0, 0, 0), 3, ct);
@@ -507,7 +509,7 @@ DO UPDATE SET execution_count = EXCLUDED.execution_count;";
         Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM {Wide.Parent}", ct));
         Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.NothingToDo, (await QueryStoreIntervalPartitions.DropExpiredAsync(connection, Wide, edge, logger, ct)).Outcome);
 
-        /* A store promoted only five days ago keeps its legacy table (S = 10-05 > cutoff 9-28), until S is old enough. */
+        /* A store promoted only five days ago keeps its legacy table (S = 10-05 > cutoff 9-23 14:55, the latest table's 15-day horizon), until S is old enough. */
         var second = Latest;
         await PromoteWholeAsync(connection, second, now.AddDays(-5), logger, ct);
         await InsertAsync(connection, second, new DateTime(2026, 10, 1), 1, ct);
