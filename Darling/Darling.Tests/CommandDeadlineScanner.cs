@@ -20,12 +20,6 @@ namespace Darling.Tests;
 /// by the time they were consolidated, and only one of them carried the hardening the others needed; a
 /// judgement duplicated once per pin would drift the same way.</para>
 ///
-/// <para><b>Which pins ask it here, and which deliberately do not, is asserted rather than listed.</b>
-/// <see cref="CommandDeadlineScannerAdoptionTests"/> re-derives the adopting set from the tree and declares
-/// the abstainers beside it, so a pin that quietly stops calling this - and a new pin that arrives with its
-/// own private copy of the rule - both fail the build. It is the authoritative roster, and it carries the
-/// reason a roster in prose is not: a list here would have nothing checking it.</para>
-///
 /// <para><b>The question is asked in two halves, because there are two places a deadline can legitimately be
 /// written and each has a different neighbour problem.</b> An initializer belongs to the construction it is
 /// attached to, so it is read from the CONSTRUCTION span; read from the wider statement span it would accept
