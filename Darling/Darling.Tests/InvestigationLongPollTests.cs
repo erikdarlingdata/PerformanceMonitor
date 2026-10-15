@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -273,12 +272,11 @@ public sealed class InvestigationLongPollTests
         // The last three parse as cursors but sit at or under the five-minute overlap (3,000,000,000 ticks), which every
         // read subtracts: before #5856 review round 1 they answered status = error from the subtraction, not this refusal.
         var rig = new Rig();
-        var started = Stopwatch.GetTimestamp();
-        var answer = Answer(await rig.WaitAsync(null, after, timeoutSeconds));
+        var answer = Answer(await rig.WaitAsync(null, after, timeoutSeconds)
+            .WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
 
         Assert.Equal("invalid", (string?)answer["status"]);
         Assert.Equal(parameter, (string?)answer["hints"]?["parameter"]);
-        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(2));
         Assert.Equal(0, rig.Signal.WaiterCount);
     }
 
