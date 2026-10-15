@@ -8,6 +8,7 @@
 
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace PerformanceMonitor.Common;
@@ -50,4 +51,7 @@ public static class InvestigationRules
     /// <summary>What a valid agent id is (#5632 review round 2, L4).</summary>
     public const string AgentIdRule =
         "agent_id is required: 1 to 64 characters, each a letter, a digit, '.', '_', ':' or '-'.";
+
+    /// <summary>The labels every earlier report carries: no person reviewed it, and the agent attributed it to itself.</summary>
+    public static readonly IReadOnlyList<string> EarlierReportLabels = new[] { "unreviewed", "self_attributed" };
 }

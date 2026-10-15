@@ -445,7 +445,7 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
             {
                 var printed = long.Parse((await ScalarAsync(connection, $"SELECT octet_length('{json.Replace("'", "''")}'::jsonb::text)", ct))!,
                     CultureInfo.InvariantCulture);
-                Assert.Equal(printed, PerformanceMonitor.Darling.Service.Mcp.DarlingMcpInvestigationTools.PgJsonbTextBytes(
+                Assert.Equal(printed, InvestigationToolCore.PgJsonbTextBytes(
                     System.Text.Json.Nodes.JsonNode.Parse(json)));
             }
         });

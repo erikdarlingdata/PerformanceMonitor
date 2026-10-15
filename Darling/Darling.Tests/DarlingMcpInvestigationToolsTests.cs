@@ -173,14 +173,14 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void ValidateReport_AnEmptyReport_ListsEveryMissingField_AtOnce()
     {
-        var problems = DarlingMcpInvestigationTools.ValidateReport(
+        var problems = InvestigationToolCore.ValidateReport(
             null, null, null, null, null, null, null, null, out _, out _, out _);
 
         Assert.Equal(
             new[] { "request_id", "claim_id", "verdict", "root_cause", "summary", "evidence" },
             problems.Select(p => p.Split(':')[0]));
 
-        var message = DarlingMcpInvestigationTools.InvalidReportMessage(problems);
+        var message = InvestigationToolCore.InvalidReportMessage(problems);
         foreach (var problem in problems)
             Assert.Contains(problem, message, StringComparison.Ordinal);
     }
@@ -188,9 +188,9 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void ValidateReport_AValidReport_HasNoProblem_AndNormalizesTheEvidence()
     {
-        var problems = DarlingMcpInvestigationTools.ValidateReport(
+        var problems = InvestigationToolCore.ValidateReport(
             Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), "real", "a blocking chain", Evidence, "summary",
-            new string('n', DarlingMcpInvestigationTools.MaxNoteChars), "[]", out _, out _, out var evidenceJson);
+            new string('n', InvestigationToolCore.MaxNoteChars), "[]", out _, out _, out var evidenceJson);
 
         Assert.Empty(problems);
         Assert.NotNull(evidenceJson);
@@ -201,7 +201,7 @@ public sealed class DarlingMcpInvestigationToolsTests
     [InlineData("anything at all")]
     public void ValidateReport_AnyActionProposal_IsRefusedAtLevel1(string proposals)
     {
-        var problems = DarlingMcpInvestigationTools.ValidateReport(
+        var problems = InvestigationToolCore.ValidateReport(
             Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), "real", "cause", Evidence, "summary", null, proposals,
             out _, out _, out _);
 
@@ -212,10 +212,10 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void ValidateReport_ANoteOverItsCap_AndAWrongVerdict_AndEvidenceWithoutNumbers_AreEachNamed()
     {
-        var problems = DarlingMcpInvestigationTools.ValidateReport(
+        var problems = InvestigationToolCore.ValidateReport(
             Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), "maybe", "cause",
             "[{\"tool\":\"get_wait_stats\",\"arguments\":{}}]", "summary",
-            new string('n', DarlingMcpInvestigationTools.MaxNoteChars + 1), null, out _, out _, out _);
+            new string('n', InvestigationToolCore.MaxNoteChars + 1), null, out _, out _, out _);
 
         Assert.Equal(new[] { "verdict", "proposed_note", "evidence" }, problems.Select(p => p.Split(':')[0]));
         Assert.Contains("key_numbers", problems[2], StringComparison.Ordinal);
@@ -284,7 +284,7 @@ public sealed class DarlingMcpInvestigationToolsTests
     public void ReportsAnswer_SaysWhenTheWindowOrTheJournalHeldMore(bool requestsTruncated, bool journalTruncated)
     {
         var read = StoredRead() with { RequestsTruncated = requestsTruncated, JournalTruncated = journalTruncated };
-        var root = JsonNode.Parse(DarlingMcpInvestigationTools.ReportsAnswer(read, 24, McpDataDetail.Full))!;
+        var root = JsonNode.Parse(InvestigationToolCore.ReportsAnswer(read, 24, McpDataDetail.Full))!;
 
         Assert.Equal(read.Requests.Count, (int)root["requests_returned"]!);
         Assert.Equal(requestsTruncated, (bool)root["truncated"]!);
@@ -295,7 +295,7 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void ReportsAnswer_MaskLiterals_ReplacesEveryFieldsLiteral_KeepsTheStructuredFields()
     {
-        var answer = DarlingMcpInvestigationTools.ReportsAnswer(StoredRead(), 24, McpDataDetail.MaskLiterals);
+        var answer = InvestigationToolCore.ReportsAnswer(StoredRead(), 24, McpDataDetail.MaskLiterals);
 
         Assert.DoesNotContain(Literal, answer, StringComparison.Ordinal);
         var root = JsonNode.Parse(answer)!;
@@ -322,7 +322,7 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void ReportsAnswer_MetadataOnly_WithholdsTheFreeText_AndMasksAPersonsLogin()
     {
-        var answer = DarlingMcpInvestigationTools.ReportsAnswer(StoredRead(), 24, McpDataDetail.MetadataOnly);
+        var answer = InvestigationToolCore.ReportsAnswer(StoredRead(), 24, McpDataDetail.MetadataOnly);
 
         foreach (var canary in new[] { Literal, Login, Host, "zq_login" })
             Assert.DoesNotContain(canary, answer, StringComparison.Ordinal);
@@ -346,7 +346,7 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void ReportsAnswer_Full_ServesTheReportAsStored()
     {
-        var answer = DarlingMcpInvestigationTools.ReportsAnswer(StoredRead(), 24, McpDataDetail.Full);
+        var answer = InvestigationToolCore.ReportsAnswer(StoredRead(), 24, McpDataDetail.Full);
         var root = JsonNode.Parse(answer)!;
         Assert.Equal(Canaries("root_cause"), (string?)root["reports"]![0]!["root_cause"]);
         Assert.Equal("person:" + Login, (string?)root["journal"]![0]!["actor"]);
@@ -364,27 +364,27 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void CapProblems_RootCause_8000Passes_8001IsRefused()
     {
-        Assert.Empty(DarlingMcpInvestigationTools.CapProblems(new string('r', 8000), Evidence));
-        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems(new string('r', 8001), Evidence));
+        Assert.Empty(InvestigationToolCore.CapProblems(new string('r', 8000), Evidence));
+        var problem = Assert.Single(InvestigationToolCore.CapProblems(new string('r', 8001), Evidence));
         Assert.Equal(("root_cause", 8000), (problem.Field, problem.Cap));
     }
 
     [Fact]
     public void CapProblems_Evidence_50ItemsPass_51AreRefused()
     {
-        Assert.Empty(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(50, 10)));
-        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(51, 10)));
+        Assert.Empty(InvestigationToolCore.CapProblems("r", EvidenceOf(50, 10)));
+        var problem = Assert.Single(InvestigationToolCore.CapProblems("r", EvidenceOf(51, 10)));
         Assert.Equal(("evidence", 50), (problem.Field, problem.Cap));
     }
 
     [Fact]
     public void CapProblems_AStringValue_1000Passes_1001IsRefused_NestedToo()
     {
-        Assert.Empty(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(1, 1000)));
-        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(1, 1001)));
+        Assert.Empty(InvestigationToolCore.CapProblems("r", EvidenceOf(1, 1000)));
+        var problem = Assert.Single(InvestigationToolCore.CapProblems("r", EvidenceOf(1, 1001)));
         Assert.Equal(("evidence", 1000), (problem.Field, problem.Cap));
         var nested = "[{\"tool\":\"t\",\"arguments\":{\"a\":[{\"b\":\"" + new string('x', 1001) + "\"}]},\"key_numbers\":\"1\"}]";
-        Assert.Equal(1000, Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", nested)).Cap);
+        Assert.Equal(1000, Assert.Single(InvestigationToolCore.CapProblems("r", nested)).Cap);
     }
 
     [Fact]
@@ -393,13 +393,13 @@ public sealed class DarlingMcpInvestigationToolsTests
         /* 32 items of 1,000 characters, then a last item padded to land the printed size exactly on the cap. */
         var items = Enumerable.Range(0, 32).Select(_ => "{\"key_numbers\":\"" + new string('k', 1000) + "\"}").ToList();
         string Build(int pad) => "[" + string.Join(",", items.Append("{\"key_numbers\":\"" + new string('p', pad) + "\"}")) + "]";
-        var basis = DarlingMcpInvestigationTools.PgJsonbTextBytes(JsonNode.Parse(Build(0)));
-        var atCap = (int)(DarlingMcpInvestigationTools.MaxEvidenceBytes - basis);
+        var basis = InvestigationToolCore.PgJsonbTextBytes(JsonNode.Parse(Build(0)));
+        var atCap = (int)(InvestigationToolCore.MaxEvidenceBytes - basis);
         Assert.InRange(atCap, 1, 1000);
 
-        Assert.Equal(32768, DarlingMcpInvestigationTools.PgJsonbTextBytes(JsonNode.Parse(Build(atCap))));
-        Assert.Empty(DarlingMcpInvestigationTools.CapProblems("r", Build(atCap)));
-        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", Build(atCap + 1)));
+        Assert.Equal(32768, InvestigationToolCore.PgJsonbTextBytes(JsonNode.Parse(Build(atCap))));
+        Assert.Empty(InvestigationToolCore.CapProblems("r", Build(atCap)));
+        var problem = Assert.Single(InvestigationToolCore.CapProblems("r", Build(atCap + 1)));
         Assert.Equal(("evidence", 32768), (problem.Field, problem.Cap));
     }
 
@@ -409,12 +409,12 @@ public sealed class DarlingMcpInvestigationToolsTests
     [InlineData("{\"a\": 1, \"b\": [true, null]}", 27)]
     [InlineData("[\"<\\u00e9\\u0001\\\"\"]", 15)]  // ["<é\u0001\""]: é is two UTF-8 bytes
     public void PgJsonbTextBytes_IsTheWidthPostgresPrints(string json, long bytes) =>
-        Assert.Equal(bytes, DarlingMcpInvestigationTools.PgJsonbTextBytes(JsonNode.Parse(json)));
+        Assert.Equal(bytes, InvestigationToolCore.PgJsonbTextBytes(JsonNode.Parse(json)));
 
     [Fact]
     public void PgJsonbTextBytes_AHugeExponent_CannotHideUnderTheCap()
     {
-        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", "[{\"tool\":\"t\",\"arguments\":{\"n\":1e40000},\"key_numbers\":\"1\"}]"));
+        var problem = Assert.Single(InvestigationToolCore.CapProblems("r", "[{\"tool\":\"t\",\"arguments\":{\"n\":1e40000},\"key_numbers\":\"1\"}]"));
         Assert.Equal(32768, problem.Cap);
     }
 

@@ -57,9 +57,6 @@ public sealed class InvestigationBriefComposer
     /// <summary>The tool an agent submits its report with.</summary>
     public const string ReportTool = "submit_investigation_report";
 
-    /// <summary>The labels every earlier report carries: no person reviewed it, and the agent attributed it to itself.</summary>
-    public static readonly IReadOnlyList<string> EarlierReportLabels = new[] { "unreviewed", "self_attributed" };
-
     /// <summary>The sections in fill order, with each section's cap and the tool that fetches what a cut drops.</summary>
     public static readonly IReadOnlyList<(string Section, int Cap, string? FetchTool)> Sections = new (string, int, string?)[]
     {
@@ -368,7 +365,7 @@ public sealed class InvestigationBriefComposer
             ["root_cause_found"] = report.RootCauseFound,
             ["summary"] = null,
         }, masker, cut, ("root_cause", report.RootCause), ("summary", report.Summary));
-        node["labels"] = new JsonArray(EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
+        node["labels"] = new JsonArray(InvestigationRules.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
         return node;
     }
 

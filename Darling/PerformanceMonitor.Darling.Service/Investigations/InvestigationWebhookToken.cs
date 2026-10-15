@@ -38,7 +38,7 @@ internal static class InvestigationWebhookToken
     internal static string Render(Guid requestId, bool opened, InvestigationRequestRow? row, string? brief, McpDataDetail mode)
     {
         var node = row is not null
-            ? JsonSerializer.SerializeToNode(DarlingMcpInvestigationTools.RequestPayload(row), McpHelpers.JsonOptions) as JsonObject
+            ? JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(row), McpHelpers.JsonOptions) as JsonObject
               ?? new JsonObject()
             : new JsonObject { ["request_id"] = requestId.ToString() };
 

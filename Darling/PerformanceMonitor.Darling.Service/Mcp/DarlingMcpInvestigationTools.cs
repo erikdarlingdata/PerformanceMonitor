@@ -35,44 +35,6 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpInvestigationTools
 {
-    /// <summary>The request states a list can filter on.</summary>
-    internal static readonly string[] States = ["open", "claimed", "reported", "closed", "expired"];
-
-    /// <summary>The investigation families (V184's check constraint).</summary>
-    internal static readonly string[] Families =
-        ["blocking", "query_performance", "resources", "availability", "jobs", "self_monitor", "other"];
-
-    /// <summary>The verdicts a report may give (V184's check constraint).</summary>
-    internal static readonly string[] Verdicts = ["real", "false_positive", "needs_person"];
-
-    /// <summary>The longest proposed note (V184's check constraint).</summary>
-    internal const int MaxNoteChars = 2000;
-
-    /// <summary>The longest summary (V184's check constraint).</summary>
-    internal const int MaxSummaryChars = 4000;
-
-    /// <summary>The longest root cause (V184's check constraint, #5632 review round 2, M2).</summary>
-    internal const int MaxRootCauseChars = 8000;
-
-    /// <summary>The most evidence items (V184's check constraint).</summary>
-    internal const int MaxEvidenceItems = 50;
-
-    /// <summary>The longest string value anywhere in an evidence item (V184's check constraint).</summary>
-    internal const int MaxEvidenceValueChars = 1000;
-
-    /// <summary>The most bytes the evidence array takes as PostgreSQL prints it (<c>octet_length(evidence::text)</c>,
-    /// V184's check constraint).</summary>
-    internal const int MaxEvidenceBytes = 32768;
-
-    /// <summary>The most requests one list returns.</summary>
-    internal const int MaxLimit = 100;
-
-    /// <summary>The most journal rows one report read returns.</summary>
-    internal const int JournalLimit = 200;
-
-    /// <summary>The agent a submit refusal is journaled under when its claim_id resolves to no claim holder.</summary>
-    internal const string UnclaimedAgent = "unclaimed";
-
     /// <summary>The long-poll tool's name (#5822).</summary>
     internal const string WaitToolName = "wait_for_investigation_requests";
 
@@ -124,12 +86,12 @@ public sealed class DarlingMcpInvestigationTools
         [Description("1-100. Default 20.")] int limit = 20,
         CancellationToken cancellationToken = default)
     {
-        var refusal = McpHelpers.ValidateChoice(state, States, "state")
-                      ?? McpHelpers.ValidateChoice(family, Families, "family");
+        var refusal = McpHelpers.ValidateChoice(state, InvestigationToolCore.States, "state")
+                      ?? McpHelpers.ValidateChoice(family, InvestigationToolCore.Families, "family");
         if (refusal is not null)
             return refusal;
-        if (limit < 1 || limit > MaxLimit)
-            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
+        if (limit < 1 || limit > InvestigationToolCore.MaxLimit)
+            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {InvestigationToolCore.MaxLimit}.");
 
         try
         {
@@ -152,7 +114,7 @@ public sealed class DarlingMcpInvestigationTools
                 message = rows.Count == 0 ? "No investigation request matches these filters." : null,
                 requests_returned = rows.Count,
                 truncated,
-                requests = rows.Select(RequestPayload),
+                requests = rows.Select(InvestigationToolCore.RequestPayload),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -382,7 +344,7 @@ public sealed class DarlingMcpInvestigationTools
         string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(request_id, out var requestId))
-            return Status("not_found", $"request_id '{request_id}' is not a request id.");
+            return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
 
         try
         {
@@ -397,7 +359,7 @@ public sealed class DarlingMcpInvestigationTools
             if (brief_format is not null && brief_format != InvestigationFormats.BriefFormat)
             {
                 await store.RecordRefusalAsync(requestId, agent_id, "claim", "unsupported_format", null, cancellationToken);
-                return Status("unsupported_format",
+                return InvestigationToolCore.Status("unsupported_format",
                     $"brief_format {brief_format} is not supported. Darling composes brief_format {InvestigationFormats.BriefFormat}.");
             }
 
@@ -418,7 +380,7 @@ public sealed class DarlingMcpInvestigationTools
 
             var claim = await store.ClaimAsync(requestId, agent_id, cancellationToken);
             if (claim.Outcome != InvestigationClaimOutcome.Claimed)
-                return Status(ClaimStatus(claim.Outcome), ClaimMessage(claim));
+                return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
             var claimId = claim.ClaimId!.Value;
             string? brief;
@@ -492,26 +454,26 @@ public sealed class DarlingMcpInvestigationTools
         int report_format, string verdict, string root_cause, string evidence, string summary, string? proposed_note,
         string? action_proposals, CancellationToken cancellationToken)
     {
-        var problems = ValidateReport(request_id, claim_id, verdict, root_cause, evidence, summary, proposed_note,
+        var problems = InvestigationToolCore.ValidateReport(request_id, claim_id, verdict, root_cause, evidence, summary, proposed_note,
             action_proposals, out var requestId, out var claimId, out var evidenceJson);
         try
         {
             var agent = requestId != Guid.Empty && claimId != Guid.Empty
-                ? await store.ClaimHolderAsync(requestId, claimId, cancellationToken) ?? UnclaimedAgent
-                : UnclaimedAgent;
+                ? await store.ClaimHolderAsync(requestId, claimId, cancellationToken) ?? InvestigationToolCore.UnclaimedAgent
+                : InvestigationToolCore.UnclaimedAgent;
 
             if (report_format < short.MinValue || report_format > short.MaxValue
                 || !InvestigationFormats.IsAcceptedReportFormat((short)report_format))
             {
                 if (requestId != Guid.Empty)
                     await store.RecordRefusalAsync(requestId, agent, "submit", "unsupported_format", null, cancellationToken);
-                return Status("unsupported_format", InvestigationFormats.UnsupportedReportFormatMessage(
+                return InvestigationToolCore.Status("unsupported_format", InvestigationFormats.UnsupportedReportFormatMessage(
                     (short)Math.Clamp(report_format, short.MinValue, short.MaxValue)));
             }
 
             /* #5632 review round 2, M2: the caps, before any write, journaled once per request and reason. Kestrel's
                request limit stays as it is: the plan-XML tools need large bodies. */
-            var oversize = CapProblems(root_cause, evidence);
+            var oversize = InvestigationToolCore.CapProblems(root_cause, evidence);
             if (oversize.Count > 0)
             {
                 if (requestId != Guid.Empty)
@@ -535,7 +497,7 @@ public sealed class DarlingMcpInvestigationTools
                     await store.RecordRefusalAsync(requestId, agent, "submit", reason, detail, cancellationToken);
                 }
 
-                return McpHelpers.Refusal(problems[0].Split(':')[0], InvalidReportMessage(problems));
+                return McpHelpers.Refusal(problems[0].Split(':')[0], InvestigationToolCore.InvalidReportMessage(problems));
             }
 
             var outcome = await store.SubmitAsync(new InvestigationReportSubmission(
@@ -551,13 +513,13 @@ public sealed class DarlingMcpInvestigationTools
                     request_id = requestId,
                     proposed_note = string.IsNullOrWhiteSpace(proposed_note) ? null : "pending",
                 }, McpHelpers.JsonOptions),
-                InvestigationSubmitOutcome.LeaseLost => Status("lease_lost",
+                InvestigationSubmitOutcome.LeaseLost => InvestigationToolCore.Status("lease_lost",
                     "This claim_id no longer holds the request: a newer claim superseded it, or it never held one. The report was not stored."),
-                InvestigationSubmitOutcome.AlreadyReported => Status("already_reported", "The request already holds a report."),
-                InvestigationSubmitOutcome.NotOpen => Status("not_open", "The request is closed."),
-                InvestigationSubmitOutcome.NotFound => Status("not_found", $"No investigation request has id {requestId}."),
-                InvestigationSubmitOutcome.AgentIdInvalid => Status("agent_id_invalid", "The claim's agent id is not valid. " + InvestigationRules.AgentIdRule),
-                _ => Status("journal_capped",
+                InvestigationSubmitOutcome.AlreadyReported => InvestigationToolCore.Status("already_reported", "The request already holds a report."),
+                InvestigationSubmitOutcome.NotOpen => InvestigationToolCore.Status("not_open", "The request is closed."),
+                InvestigationSubmitOutcome.NotFound => InvestigationToolCore.Status("not_found", $"No investigation request has id {requestId}."),
+                InvestigationSubmitOutcome.AgentIdInvalid => InvestigationToolCore.Status("agent_id_invalid", "The claim's agent id is not valid. " + InvestigationRules.AgentIdRule),
+                _ => InvestigationToolCore.Status("journal_capped",
                     $"The request already holds {InvestigationRules.MaxAgentJournalRows} agent journal rows; the report was refused."),
             };
         }
@@ -565,195 +527,6 @@ public sealed class DarlingMcpInvestigationTools
         {
             return McpHelpers.FormatError("submit_investigation_report", ex);
         }
-    }
-
-    /// <summary>The <c>invalid</c> answer's message: every problem at once, each as <c>field: sentence</c>, so an agent
-    /// fixes the report in one round; the refusal's <c>hints.parameter</c> names the first field.</summary>
-    internal static string InvalidReportMessage(IReadOnlyList<string> problems) =>
-        "The report was not stored. Fix every field listed: " + string.Join(" ", problems);
-
-    /// <summary>
-    /// Every problem with a report, as <c>field: sentence</c>, in parameter order: an empty list is a valid report. Lists
-    /// them all at once, so an agent fixes the report in one round. Any action proposal is refused at Level 1.
-    /// </summary>
-    internal static List<string> ValidateReport(string? request_id, string? claim_id, string? verdict, string? root_cause,
-        string? evidence, string? summary, string? proposed_note, string? action_proposals,
-        out Guid requestId, out Guid claimId, out string? evidenceJson)
-    {
-        var problems = new List<string>();
-        evidenceJson = null;
-        if (!Guid.TryParse(request_id, out requestId))
-            problems.Add("request_id: missing or not a request id.");
-        if (!Guid.TryParse(claim_id, out claimId))
-            problems.Add("claim_id: missing or not a claim id.");
-        if (string.IsNullOrWhiteSpace(verdict))
-            problems.Add("verdict: missing; give real, false_positive or needs_person.");
-        else if (!Verdicts.Contains(verdict, StringComparer.Ordinal))
-            problems.Add($"verdict: '{verdict}' is not real, false_positive or needs_person.");
-        if (string.IsNullOrWhiteSpace(root_cause))
-            problems.Add("root_cause: missing; say what caused the alert, or that you could not tell.");
-        if (string.IsNullOrWhiteSpace(summary))
-            problems.Add("summary: missing.");
-        else if (summary.Trim().Length > MaxSummaryChars)
-            problems.Add($"summary: {summary.Trim().Length} characters, over {MaxSummaryChars}.");
-        if (!string.IsNullOrWhiteSpace(proposed_note) && proposed_note.Trim().Length > MaxNoteChars)
-            problems.Add($"proposed_note: {proposed_note.Trim().Length} characters, over {MaxNoteChars}.");
-
-        var evidenceProblem = ValidateEvidence(evidence, out evidenceJson);
-        if (evidenceProblem is not null)
-            problems.Add("evidence: " + evidenceProblem);
-
-        if (!string.IsNullOrWhiteSpace(action_proposals) && action_proposals.Trim() is not ("[]" or "null"))
-            problems.Add("action_proposals: refused at Level 1; an investigation proposes no action. Omit it.");
-
-        return problems;
-    }
-
-    /// <summary>
-    /// Each size cap a report is over (#5632 review round 2, M2), with its field and cap, in parameter order:
-    /// <c>root_cause</c> over <see cref="MaxRootCauseChars"/> characters; <c>evidence</c> over
-    /// <see cref="MaxEvidenceItems"/> items, with a string value over <see cref="MaxEvidenceValueChars"/> characters, or
-    /// over <see cref="MaxEvidenceBytes"/> bytes as PostgreSQL prints it. Evidence that is not a JSON array is left to
-    /// <see cref="ValidateReport"/>. Characters are UTF-16 units, never fewer than PostgreSQL's code points, so a report
-    /// these caps pass also passes V184's checks.
-    /// </summary>
-    internal static List<(string Field, int Cap, string Problem)> CapProblems(string? root_cause, string? evidence)
-    {
-        var problems = new List<(string Field, int Cap, string Problem)>();
-        var rootCause = root_cause?.Trim() ?? string.Empty;
-        if (rootCause.Length > MaxRootCauseChars)
-            problems.Add(("root_cause", MaxRootCauseChars, $"root_cause: {rootCause.Length} characters, over {MaxRootCauseChars}."));
-
-        JsonNode? root = null;
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(evidence))
-                root = JsonNode.Parse(evidence);
-        }
-        catch (JsonException)
-        {
-            root = null;
-        }
-
-        if (root is JsonArray items)
-        {
-            if (items.Count > MaxEvidenceItems)
-                problems.Add(("evidence", MaxEvidenceItems, $"evidence: {items.Count} items, over {MaxEvidenceItems}."));
-            var longest = LongestString(items);
-            if (longest > MaxEvidenceValueChars)
-                problems.Add(("evidence", MaxEvidenceValueChars,
-                    $"evidence: a string value of {longest} characters, over {MaxEvidenceValueChars}."));
-            var bytes = PgJsonbTextBytes(items);
-            if (bytes > MaxEvidenceBytes)
-                problems.Add(("evidence", MaxEvidenceBytes, $"evidence: {bytes} bytes as stored, over {MaxEvidenceBytes}."));
-        }
-
-        return problems;
-    }
-
-    /// <summary>The longest string value anywhere under <paramref name="node"/> (object keys are not values).</summary>
-    private static int LongestString(JsonNode? node) => node switch
-    {
-        JsonObject o => o.Select(p => LongestString(p.Value)).DefaultIfEmpty(0).Max(),
-        JsonArray a => a.Select(LongestString).DefaultIfEmpty(0).Max(),
-        JsonValue v when v.GetValueKind() == JsonValueKind.String => v.GetValue<string>().Length,
-        _ => 0,
-    };
-
-    /// <summary>
-    /// The bytes <paramref name="node"/> takes as PostgreSQL's <c>jsonb::text</c> prints it, never fewer: <c>": "</c> and
-    /// <c>", "</c> between members, strings in UTF-8 with JSON escapes (the relaxed encoder escapes every character
-    /// PostgreSQL escapes, and widens a few it keeps raw), and each number at its printed width (<c>1e3</c> prints as
-    /// <c>1000</c>), so an exponent cannot hide a long number from the cap.
-    /// </summary>
-    internal static long PgJsonbTextBytes(JsonNode? node) => node switch
-    {
-        JsonObject o => 2 + (o.Count == 0 ? 0 : 2L * (o.Count - 1)) + o.Sum(p => QuotedBytes(p.Key) + 2 + PgJsonbTextBytes(p.Value)),
-        JsonArray a => 2 + (a.Count == 0 ? 0 : 2L * (a.Count - 1)) + a.Sum(PgJsonbTextBytes),
-        JsonValue v => v.GetValueKind() switch
-        {
-            JsonValueKind.String => QuotedBytes(v.GetValue<string>()),
-            JsonValueKind.Number => PgNumberChars(v.ToJsonString()),
-            JsonValueKind.False => 5,
-            _ => 4,
-        },
-        _ => 4,
-    };
-
-    private static readonly JsonSerializerOptions RelaxedJson =
-        new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-
-    private static long QuotedBytes(string text) =>
-        System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(text, RelaxedJson));
-
-    /// <summary>The width PostgreSQL prints a JSON number at, never less: the sign, the integer digits the exponent
-    /// moves, and the scale <c>max(0, fraction digits - exponent)</c>. A huge exponent saturates.</summary>
-    internal static long PgNumberChars(string number)
-    {
-        var body = number.Trim();
-        long sign = body.StartsWith('-') ? 1 : 0;
-        body = body.TrimStart('-');
-        var e = body.IndexOfAny(['e', 'E']);
-        long exponent = 0;
-        if (e >= 0)
-        {
-            if (!long.TryParse(body[(e + 1)..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out exponent)
-                || Math.Abs(exponent) > 1_000_000)
-                return int.MaxValue;
-            body = body[..e];
-        }
-
-        var dot = body.IndexOf('.');
-        long intDigits = dot >= 0 ? dot : body.Length;
-        if (intDigits == 1 && body[0] == '0')
-            intDigits = 0; // JSON writes no leading zero but this one, and PostgreSQL drops it once an exponent moves digits in
-        long fracDigits = dot >= 0 ? body.Length - dot - 1 : 0;
-        var whole = Math.Max(1, intDigits + exponent);
-        var scale = Math.Max(0, fracDigits - exponent);
-        return sign + whole + (scale > 0 ? 1 + scale : 0);
-    }
-
-    private static string? ValidateEvidence(string? evidence, out string? evidenceJson)
-    {
-        evidenceJson = null;
-        if (string.IsNullOrWhiteSpace(evidence))
-            return "missing; give a JSON array of at least one {tool, arguments, key_numbers}.";
-
-        JsonNode? root;
-        try
-        {
-            root = JsonNode.Parse(evidence);
-        }
-        catch (JsonException ex)
-        {
-            return "not valid JSON: " + ex.Message;
-        }
-
-        if (root is not JsonArray items || items.Count == 0)
-            return "must be a JSON array of at least one {tool, arguments, key_numbers}.";
-
-        var missing = new List<string>();
-        for (var i = 0; i < items.Count; i++)
-        {
-            if (items[i] is not JsonObject item)
-            {
-                missing.Add($"item {i} is not an object");
-                continue;
-            }
-
-            if (item["tool"] is not JsonValue tool || string.IsNullOrWhiteSpace(tool.ToString()))
-                missing.Add($"item {i} has no tool");
-            if (item["arguments"] is null)
-                missing.Add($"item {i} has no arguments");
-            if (item["key_numbers"] is null)
-                missing.Add($"item {i} has no key_numbers");
-        }
-
-        if (missing.Count > 0)
-            return string.Join("; ", missing) + ".";
-
-        evidenceJson = items.ToJsonString();
-        return null;
     }
 
     [McpServerTool(Name = "get_investigation_reports"), Description(
@@ -788,7 +561,7 @@ public sealed class DarlingMcpInvestigationTools
         {
             ReadScope.NoteNoWindow();
             if (!Guid.TryParse(request_id, out var parsed))
-                return Status("not_found", $"request_id '{request_id}' is not a request id.");
+                return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
             requestId = parsed;
         }
         else
@@ -814,148 +587,19 @@ public sealed class DarlingMcpInvestigationTools
 
             var read = await Store(postgres).ReadReportsAsync(
                 requestId, serverId, requestId is null ? DateTime.UtcNow.AddHours(-hours_back) : DateTime.UtcNow,
-                MaxLimit, JournalLimit, cancellationToken);
+                InvestigationToolCore.MaxLimit, InvestigationToolCore.JournalLimit, cancellationToken);
             if (read.Requests.Count == 0)
             {
                 return requestId is not null
-                    ? Status("not_found", $"No investigation request has id {requestId}.")
-                    : Status("empty", $"No investigation request opened in the last {hours_back} hours.");
+                    ? InvestigationToolCore.Status("not_found", $"No investigation request has id {requestId}.")
+                    : InvestigationToolCore.Status("empty", $"No investigation request opened in the last {hours_back} hours.");
             }
 
-            return ReportsAnswer(read, requestId is null ? hours_back : null, mode);
+            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_investigation_reports", ex);
         }
     }
-
-    /// <summary>
-    /// The <c>ok</c> answer for <paramref name="read"/>, masked at <paramref name="mode"/> with one masker through
-    /// <see cref="InvestigationFieldMasking"/>, the brief composer's rule (#5632 review round 2, M1): a report's
-    /// <c>root_cause</c>, <c>summary</c> and each evidence item's <c>key_numbers</c>, and a journal row's <c>reason</c>, are
-    /// free text; the login of a person's action is masked as a login; the rest is masked by key. A stored brief composed at
-    /// a weaker level is re-masked at <paramref name="mode"/>. Reports are stored as submitted, so the level that applies
-    /// is the one the host serves now.
-    /// </summary>
-    internal static string ReportsAnswer(InvestigationReportsRead read, int? hoursBack, McpDataDetail mode)
-    {
-        var masker = McpDataDetailMasker.ForAnswer(mode);
-        var reports = new JsonArray();
-        foreach (var r in read.Reports)
-        {
-            var evidence = new JsonArray();
-            if (JsonNode.Parse(r.EvidenceJson) is JsonArray items)
-            {
-                foreach (var item in items)
-                {
-                    if (item is not JsonObject entry)
-                    {
-                        evidence.Add(InvestigationFieldMasking.Mask(new JsonObject { ["item"] = item?.DeepClone() }, masker));
-                        continue;
-                    }
-
-                    var keyNumbers = entry["key_numbers"] is JsonValue v && v.TryGetValue(out string? text)
-                        ? text : entry["key_numbers"]?.ToJsonString();
-                    var copy = (JsonObject)entry.DeepClone();
-                    copy["key_numbers"] = null;
-                    evidence.Add(InvestigationFieldMasking.Mask(copy, masker, ("key_numbers", keyNumbers)));
-                }
-            }
-
-            var node = InvestigationFieldMasking.Mask(new JsonObject
-            {
-                ["request_id"] = r.RequestId.ToString(),
-                ["report_format"] = r.ReportFormat,
-                ["agent_id"] = r.AgentId,
-                ["submitted_at"] = JsonSerializer.SerializeToNode(r.SubmittedAtUtc, McpHelpers.JsonOptions),
-                ["verdict"] = r.Verdict,
-                ["root_cause"] = null,
-                ["root_cause_found"] = r.RootCauseFound,
-                ["summary"] = null,
-            }, masker, ("root_cause", r.RootCause), ("summary", r.Summary));
-            node["evidence"] = evidence;
-            node["labels"] = new JsonArray(InvestigationBriefComposer.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
-            reports.Add(node);
-        }
-
-        var journal = new JsonArray();
-        foreach (var j in read.Journal)
-        {
-            var node = InvestigationFieldMasking.Mask(new JsonObject
-            {
-                ["event_time"] = JsonSerializer.SerializeToNode(j.EventTimeUtc, McpHelpers.JsonOptions),
-                ["request_id"] = j.RequestId?.ToString(),
-                ["server_id"] = j.ServerId,
-                ["event"] = j.Event,
-                ["actor"] = null,
-                ["reason"] = null,
-                ["detail"] = j.DetailJson is null ? null : JsonNode.Parse(j.DetailJson),
-            }, masker, ("reason", j.Reason));
-            if (!node.ContainsKey("withheld"))
-                node["actor"] = InvestigationFieldMasking.Actor(j.Actor, masker);
-            journal.Add(node);
-        }
-
-        var answer = new JsonObject
-        {
-            ["status"] = "ok",
-            ["hours_back"] = hoursBack,
-            ["requests_returned"] = read.Requests.Count,
-            ["truncated"] = read.RequestsTruncated,
-            ["journal_truncated"] = read.JournalTruncated,
-            ["requests"] = JsonSerializer.SerializeToNode(read.Requests.Select(RequestPayload), McpHelpers.JsonOptions),
-            ["reports"] = reports,
-            ["journal"] = journal,
-            ["brief"] = read.Brief is null ? null : InvestigationFieldMasking.StoredBrief(read.Brief, mode, masker),
-        };
-        return answer.ToJsonString(McpHelpers.JsonOptions);
-    }
-
-    internal static object RequestPayload(InvestigationRequestRow r) => new
-    {
-        request_id = r.RequestId,
-        route_id = r.RouteId,
-        server_id = r.ServerId,
-        server_name = r.ServerName,
-        family = r.Family,
-        first_metric = r.FirstMetric,
-        first_alert_at = r.FirstAlertAtUtc,
-        last_alert_at = r.LastAlertAtUtc,
-        alert_count = r.AlertCount,
-        state = r.State,
-        opened_at = r.OpenedAtUtc,
-        expires_at = r.ExpiresAtUtc,
-        claimed_by = r.ClaimedBy,
-        lease_until = r.LeaseUntilUtc,
-        claim_count = r.ClaimCount,
-        reported_at = r.ReportedAtUtc,
-    };
-
-    internal static string ClaimStatus(InvestigationClaimOutcome outcome) => outcome switch
-    {
-        InvestigationClaimOutcome.Claimed => "claimed",
-        InvestigationClaimOutcome.AlreadyClaimed => "already_claimed",
-        InvestigationClaimOutcome.NotOpen => "not_open",
-        InvestigationClaimOutcome.NotFound => "not_found",
-        InvestigationClaimOutcome.AgentIdInvalid => "agent_id_invalid",
-        _ => "journal_capped",
-    };
-
-    private static string ClaimMessage(InvestigationClaimResult claim) => claim.Outcome switch
-    {
-        InvestigationClaimOutcome.AlreadyClaimed => "Another claim holds a live lease on this request.",
-        InvestigationClaimOutcome.NotOpen => claim.Reason switch
-        {
-            "claim_limit" => $"The request has used its {InvestigationRules.MaxClaims} claims.",
-            { } reason => $"The request is not open to a claim: {reason}.",
-            _ => "The request is not open to a claim.",
-        },
-        InvestigationClaimOutcome.NotFound => "No investigation request has that id.",
-        InvestigationClaimOutcome.AgentIdInvalid => InvestigationRules.AgentIdRule,
-        _ => $"The request already holds {InvestigationRules.MaxAgentJournalRows} agent journal rows; the claim was refused.",
-    };
-
-    private static string Status(string status, string message) =>
-        JsonSerializer.Serialize(new { status, message }, McpHelpers.JsonOptions);
 }

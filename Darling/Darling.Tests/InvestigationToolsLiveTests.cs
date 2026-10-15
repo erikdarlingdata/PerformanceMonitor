@@ -266,40 +266,40 @@ INSERT INTO config.investigation_requests
      opened_at, expires_at)
 SELECT gen_random_uuid(), 1, 7, 'srv-7', 'blocking', 'Blocking', now() - make_interval(secs => i), now() - make_interval(secs => i),
        now(), now() - make_interval(secs => i), now() + interval '4 hours'
-FROM generate_series(1, " + (DarlingMcpInvestigationTools.MaxLimit + 1) + ") AS i", ct);
+FROM generate_series(1, " + (InvestigationToolCore.MaxLimit + 1) + ") AS i", ct);
             var newest = await ScalarAsync(connection,
                 "SELECT request_id FROM config.investigation_requests ORDER BY opened_at DESC LIMIT 1", ct);
 
             async Task<(JsonElement Reports, JsonElement List)> ReadAsync() => (
                 Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, null, 24, ct)),
-                Root(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, limit: DarlingMcpInvestigationTools.MaxLimit, cancellationToken: ct)));
+                Root(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, limit: InvestigationToolCore.MaxLimit, cancellationToken: ct)));
 
             async Task JournalRowsAsync(int count) => await ExecAsync(connection,
                 "INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor) " +
                 $"SELECT now() - make_interval(secs => i), '{newest}', 7, 'opened', 'service' FROM generate_series(1, {count}) AS i", ct);
 
             var (reports, list) = await ReadAsync();
-            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, reports.GetProperty("requests_returned").GetInt32());
-            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, reports.GetProperty("requests").GetArrayLength());
+            Assert.Equal(InvestigationToolCore.MaxLimit, reports.GetProperty("requests_returned").GetInt32());
+            Assert.Equal(InvestigationToolCore.MaxLimit, reports.GetProperty("requests").GetArrayLength());
             Assert.True(reports.GetProperty("truncated").GetBoolean());
-            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, list.GetProperty("requests_returned").GetInt32());
-            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, list.GetProperty("requests").GetArrayLength());
+            Assert.Equal(InvestigationToolCore.MaxLimit, list.GetProperty("requests_returned").GetInt32());
+            Assert.Equal(InvestigationToolCore.MaxLimit, list.GetProperty("requests").GetArrayLength());
             Assert.True(list.GetProperty("truncated").GetBoolean());
 
             await ExecAsync(connection,
                 "DELETE FROM config.investigation_requests WHERE request_id = (SELECT request_id FROM config.investigation_requests ORDER BY opened_at LIMIT 1)", ct);
-            await JournalRowsAsync(DarlingMcpInvestigationTools.JournalLimit);
+            await JournalRowsAsync(InvestigationToolCore.JournalLimit);
             (reports, list) = await ReadAsync();
-            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, reports.GetProperty("requests_returned").GetInt32());
+            Assert.Equal(InvestigationToolCore.MaxLimit, reports.GetProperty("requests_returned").GetInt32());
             Assert.False(reports.GetProperty("truncated").GetBoolean());
-            Assert.Equal(DarlingMcpInvestigationTools.JournalLimit, reports.GetProperty("journal").GetArrayLength());
+            Assert.Equal(InvestigationToolCore.JournalLimit, reports.GetProperty("journal").GetArrayLength());
             Assert.False(reports.GetProperty("journal_truncated").GetBoolean());
-            Assert.Equal(DarlingMcpInvestigationTools.MaxLimit, list.GetProperty("requests_returned").GetInt32());
+            Assert.Equal(InvestigationToolCore.MaxLimit, list.GetProperty("requests_returned").GetInt32());
             Assert.False(list.GetProperty("truncated").GetBoolean());
 
             await JournalRowsAsync(1);
             (reports, _) = await ReadAsync();
-            Assert.Equal(DarlingMcpInvestigationTools.JournalLimit, reports.GetProperty("journal").GetArrayLength());
+            Assert.Equal(InvestigationToolCore.JournalLimit, reports.GetProperty("journal").GetArrayLength());
             Assert.True(reports.GetProperty("journal_truncated").GetBoolean());
         });
     }
