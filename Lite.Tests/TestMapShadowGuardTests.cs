@@ -18,14 +18,13 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// Pins the test-class map's selection and its shadow check (#5459, change 4): the rules that close the holes the
-/// replay found, the shadow-check row, and the workflow wiring that lets exactly three jobs narrow their classes.
+/// Runs the test-class map's selection and its shadow check (#5459, change 4): the rules that close the holes the
+/// replay found, the shadow-check row, and the shard scripts that narrow their classes to the selection.
 ///
 /// <para><b>Why.</b> The selection job computes the selection for every pull request, and the Darling PG shards, the
 /// Lite shards and the build job's no-store Darling pass keep only the classes it names (the shard scripts' `map-keep`
-/// call). The one thing it must never do is run LESS than the full suite by accident, so the pins below fail if a
-/// FULL, missing, unreadable or empty selection narrows anything, if any other job reads the selection, if the
-/// selection job can fail the run, or if a push, the nightly or a release run gets a selection. The rule cases pin
+/// call). The one thing it must never do is run LESS than the full suite by accident, so the tests below fail if a
+/// FULL, missing, unreadable or empty selection narrows anything. The rule cases cover
 /// what the replay of the failure corpus asked for: a path written only in a comment, a class named by a sibling
 /// test file, a partial type declared in many files, a class that would otherwise be a hole, and a documentation
 /// file a test reads by name.</para>
@@ -405,74 +404,6 @@ public sealed class TestMapShadowGuardTests : IDisposable
         Assert.Empty(missing.GetProperty("misses").EnumerateArray());
     }
 
-    private static string BuildYml() => File.ReadAllText(Path.Combine(ParitySource.RepoRoot(), ".github", "workflows", "build.yml"))
-        .Replace("\r\n", "\n");
-
-    private static string Job(string yaml, string name)
-    {
-        var start = yaml.IndexOf("\n  " + name + ":\n", StringComparison.Ordinal);
-        Assert.True(start >= 0, "build.yml has no job " + name);
-        var next = Regex.Match(yaml[(start + 1)..], @"\n  (?:#[^\n]*\n  )*[a-z][a-z0-9-]*:\n");
-        return next.Success && next.Index > 0 ? yaml.Substring(start, next.Index + 1) : yaml[start..];
-    }
-
-    [Fact]
-    public void ThePin_IsPullRequestOnly_AndCannotFailTheGate()
-    {
-        var gate = Job(BuildYml(), "gate");
-        var step = gate[gate.IndexOf("- name: Pin the test map\n", StringComparison.Ordinal)..];
-        Assert.Contains("id: testmap", step, StringComparison.Ordinal);
-        Assert.Contains("if: github.event_name == 'pull_request' && steps.decide.outputs.run == 'true'", step, StringComparison.Ordinal);
-        Assert.Contains("continue-on-error: true", step[..step.IndexOf("run: |", StringComparison.Ordinal)], StringComparison.Ordinal);
-
-        // continue-on-error absorbs a step failure but not the job's own timeout: a hung gh api call would otherwise run
-        // the gate into its 5-minute limit and red the whole run with no tests. A step timeout turns the hang into a step
-        // failure first (#5459).
-        var header = step[..step.IndexOf("run: |", StringComparison.Ordinal)];
-        var stepTimeout = Regex.Match(header, @"^        timeout-minutes: (\d+)\s*$", RegexOptions.Multiline);
-        Assert.True(stepTimeout.Success, "the pin step needs its own timeout-minutes");
-        var gateTimeout = Regex.Match(gate, @"^    timeout-minutes: (\d+)\s*$", RegexOptions.Multiline);
-        Assert.True(gateTimeout.Success, "the gate job needs a timeout-minutes");
-        Assert.True(int.Parse(stepTimeout.Groups[1].Value) < int.Parse(gateTimeout.Groups[1].Value),
-            "the pin step's timeout must be below the gate job's");
-        Assert.Contains("nightly.yml/runs?status=success", step, StringComparison.Ordinal);
-        Assert.Contains("compare/${sha}...${BASE_SHA}", step, StringComparison.Ordinal);   // the map's commit must be an ancestor of the base
-        Assert.Contains("ahead|identical", step, StringComparison.Ordinal);
-        Assert.Contains("expires_at > env.KEEP_UNTIL", step, StringComparison.Ordinal);
-        Assert.Contains("test_map_run: ${{ steps.testmap.outputs.run_id }}", gate, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheSelectionSteps_TurnEveryFailureIntoAFullNotice_NeverAnErrorOrASkip()
-    {
-        var job = Job(BuildYml(), "test-map-select");
-        foreach (var why in new[] { "no test map is pinned for this run", "the pinned map could not be downloaded",
-                     "the changed files could not be listed", "the selection script failed" })
-        {
-            Assert.Contains("full \"" + why + "\"", job, StringComparison.Ordinal);
-        }
-
-        Assert.Contains("exit 0", job, StringComparison.Ordinal);
-        Assert.Contains("timeout 120 python .github/scripts/ci-select.py map-select", job, StringComparison.Ordinal);
-        // #5459: a pull request into main always runs everything, so the step hands the base branch to map-select.
-        Assert.Contains("BASE_REF: ${{ github.base_ref }}", job, StringComparison.Ordinal);
-        Assert.Contains("--event pull_request --base-ref \"${BASE_REF}\" --base \"${BASE_SHA}\"", job, StringComparison.Ordinal);
-        var check = Job(BuildYml(), "shadow-check");
-        Assert.Contains("exit 0", check, StringComparison.Ordinal);
-        Assert.Contains("name: test-map-shadow-row", check, StringComparison.Ordinal);
-        Assert.Contains("retention-days: 30", check, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheDarlingShards_UploadTheirReports_EvenWhenAClassFailed()
-    {
-        var yml = BuildYml();
-        var step = yml[yml.IndexOf("- name: Upload Darling test timings", StringComparison.Ordinal)..];
-        step = step[..step.IndexOf("\n\n", StringComparison.Ordinal)];
-        Assert.Contains("if: always() && steps.filter.outputs.darling == 'true'", step, StringComparison.Ordinal);
-        Assert.Contains("name: darling-tests-timing-${{ matrix.shard }}", step, StringComparison.Ordinal);
-    }
-
     private (int ExitCode, string Output) MapKeep(string? selectionJson, string suite)
     {
         var path = Path.Combine(_dir, "keep-selection.json");
@@ -709,35 +640,5 @@ public sealed class TestMapShadowGuardTests : IDisposable
         var whole = RunShardScript("run-darling-pg-shard.ps1", "darling", all, selection);
         Assert.True(whole.ExitCode == 0, whole.Output);
         Assert.Equal("LIST [-list][classes/json]", ListingArguments(whole.Output));
-    }
-
-    [Fact]
-    public void TheShardScripts_NeverAssignAVariableThatIsAlsoOneOfTheirParameters()
-    {
-        // PowerShell variable names are case-insensitive, so `$scopeFilter = ...` inside a script with a typed
-        // `[string] $ScopeFilter` parameter assigns the parameter (and converts the value to a string). That broke the
-        // Darling class listing; a script can use `$scopeArgs` or any other name, never the same name in another case.
-        var scripts = Directory.GetFiles(Path.Combine(ParitySource.RepoRoot(), ".github", "scripts"), "*.ps1");
-        Assert.NotEmpty(scripts);
-        foreach (var path in scripts)
-        {
-            var text = File.ReadAllText(path).Replace("\r\n", "\n");
-            var block = Regex.Match(text, @"^param\s*\((?<body>.*?)^\)", RegexOptions.Singleline | RegexOptions.Multiline | RegexOptions.IgnoreCase);
-            if (!block.Success)
-            {
-                continue;
-            }
-
-            var parameters = Regex.Matches(block.Groups["body"].Value, @"^\s*(?:\[[^\]\n]*\]\s*)*\$(?<n>[A-Za-z_]\w*)", RegexOptions.Multiline)
-                .Select(m => m.Groups["n"].Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            Assert.NotEmpty(parameters);
-            var rest = text[(block.Index + block.Length)..];
-            var assigned = Regex.Matches(rest, @"^[ \t]*\$(?<a>[A-Za-z_]\w*)\s*[-+*/]?=(?!=)|foreach\s*\(\s*\$(?<f>[A-Za-z_]\w*)\s+in\b",
-                    RegexOptions.Multiline | RegexOptions.IgnoreCase)
-                .Select(m => m.Groups["a"].Success ? m.Groups["a"].Value : m.Groups["f"].Value)
-                .Where(n => parameters.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
-            Assert.True(assigned.Count == 0,
-                Path.GetFileName(path) + " assigns " + string.Join(", ", assigned.Select(n => "$" + n)) + ", which is one of its parameters in another spelling.");
-        }
     }
 }

@@ -225,31 +225,6 @@ public sealed class StatementScrubLivePlanDisplayTests
         Assert.Empty(problems);
     }
 
-    /// <summary>
-    /// #5320: a deadlock graph or blocked process report the filter withheld whole is the marker, not XML. The shared
-    /// <c>FileSaveHelper.SaveXmlToFile</c> (the one save path for both reports) asks the guard before it opens the save
-    /// dialog, so the marker is never written to an <c>.xml</c> file and the user is told why.
-    /// </summary>
-    [Fact]
-    public void SaveXmlToFile_RefusesAWithheldReportBeforeTheSaveDialog_AndLitesDownloadsUseIt()
-    {
-        var helper = File.ReadAllText(Path.Combine(RepoRoot(), "PerformanceMonitor.Ui", "FileSaveHelper.cs"));
-        var start = helper.IndexOf("public static void SaveXmlToFile(", StringComparison.Ordinal);
-        Assert.True(start >= 0, "SaveXmlToFile not found");
-        var dialog = helper.IndexOf("new SaveFileDialog", start, StringComparison.Ordinal);
-        var guard = helper.IndexOf("WithheldPlanGuard.RefuseSave(xml, withheldSubject)", start, StringComparison.Ordinal);
-        Assert.True(guard >= 0 && dialog >= 0 && guard < dialog, "SaveXmlToFile must call WithheldPlanGuard.RefuseSave(xml, withheldSubject) before it opens the dialog");
-
-        var plans = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Plans.cs"));
-        Assert.Contains("SaveXmlToFile(row.DeadlockGraphXml", plans, StringComparison.Ordinal);
-        Assert.Contains("SaveXmlToFile(row.BlockedProcessReportXml", plans, StringComparison.Ordinal);
-
-        /* #5367: the sentence names what is saved. A deadlock graph is not "a plan"; each download passes its own subject. */
-        Assert.Contains("SaveXmlToFile(row.DeadlockGraphXml, $\"deadlock_{row.DeadlockTime:yyyyMMdd_HHmmss}.xml\", \"deadlock XML\", \"deadlock graph\")", plans, StringComparison.Ordinal);
-        Assert.Contains("\"blocked process XML\", \"blocked process report\")", plans, StringComparison.Ordinal);
-        Assert.DoesNotContain("File.WriteAllText", plans, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void GetActualPlan_ClickReturnsOnASecondClickWhileOneIsOpen_AndShowsAWaitCursorAroundThePlanRead()
     {

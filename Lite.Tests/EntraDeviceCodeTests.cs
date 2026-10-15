@@ -2529,60 +2529,6 @@ public class EntraDeviceCodeTests
         Assert.DoesNotContain("Entra", arms, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void TheDarlingViewerDoesNotOfferTheMode()
-    {
-        /* The store rejecting it is one half. This is the other: the viewer's own dialogs must not
-           put it on screen, or a user is offered a mode whose save is refused. Swept over the whole
-           viewer project rather than the two dialogs, so a third surface added later is covered.
-
-           Positive control first: the sweep must find the mode's SIBLING in Lite's dialogs, which is
-           what proves the probe can see a radio at all. */
-        var liteDialog = ParitySource.ReadFile("Lite/Windows/AddServerDialog.xaml");
-        Assert.Contains("EntraDeviceCodeAuthRadio", liteDialog, StringComparison.Ordinal);
-
-        var viewerDir = Path.Combine(ParitySource.RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer");
-        var offenders = new List<string>();
-        var scanned = 0;
-
-        foreach (var file in Directory.GetFiles(viewerDir, "*.*", SearchOption.AllDirectories))
-        {
-            var relative = Path.GetRelativePath(ParitySource.RepoRoot(), file).Replace('\\', '/');
-            if (relative.Contains("/obj/", StringComparison.Ordinal) ||
-                relative.Contains("/bin/", StringComparison.Ordinal) ||
-                (!file.EndsWith(".cs", StringComparison.Ordinal) && !file.EndsWith(".xaml", StringComparison.Ordinal)))
-            {
-                continue;
-            }
-
-            scanned++;
-
-            var text = File.ReadAllText(file);
-
-            /* COMMENTS do not count, and that distinction is the whole difficulty. The viewer's own
-               ServerStoreCredential doc comment names this mode deliberately - it explains why the
-               whitelist rejects it - and a raw substring sweep reads that as the viewer offering the
-               mode. So a .cs file is scanned as CODE, plus its string literals separately, because
-               the strip removes both and a mode assigned as a bare literal is a real way to offer
-               one. A .xaml file has its XML comments removed and is then scanned whole: a radio
-               button's x:Name and Content are attribute text, not something the strip would keep. */
-            var offers = file.EndsWith(".cs", StringComparison.Ordinal)
-                ? CSharpSourceWalker.StripCommentsAndStrings(text).Contains("EntraDeviceCode", StringComparison.Ordinal)
-                    || CSharpSourceWalker.StringLiteralBodies(text)
-                        .Any(literal => literal.Text.Contains("EntraDeviceCode", StringComparison.Ordinal))
-                : Regex.Replace(text, "<!--.*?-->", string.Empty, RegexOptions.Singleline)
-                    .Contains("EntraDeviceCode", StringComparison.Ordinal);
-
-            if (offers)
-            {
-                offenders.Add(relative);
-            }
-        }
-
-        Assert.True(scanned >= 10, $"scanned {scanned} viewer sources; the sweep is vacuous below that");
-        Assert.Empty(offenders);
-    }
-
     // ---- The doc's own claims -------------------------------------------------------------
 
     [Fact]

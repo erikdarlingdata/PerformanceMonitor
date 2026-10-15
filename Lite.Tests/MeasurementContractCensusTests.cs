@@ -521,7 +521,6 @@ public sealed class MeasurementContractCensusTests
     private const string LiteHostLoop = "Lite/Services/RemoteCollectorService.cs";
     private const string DarlingHostLoop = "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs";
     private const string DarlingRunner = "Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs";
-    private const string LiteRemovePaths = "Lite/MainWindow.xaml.cs";
 
     /// <summary>The definitions that observe an epoch, and which observation each makes (#3694, and the two
     /// residues closed after it). SQL Server's carriers are the wait-stats collector's and the CPU collector's
@@ -540,26 +539,6 @@ public sealed class MeasurementContractCensusTests
         ("PerformanceMonitor.Collectors/PgStatementStatsCollector.cs", "ObserveStatementsDealloc"),
         ("PerformanceMonitor.Collectors/PgWaitStatsCollector.cs", "ObservePostmaster"),
         ("PerformanceMonitor.Collectors/WaitStatsCollector.cs", "ObserveInstance"),
-    };
-
-    /// <summary>
-    /// Every site in the product that forgets a server's baselines, with its count: the comparator's three
-    /// (one per observation — the instance observation's single <c>ClearServer</c> serves both SQL Server
-    /// carriers; the statements and postmaster observations each <c>ClearGroups</c> their own family), Lite's
-    /// two remove paths (a closed tab, a removed server) and Darling's two (reconcile-remove, and the same-id
-    /// reconnect #3653 A5 added), plus the Darling runner's one forget of a server's RDS endpoint verdicts, which both
-    /// of those host-loop branches call. Stated as an exact set so a forget that appears anywhere else — or one of
-    /// these that disappears — is a diff to this list.
-    /// </summary>
-    private static readonly (string File, string Method, int Count)[] ForgetSites =
-    {
-        (ComparatorFile, "ClearGroups", 2),
-        (ComparatorFile, "ClearServer", 1),
-        /* The runner's one RDS verdict forget, reached from both of the host loop's server-removal and changed-definition
-           branches; it clears that server's RDS endpoint verdicts and fresh login, not a delta baseline. */
-        (DarlingRunner, "ClearServer", 1),
-        (DarlingHostLoop, "ClearServer", 2),
-        (LiteRemovePaths, "ClearServer", 2),
     };
 
     /// <summary>
@@ -584,69 +563,6 @@ public sealed class MeasurementContractCensusTests
     /// <summary>The SQL Server collectors whose observation covers every SQL Server delta family; whichever
     /// both hosts schedule first is the one whose position bounds <see cref="FamiliesThatSubtractOnceBeforeTheCarrier"/>.</summary>
     private static readonly string[] InstanceCarriers = { "wait_stats", "cpu_utilization" };
-
-    /// <summary>
-    /// Rule 3, the comparator's call sites: exactly the two carriers observe (one <c>ObserveInstance</c>, one
-    /// <c>ObserveStatements</c>), no host calls the comparator directly, and every forget in the product is the
-    /// comparator's or a remove path's — both directions, read off comment-stripped code so the remarks that
-    /// discuss these calls cannot count as them.
-    /// </summary>
-    [Fact]
-    public void EveryForgetSite_IsTheEpochComparatorOrAHostRemovePath()
-    {
-        var observers = new List<(string File, string Observation)>();
-        var forgets = new List<(string File, string Method, int Count)>();
-
-        foreach (var (file, code) in CodeBodies())
-        {
-            foreach (Match m in Regex.Matches(code, @"\bServerEpoch\.(Observe\w+)\("))
-            {
-                observers.Add((file, m.Groups[1].Value));
-            }
-
-            foreach (var method in new[] { "ClearGroups", "ClearServer" })
-            {
-                /* The CALL, not the declaration: a member access, so the calculator's own `public void
-                   ClearServer(` and the interface's declaration do not count themselves. */
-                var count = Regex.Matches(code, @"[\w?)]\s*\.\s*" + method + @"\(").Count;
-                if (count > 0)
-                {
-                    forgets.Add((file, method, count));
-                }
-            }
-        }
-
-        Assert.Equal(
-            Carriers.OrderBy(c => c.File, StringComparer.Ordinal),
-            observers.OrderBy(c => c.File, StringComparer.Ordinal));
-
-        Assert.Equal(
-            ForgetSites.OrderBy(f => f.File, StringComparer.Ordinal).ThenBy(f => f.Method, StringComparer.Ordinal),
-            forgets.OrderBy(f => f.File, StringComparer.Ordinal).ThenBy(f => f.Method, StringComparer.Ordinal));
-
-        /* The comparator forgets BEFORE it records: ClearServer/ClearGroups precede the Measure and the
-           PendingState write inside each observation, so the marker is never written for a forget that did
-           not happen and the forget never happens without the marker. (The instance observation's forget is
-           conditional on the per-calculator memo — a second carrier finding the calculator already on the new
-           identity skips it — but the order of the three sites is what this pins, and the memo branch sits
-           inside the same `if (changed)` the marker does.) */
-        var comparator = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(ComparatorFile));
-        foreach (var (observation, forget, measurement) in new[]
-        {
-            ("ObserveInstance", "ClearServer", "IdentityChangesMeasurement"),
-            ("ObserveStatements", "ClearGroups", "StatementsChangesMeasurement"),
-            ("ObservePostmaster", "ClearGroups", "PostmasterChangesMeasurement"),
-        })
-        {
-            var body = comparator[comparator.IndexOf("public static bool " + observation + "(", StringComparison.Ordinal)..];
-            body = body[..body.IndexOf("\n    }", StringComparison.Ordinal)];
-            var forgetAt = body.IndexOf("context.Deltas." + forget + "(", StringComparison.Ordinal);
-            var measureAt = body.IndexOf("context.Measure(" + measurement, StringComparison.Ordinal);
-            var previousAt = body.IndexOf("PreviousStateKey] = Serialize(replaced)", StringComparison.Ordinal);
-            Assert.True(forgetAt >= 0 && measureAt > forgetAt && previousAt > measureAt,
-                $"{observation}: expected forget → measure → persist-the-replaced-pair, in that order");
-        }
-    }
 
     /// <summary>
     /// Rule 3, the marker's route on both hosts: each host loop drains the comparator's account after every

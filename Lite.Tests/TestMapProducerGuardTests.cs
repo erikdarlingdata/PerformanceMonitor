@@ -20,8 +20,8 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// Pins the test-map producer (#5459 change 4, slice 3): <c>.github/scripts/test-map.py</c> and the two jobs in
-/// <c>nightly.yml</c> that run it.
+/// Runs the test-map producer (#5459 change 4, slice 3), <c>.github/scripts/test-map.py</c>, which two jobs in
+/// <c>nightly.yml</c> run.
 ///
 /// <para><b>Why.</b> The map is only as good as what goes into it. Coverage sees the product files a class ran; the
 /// producer adds the files a class only names (path and tool-name literals, the type-name rule), marks a class that
