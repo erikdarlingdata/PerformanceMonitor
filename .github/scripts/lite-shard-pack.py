@@ -18,7 +18,8 @@ the repo root), so there is no hand-kept list to rot. Every class weighs at leas
 shard's load and no shard is left empty. A class with no timing history gets the MEAN weight of the known
 classes. When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
 discovered classes, the assignment falls back to the class-name hash (SHA-256 first byte modulo N), the cut
-the workflow used before this script existed.
+the workflow used before this script existed. A timed class the test sources no longer declare is left out, with
+one warning line each (#5833).
 
 `backtest` replays the model: the DIRs are runs in time order, each holding one xUnit XML per shard. For every run after
 the first it weighs that run's shards by the PREVIOUS run's timings and prints modelled against ran, the way the real
@@ -146,6 +147,45 @@ def serial_collection_names(tests_dir):
             else:
                 names.add(found)
     return names, unresolved
+
+
+REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+TEST_SOURCE_DIRS = (os.path.join(REPO_ROOT, "Lite.Tests"), os.path.join(REPO_ROOT, "Darling", "Darling.Tests"))
+_DECLARATION = re.compile(r"\b(?:class|record|struct)\s+([A-Za-z_]\w*)")
+
+
+def declared_class_names(dirs=TEST_SOURCE_DIRS):
+    """Every class, record and struct name the C# files under DIRS declare (bin and obj left out). Both test projects
+    are read, because each compiles some of the other's files in. Empty when no DIR exists."""
+    names = set()
+    for d in dirs:
+        for p in glob.glob(os.path.join(d, "**", "*.cs"), recursive=True) if os.path.isdir(d) else []:
+            parts = set(os.path.relpath(p, d).replace("\\", "/").split("/"))
+            if "bin" in parts or "obj" in parts:
+                continue
+            try:
+                with open(p, encoding="utf-8-sig", errors="replace") as f:
+                    names.update(_DECLARATION.findall(f.read()))
+            except OSError:
+                continue
+    return names
+
+
+def drop_missing_classes(weights, declared, source):
+    """#5833: a weight whose class the test sources no longer declare (a deleted or renamed class) is left out, with
+    one warning line each, instead of being carried. Returns (kept weights, warning lines); the caller prints the
+    lines where its output carries them. A class is matched by its own name (`Ns.Outer+Inner` is `Inner`, and a
+    generic arity suffix is ignored). With no declarations to compare against, nothing is dropped."""
+    if not declared:
+        return dict(weights), []
+    kept, warnings = {}, []
+    for name in sorted(weights):
+        if re.split(r"[.+/]", name)[-1].split("`")[0] in declared:
+            kept[name] = weights[name]
+        else:
+            warnings.append(f"::warning title=Shard weights::{source} has a weight for {name}, a class the test sources "
+                            "no longer declare; it is left out")
+    return kept, warnings
 
 
 def hash_shard(name, shards):
@@ -374,7 +414,9 @@ def main(argv):
     if cmd == "reconcile":
         return run_reconcile(classes, read_shards(out, shards))
     timings = arg(rest, "--timings", many=True)
-    weights = load_weights(timings)
+    weights, stale = drop_missing_classes(load_weights(timings), declared_class_names(), "the timing run")
+    for line in stale:
+        print(line)
     tests_dir = arg(rest, "--tests-dir", DEFAULT_TESTS_DIR)
     serial_names, unresolved = serial_collection_names(tests_dir)
     for u in unresolved:
@@ -577,6 +619,24 @@ def self_test():
     inv[0].append("Invented.Class")
     ok(any("not in the discovered" in x for x in reconcile(names, inv)), "invented class detected")
     ok(reconcile([], [[], []]) != [], "empty discovered set fails")
+
+    # A weight for a class the sources no longer declare is left out with one warning line; a nested or generic
+    # class is matched by its own name, and with nothing declared to compare against nothing is dropped.
+    kept, warned = drop_missing_classes({"Lite.Tests.Kept": 1.0, "Lite.Tests.Outer+Inner": 2.0, "Lite.Tests.Box`1": 3.0,
+                                         "Lite.Tests.Gone": 4.0}, {"Kept", "Inner", "Box"}, "the table")
+    ok(sorted(kept) == ["Lite.Tests.Box`1", "Lite.Tests.Kept", "Lite.Tests.Outer+Inner"], "only the missing class is dropped")
+    ok(len(warned) == 1 and "Lite.Tests.Gone" in warned[0] and warned[0].startswith("::warning "), "one warning line names it")
+    ok(drop_missing_classes({"Lite.Tests.Gone": 4.0}, set(), "the table") == ({"Lite.Tests.Gone": 4.0}, []),
+       "no declarations: nothing dropped")
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "Sub"))
+        os.makedirs(os.path.join(d, "obj"))
+        with open(os.path.join(d, "Sub", "A.cs"), "w", encoding="utf-8") as f:
+            f.write("public sealed class ATests { private sealed record Row(int X); }\ninternal struct Pair { }\n")
+        with open(os.path.join(d, "obj", "G.cs"), "w", encoding="utf-8") as f:
+            f.write("public class GeneratedTests { }\n")
+        ok(declared_class_names([d, os.path.join(d, "missing")]) == {"ATests", "Row", "Pair"},
+           "the source scan reads class, record and struct declarations and skips obj")
 
     print(f"self-test: {checks} assertions passed")
     return 0

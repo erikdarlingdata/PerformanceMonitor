@@ -12,6 +12,7 @@ prints. Classes go longest-first into the least-loaded shard (ties break on clas
 weights in the committed table (darling-shard-weights.json). A class the table does not know weighs the MEAN of the
 known ones. When the table is missing, unreadable, empty, or knows under MIN_COVERAGE of the listed classes, the cut
 falls back to the class-name hash (SHA-256, first four bytes, modulo N), the cut the workflow used before this script.
+A weight for a class the test sources no longer declare is left out, with one warning line each on stderr (#5833).
 
 A weight is the wall-clock cost of a class in one shard, in seconds, not its raw test seconds (the model is fitted on
 24 shard runs of four full dev runs and is within about 18 s of a shard's wall; raw seconds were 56 s off):
@@ -39,6 +40,7 @@ import collections
 import glob
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -111,11 +113,25 @@ def reconcile(classes, assignment):
     return f"duplicated={dup[:5]} missing={missing[:5]} extra={extra[:5]}"
 
 
-def _serial_names(tests_dir):
+def _lite_pack():
     spec = importlib.util.spec_from_file_location("lite_shard_pack", os.path.join(HERE, "lite-shard-pack.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    names, unresolved = mod.serial_collection_names(tests_dir)
+    return mod
+
+
+def without_missing_classes(table, err=None):
+    """#5833: the table less every class the test sources no longer declare, each named on one stderr line (stdout is
+    the shard's class list). The check is lite-shard-pack.py's, so the two packers judge a stale weight the same way."""
+    mod = _lite_pack()
+    kept, warnings = mod.drop_missing_classes(table, mod.declared_class_names(), "darling-shard-weights.json")
+    for line in warnings:
+        print(line, file=err or sys.stderr)
+    return kept
+
+
+def _serial_names(tests_dir):
+    names, unresolved = _lite_pack().serial_collection_names(tests_dir)
     if unresolved:
         raise SystemExit(f"refresh: could not resolve the collection name of {unresolved}")
     return names
@@ -190,7 +206,7 @@ def main(argv):
             return 2
         with open(classes_file, encoding="utf-8") as f:
             classes = [ln.strip() for ln in f if ln.strip()]
-        out, method, loads = pack(classes, shards, load_table(arg(args, "--weights", DEFAULT_WEIGHTS)))
+        out, method, loads = pack(classes, shards, without_missing_classes(load_table(arg(args, "--weights", DEFAULT_WEIGHTS))))
         problem = reconcile(classes, out)
         if problem:
             print(f"pack: the assignment lost or repeated a class ({problem})", file=sys.stderr)
@@ -256,6 +272,10 @@ def self_test():
                     '</assembly></assemblies>')
         w, runs = class_weights([tmp], {"serial-one"})
         assert runs == 1 and w == {"N.Live": 8.0, "N.Ser": 10.0, "N.Par": 2.5}, w
+    # A weight for a class no test source declares is left out (with its warning line on stderr).
+    err = io.StringIO()
+    kept = without_missing_classes({"Darling.Tests.DarlingShardPackNoSuchClassTests": 1.0}, err)
+    assert kept == {} and err.getvalue().count("DarlingShardPackNoSuchClassTests") == 1, (kept, err.getvalue())
     print("darling-shard-pack self-test passed")
     return 0
 

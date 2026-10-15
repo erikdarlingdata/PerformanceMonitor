@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Put [Trait("Reads", "Lite")] on the Darling.Tests classes the census names (#5459 cut 3a).
+"""Put [Trait("Reads", "Lite")] on the Darling.Tests classes a list names (#5459 cut 3a).
 
-LiteReadsTraitGuardTests derives, from the test sources, which classes read a Lite file, and fails with one
-`<file>: <Class>` line per class that lacks the trait. This script reads that list (the failure text of the
-census run, or any file of such lines) and writes the attribute line above each named class declaration, so the
-tags are generated from the census's own answer and the two cannot disagree about the detector.
+The list is a file of `<file>: <Class>` lines, one per Darling.Tests class that reads a Lite file and lacks the
+trait. This script writes the attribute line above each named class declaration.
 
-    python .github/scripts/tag-reads-lite.py census-output.txt
+    python .github/scripts/tag-reads-lite.py classes.txt
 
 Idempotent: a class that already carries the trait is left alone. Paths are relative to Darling/Darling.Tests;
 a `Linked/<name>.cs` path is a Lite.Tests file the project compiles in, found under Lite.Tests.

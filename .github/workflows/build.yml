@@ -273,9 +273,8 @@ jobs:
   # pull request breaks fails in about ten minutes with every shard skipped, instead of after the whole run.
   # Before this job, 6 PostgreSQL shards, 4 Lite shards, the build job's own suites and the Linux image all
   # ran to the end on a pull request one stacked doc comment had already broken. The guard classes carry
-  # [Trait("Stage", "Guard")]; GuardStageCensusTests (one per suite) fails a class whose name says it is a
-  # guard, or that walks the whole repository, and carries no trait, and fails a tagged class that needs a
-  # store, because this job has no PostgreSQL (and no DARLING_TEST_* variable).
+  # [Trait("Stage", "Guard")], and none of them may need a store, because this job has no PostgreSQL (and no
+  # DARLING_TEST_* variable).
   #
   # NOT a required check. The four required checks (`build`, `Darling PostgreSQL tests`, `Lite tests (result)`
   # and the Claude review guard) keep their names; the first three read this job's result and go red when it
@@ -731,18 +730,12 @@ jobs:
               # version property back to it must run the Darling guard that would catch it. Derived
               # rather than the one path, for the reason the two entries above are derived.
               - 'Lite/**/*.csproj'
-              # #4966: Darling.Tests' CommentFilterAdoptionTests reads this Lite.Tests file, so an edit to it has to reach the Darling suite.
-              - 'Lite.Tests/DataStartBannerQueriesTabTests.cs'
-              # #5562: same, for the Lite.Tests file CommentFilterAdoptionTests lists as a stated bound.
-              - 'Lite.Tests/LiteTimeRangeGapTests.cs'
               # #5641: Darling.Tests compiles this Lite.Tests file in (Linked\AlertLegendParityTests.cs), so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/AlertLegendParityTests.cs'
               # #5750: Darling.Tests compiles this Lite.Tests file in (Linked\NotificationRouteParityFixture.cs), so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/NotificationRouteParityFixture.cs'
               # #5644: Darling.Tests compiles this Lite.Tests file in (Linked\DefaultTraceEventSequenceWatermarkTests.cs), so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/DefaultTraceEventSequenceWatermarkTests.cs'
-              # #5596: Darling.Tests' WpfExitSwitchPinTests reads this project file for the WPF exit switch, so an edit to it has to reach the Darling suite.
-              - 'Lite.Tests/Lite.Tests.csproj'
               # #5616: the two shard scripts are run by the shard jobs and parsed by Darling.Tests pins.
               - '.github/scripts/run-darling-pg-shard.ps1'
               - '.github/scripts/darling-shard-pack.py'
@@ -751,8 +744,8 @@ jobs:
             # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
             # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
             # Lite entries above runs the Stage=Guard classes and the classes tagged Reads=Lite, which are the ones
-            # that read a Lite file (LiteReadsTraitGuardTests derives the tag from the source, and pins that
-            # `darling` minus this filter is Lite paths only). The decision lives in .github/scripts/ci-select.py.
+            # that read a Lite file (.github/scripts/tag-reads-lite.py writes that tag). The decision lives in
+            # .github/scripts/ci-select.py.
             darling_full:
               - 'Darling/**/!(*.md)'
               - '.github/workflows/nightly.yml'
@@ -782,9 +775,9 @@ jobs:
               - 'CITATION.cff'
               - '.gitignore'
               - '.gitattributes'
-              # The exact root path, not '**/*.txt': Darling/Darling.Tests/McpToolsListBudget/*.txt
-              # (and Lite's copy) are test INPUTS, not documentation, and a bare extension glob
-              # would wave every budget-pin edit through the fast path unbuilt and untested.
+              # The exact root path, not '**/*.txt': a .txt file elsewhere in the tree can be a test
+              # INPUT, not documentation, and a bare extension glob would wave its edit through the
+              # fast path unbuilt and untested.
               - 'llms.txt'
               # The changelog archive census, an exact path for the same reason as llms.txt. Every
               # changelog splice regenerates it beside CHANGELOG.md and docs/changelog/<version>.md, and
