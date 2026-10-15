@@ -349,6 +349,11 @@ FROM generate_series(1, {InvestigationToolCore.MaxLimit + 1}) AS t(i)");
         Assert.Equal("invalid", badWindow.GetProperty("status").GetString());
     }
 
+    /* The cross-app contract: Darling tool class is held to the same table by Darling.Tests InvestigationToolContractTests. */
+    [Fact]
+    public void LitesInvestigationTools_KeepTheSharedContractWithDarling() =>
+        Assert.Empty(Darling.Tests.InvestigationToolContract.Differences(typeof(McpInvestigationTools)));
+
     [Fact]
     public void TheFourToolNames_AreTheOnesTheGateServes()
     {
