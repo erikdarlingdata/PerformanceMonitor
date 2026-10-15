@@ -15,6 +15,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -230,37 +232,39 @@ public sealed class PayloadProbeFailureTests
         Assert.False(string.IsNullOrWhiteSpace(failure.Error));
     }
 
-    /* ── the host wiring, pinned at source (the branch is the tail of a live payload read) ── */
+    /* ── the host: the Lite runner's plain single-query path, driven through its reader seam ── */
 
     [Fact]
-    public void Host_Reads_The_Trailing_Set_Through_The_Shared_Contract()
+    public async Task The_Runner_Stores_The_Payload_And_Notes_The_Trailing_Failures()
     {
-        var source = File.ReadAllText(FindRepoFile(
-            Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
+        /* The host half, run end to end: RunCollectorDefinitionAsync on the real definition over a reader that
+           carries the payload plus its trailing set. The rows land in DuckDB (the payload was read before the
+           trailing set), and the run's note is the shared probe-failure note (the trailing set was read at all). */
+        await using var fixture = new SharedDuckDbFixture();
+        await fixture.InitializeAsync();
+        var configDir = Path.Combine(Path.GetTempPath(), "pmlite-payload-probe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(configDir);
+        try
+        {
+            var servers = new ServerManager(configDir);
+            var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "probe-srv", DisplayName = "probe-srv", IsEnabled = true };
+            servers.AddServer(server);
+            var collector = new RemoteCollectorService(fixture.DuckDb, servers, new ScheduleManager(configDir))
+            {
+                ServerReaderOverrideForTests = _ => MakeReader(payloadRows: 2, probeFailures: ManyFailures(3)),
+            };
 
-        Assert.Contains("definition.EmitsProbeFailures", source, StringComparison.Ordinal);
-        Assert.Contains("EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync", source, StringComparison.Ordinal);
-        Assert.Contains("EnumeratedCollectorDriver.MaxLoggedProbeFailures", source, StringComparison.Ordinal);
-    }
+            var written = await collector.RunCollectorDefinitionAsync(DatabaseSizeStatsCollector.Instance, server, CancellationToken.None);
 
-    [Fact]
-    public void Host_Reads_The_Trailing_Set_After_The_Payload_And_Before_The_Write()
-    {
-        /* Ordering is the whole correctness argument for putting this on the plain path: read it before the
-           payload and the definition loses its rows; read it after the write and the note misses the row it
-           belongs on. It also must not disturb the delta/EndPayload ordering, which it cannot, because
-           everything between ReadAsync and the write here touches only the note. */
-        var source = File.ReadAllText(FindRepoFile(
-            Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
-        var plainPath = source[source.IndexOf("Plain single-query path", StringComparison.Ordinal)..];
-
-        var read = plainPath.IndexOf("definition.ReadAsync(reader", StringComparison.Ordinal);
-        var probes = plainPath.IndexOf("ReadPayloadProbeFailuresAsync", StringComparison.Ordinal);
-        var write = plainPath.IndexOf("WriteBatch(duckConnection", StringComparison.Ordinal);
-
-        Assert.True(read >= 0 && probes >= 0 && write >= 0, "the plain path must read, probe, then write");
-        Assert.True(read < probes, "the payload must be read before the trailing set");
-        Assert.True(probes < write, "the trailing set must be read before the storage phase");
+            Assert.Equal(2, written);
+            Assert.Equal(
+                EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, probeFailureCount: 3),
+                collector.TelemetryFor(RemoteCollectorService.GetServerId(server)).HostNote);
+        }
+        finally
+        {
+            try { Directory.Delete(configDir, recursive: true); } catch (IOException) { /* temp dir */ }
+        }
     }
 
     /* ── helpers ── */
@@ -346,20 +350,5 @@ public sealed class PayloadProbeFailureTests
         }
 
         return table;
-    }
-
-    private static string FindRepoFile(string relativePath)
-    {
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 8 && dir is not null; i++)
-        {
-            var candidate = Path.Combine(dir, relativePath);
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-            dir = Path.GetDirectoryName(dir);
-        }
-        throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
     }
 }

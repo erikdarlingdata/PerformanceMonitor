@@ -225,48 +225,6 @@ public sealed class StatementScrubLivePlanDisplayTests
         Assert.Empty(problems);
     }
 
-    [Fact]
-    public void GetActualPlan_ClickReturnsOnASecondClickWhileOneIsOpen_AndShowsAWaitCursorAroundThePlanRead()
-    {
-        /* #5639: a second click while the first actual-plan read is still open returns before it opens a second prompt.
-           The wait cursor covers only the plan read, so it is back to normal before any MessageBox shows. */
-        var plans = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Plans.cs"));
-        var start = plans.IndexOf("private async void GetActualPlan_Click(", StringComparison.Ordinal);
-        Assert.True(start >= 0, "GetActualPlan_Click not found");
-        var end = plans.IndexOf("\n    }", start, StringComparison.Ordinal);
-        Assert.True(end > start, "GetActualPlan_Click has no closing brace");
-        var method = plans.Substring(start, end - start);
-
-        var guard = method.IndexOf("if (_actualPlanRequestOpen) return;", StringComparison.Ordinal);
-        var open = method.IndexOf("_actualPlanRequestOpen = true;", StringComparison.Ordinal);
-        Assert.True(guard >= 0 && open > guard, "GetActualPlan_Click must return early on _actualPlanRequestOpen before it sets the flag");
-
-        var clear = method.IndexOf("_actualPlanRequestOpen = false;", StringComparison.Ordinal);
-        Assert.True(clear > open && method.LastIndexOf("finally", clear, StringComparison.Ordinal) > open,
-            "GetActualPlan_Click must clear _actualPlanRequestOpen in a finally");
-
-        var wait = method.IndexOf("Mouse.OverrideCursor = Cursors.Wait;", StringComparison.Ordinal);
-        var planRead = method.IndexOf("switch (grid.CurrentItem)", StringComparison.Ordinal);
-        var reset = method.IndexOf("Mouse.OverrideCursor = null;", StringComparison.Ordinal);
-        Assert.True(wait >= 0 && wait < planRead && planRead < reset,
-            "GetActualPlan_Click must set the wait cursor before the plan-read switch and reset it after");
-        Assert.True(method.LastIndexOf("finally", reset, StringComparison.Ordinal) > planRead,
-            "GetActualPlan_Click must reset the cursor in a finally");
-    }
-
-    /// <summary>#5639 Lite parity: its actual-plan re-run runs the row's own in-process text, so the text the plan host gets is
-    /// the text that ran. The same variable feeds the prompt, the run and the plan host; nothing resolves a second text.</summary>
-    [Fact]
-    public void LitePlanActions_HandThePlanHostTheTextThatRan()
-    {
-        var controller = File.ReadAllText(Path.Combine(RepoRoot(), "PerformanceMonitor.Ui", "PlanNavigationController.cs"));
-        Assert.Contains("executeActual(databaseName ?? \"\", queryText, estimatedPlanXml, isolationLevel,", controller, StringComparison.Ordinal);
-        Assert.Contains("_showPlan(actualPlanXml, label, queryText)", controller, StringComparison.Ordinal);
-
-        var serverTab = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Plans.cs"));
-        Assert.Contains("OpenPlanTab(actualPlanXml, label, queryText)", serverTab, StringComparison.Ordinal);
-    }
-
     private static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 }

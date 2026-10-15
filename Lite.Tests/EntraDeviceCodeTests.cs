@@ -2494,41 +2494,6 @@ public class EntraDeviceCodeTests
             StringComparison.Ordinal);
     }
 
-    // ---- Lite/Darling parity --------------------------------------------------------------
-
-    [Fact]
-    public void TheDarlingServiceStoreRejectsTheMode_ByTheWhitelistItAlreadyHad()
-    {
-        /* The parity finding, pinned rather than asserted in prose. ServerStoreCredential.MapAuth
-           names the two modes the Darling service can honor and answers null for everything else, so
-           this mode was rejected on the day it was added with no edit to that file. Darling.Tests
-           holds the behavioural rows; this is the Lite-side statement that the mode is Lite-only.
-
-           Read out of source because Lite.Tests cannot reference the Darling viewer project, and
-           anchored on MapAuth's own body so a whitelist quietly turned into a blacklist fails here. */
-        var code = CSharpSourceWalker.StripCommentsAndStrings(
-            ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Viewer/ServerStoreCredential.cs"));
-
-        var at = code.IndexOf("MapAuth(string? authenticationType)", StringComparison.Ordinal);
-        Assert.True(at >= 0, "MapAuth is the whitelist and must exist");
-
-        var arms = code[at..Math.Min(code.Length, at + 400)];
-
-        Assert.Contains("AuthenticationTypes.Windows", arms, StringComparison.Ordinal);
-        Assert.Contains("AuthenticationTypes.SqlServer", arms, StringComparison.Ordinal);
-        /* #3484 added the two NON-interactive Entra modes to the whitelist — they are honored now. */
-        Assert.Contains("AuthenticationTypes.ServicePrincipal", arms, StringComparison.Ordinal);
-        Assert.Contains("AuthenticationTypes.ManagedIdentity", arms, StringComparison.Ordinal);
-        Assert.Contains("_ => null", arms, StringComparison.Ordinal);
-
-        /* No INTERACTIVE Entra mode is named in it at all - the discriminating assertion for a device-code
-           (or MFA / default-credential) mode, because a blacklist that happened to list them would satisfy
-           everything above. The substring "Entra" matches only the interactive modes' AuthenticationTypes
-           constants (EntraMFA / EntraDeviceCode / EntraDefaultCredential); ServicePrincipal and ManagedIdentity
-           do not contain it, so this stays a clean whitelist-not-blacklist check that device code hits null. */
-        Assert.DoesNotContain("Entra", arms, StringComparison.Ordinal);
-    }
-
     // ---- The doc's own claims -------------------------------------------------------------
 
     [Fact]
