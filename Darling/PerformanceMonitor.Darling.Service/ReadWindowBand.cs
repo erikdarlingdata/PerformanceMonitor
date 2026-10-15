@@ -32,7 +32,8 @@ internal static class ReadWindowBand
     /// <summary>
     /// The reads whose window is fixed in code rather than taken from an argument (#5814), by route: the MCP tool name and
     /// the <c>/api/read</c> name, which are the same. The band of such a read is known before it runs, so admission, the
-    /// read cache and the read-latency row all use one key, and the tool notes the same window on its
+    /// read cache and the read-latency row all use one key (today's only entry is a health read, which admission and the cache
+    /// skip, so its band reaches only the read-latency row), and the tool notes the same window on its
     /// <see cref="ReadScope"/> for the slow-read row.
     /// </summary>
     internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, int> FixedHours =

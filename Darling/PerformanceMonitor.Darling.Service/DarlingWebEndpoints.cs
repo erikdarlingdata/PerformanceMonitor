@@ -7063,6 +7063,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static string? FleetParamRefusal(int hours, int worstCount, Func<string, string?> lookup)
     {
+        /* The note this makes is inert today (#5814): /api/fleet calls this before its ReadScope opens, so there is no scope
+           to note on, and the route is never offered to the slow-read log. A route that starts offering it a row must note
+           its window inside the scope. */
         var window = DarlingReadWindow.ValidateHoursBack(hours);
         if (window is not null)
         {

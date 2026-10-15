@@ -89,6 +89,24 @@ public sealed partial class DarlingMcpFinOpsTools
         _ => MaxLimit,
     };
 
+    /// <summary>
+    /// Notes the window <paramref name="normalizedView"/> reads on the <see cref="ReadScope"/>, for its slow-read row
+    /// (#5814): the <paramref name="hoursBack"/> hours ending now, after the check passed. Only a view that reads that window
+    /// notes it. index_analysis and database_sizes read the newest snapshot, so a noted window would record a span the read
+    /// never touched; storage_growth's window is not its <c>hours_back</c> (30 days at the default), so it notes the span it
+    /// reads itself, in <see cref="ReadStorageGrowthAsync"/>.
+    /// </summary>
+    internal static void NoteViewWindow(string normalizedView, int hoursBack)
+    {
+        if (normalizedView is StorageGrowthView or IndexAnalysisView or DatabaseSizesView)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        ReadScope.NoteWindow(now.AddHours(-hoursBack), now);
+    }
+
     [McpServerTool(Name = "get_finops"), Description(
         "FinOps views for one server, picked by view. Windowed over hours_back, UTC; no as_of." + SetAViewLines + SetBViewLines + " An unknown view is refused with the valid list. <<GUIDE>>" + SetAGuides + SetBGuides)]
     public static async Task<string> GetFinOps(
@@ -113,7 +131,7 @@ public sealed partial class DarlingMcpFinOpsTools
             return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
 
         /* storage_growth validates its own window (24, or 7 to 90 whole days): the shared ceiling is 168 hours. */
-        var validation = normalized == StorageGrowthView ? null : DarlingReadWindow.ValidateHoursBack(hours_back);
+        var validation = normalized == StorageGrowthView ? null : McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
         var maxLimit = MaxLimitFor(normalized);
         if (limit < 1 || limit > maxLimit)
@@ -123,6 +141,7 @@ public sealed partial class DarlingMcpFinOpsTools
         object_name = NormalizeOptionalText(object_name);
         var misuse = OptionalParamMisuse(normalized, database_name, full_text, object_name);
         if (misuse is { } m) return McpHelpers.Refusal(m.Parameter, m.Message);
+        NoteViewWindow(normalized, hours_back); // #5814: after every check, so a refused call notes nothing
 
         try
         {

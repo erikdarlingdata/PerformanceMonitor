@@ -276,7 +276,16 @@ public sealed partial class DarlingMcpFinOpsTools
         };
     }
 
-    private static async Task<string> ReadStorageGrowthAsync(
+    /// <summary>
+    /// The span storage_growth reads, noted on the <see cref="ReadScope"/> for its slow-read row (#5814): its window is not
+    /// its <c>hours_back</c>, so nothing else can record it. The databases level compares the newest size snapshot with the
+    /// ones nearest 7 and <see cref="StorageGrowthWindowDays"/> days back, whatever <c>hours_back</c> says; the objects and
+    /// indexes levels read the object-growth series over <paramref name="windowDays"/> (30 at the default <c>hours_back</c>).
+    /// </summary>
+    internal static void NoteStorageGrowthWindow(string? databaseName, int windowDays, DateTime nowUtc) =>
+        ReadScope.NoteWindow(nowUtc.AddDays(-(databaseName == null ? StorageGrowthWindowDays : windowDays)), nowUtc);
+
+    internal static async Task<string> ReadStorageGrowthAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit,
         string? databaseName, string? objectName, CancellationToken ct)
     {
@@ -293,6 +302,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 $"limit applies only to the databases and objects levels of view {StorageGrowthView}; omit it for the indexes level (database_name with object_name).");
 
         var now = DateTime.UtcNow;
+        NoteStorageGrowthWindow(databaseName, windowDays, now);
         var timeout = McpCommandDeadlines.ReadSeconds;
         var databases = await DarlingFinOpsStorageGrowthReader.GetStorageGrowthAsync(postgres, resolved.ServerId, now, timeout, ct);
         var dbGate = databases.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", ct) : null;
