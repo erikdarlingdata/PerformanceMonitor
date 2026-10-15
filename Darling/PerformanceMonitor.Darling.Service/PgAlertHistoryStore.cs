@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -26,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// the service log every sweep; the seed reads degrade to null. <c>alert_time</c> is stamped
 /// naive-UTC at record time and tagged Utc on read, exactly like Lite's UtcNow discipline.
 /// </summary>
-public sealed class PgAlertHistoryStore : IAlertHistoryStore
+public sealed class PgAlertHistoryStore : IAlertHistoryStore, IDeliveredFireReader
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
@@ -256,6 +257,61 @@ AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.
             : DateTime.SpecifyKind(Convert.ToDateTime(resolved, CultureInfo.InvariantCulture), DateTimeKind.Utc);
 
         return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt, tierWhenRowCarriesNone);
+    }
+
+    /// <summary>#5825: the most delivered fire rows <see cref="GetOpenDeliveredFiresAsync"/> returns. An alert that
+    /// repeats for days writes a row per send; the newest few name every channel the episode reached.</summary>
+    public const int OpenDeliveredFireRowCap = 50;
+
+    /// <summary>
+    /// #5825: an open alert's delivered fire rows, so its clear can go where the fire went after a service restart emptied
+    /// the deliverer's memory. "Open" is after the alert's last resolution row (a resolution row is stored under its title),
+    /// so an episode that already cleared is never cleared twice. Delivered is <c>alert_sent</c>, not muted, not a digest;
+    /// the caller reads each row's <c>Route</c> record for the channels that delivered. The first-fire time comes from
+    /// every row in the episode, before the row cap. Seeks <c>idx_config_alert_log_time</c> (server_id, metric_name,
+    /// alert_time) for both halves.
+    /// </summary>
+    public async Task<DeliveredFireHistory?> GetOpenDeliveredFiresAsync(
+        string serverKey, string metricName, string resolutionTitle, CancellationToken cancellationToken = default)
+    {
+        /* Same identity scope as the cooldown seeds (#3456): a key that is not a server id has no per-server rows. */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverKey);
+        if (sid is null)
+        {
+            return null;
+        }
+
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(@"
+SELECT alert_time, current_value, detail_text, context_json, MIN(alert_time) OVER () AS first_fired
+FROM config_alert_log
+WHERE server_id = $1
+AND   metric_name = $2
+AND   alert_sent
+AND   NOT muted" + DigestExclusionFilter + @"
+AND   alert_time > COALESCE(
+          (SELECT MAX(r.alert_time) FROM config_alert_log AS r WHERE r.server_id = $1 AND r.metric_name = $3),
+          '-infinity'::timestamp)
+ORDER BY alert_time DESC
+LIMIT $4", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(sid.Value);
+        command.Parameters.AddWithValue(metricName);
+        command.Parameters.AddWithValue(resolutionTitle);
+        command.Parameters.AddWithValue(OpenDeliveredFireRowCap);
+        var rows = new System.Collections.Generic.List<DeliveredFireRow>();
+        DateTime? firstFired = null;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new DeliveredFireRow(
+                DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                reader.IsDBNull(1) ? null : reader.GetDouble(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
+            firstFired ??= DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc);
+        }
+
+        return firstFired is { } first ? new DeliveredFireHistory(first, rows) : null;
     }
 
     /// <summary>The #3712 seed exclusion, as SQL text. A literal rather than a parameter for the reason the

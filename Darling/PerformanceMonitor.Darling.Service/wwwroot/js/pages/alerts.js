@@ -227,9 +227,10 @@ function detailFullText(a) {
 
 function detailCell(a) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
-  if (!hasDetail && !a.send_error) return el("span", { class: "muted", text: "—" });
+  if (!hasDetail && !a.send_error && !a.resolution_outcome) return el("span", { class: "muted", text: "—" });
 
-  const summary = hasDetail ? localizeAlertDetail(a.detail_text, a.newest_sample) : "Delivery error: " + a.send_error;
+  const summary = hasDetail ? localizeAlertDetail(a.detail_text, a.newest_sample)
+    : a.send_error ? "Delivery error: " + a.send_error : "Resolution: " + a.resolution_outcome;
   const placeholder = el("div", {});
   const node = disclosure(summary, placeholder, { max: 120 });
 
@@ -320,6 +321,14 @@ function detailBody(a, details) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {
     body.push(el("div", { class: "detail-raw", text: shownDetail }));
+  }
+  /* #5825: what a resolution row's send did. get_alert_history sets the three fields on such a row only. */
+  if (a.resolution_outcome) {
+    body.push(el("div", { class: "detail-fields" }, [
+      ["Resolution outcome", a.resolution_outcome],
+      ["Resolution channels", a.resolution_channels || "—"],
+      ["Resolution sent", parseUtc(a.resolution_sent_at)?.toLocaleString() ?? "—"],
+    ].map(fieldRow)));
   }
   if (a.send_error) {
     body.push(el("div", { class: "detail-fields detail-error" }, [fieldRow(["Delivery error", a.send_error])]));

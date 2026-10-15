@@ -33,6 +33,19 @@ public partial class AlertDetailWindow : Window
         ThresholdText.Text = item.ThresholdValueDisplay;
         NotificationText.Text = item.NotificationType;
         StatusValueText.Text = item.StatusDisplay;
+        /* #5825: a resolution row's send, one row per field; collapsed on a row with no resolution outcome. */
+        var resolution = item.ResolutionOutcome is null ? Visibility.Collapsed : Visibility.Visible;
+        ResolutionSentAtText.Text = item.ResolutionSentAtDisplay;
+        ResolutionChannelsText.Text = item.ResolutionChannels ?? "";
+        ResolutionOutcomeText.Text = item.ResolutionOutcome ?? "";
+        foreach (var element in new UIElement[]
+                 {
+                     ResolutionSentAtLabel, ResolutionSentAtText, ResolutionChannelsLabel, ResolutionChannelsText,
+                     ResolutionOutcomeLabel, ResolutionOutcomeText,
+                 })
+        {
+            element.Visibility = resolution;
+        }
 
         if (item.Muted)
         {

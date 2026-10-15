@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Net;
 using System.Text;
 
@@ -80,6 +82,43 @@ internal static class EmailTemplateBuilder
     }
 
     /// <summary>
+    /// Builds both bodies for an alert resolution email (#5825): the resolution's own name as the heading, a data table of
+    /// the server, the alert, when it fired and cleared, how long it lasted and the last value, the resolution's message,
+    /// and the triage link the fire carried. No cooldown footer: a resolution is sent once.
+    /// </summary>
+    public static (string HtmlBody, string PlainTextBody) BuildResolutionEmail(AlertResolutionFacts facts, AlertBranding branding)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var (accentColor, badgeText, _) = AlertSeverity.ForMetric(facts.Title, null);
+        var rows = facts.Rows();
+        var prose = string.IsNullOrWhiteSpace(facts.Message) ? null : facts.Message;
+        var html = BuildHtmlBody(facts.Title, facts.ServerName, "", "", facts.ClearedAtUtc, facts.ClearedAtUtc.ToLocalTime(),
+            accentColor, badgeText, branding, context: null, emailCooldownMinutes: 0, prose: prose, triageUrl: facts.TriageUrl,
+            dataRows: rows);
+
+        var plain = new StringBuilder();
+        plain.Append(CultureInfo.InvariantCulture, $"{branding.EditionName} Alert Resolved\r\n");
+        plain.Append("-------------------------------\r\n");
+        plain.Append(CultureInfo.InvariantCulture, $"{facts.Title}\r\n");
+        foreach (var (label, value) in rows)
+        {
+            plain.Append(CultureInfo.InvariantCulture, $"{label}: {value}\r\n");
+        }
+
+        if (prose is not null)
+        {
+            plain.Append(CultureInfo.InvariantCulture, $"\r\n{prose}\r\n");
+        }
+
+        if (!string.IsNullOrEmpty(facts.TriageUrl))
+        {
+            plain.Append(CultureInfo.InvariantCulture, $"\r\nTriage: {facts.TriageUrl}\r\n");
+        }
+
+        return (html, plain.ToString());
+    }
+
+    /// <summary>
     /// Builds both HTML and plain-text bodies for a test email.
     /// </summary>
     public static (string HtmlBody, string PlainTextBody) BuildTestEmail(AlertBranding branding)
@@ -113,7 +152,8 @@ internal static class EmailTemplateBuilder
         AlertContext? context = null,
         int emailCooldownMinutes = 15,
         string? prose = null,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        IReadOnlyList<(string Label, string Value)>? dataRows = null)
     {
         var sb = new StringBuilder(2048);
 
@@ -160,6 +200,14 @@ internal static class EmailTemplateBuilder
             AppendDataRow(sb, "Status", "SMTP configuration is working correctly", false);
             AppendDataRow(sb, "Sent at", localNow.ToString("yyyy-MM-dd HH:mm:ss"), true);
         }
+        else if (dataRows is not null)
+        {
+            /* #5825: a resolution's own facts in place of the fire's value, threshold and time. */
+            for (var i = 0; i < dataRows.Count; i++)
+            {
+                AppendDataRow(sb, dataRows[i].Label, dataRows[i].Value, i == dataRows.Count - 1);
+            }
+        }
         else
         {
             AppendDataRow(sb, "Server", serverName, false);
@@ -203,7 +251,7 @@ internal static class EmailTemplateBuilder
         sb.Append("<tr><td style=\"padding:12px 24px 16px 24px;\">");
         sb.Append($"<span style=\"font-family:{FontStack};font-size:11px;color:#E4E6EB;\">");
         sb.Append($"Sent by {WebUtility.HtmlEncode(branding.EditionName)}");
-        if (!isTest)
+        if (!isTest && dataRows is null)
         {
             sb.Append($" &middot; {emailCooldownMinutes}-minute cooldown between repeat alerts");
         }

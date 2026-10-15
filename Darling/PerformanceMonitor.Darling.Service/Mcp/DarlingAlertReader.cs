@@ -48,7 +48,17 @@ internal static class DarlingAlertReader
     public sealed record AlertHistoryReadRow(
         DateTime AlertTime, int ServerId, string ServerName, string MetricName,
         double CurrentValue, double ThresholdValue, bool AlertSent, string NotificationType,
-        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null, string? StoredServerName = null);
+        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null, string? StoredServerName = null)
+    {
+        /// <summary>#5825 (V186): when a resolution's send delivered (UTC); null on every other row.</summary>
+        public DateTime? ResolutionSentAt { get; init; }
+
+        /// <summary>#5825: the channels a resolution went to, or would have gone to when muted, comma-separated.</summary>
+        public string? ResolutionChannels { get; init; }
+
+        /// <summary>#5825: <c>sent</c>, <c>failed: ...</c>, <c>muted</c> or <c>route deleted or disabled: ...</c>.</summary>
+        public string? ResolutionOutcome { get; init; }
+    }
 
     private const string AlertHistorySelectColumns = @"
     a.alert_time,
@@ -64,6 +74,9 @@ internal static class DarlingAlertReader
     a.detail_text,
     a.context_json,
     a.server_name AS stored_server_name,
+    a.resolution_sent_at,
+    a.resolution_channels,
+    a.resolution_outcome,
     a.dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
@@ -213,11 +226,16 @@ LIMIT 1";
             !reader.IsDBNull(9) && reader.GetBoolean(9),
             reader.IsDBNull(10) ? null : reader.GetString(10),
             /* context_json sits at ordinal 11, the stored server_name (the spelling the producer's mute context
-               carries, as opposed to the display name at ordinal 2) at 12, and dismissed stays the LAST column
-               at 13 — the "dismissed is selected" pin anchors on it closing the list. */
-            !reader.IsDBNull(13) && reader.GetBoolean(13),
+               carries, as opposed to the display name at ordinal 2) at 12, the three #5825 resolution columns at 13-15,
+               and dismissed stays the LAST column at 16. */
+            !reader.IsDBNull(16) && reader.GetBoolean(16),
             reader.IsDBNull(11) ? null : reader.GetString(11),
-            reader.IsDBNull(12) ? null : reader.GetString(12));
+            reader.IsDBNull(12) ? null : reader.GetString(12))
+        {
+            ResolutionSentAt = reader.IsDBNull(13) ? null : DateTime.SpecifyKind(reader.GetDateTime(13), DateTimeKind.Utc),
+            ResolutionChannels = reader.IsDBNull(14) ? null : reader.GetString(14),
+            ResolutionOutcome = reader.IsDBNull(15) ? null : reader.GetString(15),
+        };
 
     /* ─────────── the first row after an alert (#4755) ─────────── */
 

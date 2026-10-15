@@ -875,7 +875,9 @@ public class WebhookAlertService
             if (!string.IsNullOrEmpty(database))
                 facts.Add(new { name = "Database", value = TeamsEscape(database) });
             facts.Add(new { name = "Current Value", value = TeamsEscape(currentValue) });
-            facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
+            /* #5825: an alert resolution has no threshold, and an empty fact says nothing. */
+            if (!string.IsNullOrEmpty(thresholdValue))
+                facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
             facts.Add(new { name = "Time (UTC)", value = utcNow.ToString("yyyy-MM-dd HH:mm:ss") });
             facts.Add(new { name = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
@@ -2034,7 +2036,9 @@ public class WebhookAlertService
             if (!string.IsNullOrEmpty(database))
                 fields.Add(new { type = "mrkdwn", text = $"*Database:*\n{SlackEscape(database)}" });
             fields.Add(new { type = "mrkdwn", text = $"*Current Value:*\n{SlackEscape(currentValue)}" });
-            fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{SlackEscape(thresholdValue)}" });
+            /* #5825: an alert resolution has no threshold, and an empty field says nothing. */
+            if (!string.IsNullOrEmpty(thresholdValue))
+                fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{SlackEscape(thresholdValue)}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (UTC):*\n{utcNow:yyyy-MM-dd HH:mm:ss}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (Local):*\n{localNow:yyyy-MM-dd HH:mm:ss}" });
         }
@@ -2774,11 +2778,17 @@ public class WebhookAlertService
     /// succeeded, the error text when it did not; never throws except for the caller's own cancellation.
     /// </summary>
     internal async Task<string?> TrySendResolutionAsync(
-        string channel, string destination, string title, string serverName, string serverId, string detailText,
-        string? triageUrl, CancellationToken cancellationToken = default)
+        string channel, string destination, AlertResolutionFacts facts, string serverId, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(facts);
         var delivery = _settings.SnapshotForDelivery();
-        var now = _utcNow();
+        /* The card's Server fact names the server; the detail prose carries the alert, when it fired and cleared, how
+           long it lasted and the last value; the card's time is the clear's. No threshold row. */
+        var detailText = facts.DetailText();
+        var title = facts.Title;
+        var serverName = facts.ServerName;
+        var triageUrl = facts.TriageUrl;
+        var now = facts.ClearedAtUtc;
         return channel switch
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(

@@ -49,6 +49,9 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Time:" FontWeight="SemiBold"
@@ -84,6 +87,20 @@
             <TextBlock Grid.Row="6" Grid.Column="0" Text="Status:" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
             <TextBlock Grid.Row="6" Grid.Column="1" x:Name="StatusValueText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <!-- #5825: a resolution row's send; the three rows are collapsed on every other row. -->
+            <TextBlock Grid.Row="7" Grid.Column="0" x:Name="ResolutionSentAtLabel" Text="Resolution sent:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="7" Grid.Column="1" x:Name="ResolutionSentAtText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+            <TextBlock Grid.Row="8" Grid.Column="0" x:Name="ResolutionChannelsLabel" Text="Resolution channels:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="8" Grid.Column="1" x:Name="ResolutionChannelsText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+            <TextBlock Grid.Row="9" Grid.Column="0" x:Name="ResolutionOutcomeLabel" Text="Resolution outcome:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="9" Grid.Column="1" x:Name="ResolutionOutcomeText"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
         </Grid>
 

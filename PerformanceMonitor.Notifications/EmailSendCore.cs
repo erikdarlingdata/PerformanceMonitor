@@ -331,15 +331,16 @@ public sealed class EmailSendCore
     /// route: the caller already knows the destination, and a delivered fire always gets its one clear. Null when the
     /// send succeeded, the SMTP error when it did not. Never throws.
     /// </summary>
-    internal async Task<string?> TrySendResolutionEmailAsync(
-        string recipients, string title, string serverName, string detailText, string? triageUrl)
+    internal async Task<string?> TrySendResolutionEmailAsync(string recipients, AlertResolutionFacts facts)
     {
+        ArgumentNullException.ThrowIfNull(facts);
+        var title = facts.Title;
+        var serverName = facts.ServerName;
         try
         {
             var subject = $"[SQL Monitor Resolved] {title} on {serverName}";
-            var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                title, serverName, "resolved", "", _settings.EmailCooldownMinutes, _branding,
-                context: null, detailText: detailText, displayName: null, triageUrl: triageUrl);
+            /* The resolution's own body: its facts as the data table, not the fire's value and threshold rows. */
+            var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildResolutionEmail(facts, _branding);
             await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, context: null, recipients: recipients);
             _logger.LogInformation($"Alert resolution email sent for {title} on {serverName}");
             return null;

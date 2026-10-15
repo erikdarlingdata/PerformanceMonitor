@@ -166,6 +166,12 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
+                    <!-- #5825: what a resolution row's send did, and where; blank on every other row. -->
+                    <DataGridTextColumn Binding="{Binding ResolutionDisplay}" Width="160">
+                        <DataGridTextColumn.Header>
+                            <TextBlock Text="Resolution" FontWeight="Bold" VerticalAlignment="Center"/>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
                     <!-- #5642: the age of the newest sample the alert judged, as it was when the alert fired (Lite's twin column). -->
                     <DataGridTextColumn Binding="{Binding NewestSampleDisplay}" Width="270">
                         <DataGridTextColumn.Header>

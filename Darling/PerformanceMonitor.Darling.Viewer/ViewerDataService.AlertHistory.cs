@@ -66,6 +66,25 @@ public sealed class ViewerAlertRow
 
     public string? ContextJson { get; init; }
 
+    /// <summary>#5825 (V186): when a resolution's send delivered (UTC); null on every other row.</summary>
+    public DateTime? ResolutionSentAt { get; init; }
+
+    /// <summary>#5825: the channels a resolution went to, or would have gone to when muted; null on every other row.</summary>
+    public string? ResolutionChannels { get; init; }
+
+    /// <summary>#5825: <c>sent</c>, <c>failed: ...</c>, <c>muted</c> or <c>route deleted or disabled: ...</c>; null on every
+    /// other row.</summary>
+    public string? ResolutionOutcome { get; init; }
+
+    /// <summary>The resolution's send in one cell (#5825): "sent to Slack,Email", "muted (Slack)"; blank on any other row.</summary>
+    public string ResolutionDisplay => ResolutionOutcome is null
+        ? ""
+        : string.IsNullOrEmpty(ResolutionChannels) ? ResolutionOutcome : $"{ResolutionOutcome} ({ResolutionChannels})";
+
+    /// <summary>The resolution's send time for the details window, in UTC; blank when nothing delivered.</summary>
+    public string ResolutionSentAtDisplay =>
+        ResolutionSentAt is { } sent ? sent.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " UTC" : "";
+
     /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
     /// machine's offset while none is collected), set by <see cref="ViewerDataService.GetAlertHistoryAsync"/>
     /// from the fleet's clocks, which it reads at most once per <see cref="ViewerDataService.AlertClockLifetime"/>
@@ -170,7 +189,10 @@ public sealed partial class ViewerDataService
     a.muted,
     a.detail_text,
     a.context_json,
-    a.server_name AS stored_server_name";
+    a.server_name AS stored_server_name,
+    a.resolution_sent_at,
+    a.resolution_channels,
+    a.resolution_outcome";
 
     /// <summary>Per-server read. $1 window start, $2 server_id, $3 limit, $4 window end, exclusive (naive UTC / int / int / naive UTC).
     /// The end (#5562) is what a finished calendar period or a typed range needs; a live window passes a far-future instant.</summary>
@@ -285,6 +307,10 @@ AND    dismissed = FALSE";
                 DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ContextJson = reader.IsDBNull(11) ? null : reader.GetString(11),
                 StoredServerName = reader.IsDBNull(12) ? "" : reader.GetString(12),
+                /* #5825 (V186): what a resolution row's send did; null on every other row. */
+                ResolutionSentAt = reader.IsDBNull(13) ? null : DateTime.SpecifyKind(reader.GetDateTime(13), DateTimeKind.Utc),
+                ResolutionChannels = reader.IsDBNull(14) ? null : reader.GetString(14),
+                ResolutionOutcome = reader.IsDBNull(15) ? null : reader.GetString(15),
             });
         }
 
