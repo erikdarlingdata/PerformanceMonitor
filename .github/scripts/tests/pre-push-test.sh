@@ -21,7 +21,10 @@ suite=darling; case "$*" in *Lite.Tests*) suite=lite;; esac
 while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done; shift
 echo "$suite $*" >> "$FAKE_LOG"
 case "$1" in
-  -list) if [ $suite = darling ]; then cat "$FAKE_LIST_DARLING"; else cat "$FAKE_LIST_LITE"; fi;;
+  -list) case "$*" in
+           *"-trait Stage=Guard"*) g="FAKE_GUARD_LIST_${suite^^}"; [ -n "${!g:-}" ] && cat "${!g}";;
+           *) if [ $suite = darling ]; then cat "$FAKE_LIST_DARLING"; else cat "$FAKE_LIST_LITE"; fi;;
+         esac;;
   -trait) echo "  Fake.Tests  Total: ${FAKE_GUARD_TOTAL:-7}, Errors: 0, Failed: 0";;
   -class) echo "  Fake.Tests  Total: ${FAKE_CLASS_TOTAL:-3}, Errors: 0, Failed: 0";;
 esac
@@ -80,6 +83,16 @@ check green "the helper class is counted as unlisted, not run" $(printf '%s\n' "
 FAKE_GUARD_TOTAL=0 run_gate guard0 "$sel_small" "$list_d" "$list_l" --skip-build
 check guard0 "exit 1 and GATE RED naming Stage=Guard" $([ $rc -eq 1 ] && last | grep -q '^GATE RED: guard-darling Stage=Guard ran 0 tests'; echo $?)
 
+# 3b. #5894: a class the symbol set or the map names that carries Stage=Guard already ran in the Guard stage, so the
+# batches leave it out and the gate says how many; a listing with no Guard class (the fake's default) drops nothing
+printf '%s
+' '["Darling.Tests.AlphaTests"]' > "$work/guard-list-darling.json"
+FAKE_GUARD_LIST_DARLING="$work/guard-list-darling.json" FAKE_CLASS_TOTAL=3 run_gate guardout "$sel_small" "$list_d" "$list_l" --skip-build
+check guardout "GATE GREEN" $([ $rc -eq 0 ] && last | grep -q '^GATE GREEN: '; echo $?)
+check guardout "the Guard class is not run again" $(grep -qxF 'darling -class Darling.Tests.Outer+NestedTests' "$calls"; echo $?)
+check guardout "the gate says how many it left out" $(printf '%s
+' "$out" | grep -qF 'guard-stage classes left out of the selection (stage 2 ran them): darling 1'; echo $?)
+
 # 4. a whole-suite selection (401 darling classes over the 400 default) is a STOP: exit 3, no selected class runs
 names=$(seq -f 'C%03gTests' 1 401)
 sel_big="{\"full\": false, \"selected\": {\"darling\": [$(printf '"%s",' $names | sed 's/,$//')], \"lite\": [\"BetaTests\"]}}"
@@ -88,7 +101,7 @@ run_gate stop "$sel_big" "$list_big" "$list_l" --skip-build
 check stop "exit 3" $([ $rc -eq 3 ]; echo $?)
 check stop "last line is the GATE STOP line" $(last | grep -qF "GATE STOP: selection is the whole suite (darling 401, lite 1): run the brief's classes; CI decides"; echo $?)
 check stop "no -class run" $(! grep -q -- '-class' "$calls"; echo $?)
-check stop "the Guard stage still ran" $(grep -c -- '-trait Stage=Guard' "$calls" | grep -qx 2; echo $?)
+check stop "the Guard stage still ran" $(grep -c -- '^[a-z]* -trait Stage=Guard' "$calls" | grep -qx 2; echo $?)
 
 # 5. batches are cut by length: 401 classes under a 2000-character budget run in several batches, each under it
 FAKE_CLASS_TOTAL=3 PRE_PUSH_MAX_CLASSES=1000 PRE_PUSH_ARG_BUDGET=2000 run_gate chunks "$sel_big" "$list_big" "$list_l" --skip-build
