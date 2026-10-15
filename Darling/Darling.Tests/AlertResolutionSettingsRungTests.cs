@@ -110,7 +110,7 @@ public sealed class AlertResolutionSettingsRungTests
         {
             /* Fresh: every column, its type, its nullability and its default. */
             await AssertColumnsAsync(connection, ct);
-            Assert.Equal(RungVersion, await ProbedVersionAsync(connection, ct));
+            Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct)); /* the ladder's top: V188 (#5821) sits above this rung */
 
             /* A store one rung behind, holding a notification row, a route and an alert-history row from before the rung. */
             await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
@@ -127,7 +127,7 @@ public sealed class AlertResolutionSettingsRungTests
 
             await PgMigrations.MigrateAsync(connection, ct);
 
-            Assert.Equal(RungVersion, await ProbedVersionAsync(connection, ct));
+            Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct)); /* the ladder's top: V188 (#5821) sits above this rung */
             await AssertColumnsAsync(connection, ct);
             Assert.Equal("f|f|f|f", await ScalarAsync(connection,
                 "SELECT concat_ws('|', slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions) FROM config.config_notification WHERE id = 1", ct));
