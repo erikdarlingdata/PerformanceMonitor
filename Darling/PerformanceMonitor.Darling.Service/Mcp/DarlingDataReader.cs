@@ -3282,11 +3282,12 @@ internal static class DarlingDataReader
     /// <para><b>p95 from a duration histogram, not an ordered-set aggregate (#5810).</b> A
     /// <c>PERCENTILE_DISC ... WITHIN GROUP</c> in <c>health</c> made the whole aggregate a serial GroupAggregate
     /// that fed every row of the window into a per-collector tuplesort: over a planted week (TimescaleDB, 1-day
-    /// chunks, compressed after a day) 0.59 s for a 117,000-row server and 1.47 s for a 1,030,000-row one, where
-    /// the same aggregate without it is a parallel HashAggregate at 0.51 s. <c>p95</c> below is the same exact
-    /// value from a narrow GROUP BY (collector, duration) count, itself a parallel HashAggregate, and a running
-    /// sum over the much smaller histogram: 0.21 s and 0.70 s on those two servers, every column identical
-    /// (<c>CollectionHealthP95HistogramLiveTests</c>). The floor left is one scan of the window's rows.</para>
+    /// chunks, compressed after a day, warm cache) 1.69 s for a 1,030,000-row server, where the same aggregate
+    /// without it is a parallel HashAggregate at about 0.5 s. <c>p95</c> below is the same exact value from a narrow
+    /// GROUP BY (collector, duration) count, itself a parallel HashAggregate, and a running sum over the much smaller
+    /// histogram: 0.85 s on that server (medians of seven alternating runs), about 0.25 s either way on a
+    /// 117,000-row one, every column identical (<c>CollectionHealthP95HistogramLiveTests</c>). The floor left is one
+    /// scan of the window's rows, which only an hourly rollup removes.</para>
     /// </summary>
     public const string CollectionHealthSql = $"""
         WITH p95 AS
