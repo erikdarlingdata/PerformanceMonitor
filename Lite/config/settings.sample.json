@@ -184,6 +184,7 @@
   // Written by the app as you use it, not settings you would normally hand-edit.
   "overview_sort_mode": "Cpu",         // "Cpu" | "Name"; unrecognised -> "Cpu"
   "collapsed_fleet_groups": [],        // tag-group headers left collapsed in the sidebar
+  "settings_window_tab": "",          // the Settings tab open when it last closed ("AlertRulesTab"); "" or unknown -> first tab
 
   // ---- Update check ------------------------------------------------------------------------------
   // NO UI. Off = Lite never contacts github.com on its own; the sidebar's About button
