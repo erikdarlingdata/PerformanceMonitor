@@ -324,7 +324,10 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
     /// #5812 M3: the seam between the builder's watermark, the trigger's bound and the read. A real build of today on the
     /// store's clock stamps <c>built_through</c> two hours before the current hour. Set an hour back, the idle advance stamps it
     /// to the watermark again. A row of today that starts 30 minutes below that watermark, written through the real trigger,
-    /// moves the day's <c>late_seq</c>, so the stamped day is stale, and the daily read equals the interval-table read.
+    /// moves the day's <c>late_seq</c>, so the stamped day is stale, and the daily read equals the interval-table read. The
+    /// open day is the watermark's own: today from 04:00 UTC, yesterday before 02:00 UTC (the watermark is 22:00 or 23:00 of
+    /// yesterday, a partial day too), and only from 02:00 to 04:00 UTC, when the rows two hours below the watermark would
+    /// cross midnight, does it skip.
     /// </summary>
     [Fact]
     public async Task ABuildOnTheStoreClock_StampsTwoHoursBeforeTheHour_AndAWriteBelowAnAdvancedWatermarkMarksTheDay()
@@ -338,8 +341,14 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var now = await SettledStoreNowAsync(connection, ct);
-        var today = now.Date;
+        var now = await SettledStoreNowAsync(connection, ct, skipBeforeFour: false);
+        var watermark = Convert.ToDateTime(await TextAsync(connection,
+            "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
+        Assert.SkipWhen(watermark.AddHours(-2).Date != watermark.Date,
+            "From 02:00 to 04:00 UTC the rows two hours below the watermark would cross midnight; the #5812 seam test needs them inside the watermark's day.");
+
+        /* The open day: the watermark's own (today, or yesterday before 02:00 UTC). Every day before it is built whole. */
+        var today = watermark.Date;
         var todayDay = DateOnly.FromDateTime(today);
         var window = today.AddDays(-14);
 
@@ -349,9 +358,6 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
         {
             await BuildAsync(connection, DateOnly.FromDateTime(d), d.AddDays(1), ct);
         }
-
-        var watermark = Convert.ToDateTime(await TextAsync(connection,
-            "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
 
         /* Today's rows, all more than an hour below the watermark, planted with the trigger off (they are not late writes). */
         await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
@@ -451,9 +457,10 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
 
     private const int ServerB = -5812402;
 
-    /// <summary>The store's clock (naive UTC), settled: skips before 04:00 UTC (today's rows two hours below the
-    /// watermark would start before midnight) and waits out an hour boundary less than three minutes off, so the test and the statements read one hour.</summary>
-    private static async Task<DateTime> SettledStoreNowAsync(NpgsqlConnection connection, CancellationToken ct)
+    /// <summary>The store's clock (naive UTC), settled: skips before 04:00 UTC unless <paramref name="skipBeforeFour"/> is
+    /// false (today's rows two hours below the watermark would start before midnight) and waits out an hour boundary less
+    /// than three minutes off, so the test and the statements read one hour.</summary>
+    private static async Task<DateTime> SettledStoreNowAsync(NpgsqlConnection connection, CancellationToken ct, bool skipBeforeFour = true)
     {
         const string Sql = "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')";
         var now = Convert.ToDateTime(await TextAsync(connection, Sql, ct), CultureInfo.InvariantCulture);
@@ -464,7 +471,7 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
             now = Convert.ToDateTime(await TextAsync(connection, Sql, ct), CultureInfo.InvariantCulture);
         }
 
-        Assert.SkipWhen(now.Hour < 4, "Before 04:00 UTC the rows two hours below today's watermark would start before midnight; the #5812 stamp tests need them inside today.");
+        Assert.SkipWhen(skipBeforeFour && now.Hour < 4, "Before 04:00 UTC the rows two hours below today's watermark would start before midnight; the #5812 stamp tests need them inside today.");
         return now;
     }
 
