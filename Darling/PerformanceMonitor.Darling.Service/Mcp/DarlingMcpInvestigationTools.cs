@@ -160,7 +160,7 @@ public sealed class DarlingMcpInvestigationTools
         }
     }
 
-    [McpServerTool(Name = WaitToolName), Description(
+    [McpServerTool(Name = "wait_for_investigation_requests"), Description(
         "Waits up to 25 seconds for an investigation request to open on your agent routes and answers its id, server and " +
         "family. Writes nothing. status ok or empty. Call again with the cursor it answers; claim with " +
         "claim_investigation_request. <<GUIDE>> " +
