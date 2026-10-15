@@ -113,6 +113,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Agent investigation" VerticalAlignment="Center" Margin="0,0,8,6"/>
@@ -133,6 +134,11 @@
                 <TextBlock Text="/" VerticalAlignment="Center" Margin="6,0,6,0"/>
                 <TextBox x:Name="AgentExpiryMinutesBox" Width="60" ToolTip="How long a request nobody claims stays open, 15 to 1440 minutes."/>
             </StackPanel>
+
+            <!-- #5825: whether this route's destinations get an alert's resolution. -->
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="Send resolutions" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <ComboBox Grid.Row="3" Grid.Column="1" x:Name="SendResolutionsCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
+                      ToolTip="Whether this route's destinations also get the message that an alert has cleared. Use channel setting: each channel's Send resolutions box in Notifications decides. Always or Never overrides it for this route."/>
         </Grid>
 
         <CheckBox Grid.Row="12" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"

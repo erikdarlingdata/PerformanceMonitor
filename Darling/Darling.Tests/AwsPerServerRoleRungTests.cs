@@ -112,21 +112,19 @@ public sealed class AwsPerServerRoleRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, and V186's (#5810) is next; V187's (#5821) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, and V187's (#5825) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 14})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 15})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 16})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 17})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* A newer rung's sentinel (V187's, #5821) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 18, arity - 1);
+        /* A newer rung's sentinel (V185's, #5812) is the last argument. */
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);

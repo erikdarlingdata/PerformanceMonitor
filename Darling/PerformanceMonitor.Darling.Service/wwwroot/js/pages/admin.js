@@ -79,6 +79,7 @@ export const ROUTE_COLUMNS = [
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "agent", label: "Agent" },
+  { key: "resolutions", label: "Send resolutions" },
   { key: "smtp_recipients", label: "Email to", wrap: true },
   { key: "modified_at_utc", label: "Modified", format: "time" },
 ];
@@ -190,7 +191,7 @@ export const GROUP_FIELDS = {
   failed_job: ["enabled", "lookback_minutes"],
   database_state: ["enabled"],
   ag: ["enabled", "lag_threshold_seconds", "redo_queue_threshold_kb", "disconnect_refire_minutes"],
-  delivery: ["mode", "per_event_max", "cooldown_minutes"],
+  delivery: ["mode", "per_event_max", "cooldown_minutes", "send_resolutions"],
   analysis: ["enabled", "interval_minutes", "notifications_enabled", "notify_severity", "notify_cooldown_minutes",
     "uncorroborated_route", "uncorroborated_route_source"],
   fleet_sweep: ["enabled", "interval_minutes"],
@@ -211,6 +212,19 @@ function valueText(v) {
   return String(v);
 }
 
+/* #5825: delivery.send_resolutions is one object of per-channel flags, in the Settings window's channel words. Only a
+   true or false is drawn, so nothing but yes/no can reach the cell; a channel the read does not carry is left out. */
+const RESOLUTION_CHANNELS = [["slack", "Slack"], ["teams", "Teams"], ["webhook", "Generic webhook"], ["email", "Email"]];
+
+export function sendResolutionsText(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "—";
+  const parts = RESOLUTION_CHANNELS.filter(([k]) => typeof v[k] === "boolean").map(([k, label]) => label + ": " + (v[k] ? "yes" : "no"));
+  return parts.length ? parts.join(", ") : "—";
+}
+
+/* A listed field whose value is an object, drawn by its own formatter (valueText draws any object as "—"). */
+const FIELD_TEXT = { "delivery.send_resolutions": sendResolutionsText };
+
 /** Setting rows for one group: [{ setting, value }], only the fields the group allow-list names (or `fields`, when a
     section shows part of a group) that the group carries; a secret-shaped key is dropped even if it were listed. */
 export function groupRows(prefix, group, fields) {
@@ -218,7 +232,7 @@ export function groupRows(prefix, group, fields) {
   const allowed = fields || GROUP_FIELDS[prefix] || [];
   return allowed
     .filter((k) => k in group && !isSecretKey(k))
-    .map((k) => ({ setting: prefix + "." + k, label: settingLabel(prefix, k), value: valueText(group[k]) }));
+    .map((k) => ({ setting: prefix + "." + k, label: settingLabel(prefix, k), value: (FIELD_TEXT[prefix + "." + k] || valueText)(group[k]) }));
 }
 
 /** The sections of the settings payload as [{ title, rows }]; a section with no rows is dropped. */
@@ -265,6 +279,14 @@ export function routeAgentText(r) {
   return "Off";
 }
 
+/** The Send resolutions column (#5825), in the route dialog's words: send_resolutions null follows each channel's own
+    "Send resolutions" setting, true always sends the cleared message to this route's destinations, false never does. A
+    route read without the field reads as the channel setting, the same as null. */
+export function routeResolutionsText(r) {
+  if (!r || r.send_resolutions === null || r.send_resolutions === undefined) return "Use channel setting";
+  return r.send_resolutions === true ? "Always" : "Never";
+}
+
 /** Route rows: only the columns above, with the channel names joined. A destination field is never copied. */
 export function routeRows(data) {
   const routes = data && Array.isArray(data.routes) ? data.routes : [];
@@ -278,6 +300,7 @@ export function routeRows(data) {
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     agent: routeAgentText(r),
+    resolutions: routeResolutionsText(r),
     smtp_recipients: Array.isArray(r.smtp_recipients) ? r.smtp_recipients.join(", ") : r.smtp_recipients ?? null,
     modified_at_utc: r.modified_at_utc,
   }));

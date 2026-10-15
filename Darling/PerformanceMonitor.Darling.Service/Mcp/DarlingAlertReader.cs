@@ -48,7 +48,17 @@ internal static class DarlingAlertReader
     public sealed record AlertHistoryReadRow(
         DateTime AlertTime, int ServerId, string ServerName, string MetricName,
         double CurrentValue, double ThresholdValue, bool AlertSent, string NotificationType,
-        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null, string? StoredServerName = null);
+        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null, string? StoredServerName = null)
+    {
+        /// <summary>#5825 (V187): when a resolution's send delivered (UTC); null on every other row.</summary>
+        public DateTime? ResolutionSentAt { get; init; }
+
+        /// <summary>#5825: the channels a resolution went to, or would have gone to when muted, comma-separated.</summary>
+        public string? ResolutionChannels { get; init; }
+
+        /// <summary>#5825: <c>sent</c>, <c>failed: ...</c>, <c>muted</c> or <c>route deleted or disabled: ...</c>.</summary>
+        public string? ResolutionOutcome { get; init; }
+    }
 
     private const string AlertHistorySelectColumns = @"
     a.alert_time,
@@ -64,6 +74,9 @@ internal static class DarlingAlertReader
     a.detail_text,
     a.context_json,
     a.server_name AS stored_server_name,
+    a.resolution_sent_at,
+    a.resolution_channels,
+    a.resolution_outcome,
     a.dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
@@ -213,11 +226,16 @@ LIMIT 1";
             !reader.IsDBNull(9) && reader.GetBoolean(9),
             reader.IsDBNull(10) ? null : reader.GetString(10),
             /* context_json sits at ordinal 11, the stored server_name (the spelling the producer's mute context
-               carries, as opposed to the display name at ordinal 2) at 12, and dismissed stays the LAST column
-               at 13 — the "dismissed is selected" pin anchors on it closing the list. */
-            !reader.IsDBNull(13) && reader.GetBoolean(13),
+               carries, as opposed to the display name at ordinal 2) at 12, the three #5825 resolution columns at 13-15,
+               and dismissed stays the LAST column at 16. */
+            !reader.IsDBNull(16) && reader.GetBoolean(16),
             reader.IsDBNull(11) ? null : reader.GetString(11),
-            reader.IsDBNull(12) ? null : reader.GetString(12));
+            reader.IsDBNull(12) ? null : reader.GetString(12))
+        {
+            ResolutionSentAt = reader.IsDBNull(13) ? null : DateTime.SpecifyKind(reader.GetDateTime(13), DateTimeKind.Utc),
+            ResolutionChannels = reader.IsDBNull(14) ? null : reader.GetString(14),
+            ResolutionOutcome = reader.IsDBNull(15) ? null : reader.GetString(15),
+        };
 
     /* ─────────── the first row after an alert (#4755) ─────────── */
 
@@ -543,15 +561,23 @@ WHERE id = 1";
     /// columns the carve GRANTS is the shape that survives. <c>McpConfigReadAvoidsSecretColumnsTests</c>
     /// pins that this SELECT names no carved column.</para></summary>
     public const string DeliveryCooldownSelectSql = @"
-SELECT email_cooldown_minutes
+SELECT email_cooldown_minutes,
+       slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions
 FROM config_notification
 WHERE id = 1";
+
+    /// <summary>The four per-channel "send resolutions" flags (V187, #5825), as get_alert_settings reports them under
+    /// <c>delivery.send_resolutions</c>. Non-secret columns of the same row, granted to the read roles.</summary>
+    public sealed record SendResolutionsRead(bool Slack, bool Teams, bool Webhook, bool Email);
+
+    /// <summary>The delivery half of the alert configuration: the delivery cooldown and the resolution flags.</summary>
+    public sealed record DeliveryRead(int CooldownMinutes, SendResolutionsRead SendResolutions);
 
     /// <summary>Reads the delivery cooldown, or null when the store has no notification row. Null is a
     /// distinct answer rather than the shipped 15: the service seeds this row and
     /// <c>config_alert_settings</c> in ONE pass, so "settings present, notification absent" is not a state
     /// the product produces, and reporting a number nobody wrote would claim a reading never taken.</summary>
-    private static async Task<int?> ReadDeliveryCooldownAsync(
+    private static async Task<DeliveryRead?> ReadDeliveryAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
     {
         await using var command = new NpgsqlCommand(DeliveryCooldownSelectSql, connection) { Transaction = transaction };
@@ -562,13 +588,15 @@ WHERE id = 1";
             return null;
         }
 
-        return reader.GetInt32(0);
+        return new DeliveryRead(
+            reader.GetInt32(0),
+            new SendResolutionsRead(reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4)));
     }
 
     /// <summary>Both halves of the alert configuration, read in ONE snapshot: the settings row and the
     /// delivery cooldown that lives on the other table. Either may be null when the store has not seeded
     /// that singleton yet.</summary>
-    public sealed record AlertConfigurationRead(AlertSettingsReadRow? Settings, int? DeliveryCooldownMinutes);
+    public sealed record AlertConfigurationRead(AlertSettingsReadRow? Settings, DeliveryRead? Delivery);
 
     /// <summary>
     /// The alert configuration across BOTH config tables, under one snapshot.
@@ -596,8 +624,8 @@ WHERE id = 1";
             System.Data.IsolationLevel.RepeatableRead, cancellationToken);
 
         var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
-        var deliveryCooldownMinutes = await ReadDeliveryCooldownAsync(connection, transaction, cancellationToken);
+        var delivery = await ReadDeliveryAsync(connection, transaction, cancellationToken);
 
-        return new AlertConfigurationRead(settings, deliveryCooldownMinutes);
+        return new AlertConfigurationRead(settings, delivery);
     }
 }

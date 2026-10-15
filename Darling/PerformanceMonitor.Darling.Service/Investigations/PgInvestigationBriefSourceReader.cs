@@ -48,9 +48,9 @@ WHERE r.request_id = $1";
        distinct first. config_alert_log.alert_time is naive UTC; the link allows five seconds either side and takes the
        nearest row, so a stamp taken a moment apart from the request row still finds its alert.
        #5821: an alert that opens or joins before its page is sent writes its link rows before its history row, so an agent
-       that claims while the page is in flight finds no history row yet. The link rows carry the history row's values (V187)
+       that claims while the page is in flight finds no history row yet. The link rows carry the history row's values (V188)
        and are read first; the history row answers only for what the link does not hold (send_error, and every value of a
-       link written before V187). */
+       link written before V188). */
     internal const string AlertsSql = @"
 WITH a AS (
     SELECT DISTINCT ON (alert_time, server_id, metric_name)

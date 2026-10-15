@@ -16,7 +16,9 @@ namespace PerformanceMonitor.Alerting;
 /// through <see cref="IAlertDeliverer"/>: the engine hands them to an optional host callback
 /// instead. <see cref="Title"/>/<see cref="Message"/> carry Lite's exact strings so a forwarding
 /// Lite renders identical toasts (always Success severity — every Lite resolution toast is);
-/// Darling logs them.
+/// Darling logs them and writes a history row for each; since #5825 it also posts one, when the store sends resolutions,
+/// to the channels the alert's delivered fire reached (<c>DarlingAlertDeliverer.DeliverResolutionAsync</c>), still not
+/// through <see cref="IAlertDeliverer"/>.
 /// </summary>
 /// <param name="ServerKey">The engine's stable identity for the server.</param>
 /// <param name="ServerName">Display name (already embedded in <see cref="Message"/>).</param>

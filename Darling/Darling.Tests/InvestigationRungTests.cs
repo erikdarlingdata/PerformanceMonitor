@@ -43,8 +43,8 @@ public sealed class InvestigationRungTests
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(InvestigationTables.RungVersion, RungVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V185 (#5812), V186 (#5810) and V187 (#5821) sit above this rung. */
-        Assert.Equal(RungVersion, PgMigrations.Scripts[^4].Version);
+        /* V185 (#5812) took the top of the ladder; this rung stays registered just below it. */
+        Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Equal(InvestigationTables.CreateSql, Rung.Sql);
     }
@@ -79,27 +79,26 @@ public sealed class InvestigationRungTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        /* V187's sentinel (#5821) is the last parameter, then V186's (#5810) and V185's (#5812); this one is just below them. */
-        Assert.Equal("hasInvestigationAlertFacts", parameters[^1].Name);
-        Assert.Equal("hasCollectionLogHourly", parameters[^2].Name);
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^3].Name);
-        Assert.Equal("hasInvestigations", parameters[^4].Name);
-        Assert.Equal("hasReadCaller", parameters[^5].Name);
+        /* Found by name, not by distance from the top: every later rung's sentinel moved that distance (#5812, #5825). */
+        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasInvestigations");
+        Assert.True(ownOrdinal > 0, "MapProbedSchemaVersion takes this rung's sentinel");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        /* A store stopped here: every sentinel but the three above it. */
+        /* A store stopped here: this rung's sentinel and every one below it, none above it. */
         var atThisRung = (object[])all.Clone();
-        atThisRung[^1] = false;
-        atThisRung[^2] = false;
-        atThisRung[^3] = false;
+        for (var i = ownOrdinal + 1; i < atThisRung.Length; i++)
+        {
+            atThisRung[i] = false;
+        }
+
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var behind = (object[])atThisRung.Clone();
-        behind[^4] = false;
+        behind[ownOrdinal] = false;
         Assert.Equal(183, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasInvestigations)", StringComparison.Ordinal);
@@ -123,6 +122,7 @@ public sealed class InvestigationRungTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
+        await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
@@ -132,7 +132,7 @@ DELETE FROM darling_schema_version WHERE version >= 184;
 INSERT INTO config.config_notification_routes (metric_match, teams_url) VALUES ('Blocking', 'https://example.invalid/hook');", ct);
         Assert.Equal(183, await ProbedVersionAsync(connection, ct));
 
-        /* V184 and the rungs above it (V185 #5812, V186 #5810, V187 #5821) all apply. */
+        /* V184 and the rung above it (V185, #5812) both apply. */
         Assert.Equal(StorageVersion.SchemaVersion - 183, await PgMigrations.MigrateAsync(connection, ct));
         await AssertMigratedAsync(connection, ct);
 

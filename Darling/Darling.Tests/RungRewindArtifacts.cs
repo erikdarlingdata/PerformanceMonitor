@@ -179,11 +179,31 @@ ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     }
 
     /// <summary>
-    /// V187 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
-    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
-    /// below V187 reads every alert value from the history row, as it did before.
+    /// V187 (#5825): the four per-channel resolution flags, the route override and the alert log's three resolution columns
+    /// (<c>resolution_outcome</c> is the probe's newest sentinel). Safe on a store that never had them.
     /// </summary>
     internal static async Task DropV187SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS config.config_notification
+    DROP COLUMN IF EXISTS slack_send_resolutions,
+    DROP COLUMN IF EXISTS teams_send_resolutions,
+    DROP COLUMN IF EXISTS generic_send_resolutions,
+    DROP COLUMN IF EXISTS email_send_resolutions;
+ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS send_resolutions;
+ALTER TABLE IF EXISTS config.config_alert_log
+    DROP COLUMN IF EXISTS resolution_sent_at,
+    DROP COLUMN IF EXISTS resolution_channels,
+    DROP COLUMN IF EXISTS resolution_outcome;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V188 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
+    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
+    /// below V188 reads every alert value from the history row, as it did before.
+    /// </summary>
+    internal static async Task DropV188SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(@"
 ALTER TABLE IF EXISTS config.investigation_request_alerts

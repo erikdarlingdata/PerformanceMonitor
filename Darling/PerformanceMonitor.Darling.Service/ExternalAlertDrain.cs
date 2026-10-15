@@ -82,6 +82,7 @@ public sealed class ExternalAlertDrain
     private readonly string _serviceInstance;
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
+    private readonly Func<AlertResolution, AlertResolutionSendOptions, CancellationToken, Task>? _deliverResolution;
 
     /// <param name="alertsEnabled">The live master switch every alert family consults (#3464). Off, a pass only expires rows.</param>
     /// <param name="deliver">The record-and-send seam: <see cref="DarlingAlertDeliverer.DeliverAndReportAsync"/>.</param>
@@ -100,8 +101,10 @@ public sealed class ExternalAlertDrain
         Func<string, ExternalAlertServer?> resolveServer,
         string serviceInstance,
         ILogger logger,
-        Func<DateTime>? utcNow = null)
+        Func<DateTime>? utcNow = null,
+        Func<AlertResolution, AlertResolutionSendOptions, CancellationToken, Task>? deliverResolution = null)
     {
+        _deliverResolution = deliverResolution;
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _alertsEnabled = alertsEnabled ?? throw new ArgumentNullException(nameof(alertsEnabled));
         _deliver = deliver ?? throw new ArgumentNullException(nameof(deliver));
@@ -386,15 +389,26 @@ public sealed class ExternalAlertDrain
             return ExternalAlertOutcome.Ignored;
         }
 
-        /* Darling's own clears write a history row and post nothing (BuildResolutionRecord); this one carries the pending
+        /* The clear's history row (BuildResolutionRecord, written by the resolution send below, #5825) carries the pending
            id in its context so the reap can tell it was written. */
         var resolvedContext = AlertContextSerializer.Serialize(new AlertContext
         {
             External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId),
         });
-        await _history.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(new AlertResolution(
-            firedKey, firedLabel, firingMetric, ResolvedMetricNameFor(row.SourceName, row.AlertKey), message))
-            with { ContextJson = resolvedContext });
+        var resolution = new AlertResolution(
+            firedKey, firedLabel, firingMetric, ResolvedMetricNameFor(row.SourceName, row.AlertKey), message);
+        if (_deliverResolution is not null)
+        {
+            /* #5825: the clear follows the same setting as every other clear, to the destinations its fire reached. The
+               PagerDuty resolve above already ran, so this one does not close the incident again. */
+            await _deliverResolution(
+                resolution, new AlertResolutionSendOptions(row.SourceName, ClosePagerDuty: false, resolvedContext), cancellationToken);
+        }
+        else
+        {
+            await _history.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution)
+                with { ContextJson = resolvedContext });
+        }
 
         await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Delivered,
             pagerDuty == AlertChannelOutcome.Delivered ? "resolved; the PagerDuty incident was closed" : "resolved");

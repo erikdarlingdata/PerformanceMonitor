@@ -48,7 +48,7 @@ public sealed partial class ViewerDataService
     /// metric level, then the route id, so the id order is no longer the order routes are consulted in.</summary>
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, " + NotificationRouteDestinationColumns + ", enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
-        + NotificationRouteAgentColumns + " "
+        + NotificationRouteAgentColumns + ", send_resolutions "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>The secret-free projection a read-only <c>viewer</c> seat reads: the four webhook-class
@@ -56,15 +56,15 @@ public sealed partial class ViewerDataService
     /// not a secret, on the parent either), and <c>configured_channels</c> carries presence.</summary>
     public const string NotificationRoutesSelectNoSecretSql =
         "SELECT route_id, metric_match, smtp_recipients, enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
-        + NotificationRouteAgentColumns + " "
+        + NotificationRouteAgentColumns + ", send_resolutions "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in
     /// the column list; RETURNING hands it back for the grid.</summary>
     public const string NotificationRouteInsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + NotificationRouteDestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + NotificationRouteAgentColumns + @", modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + NotificationRouteDestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + NotificationRouteAgentColumns + @", send_resolutions, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string NotificationRouteUpdateSql = @"
@@ -83,6 +83,7 @@ UPDATE config_notification_routes SET
     agent_max_per_day = $13,
     agent_lease_minutes = $14,
     agent_expiry_minutes = $15,
+    send_resolutions = $16,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
@@ -123,7 +124,7 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });                    // $7
         AddNullableInt(command, row.ScopeServerId);                                                        // $8
         AddNullableInt(command, row.ScopeTagId);                                                           // $9
-        AddAgentColumns(command, row);                                                                     // $10-$14
+        AddAgentColumns(command, row);                                                                     // $10-$15
         var id = await ExecuteWriteScalarAsync(command, cancellationToken);
         return Convert.ToInt32(id, System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -145,7 +146,7 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });                    // $8
         AddNullableInt(command, row.ScopeServerId);                                                        // $9
         AddNullableInt(command, row.ScopeTagId);                                                           // $10
-        AddAgentColumns(command, row);                                                                     // $11-$15
+        AddAgentColumns(command, row);                                                                     // $11-$16
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -291,6 +292,9 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.AgentMaxPerDay });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.AgentLeaseMinutes });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.AgentExpiryMinutes });
+        /* #5825 (V187): the resolution override, bound right after the agent columns in every insert and update. NULL is
+           "use the channel's setting". */
+        AddNullableBool(command, row.SendResolutions);
     }
 
     /// <summary>The <c>smallint</c> <c>agent_level</c>: a value, or SQL NULL for "inherit".</summary>
@@ -327,6 +331,7 @@ WHERE route_id = $1";
         AgentMaxPerDay = reader.GetInt32(14),
         AgentLeaseMinutes = reader.GetInt32(15),
         AgentExpiryMinutes = reader.GetInt32(16),
+        SendResolutions = reader.IsDBNull(17) ? null : reader.GetBoolean(17),
     };
 
     /// <summary>The secret-free reader: the four carved destinations stay empty (the seat cannot author them
@@ -350,6 +355,7 @@ WHERE route_id = $1";
         AgentMaxPerDay = reader.GetInt32(10),
         AgentLeaseMinutes = reader.GetInt32(11),
         AgentExpiryMinutes = reader.GetInt32(12),
+        SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
     };
 }
 
@@ -394,6 +400,10 @@ public sealed class NotificationRouteRow
 
     /// <summary>A request nobody claims expires after this long (#5632).</summary>
     public int AgentExpiryMinutes { get; set; } = NotificationRoute.DefaultAgentExpiryMinutes;
+
+    /// <summary>Whether this route's destinations get an alert's resolution (#5825): null uses each channel's setting,
+    /// true always sends it, false never does.</summary>
+    public bool? SendResolutions { get; set; }
 
     /// <summary>The Scope column: "All servers", the server's display name or the tag path. Filled by the window from the
     /// registry and the tag tree (<see cref="ViewerNotificationRouteScope.ScopeText"/>); not stored.</summary>
@@ -472,6 +482,7 @@ public sealed class NotificationRouteRow
         AgentMaxPerDay = AgentMaxPerDay,
         AgentLeaseMinutes = AgentLeaseMinutes,
         AgentExpiryMinutes = AgentExpiryMinutes,
+        SendResolutions = SendResolutions,
         ScopeDisplay = ScopeDisplay,
         StatusDisplay = StatusDisplay,
     };

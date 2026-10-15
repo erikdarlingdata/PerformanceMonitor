@@ -165,7 +165,7 @@ FROM config.investigation_requests AS r", ct));
     /// #5821 review round 1: the request id leaves in the generic webhook before the alert's history row is written, and a
     /// runner may claim while the POST is in flight. The brief composed then reads its alerts section through
     /// <see cref="PgInvestigationBriefSourceReader"/>; it must carry the alert's value, threshold, detail text and context from
-    /// the link rows, though the history row does not exist yet. Before V187 the four were null there.
+    /// the link rows, though the history row does not exist yet. Before V188 the four were null there.
     /// </summary>
     [Fact]
     public async Task ARunnerThatReadsTheBriefDuringThePost_FindsTheAlertsValues_BeforeItsHistoryRowExists()

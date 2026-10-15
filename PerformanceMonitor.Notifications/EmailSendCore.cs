@@ -332,6 +332,32 @@ public sealed class EmailSendCore
         (_consecutiveFailures, _lastFailureError);
 
     /// <summary>
+    /// Sends one alert resolution email (#5825) to the recipients the fire it closes went to. No cooldown, budget or
+    /// route: the caller already knows the destination, and a delivered fire always gets its one clear. Null when the
+    /// send succeeded, the SMTP error when it did not. Never throws.
+    /// </summary>
+    internal async Task<string?> TrySendResolutionEmailAsync(string recipients, AlertResolutionFacts facts)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var title = facts.Title;
+        var serverName = facts.ServerName;
+        try
+        {
+            var subject = $"[SQL Monitor Resolved] {title} on {serverName}";
+            /* The resolution's own body: its facts as the data table, not the fire's value and threshold rows. */
+            var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildResolutionEmail(facts, _branding);
+            await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, context: null, recipients: recipients);
+            _logger.LogInformation($"Alert resolution email sent for {title} on {serverName}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"ALERT RESOLUTION EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
     /// Sends a test email to verify SMTP configuration. Returns null on success, or the error
     /// message on failure. Static — the test-send path supplies its own <see cref="IAlertSettings"/>
     /// (Lite: <c>new AppAlertSettings()</c>; Dashboard: the transient form-values adapter, MOD-1).

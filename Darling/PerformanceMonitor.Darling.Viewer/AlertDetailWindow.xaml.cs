@@ -60,6 +60,19 @@ public partial class AlertDetailWindow : Window
         ThresholdText.Text = item.ThresholdValueDisplay;
         NotificationText.Text = item.NotificationType;
         StatusValueText.Text = item.StatusDisplay;
+        /* #5825: a resolution row's send, one row per field; collapsed on a row with no resolution outcome. */
+        var resolution = item.ResolutionOutcome is null ? Visibility.Collapsed : Visibility.Visible;
+        ResolutionSentAtText.Text = item.ResolutionSentAtDisplay;
+        ResolutionChannelsText.Text = item.ResolutionChannels ?? "";
+        ResolutionOutcomeText.Text = item.ResolutionOutcome ?? "";
+        foreach (var element in new UIElement[]
+                 {
+                     ResolutionSentAtLabel, ResolutionSentAtText, ResolutionChannelsLabel, ResolutionChannelsText,
+                     ResolutionOutcomeLabel, ResolutionOutcomeText,
+                 })
+        {
+            element.Visibility = resolution;
+        }
 
         if (item.Muted)
         {
@@ -134,7 +147,8 @@ public partial class AlertDetailWindow : Window
     internal string BuildCopyText() => AlertDetailCopyText.Build(
         new AlertDetailCopyHeader(
             _item.TimeLocal, _item.ServerName, _item.MetricName, _item.CurrentValueDisplay,
-            _item.ThresholdValueDisplay, _item.NotificationType, _item.StatusDisplay, _item.Muted),
+            _item.ThresholdValueDisplay, _item.NotificationType, _item.StatusDisplay, _item.Muted,
+            _item.ResolutionSentAtDisplay, _item.ResolutionChannels ?? "", _item.ResolutionOutcome),
         _item.ContextJson, _item.DetailText);
 
     /* #5847: a clipboard another app holds is a status line here, never an exception. */

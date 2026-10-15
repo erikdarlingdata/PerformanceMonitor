@@ -68,6 +68,9 @@ internal static class DarlingWebhookSecrets
             PagerDutyRoutingKey = OpenValue(stored.PagerDutyRoutingKey, "pagerduty", row, stored.PagerDutyProxy, null, NotificationRouter.PagerDutyChannel, "PagerDuty routing key", ring, failures),
             PagerDutyUseEuRegion = stored.PagerDutyUseEuRegion,
             PagerDutyAutoResolve = stored.PagerDutyAutoResolve,
+            SlackSendResolutions = stored.SlackSendResolutions,
+            TeamsSendResolutions = stored.TeamsSendResolutions,
+            GenericSendResolutions = stored.GenericSendResolutions,
             PagerDutyProxy = stored.PagerDutyProxy,
         };
 
@@ -193,6 +196,9 @@ internal static class DarlingWebhookSecrets
         Add(w.PagerDutyRoutingKey);
         Add(w.PagerDutyUseEuRegion ? "1" : "0");
         Add(w.PagerDutyAutoResolve ? "1" : "0");
+        Add(w.SlackSendResolutions ? "1" : "0");
+        Add(w.TeamsSendResolutions ? "1" : "0");
+        Add(w.GenericSendResolutions ? "1" : "0");
         Add(w.PagerDutyProxy);
         foreach (var r in routes ?? Array.Empty<NotificationRoute>())
         {
@@ -204,6 +210,7 @@ internal static class DarlingWebhookSecrets
             Add(r.PagerDutyRoutingKey);
             Add(r.SmtpRecipients);
             Add(r.Enabled ? "1" : "0");
+            Add(r.SendResolutions is null ? "-" : r.SendResolutions.Value ? "1" : "0");
 
             /* #5750: the scope and what the loader expanded it to. A tag edit changes the expanded set while every stored column
                stays the same, and the opened result carries the routes, so without these a tag edit would keep the old server set. */

@@ -13,7 +13,9 @@ namespace PerformanceMonitor.Notifications;
 
 /// <summary>
 /// The header of one alert-history row as the Alert Details window shows it (#5847): every value already formatted
-/// for display, so the copied text reads exactly like the window.
+/// for display, so the copied text reads exactly like the window. The three resolution values (#5825) are the
+/// Darling Viewer's: a resolution row's send, copied only when <paramref name="ResolutionOutcome"/> is set, as the
+/// window shows those rows only then. Lite has no resolution rows and leaves them null.
 /// </summary>
 public sealed record AlertDetailCopyHeader(
     string Time,
@@ -23,7 +25,10 @@ public sealed record AlertDetailCopyHeader(
     string Threshold,
     string Notification,
     string Status,
-    bool Muted);
+    bool Muted,
+    string? ResolutionSentAt = null,
+    string? ResolutionChannels = null,
+    string? ResolutionOutcome = null);
 
 /// <summary>
 /// The plain text behind the Alert Details window's "Copy all details" button (#5847), shared by Lite and the Darling
@@ -57,6 +62,14 @@ public static class AlertDetailCopyText
         if (ageLine is not null)
         {
             text.AppendLine(ageLine);
+        }
+
+        /* #5825: a resolution row's send, below the sample age, where the Viewer's window shows it. */
+        if (header.ResolutionOutcome is not null)
+        {
+            AppendLine(text, "Resolution sent", header.ResolutionSentAt);
+            AppendLine(text, "Resolution channels", header.ResolutionChannels);
+            AppendLine(text, "Resolution outcome", header.ResolutionOutcome);
         }
 
         if (header.Muted)

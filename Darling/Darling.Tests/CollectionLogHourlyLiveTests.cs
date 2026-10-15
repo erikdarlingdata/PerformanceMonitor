@@ -88,7 +88,9 @@ public sealed class CollectionLogHourlyLiveTests
         Assert.Equal(new[] { "server_id", "collector_name", "hour_start" }, await PrimaryKeyColumnsAsync(connection, ct));
         Assert.Equal(StorageVersion.SchemaVersion, await ProbeAsync(scratch.ConnectionString, ct));
 
-        /* Back to V185: the table gone (with every rung above it) and the ladder at 185. The probe must say 185, not 186. */
+        /* Back to V185: the table gone and the ladder at 185. The probe must say 185, not 186. */
+        /* V187 (#5825) sits above this rung, so its sentinel goes too. */
+        await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 186;");

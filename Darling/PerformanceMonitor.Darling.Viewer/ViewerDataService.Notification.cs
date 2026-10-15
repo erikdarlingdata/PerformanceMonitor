@@ -42,7 +42,8 @@ public sealed partial class ViewerDataService
         "smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address, " +
         "smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, " +
         "generic_url, generic_headers, generic_body_template, generic_proxy, " +
-        "pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve";
+        "pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve, " +
+        "slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions";
 
     /// <summary>The single global notification row (id=1), for the Settings window prefill + migrate-in check.</summary>
     public const string NotificationSelectSql =
@@ -57,7 +58,8 @@ public sealed partial class ViewerDataService
     private const string NotificationNonSecretColumns =
         "smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients, " +
         "email_cooldown_minutes, teams_proxy, slack_proxy, generic_body_template, generic_proxy, " +
-        "pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve";
+        "pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve, " +
+        "slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions";
 
     /// <summary>The secret-free notification projection a read-only <c>viewer</c> seat reads (D7 degradation):
     /// the four carved secret columns are omitted, so it never 42501s for a viewer. The secret fields come back
@@ -66,10 +68,10 @@ public sealed partial class ViewerDataService
         "SELECT " + NotificationNonSecretColumns + " FROM config_notification WHERE id = 1";
 
     /// <summary>Upserts the single global notification row (Settings window Save). ON CONFLICT rewrites every
-    /// column and bumps <c>config_version</c> via the V17 trigger. $1..$20 in <see cref="NotificationColumns"/> order.</summary>
+    /// column and bumps <c>config_version</c> via the V17 trigger. $1..$24 in <see cref="NotificationColumns"/> order.</summary>
     public const string NotificationUpsertSql = @"
 INSERT INTO config_notification (id, " + NotificationColumns + @", modified_at)
-VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, (now() AT TIME ZONE 'UTC'))
+VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     smtp_host = EXCLUDED.smtp_host,
     smtp_port = EXCLUDED.smtp_port,
@@ -91,6 +93,10 @@ ON CONFLICT (id) DO UPDATE SET
     pagerduty_use_eu_region = EXCLUDED.pagerduty_use_eu_region,
     pagerduty_proxy = EXCLUDED.pagerduty_proxy,
     pagerduty_auto_resolve = EXCLUDED.pagerduty_auto_resolve,
+    slack_send_resolutions = EXCLUDED.slack_send_resolutions,
+    teams_send_resolutions = EXCLUDED.teams_send_resolutions,
+    generic_send_resolutions = EXCLUDED.generic_send_resolutions,
+    email_send_resolutions = EXCLUDED.email_send_resolutions,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Reads the single global notification row, or null when the store has not seeded it yet. A
@@ -141,6 +147,10 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.PagerDutyUseEuRegion });  // $18
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.PagerDutyProxy ?? "" });  // $19
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.PagerDutyAutoResolve });  // $20
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.SlackSendResolutions });   // $21
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.TeamsSendResolutions });   // $22
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.GenericSendResolutions }); // $23
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.EmailSendResolutions });   // $24
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -166,6 +176,10 @@ ON CONFLICT (id) DO UPDATE SET
         PagerDutyUseEuRegion = reader.GetBoolean(17),
         PagerDutyProxy = reader.GetString(18),
         PagerDutyAutoResolve = reader.GetBoolean(19),
+        SlackSendResolutions = reader.GetBoolean(20),
+        TeamsSendResolutions = reader.GetBoolean(21),
+        GenericSendResolutions = reader.GetBoolean(22),
+        EmailSendResolutions = reader.GetBoolean(23),
     };
 
     /// <summary>
@@ -199,6 +213,10 @@ ON CONFLICT (id) DO UPDATE SET
         PagerDutyUseEuRegion = reader.GetBoolean(10),
         PagerDutyProxy = reader.GetString(11),
         PagerDutyAutoResolve = reader.GetBoolean(12),
+        SlackSendResolutions = reader.GetBoolean(13),
+        TeamsSendResolutions = reader.GetBoolean(14),
+        GenericSendResolutions = reader.GetBoolean(15),
+        EmailSendResolutions = reader.GetBoolean(16),
     };
 }
 
@@ -245,6 +263,13 @@ public sealed class NotificationRow
        so it stays in the read-only roles' grants. */
     public bool PagerDutyAutoResolve { get; set; }
 
+    /* V187 (#5825): whether each channel also sends an alert's resolution to the destinations its fire reached.
+       Non-secret behaviour toggles, off by default. */
+    public bool SlackSendResolutions { get; set; }
+    public bool TeamsSendResolutions { get; set; }
+    public bool GenericSendResolutions { get; set; }
+    public bool EmailSendResolutions { get; set; }
+
     /// <summary>A row equal to the V17 seed defaults — the migrate-in "is the service section still at defaults?" baseline.</summary>
     public static NotificationRow Defaults() => new();
 
@@ -272,6 +297,10 @@ public sealed class NotificationRow
             && string.Equals(PagerDutyRoutingKey, other.PagerDutyRoutingKey, StringComparison.Ordinal)
             && PagerDutyUseEuRegion == other.PagerDutyUseEuRegion
             && PagerDutyProxy == other.PagerDutyProxy
-            && PagerDutyAutoResolve == other.PagerDutyAutoResolve;
+            && PagerDutyAutoResolve == other.PagerDutyAutoResolve
+            && SlackSendResolutions == other.SlackSendResolutions
+            && TeamsSendResolutions == other.TeamsSendResolutions
+            && GenericSendResolutions == other.GenericSendResolutions
+            && EmailSendResolutions == other.EmailSendResolutions;
     }
 }

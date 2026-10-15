@@ -1310,9 +1310,9 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// Held for the same reason <see cref="_alertDeliverer"/> is: the Postgres Deadlocks/Blocking alerts
     /// (#2711) need to write a resolution history row on the active→inactive transition, exactly like
-    /// <see cref="BuildAlertEngine"/>'s <c>resolutionCallback</c> does for the SQL Server families - a
-    /// resolution has no send channel (<see cref="AlertResolution"/>'s own doc comment), so it goes
-    /// straight to history rather than through <see cref="_alertDeliverer"/>.
+    /// <see cref="BuildAlertEngine"/>'s <c>resolutionCallback</c> does for the SQL Server families. Since #5825 the
+    /// resolution goes through <see cref="_alertDeliverer"/>'s resolution send, which writes the same row; this store
+    /// is the fallback when no deliverer was built.
     /// </summary>
     private PgAlertHistoryStore? _historyStore;
 
@@ -3411,7 +3411,9 @@ LIMIT 1";
                         ?.Config.AlertDeliveryModeOverride;
                 }
             },
-            investigationDispatcher: investigationDispatcher);
+            investigationDispatcher: investigationDispatcher,
+            /* #5825: the same mute rules the fires obey stop an alert's clear. */
+            isAlertMuted: muteRuleService.IsAlertMuted);
         var engine = BuildAlertEngine(config, servers, alertSettings, historyStore, muteRuleService, deliverer);
 
         /* Held for the PostgreSQL predictors, which deliver alongside the shared engine rather than
@@ -3612,7 +3614,9 @@ LIMIT 1";
                 }
             },
             serviceInstance,
-            _loggerFactory.CreateLogger<ExternalAlertDrain>());
+            _loggerFactory.CreateLogger<ExternalAlertDrain>(),
+            /* #5825: an external alert's clear goes where its fire went, under the same setting as every clear. */
+            deliverResolution: (resolution, options, token) => deliverer.DeliverResolutionAsync(resolution, options, token));
 
         /* #5654: the drain runs on its own 15-second loop, like the command loop, and is never awaited inside the fleet
            loop, so collection, the custom alerts and the self alerts do not wait on a channel send or a store lock. The
@@ -7605,7 +7609,7 @@ LIMIT 1";
                map, so a denied or broken msdb read costs a card its job NAME and never the card. */
             agentJobStepResolver: (serverKey, keys, ct) =>
                 Task.FromResult(ServeStepNamesFromCache(servers, serverKey, keys)),
-            resolutionCallback: async (resolution, _) =>
+            resolutionCallback: async (resolution, token) =>
             {
                 /* #1681: same shared shape as the firing line the engine's funnel writes, so an engine
                    alert's TRIGGERED and RESOLVED halves pair up in the log. */
@@ -7613,10 +7617,11 @@ LIMIT 1";
                     AlertFiringLog.Resolved(resolution.ServerName, resolution.Title, resolution.Message));
                 /* Stage 4 parity-gap fix: record a resolved-flavored history row so an operator reviewing
                    alert history sees the paired "Detected" then "Cleared/Resolved" entries (the Dashboard
-                   records these explicitly; Darling previously only logged them). A resolution has no send
-                   channel, so this never emails/webhooks; RecordAlertAsync is failure-isolated so it can
-                   never break the sweep. */
-                await historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution));
+                   records these explicitly; Darling previously only logged them). #5825: the deliverer also sends the
+                   clear to the destinations its delivered fire reached when the store sends resolutions, and records
+                   the send on the row. A failed send is recorded, not thrown, and RecordAlertAsync is failure-isolated,
+                   so neither can break the sweep. */
+                await deliverer.DeliverResolutionAsync(resolution, cancellationToken: token);
             },
             logger: _logger,
             /* #5715 part B: a Warning delivered before a restart still lets the Critical through at once. */
@@ -9307,9 +9312,8 @@ LIMIT 1";
     /// Writes a Postgres Deadlocks/Blocking resolution the same way <see cref="BuildAlertEngine"/>'s
     /// <c>resolutionCallback</c> does for the SQL Server families: a log line via
     /// <see cref="AlertFiringLog.Resolved"/> and a history row via
-    /// <see cref="DarlingSelfAlertEvaluator.BuildResolutionRecord"/> — never through
-    /// <see cref="_alertDeliverer"/>, because a resolution has no send channel
-    /// (<see cref="AlertResolution"/>'s own doc comment). Best-effort: a history-write failure here must
+    /// <see cref="DarlingSelfAlertEvaluator.BuildResolutionRecord"/>, written by <see cref="_alertDeliverer"/>'s
+    /// resolution send (#5825), which also posts the clear where the delivered fire went when the store sends resolutions. Best-effort: a history-write failure here must
     /// not be allowed to look like the alert itself failed, since the condition genuinely did clear.
     /// </summary>
     private async Task NotifyPgResolutionAsync(
@@ -9328,8 +9332,16 @@ LIMIT 1";
 
         try
         {
-            await _historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(
-                new AlertResolution(serverKey, serverName, metricName, title, message)));
+            var resolution = new AlertResolution(serverKey, serverName, metricName, title, message);
+            /* #5825: through the deliverer, so a delivered fire's clear goes where the fire went. */
+            if (_alertDeliverer is not null)
+            {
+                await _alertDeliverer.DeliverResolutionAsync(resolution);
+            }
+            else
+            {
+                await _historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution));
+            }
         }
         catch (Exception ex)
         {

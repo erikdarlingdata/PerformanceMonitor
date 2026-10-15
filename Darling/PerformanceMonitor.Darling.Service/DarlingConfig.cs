@@ -1343,6 +1343,14 @@ public sealed class SmtpConfig
     /// <summary>Email/webhook channel cooldown between repeated alerts (Lite's default 15).</summary>
     [JsonPropertyName("emailCooldownMinutes")]
     public int EmailCooldownMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Opt-in (V187, #5825, <c>config_notification.email_send_resolutions</c>): when an alert clears, email the
+    /// resolution to the recipients its fire reached. Off by default. A notification route can override it for its
+    /// own destinations (<see cref="NotificationRouteResolutions"/>).
+    /// </summary>
+    [JsonPropertyName("emailSendResolutions")]
+    public bool SendResolutions { get; set; } = false;
 }
 
 /// <summary>
@@ -2358,6 +2366,22 @@ public sealed class WebhooksConfig
     /// </summary>
     [JsonPropertyName("pagerDutyAutoResolve")]
     public bool PagerDutyAutoResolve { get; set; } = false;
+
+    /* V187 (#5825): send an alert's resolution to the channels its fire reached, one opt-in per channel, all off by
+       default. Stored on the singleton notification row beside the destinations they govern. A route can override
+       each for its own destinations; NotificationRouteResolutions holds that rule. */
+
+    /// <summary>Send resolutions to Slack (<c>config_notification.slack_send_resolutions</c>).</summary>
+    [JsonPropertyName("slackSendResolutions")]
+    public bool SlackSendResolutions { get; set; } = false;
+
+    /// <summary>Send resolutions to Teams (<c>config_notification.teams_send_resolutions</c>).</summary>
+    [JsonPropertyName("teamsSendResolutions")]
+    public bool TeamsSendResolutions { get; set; } = false;
+
+    /// <summary>Send resolutions to the generic webhook (<c>config_notification.generic_send_resolutions</c>).</summary>
+    [JsonPropertyName("genericSendResolutions")]
+    public bool GenericSendResolutions { get; set; } = false;
 }
 
 public sealed class MonitoredServer

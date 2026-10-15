@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <param name="RouteId">The route whose agent level answered 1; its limits are the next four members.</param>
 /// <param name="DedupKeys">Every incident dedup key of the alert (a row is recorded per key); empty when it has none.</param>
 /// <param name="Facts">
-/// #5821: what the alert's history row will hold, written on its link rows (V187) so the brief's alerts section reads them
+/// #5821: what the alert's history row will hold, written on its link rows (V188) so the brief's alerts section reads them
 /// even when an agent claims the request before that row exists. Null writes NULLs, and the brief then reads the history row.
 /// </param>
 public sealed record InvestigationAlert(
