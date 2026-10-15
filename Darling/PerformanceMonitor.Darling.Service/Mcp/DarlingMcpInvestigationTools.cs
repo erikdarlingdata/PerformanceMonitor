@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
@@ -76,6 +77,35 @@ public sealed class DarlingMcpInvestigationTools
     /// <summary>The agent a submit refusal is journaled under when its claim_id resolves to no claim holder.</summary>
     internal const string UnclaimedAgent = "unclaimed";
 
+    /// <summary>The long-poll tool's name (#5822).</summary>
+    internal const string WaitToolName = "wait_for_investigation_requests";
+
+    /// <summary>How long a wait lasts when the call names no timeout, in seconds.</summary>
+    internal const int DefaultWaitSeconds = 20;
+
+    /// <summary>The longest wait, in seconds: under the 30 seconds a proxy or a client's request timeout commonly allows, so
+    /// neither cuts the call before it answers.</summary>
+    internal const int MaxWaitSeconds = 25;
+
+    /// <summary>The most requests one wait answers; the cursor moves past only what it answered.</summary>
+    internal const int MaxWaitRows = 100;
+
+    /// <summary>The most rows one catch-up read takes (the cursor's already-answered rows included).</summary>
+    internal const int WaitReadLimit = 1000;
+
+    /// <summary>
+    /// How far behind its newest answered request a cursor reads again (#5822). A request's <c>opened_at</c> is taken before
+    /// its transaction waits on the open-or-join locks, so it can commit after a request with a later <c>opened_at</c> was
+    /// already answered. The cursor keeps the ids it answered inside this window and skips them, so a late commit is answered
+    /// once and an early one is not answered twice. Each lock wait is capped at
+    /// <see cref="InvestigationDispatcher.LockTimeoutMilliseconds"/>.
+    /// </summary>
+    internal static readonly TimeSpan CursorOverlap = TimeSpan.FromMinutes(5);
+
+    /// <summary>The store read a wait catches up with: requests opened after a time on some routes, oldest first.</summary>
+    internal delegate Task<IReadOnlyList<InvestigationOpenedRow>> OpenedReader(
+        DateTime sinceUtc, IReadOnlyCollection<int>? routeIds, int limit, CancellationToken cancellationToken);
+
     private static InvestigationRequestStore Store(NpgsqlDataSource postgres) =>
         new(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
 
@@ -132,6 +162,201 @@ public sealed class DarlingMcpInvestigationTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("list_investigation_requests", ex);
+        }
+    }
+
+    [McpServerTool(Name = "wait_for_investigation_requests"), Description(
+        "Waits up to 25 seconds for an investigation request to open on your agent routes and answers its id, server and " +
+        "family. Writes nothing. status ok or empty. Call again with the cursor it answers; claim with " +
+        "claim_investigation_request. <<GUIDE>> " +
+        "A long poll (#5822): the MCP transport is stateless, so the server cannot push a notification; this call is how an " +
+        "agent hears of a new request without listing on a timer. It answers at once when a request opened on route_ids after " +
+        "the cursor; otherwise it waits up to timeout_seconds (0-25, default 20; capped at 25 so a proxy or a client's request " +
+        "timeout never cuts the call) for one to open, and at the timeout answers empty with the same cursor. Each row: " +
+        "request_id, route_id, server_name, family and opened_at, nothing more: no lease and no brief. The claim stays pull: " +
+        "the first claim_investigation_request call wins, exactly as for a request found by listing, so one request can wake " +
+        "several agents and only one claims it. route_ids: the agent routes to wait on (get_notification_routes, agent_level " +
+        "1); omit them for every route. There is one shared bearer token, so every token holder can wait on every route; a " +
+        "route that is not an agent route opens no request, so a wait on it only times out. after: the opaque cursor the last " +
+        "call answered. Omit it to start now: requests already open are not answered (list them with " +
+        "list_investigation_requests). Nothing is queued for an agent: the store is the queue, so a cursor catches up on every " +
+        "request opened since its last answer (at most 100 per answer, oldest first), including one that opened while no call " +
+        "was waiting, and answers each request once.")]
+    public static Task<string> WaitForInvestigationRequests(
+        NpgsqlDataSource postgres,
+        InvestigationOpenSignal signal,
+        [Description("Agent route ids to wait on. Omit for every route.")] int[]? route_ids = null,
+        [Description("The cursor the last call answered. Omit to start now.")] string? after = null,
+        [Description("0-25. Default 20.")] int timeout_seconds = DefaultWaitSeconds,
+        CancellationToken cancellationToken = default) =>
+        WaitAsync(Store(postgres).OpenedSinceAsync, signal, () => DateTime.UtcNow, route_ids, after, timeout_seconds,
+            cancellationToken);
+
+    /// <summary>
+    /// The long poll behind <see cref="WaitForInvestigationRequests"/> (#5822). Rearms its waiter BEFORE each catch-up read,
+    /// so a request that commits between the read and the wait still wakes it; answers what the read found past the cursor,
+    /// or waits for the signal and reads again, until the timeout. A cancellation removes the waiter and throws.
+    /// </summary>
+    internal static async Task<string> WaitAsync(OpenedReader read, InvestigationOpenSignal signal, Func<DateTime> utcNow,
+        int[]? route_ids, string? after, int timeout_seconds, CancellationToken cancellationToken)
+    {
+        if (timeout_seconds < 0 || timeout_seconds > MaxWaitSeconds)
+            return McpHelpers.Refusal("timeout_seconds",
+                $"Invalid timeout_seconds value '{timeout_seconds}'. Must be an integer from 0 to {MaxWaitSeconds}.");
+        if (route_ids is not null && route_ids.Any(id => id < 1))
+            return McpHelpers.Refusal("route_ids", "Invalid route_ids: every route id is a positive integer (get_notification_routes).");
+
+        WaitCursor? cursor = null;
+        if (after is not null && !WaitCursor.TryParse(after, out cursor))
+            return McpHelpers.Refusal("after",
+                $"Invalid after value. Pass the cursor a previous {WaitToolName} call answered, or omit it to start now.");
+
+        IReadOnlyCollection<int>? routes = route_ids is { Length: > 0 } ? route_ids.Distinct().ToArray() : null;
+        var timeout = TimeSpan.FromSeconds(timeout_seconds);
+        var started = Stopwatch.GetTimestamp();
+
+        try
+        {
+            using var waiter = signal.Register(routes);
+            while (true)
+            {
+                waiter.Rearm();
+                IReadOnlyList<InvestigationOpenedRow> fresh;
+                if (cursor is null)
+                {
+                    var now = utcNow();
+                    var rows = await read(now - CursorOverlap, routes, WaitReadLimit, cancellationToken);
+                    (fresh, cursor) = WaitCursor.Start(now, rows).Advance(rows);
+                }
+                else
+                {
+                    var rows = await read(cursor.Watermark - CursorOverlap, routes, WaitReadLimit, cancellationToken);
+                    (fresh, cursor) = cursor.Advance(rows);
+                }
+
+                if (fresh.Count > 0)
+                    return WaitAnswer(fresh, cursor, timeout_seconds);
+
+                var remaining = timeout - Stopwatch.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero || !await waiter.WaitAsync(remaining, cancellationToken))
+                    return WaitAnswer(fresh, cursor, timeout_seconds);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError(WaitToolName, ex);
+        }
+    }
+
+    private static string WaitAnswer(IReadOnlyList<InvestigationOpenedRow> rows, WaitCursor cursor, int timeoutSeconds) =>
+        JsonSerializer.Serialize(new
+        {
+            status = rows.Count == 0 ? "empty" : "ok",
+            message = rows.Count == 0
+                ? $"No investigation request opened on these routes in {timeoutSeconds} seconds. Call again with this cursor."
+                : null,
+            count = rows.Count,
+            requests = rows.Select(r => new
+            {
+                request_id = r.RequestId,
+                route_id = r.RouteId,
+                server_name = r.ServerName,
+                family = r.Family,
+                opened_at = r.OpenedAtUtc,
+            }),
+            cursor = cursor.Encode(),
+        }, McpHelpers.JsonOptions);
+
+    /// <summary>
+    /// The long poll's cursor (#5822): the newest <c>opened_at</c> it has answered (the watermark) and the ids it answered
+    /// within <see cref="CursorOverlap"/> of it. Opaque to the agent: <c>v1.&lt;ticks&gt;.&lt;id&gt;,&lt;id&gt;</c>.
+    /// </summary>
+    internal sealed class WaitCursor
+    {
+        private const string Version = "v1";
+
+        private WaitCursor(DateTime watermark, IReadOnlySet<Guid> seen)
+        {
+            Watermark = watermark;
+            Seen = seen;
+        }
+
+        /// <summary>The newest opened_at answered, UTC.</summary>
+        internal DateTime Watermark { get; }
+
+        /// <summary>The ids answered inside the overlap window: skipped when the read meets them again.</summary>
+        internal IReadOnlySet<Guid> Seen { get; }
+
+        /// <summary>The cursor of a call that named none: everything opened by <paramref name="nowUtc"/> counts as seen.</summary>
+        internal static WaitCursor Start(DateTime nowUtc, IReadOnlyList<InvestigationOpenedRow> rows) =>
+            new(DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc),
+                rows.Where(r => r.OpenedAtUtc <= nowUtc).Select(r => r.RequestId).ToHashSet());
+
+        /// <summary>
+        /// The rows of a catch-up read (every request opened after <see cref="Watermark"/> minus the overlap, oldest first)
+        /// this cursor has not answered, at most <see cref="MaxWaitRows"/>, and the cursor past them.
+        /// </summary>
+        internal (IReadOnlyList<InvestigationOpenedRow> Fresh, WaitCursor Next) Advance(IReadOnlyList<InvestigationOpenedRow> rows)
+        {
+            var fresh = new List<InvestigationOpenedRow>();
+            var known = new List<InvestigationOpenedRow>();
+            foreach (var row in rows)
+            {
+                if (Seen.Contains(row.RequestId))
+                {
+                    known.Add(row);
+                }
+                else if (fresh.Count < MaxWaitRows)
+                {
+                    fresh.Add(row);
+                    known.Add(row);
+                }
+            }
+
+            var watermarkTicks = known.Count == 0 ? Watermark.Ticks : Math.Max(Watermark.Ticks, known.Max(r => r.OpenedAtUtc.Ticks));
+            var watermark = new DateTime(watermarkTicks, DateTimeKind.Utc);
+            var floor = watermark - CursorOverlap;
+            var seen = known.Where(r => r.OpenedAtUtc > floor).Select(r => r.RequestId).ToHashSet();
+            return (fresh, new WaitCursor(watermark, seen));
+        }
+
+        internal string Encode() =>
+            Version + "." + Watermark.Ticks.ToString(CultureInfo.InvariantCulture) + "." +
+            string.Join(",", Seen.OrderBy(id => id).Select(id => id.ToString("N")));
+
+        /// <summary>
+        /// Reads a cursor an earlier call answered. Bounded on both sides (#5856 review round 1): every read subtracts
+        /// <see cref="CursorOverlap"/> from the watermark, so a watermark at or under the overlap (<c>v1.0.</c>) is
+        /// refused here as an <c>invalid</c> cursor instead of throwing below <see cref="DateTime.MinValue"/> in the read.
+        /// </summary>
+        internal static bool TryParse(string text, out WaitCursor? cursor)
+        {
+            cursor = null;
+            var parts = text.Split('.');
+            if (parts.Length != 3 || parts[0] != Version
+                || !long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)
+                || ticks > DateTime.MaxValue.Ticks
+                || ticks <= CursorOverlap.Ticks)
+            {
+                return false;
+            }
+
+            var seen = new HashSet<Guid>();
+            if (parts[2].Length > 0)
+            {
+                foreach (var id in parts[2].Split(','))
+                {
+                    if (!Guid.TryParseExact(id, "N", out var guid))
+                    {
+                        return false;
+                    }
+
+                    seen.Add(guid);
+                }
+            }
+
+            cursor = new WaitCursor(new DateTime(ticks, DateTimeKind.Utc), seen);
+            return true;
         }
     }
 

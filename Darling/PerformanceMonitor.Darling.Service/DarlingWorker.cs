@@ -3379,7 +3379,8 @@ LIMIT 1";
                         EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
-        var investigationDispatcher = new InvestigationDispatcher(investigationStore, alertSettings, _logger);
+        var investigationDispatcher = new InvestigationDispatcher(
+            investigationStore, alertSettings, _logger, PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared);
 
         /* The shared record-and-send deliverer — hoisted so BOTH the shared alert engine and the Stage 4
            service self-alerts (DarlingSelfAlertEvaluator) fire through the SAME instance: identical
