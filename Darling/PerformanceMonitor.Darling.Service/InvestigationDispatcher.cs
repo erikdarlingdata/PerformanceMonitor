@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -46,6 +47,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>The brief is not composed here.</b> It is built when an agent claims the request
 /// (<see cref="InvestigationRequestStore.SetBriefAsync"/> needs the claim id), so the dispatcher leaves <c>brief</c> NULL.</para>
 ///
+/// <para><b>The long-poll's wake-up (#5822).</b> When the store answers <see cref="InvestigationOpenOutcome.Opened"/>, and only
+/// then (a join is not a new request, and a limit opens nothing), the dispatcher fires <see cref="InvestigationOpenSignal.Opened"/>
+/// for the route, which wakes every <c>wait_for_investigation_requests</c> call waiting on it. The signal carries nothing: the
+/// woken call reads the committed request from the store. With nobody waiting it costs a lock and an empty loop.</para>
+///
 /// <para><b>Never throws.</b> A failure, a cancellation included, is logged and the delivery that called it goes on: the
 /// deliverer's and the finding sender's catch turn a throw into a null delivery, which would misreport a page that was sent.
 /// Its store connections carry a 5-second <c>lock_timeout</c> (<see cref="WithLockTimeout"/>), so a held lock costs an alert
@@ -59,12 +65,15 @@ public sealed class InvestigationDispatcher
     private readonly Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>> _openOrJoin;
     private readonly IAlertSettings _settings;
     private readonly ILogger _logger;
+    private readonly InvestigationOpenSignal? _openSignal;
 
     /// <param name="store">The store, over a data source built from <see cref="WithLockTimeout"/>.</param>
     /// <param name="settings">The live alert settings: the route list and the PagerDuty auto-resolve flag are read per call.</param>
     /// <param name="logger">Where a failure is logged.</param>
-    public InvestigationDispatcher(InvestigationRequestStore store, IAlertSettings settings, ILogger logger)
-        : this((store ?? throw new ArgumentNullException(nameof(store))).OpenOrJoinAsync, settings, logger)
+    /// <param name="openSignal">Fired when a request opens (#5822); null fires nothing.</param>
+    public InvestigationDispatcher(InvestigationRequestStore store, IAlertSettings settings, ILogger logger,
+        InvestigationOpenSignal? openSignal = null)
+        : this((store ?? throw new ArgumentNullException(nameof(store))).OpenOrJoinAsync, settings, logger, openSignal)
     {
     }
 
@@ -72,11 +81,13 @@ public sealed class InvestigationDispatcher
     internal InvestigationDispatcher(
         Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>> openOrJoin,
         IAlertSettings settings,
-        ILogger logger)
+        ILogger logger,
+        InvestigationOpenSignal? openSignal = null)
     {
         _openOrJoin = openOrJoin ?? throw new ArgumentNullException(nameof(openOrJoin));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _openSignal = openSignal;
     }
 
     /// <summary>
@@ -143,6 +154,7 @@ public sealed class InvestigationDispatcher
                     _logger.LogInformation(
                         "Investigation request {RequestId} opened for {Metric} on {Server} (family {Family}, route {RouteId})",
                         result.RequestId, record.MetricName, record.ServerName, family, route.RouteId);
+                    _openSignal?.Opened(route.RouteId);
                     break;
                 case InvestigationOpenOutcome.LimitReached:
                     _logger.LogWarning(

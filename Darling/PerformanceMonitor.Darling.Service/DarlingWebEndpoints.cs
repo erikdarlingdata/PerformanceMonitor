@@ -115,7 +115,10 @@ public static class DarlingWebEndpoints
     /// <c>update</c> / <c>delete</c> write <c>config.custom_alert_rules</c> and <c>get</c> / <c>list</c> /
     /// <c>validate_custom_alert_rule</c> read/validate against the compose catalog, none a <c>/api/read/{tool}</c>
     /// mirror. <c>get_tool_guide</c> (#3898) reads no data at all: it serves the MCP tools' own reading guides out of
-    /// the registration-time catalog only the MCP host builds, so a web read of it has nothing to mirror.</summary>
+    /// the registration-time catalog only the MCP host builds, so a web read of it has nothing to mirror.
+    /// <c>wait_for_investigation_requests</c> (#5822) is an agent's long poll: it holds the call up to 25 seconds waiting
+    /// for a request to open, which is no page read, and the web page reads the requests through
+    /// <c>list_investigation_requests</c>.</summary>
     public static readonly IReadOnlySet<string> ExcludedToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_server",
@@ -160,6 +163,7 @@ public static class DarlingWebEndpoints
         "assign_server_tag",
         "unassign_server_tag",
         "get_tool_guide",
+        "wait_for_investigation_requests",
     };
 
     /// <summary>

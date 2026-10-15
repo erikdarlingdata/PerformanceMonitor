@@ -609,6 +609,36 @@ public sealed class McpToolLatencyRecordingTests
     }
 
     [Fact]
+    public async Task TheInvestigationWait_IsNeitherTimedNorAdmitted_WhileAnotherRead_IsBoth()
+    {
+        /* #5856 review round 1: the long poll waits up to 25 seconds by design. With both slots and the whole queue taken,
+           and both tools planted as heavy, an admitted call answers busy: the wait answers its own refusal instead (the
+           tool ran, no store needed) and leaves no read-latency sample, while the probe read answers busy and records. */
+        var readLatency = new ReadLatencyAccumulator();
+        var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
+        admission.Cache.Enabled = false;
+        admission.SetTable(new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long>
+        {
+            [(ReadSurface.Mcp, DarlingMcpInvestigationTools.WaitToolName, ReadWindowBand.None)] = 3_000,
+            [(ReadSurface.Mcp, "latency_probe_ok", ReadWindowBand.None)] = 3_000,
+        });
+        using var server = await BuildServer(readLatency, admission: admission);
+        var held = await FillAsync(admission, ReadSurface.Mcp, "latency_probe_ok", ReadWindowBand.None);
+
+        var wait = await ToolsCallAsync(server, "/", DarlingMcpInvestigationTools.WaitToolName, "{\"timeout_seconds\":26}");
+        var probe = await ToolsCallAsync(server, "/", "latency_probe_ok");
+        await ReleaseAsync(held);
+
+        Assert.Contains("Invalid timeout_seconds value", wait.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("retry_after_seconds", wait.Body, StringComparison.Ordinal);
+        Assert.Contains("retry_after_seconds", probe.Body, StringComparison.Ordinal);
+
+        var drained = readLatency.Drain();
+        Assert.DoesNotContain(drained, d => d.Route == DarlingMcpInvestigationTools.WaitToolName);
+        Assert.Equal(ReadOutcome.Busy, Assert.Single(drained, d => d.Route == "latency_probe_ok").Outcome);
+    }
+
+    [Fact]
     public async Task RunCustomViewPanel_RefusedByTheSharedRunner_AnswersBusy_WithTheErrorFlag()
     {
         var readLatency = new ReadLatencyAccumulator();
