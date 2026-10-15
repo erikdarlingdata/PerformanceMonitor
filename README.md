@@ -536,6 +536,8 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 By default Lite serves its 89 read tools only. Its four write tools, `mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled` and `delete_notification_route`, are served when `mcp_allow_writes` is `true` in `settings.json`. Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. Lite's MCP endpoint has no token or caller check, so with the setting on, any program on this computer that can reach the port can mute or unmute findings, and disable or delete notification routes. Leave it off unless you trust every program that runs on this computer.
 
+Two more file settings, both off or at `full` by default and read at start (restart Lite after a change). `mcp_allow_investigations` serves the four investigation tools (`list_investigation_requests`, `claim_investigation_request`, `submit_investigation_report` and `get_investigation_reports`) only when it is `true` AND `mcp_allow_writes` is `false`; with both on, the investigation tools stay off and Lite logs one Critical line. There is no token, so with it on any program on this computer that can reach the port can list, claim and report on investigation requests. `mcp_data_detail` sets how much collected data the tool answers hand out: `full` (the default), `maskLiterals` (statement text keeps its shape with every literal replaced) or `metadataOnly` (statement text, error text, plans and input buffers are withheld, and logins and host names are masked). Any other word keeps the MCP endpoint off and the log names the accepted words.
+
 | Category | Tools |
 |---|---|
 | Discovery | `list_servers` |
