@@ -30,7 +30,8 @@ namespace Darling.Tests;
 /// the timed-out database is the run's slowest item under its marker, and the next pass that can read it resumes from
 /// the same watermark with every interval stored exactly once. The timed-out warning is logged once per database per
 /// UTC day. The enumerated arm wraps the same statement the same way; its wiring is pinned by
-/// <see cref="QueryStoreReadBudgetWiringPinTests"/>.
+/// <see cref="QueryStoreReadBudgetWiringPinTests"/>. The same harness reaches the plan-XML fetch (its gate is the
+/// provider's engine since #5813, a fact the fake states), so the plan fetch's time budget is driven here too.
 ///
 /// <para><b>#1776 own-store</b> - every test here creates and drops its own scratch database through
 /// <see cref="ScratchPostgres"/>, so none is in the <c>live-postgres</c> collection.</para>
@@ -64,6 +65,29 @@ public sealed class QueryStoreReadBudgetLiveTests
         public Dictionary<string, List<object[]>> Rows { get; } = new(StringComparer.Ordinal);
         public string? SlowOn { get; set; }
         public int SlowReads;
+
+        /// <summary>
+        /// #5813 plan fetch: how long the statement takes per requested plan before it ships its first row, the stand-in
+        /// for the real statement's decompression of every requested plan into a temp table.
+        /// </summary>
+        public TimeSpan DecompressPerPlan { get; set; }
+
+        /// <summary>#5813 plan fetch: how long each plan row then takes to arrive.</summary>
+        public TimeSpan ShipPerPlan { get; set; }
+
+        /// <summary>Every plan id the plan fetch shipped, in order, across passes.</summary>
+        public List<long> ShippedPlans { get; } = [];
+
+        /// <summary>How many ids each plan-fetch statement asked for, in order, across passes.</summary>
+        public List<(string Database, int Width)> RequestedWidths { get; } = [];
+
+        public List<int> WidthsFor(string database)
+        {
+            lock (RequestedWidths)
+            {
+                return RequestedWidths.Where(w => w.Database == database).Select(static w => w.Width).ToList();
+            }
+        }
     }
 
     private sealed class CapturingLogger : ILogger
@@ -76,6 +100,28 @@ public sealed class QueryStoreReadBudgetLiveTests
             lock (Lines)
             {
                 Lines.Add((logLevel, formatter(state, exception)));
+            }
+        }
+
+        /// <summary>The plan fetch's once-a-day budget line for <paramref name="database"/>, at Information.</summary>
+        public int PlanFetchBudgetLines(string database)
+        {
+            lock (Lines)
+            {
+                return Lines.Count(l => l.Level == LogLevel.Information && l.Text.StartsWith("query_store plan fetch on", StringComparison.Ordinal)
+                    && l.Text.Contains(" budget: ", StringComparison.Ordinal)
+                    && l.Text.Contains("[" + database + "]", StringComparison.Ordinal));
+            }
+        }
+
+        /// <summary>The #2776 backoff's line: the cap narrowed after <paramref name="failures"/> consecutive failure(s).</summary>
+        public int NarrowedAfter(string database, int failures)
+        {
+            lock (Lines)
+            {
+                return Lines.Count(l => l.Text.Contains("width narrowed", StringComparison.Ordinal)
+                    && l.Text.Contains("after " + failures + " consecutive failure", StringComparison.Ordinal)
+                    && l.Text.Contains("[" + database + "]", StringComparison.Ordinal));
             }
         }
 
@@ -311,6 +357,166 @@ public sealed class QueryStoreReadBudgetLiveTests
         Assert.Equal(second, await StoreAsync(rig.Runner, Alpha, token));
     }
 
+    /// <summary>
+    /// #5813 (a) and (d): the plan fetch's time budget, the field's real spike (91 s of a 97 s run was the plan fetch).
+    /// Six plans at 400 ms each against a 1 s budget, with no measured time per plan yet: the first pass asks for all
+    /// six, is cut at the budget, stores the plans it received and leaves the rest in the backlog; later passes ask for
+    /// the predicted width and fetch the rest, every plan exactly once. The budget line is logged once that UTC day and
+    /// again the next.
+    /// </summary>
+    [Fact]
+    public async Task ASlowPlanFetch_IsCutAtItsBudget_StoresWhatItReceived_AndLaterPassesFetchTheRestOnce()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 plan-fetch budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStorePlanFetchBudgetSpan = TimeSpan.FromSeconds(1);
+
+        var now = WholeSecondNow();
+        var target = new Target { ShipPerPlan = TimeSpan.FromMilliseconds(400) };
+        target.Rows[Alpha] = Enumerable.Range(1, 6).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+
+        await PassAsync(rig, target, token, Alpha);
+
+        /* The intervals are all written; the plan fetch asked for all six, was cut, and stored what it received. */
+        Assert.Equal(6, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Equal([6], target.WidthsFor(Alpha));
+        var afterFirst = await StoredPlansAsync(rig, Alpha, token);
+        Assert.InRange(afterFirst.Count, 1, 5);
+        Assert.Equal(afterFirst, target.ShippedPlans.Order().ToList());
+        Assert.NotNull(rig.Runner.PlanFetchMsPerPlanForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name));
+        Assert.Equal(1, rig.Log.PlanFetchBudgetLines(Alpha));
+
+        /* Later passes read no new interval and fetch the owed plans from the backlog, a predicted few at a time. */
+        for (var pass = 0; pass < 10 && (await StoredPlansAsync(rig, Alpha, token)).Count < 6; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        Assert.Equal([1L, 2L, 3L, 4L, 5L, 6L], await StoredPlansAsync(rig, Alpha, token));
+        Assert.Equal(target.ShippedPlans.Count, target.ShippedPlans.Distinct().Count());
+        Assert.All(target.WidthsFor(Alpha).Skip(1), w => Assert.InRange(w, 1, 2));
+        Assert.Equal(6, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Equal(1, rig.Log.PlanFetchBudgetLines(Alpha));
+
+        /* (d) The next UTC day, four new plans at the same pace: the pass is held to its budget again and says so once. */
+        rig.Runner.QueryStoreReadTimeoutClockForTests = () => DateTime.UtcNow.AddDays(1);
+        target.Rows[Alpha].AddRange(Enumerable.Range(7, 4).Select(id => Row(id, now.AddMinutes(-4))));
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal(2, rig.Log.PlanFetchBudgetLines(Alpha));
+    }
+
+    /// <summary>
+    /// #5813 (b): the binding catch. The fetch statement decompresses every requested plan before it ships the first row,
+    /// so a cut usually receives nothing. Eight plans at 400 ms of decompression each against a 2 s budget: the first
+    /// pass is cut empty, which counts as a fetch failure (the #2776 backoff narrows the next pass) and leaves a time per
+    /// plan that asks for at most half as many next pass, which then fits; every plan is fetched exactly once.
+    /// </summary>
+    [Fact]
+    public async Task ACutThatReceivedNothing_IsAFetchFailure_AndTheNextPassAsksForAtMostHalf()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 plan-fetch budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStorePlanFetchBudgetSpan = TimeSpan.FromSeconds(2);
+
+        var now = WholeSecondNow();
+        var target = new Target { DecompressPerPlan = TimeSpan.FromMilliseconds(400) };
+        target.Rows[Alpha] = Enumerable.Range(1, 8).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal([8], target.WidthsFor(Alpha));
+        Assert.Empty(target.ShippedPlans);
+        Assert.Empty(await StoredPlansAsync(rig, Alpha, token));
+        Assert.True(rig.Runner.PlanFetchMsPerPlanForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name) >= 2.0 * 2000 / 8);
+        Assert.Equal(1, rig.Log.PlanFetchBudgetLines(Alpha));
+
+        await PassAsync(rig, target, token, Alpha);
+        var widths = target.WidthsFor(Alpha);
+        Assert.InRange(widths[1], 1, 4);
+        Assert.Equal(1, rig.Log.NarrowedAfter(Alpha, 1));
+        Assert.NotEmpty(await StoredPlansAsync(rig, Alpha, token));
+
+        for (var pass = 0; pass < 10 && (await StoredPlansAsync(rig, Alpha, token)).Count < 8; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        Assert.Equal(Enumerable.Range(1, 8).Select(static id => (long)id).ToList(), await StoredPlansAsync(rig, Alpha, token));
+        Assert.Equal(8, target.ShippedPlans.Count);
+        Assert.Equal(0, rig.Log.NarrowedAfter(Alpha, 2));
+    }
+
+    /// <summary>
+    /// #5813 (c): the predicted width's two clamps on the real fetch. A database slower per plan than the whole budget
+    /// still asks for one plan each pass, never none. A fast one's measured time per plan predicts the full 400 ids per
+    /// statement, so the time budget leaves its passes exactly as they were: every statement asks for the candidate cap
+    /// the byte budget sized, and no pass is held to the budget.
+    /// </summary>
+    [Fact]
+    public async Task ThePredictedWidth_NeverFallsBelowOnePlan_NorRisesAboveTheStatementWidth()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 plan-fetch budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStorePlanFetchBudgetSpan = TimeSpan.FromSeconds(1);
+
+        var now = WholeSecondNow();
+        var slow = new Target { ShipPerPlan = TimeSpan.FromMilliseconds(1500) };
+        slow.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        for (var pass = 0; pass < 3; pass++)
+        {
+            await PassAsync(rig, slow, token, Alpha);
+        }
+
+        /* 3 unmeasured, cut empty; then 2 x 1000 / 3 ms a plan asks for 1; cut empty again, 2000 ms a plan would ask for
+           none, and the floor keeps it at 1. */
+        Assert.Equal([3, 1, 1], slow.WidthsFor(Alpha));
+        Assert.Equal(0, QueryStoreReadBudget.PlanFetchWidth(
+            TimeSpan.FromSeconds(1), rig.Runner.PlanFetchMsPerPlanForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name), 400, firstChunk: false));
+
+        var fast = new Target();
+        fast.Rows[Zeta] = Enumerable.Range(1, 600).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        for (var pass = 0; pass < 12 && (await StoredPlansAsync(rig, Zeta, token)).Count < 600; pass++)
+        {
+            await PassAsync(rig, fast, token, Zeta);
+        }
+
+        Assert.True(600 == (await StoredPlansAsync(rig, Zeta, token)).Count, "widths " + string.Join(",", fast.WidthsFor(Zeta)));
+        var fastWidths = fast.WidthsFor(Zeta);
+        Assert.All(fastWidths.SkipLast(1), w => Assert.Equal(fastWidths[0], w));
+        Assert.InRange(fastWidths[0], QueryStorePlanXmlState.MinCandidatePlans, 400);
+        Assert.Equal(400, QueryStoreReadBudget.PlanFetchWidth(
+            TimeSpan.FromSeconds(1), rig.Runner.PlanFetchMsPerPlanForTests(LiveServerId, Zeta, QueryStoreCollector.Instance.Name), 400, firstChunk: true));
+        Assert.Equal(0, rig.Log.PlanFetchBudgetLines(Zeta));
+    }
+
+    private static DateTime WholeSecondNow()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+    }
+
+    /// <summary>The plan ids the store holds for <paramref name="database"/>, ascending.</summary>
+    private static async Task<List<long>> StoredPlansAsync(Rig rig, string database, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        await using var command = new NpgsqlCommand(
+            "SELECT plan_id FROM collect.query_store_plan_map WHERE server_id = @s AND database_name = @d ORDER BY plan_id",
+            connection);
+        command.Parameters.AddWithValue("s", LiveServerId);
+        command.Parameters.AddWithValue("d", database);
+        var result = new List<long>();
+        await using var reader = await command.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            result.Add(reader.GetInt64(0));
+        }
+
+        return result;
+    }
+
     private sealed class FakeTargetProvider(Target target) : ITargetProvider
     {
         public CollectorTargetEngine Engine => CollectorTargetEngine.SqlServer;
@@ -373,6 +579,28 @@ public sealed class QueryStoreReadBudgetLiveTests
         protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
         {
             var cutoff = query.Parameters?.FirstOrDefault(static p => p.Name == "@cutoff_time")?.Value as DateTime?;
+            if (cutoff is null && query.Text.Contains("FROM sys.query_store_plan AS qsp", StringComparison.Ordinal))
+            {
+                /* #5813: the plan-XML fetch by ids. Like the real statement it spends DecompressPerPlan on every
+                   requested plan before the first row, then ships the plans in ascending plan_id order. */
+                var ids = System.Text.RegularExpressions.Regex.Match(query.Text, @"plan_id IN \(([0-9, ]+)\)").Groups[1].Value
+                    .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                    .Select(static id => long.Parse(id, System.Globalization.CultureInfo.InvariantCulture))
+                    .Order()
+                    .ToArray();
+                lock (target.RequestedWidths)
+                {
+                    target.RequestedWidths.Add((owner.DatabaseName, ids.Length));
+                }
+
+                if (target.DecompressPerPlan > TimeSpan.Zero)
+                {
+                    await Task.Delay(target.DecompressPerPlan * ids.Length, cancellationToken);
+                }
+
+                return new PlanReader(target, ids);
+            }
+
             if (cutoff is null)
             {
                 return new Reader(Array.Empty<object[]>());
@@ -388,6 +616,67 @@ public sealed class QueryStoreReadBudgetLiveTests
             var rows = target.Rows.TryGetValue(owner.DatabaseName, out var all) ? all : new List<object[]>();
             return new Reader(rows.Where(r => ((DateTimeOffset)r[4]).UtcDateTime > floor).ToArray());
         }
+    }
+
+    /// <summary>The plan fetch's rows (plan_id, plan hash, plan XML); each takes <see cref="Target.ShipPerPlan"/> to arrive.</summary>
+    private sealed class PlanReader(Target target, long[] ids) : DbDataReader
+    {
+        private int _row = -1;
+
+        public override async Task<bool> ReadAsync(CancellationToken cancellationToken)
+        {
+            if (_row + 1 >= ids.Length)
+            {
+                return false;
+            }
+
+            if (target.ShipPerPlan > TimeSpan.Zero)
+            {
+                await Task.Delay(target.ShipPerPlan, cancellationToken);
+            }
+
+            _row++;
+            lock (target.ShippedPlans)
+            {
+                target.ShippedPlans.Add(ids[_row]);
+            }
+
+            return true;
+        }
+
+        public override bool Read() => throw new NotSupportedException();
+        public override bool NextResult() => false;
+        public override long GetInt64(int o) => ids[_row];
+        public override string GetString(int o) => o == 1
+            ? "0x" + ids[_row].ToString("X8", System.Globalization.CultureInfo.InvariantCulture)
+            : "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.0\" />";
+        public override bool IsDBNull(int o) => false;
+        public override object GetValue(int o) => o == 0 ? ids[_row] : GetString(o);
+        public override int FieldCount => 3;
+        public override bool HasRows => ids.Length > 0;
+        public override bool IsClosed => false;
+        public override int Depth => 0;
+        public override int RecordsAffected => -1;
+        public override object this[int o] => GetValue(o);
+        public override object this[string n] => throw new NotSupportedException();
+        public override bool GetBoolean(int o) => throw new NotSupportedException();
+        public override byte GetByte(int o) => throw new NotSupportedException();
+        public override long GetBytes(int o, long d, byte[]? b, int bo, int l) => throw new NotSupportedException();
+        public override char GetChar(int o) => throw new NotSupportedException();
+        public override long GetChars(int o, long d, char[]? b, int bo, int l) => throw new NotSupportedException();
+        public override string GetDataTypeName(int o) => throw new NotSupportedException();
+        public override DateTime GetDateTime(int o) => throw new NotSupportedException();
+        public override decimal GetDecimal(int o) => throw new NotSupportedException();
+        public override double GetDouble(int o) => throw new NotSupportedException();
+        public override IEnumerator GetEnumerator() => throw new NotSupportedException();
+        public override Type GetFieldType(int o) => throw new NotSupportedException();
+        public override float GetFloat(int o) => throw new NotSupportedException();
+        public override Guid GetGuid(int o) => throw new NotSupportedException();
+        public override short GetInt16(int o) => throw new NotSupportedException();
+        public override int GetInt32(int o) => throw new NotSupportedException();
+        public override string GetName(int o) => throw new NotSupportedException();
+        public override int GetOrdinal(string n) => throw new NotSupportedException();
+        public override int GetValues(object[] v) => throw new NotSupportedException();
     }
 
     private sealed class Reader(object[][] rows) : DbDataReader

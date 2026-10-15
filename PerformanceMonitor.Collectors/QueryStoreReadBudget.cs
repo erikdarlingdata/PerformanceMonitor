@@ -19,9 +19,9 @@ namespace PerformanceMonitor.Collectors;
 /// each product's fan-out shapes (the enumerated per-database driver and the Azure SQL Database per-database loop).
 ///
 /// <para><b>What it bounds.</b> ONE statement: the runtime-stats read for one database, from the open to the end of the
-/// drain. The watermark refresh before it and the plan and text fetches after it are outside it; those keep
-/// <see cref="QueryStoreCollector.PerDatabaseWallClockBudget"/> and the collector's 500 s command timeout, which #2776
-/// sized for plan fetches that legitimately run past a minute.</para>
+/// drain. The watermark refresh before it and the plan and text fetches after it are outside it. Darling's plan-XML fetch
+/// has its own per-database budget, <see cref="PlanFetchBudget"/>; the text fetch keeps
+/// <see cref="QueryStoreCollector.PerDatabaseWallClockBudget"/> and the collector's 500 s command timeout.</para>
 ///
 /// <para><b>Why it exists.</b> Before this the read was bounded only by the 500 s command timeout and the 10-minute item
 /// budget, so one database whose Query Store was slow to answer held a 5-minute collector for up to 144 s in the field.
@@ -46,6 +46,88 @@ public static class QueryStoreReadBudget
     /// repeated per-database failure.
     /// </summary>
     public static readonly TimeSpan Budget = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The per-database, per-pass budget on Darling's plan-XML fetch that follows the read (#5813). In the field the read
+    /// budget alone did not bound the slow runs: 30 runs of 30 s or more in a week, 97 s on average, spent 91 s of it in
+    /// the plan fetch (about 136 plans a run, up to 2 s a plan on the server) and 1 to 3 s in the read, and the worst runs
+    /// reached 231 s and 266 s. 30 s for the same reason as <see cref="Budget"/>: a tenth of the 5-minute cadence, so
+    /// read plus fetch stay inside a fifth of it per database.
+    ///
+    /// <para><b>Cuts are the safety net, not the mechanism.</b> Each chunk asks for <see cref="PlanFetchWidth"/> plans,
+    /// predicted from the database's last measured time per plan, so a slow database asks for fewer plans and fits
+    /// instead of being cut. When a chunk is cut anyway, the plans already received are written and every id not
+    /// received stays in the database's plan-fetch backlog, which the next pass fetches first. Plans are not the
+    /// watermark's subject, so the watermark is unaffected either way.</para>
+    ///
+    /// <para><b>A cut usually receives nothing.</b> The fetch statement decompresses every requested plan into a temp
+    /// table before it ships the first row, so a cut inside the statement is normally empty. The runner counts a cut
+    /// pass that received no plan as a fetch failure (the #2776 backoff) and records the time per plan as at least twice
+    /// the cut chunk's measured share (<see cref="NextMsPerPlan"/>), so the next pass asks for at most half as many and
+    /// the same width is never cut empty twice.</para>
+    /// </summary>
+    public static readonly TimeSpan PlanFetchBudget = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The share of the time left a predicted plan-fetch chunk aims to fill (#5813). Not all of it: a width sized to end
+    /// exactly at the budget is cut whenever the next pass runs a little slower than the last, and a cut chunk usually
+    /// receives nothing (see <see cref="PlanFetchBudget"/>), so a database whose time per plan only wobbles would be cut
+    /// empty every other pass. A quarter of headroom absorbs that wobble; a larger swing is what the cut is for.
+    /// </summary>
+    public const double PlanFetchHeadroom = 0.75;
+
+    /// <summary>
+    /// How many plans the next plan-fetch chunk asks for (#5813):
+    /// <c>clamp(floor(timeLeft x PlanFetchHeadroom / msPerPlan), floor, maxWidth)</c>, where <paramref name="msPerPlan"/>
+    /// is the database's last measured time per plan. With no measurement yet the width is <paramref name="maxWidth"/>
+    /// (the 400 ids per statement the fetch has always used). The floor is 1 for a pass's first chunk, so every database
+    /// asks for at least one plan each pass and a slow one still progresses, and 0 for a later chunk, which means "stop:
+    /// the time left does not fit one more plan, leave the rest to the next pass". No time left is always 0. Worked
+    /// figures at a 30 s budget: 2 s a plan asks for 11, 56 ms or less asks for 400.
+    /// </summary>
+    public static int PlanFetchWidth(TimeSpan timeLeft, double? msPerPlan, int maxWidth, bool firstChunk)
+    {
+        if (timeLeft <= TimeSpan.Zero || maxWidth <= 0)
+        {
+            return 0;
+        }
+
+        if (msPerPlan is not double perPlan || perPlan <= 0 || double.IsNaN(perPlan) || double.IsInfinity(perPlan))
+        {
+            return maxWidth;
+        }
+
+        var predicted = Math.Floor(timeLeft.TotalMilliseconds * PlanFetchHeadroom / perPlan);
+        var floor = firstChunk ? 1 : 0;
+        if (predicted <= floor)
+        {
+            return floor;
+        }
+
+        return predicted >= maxWidth ? maxWidth : (int)predicted;
+    }
+
+    /// <summary>
+    /// The time per plan a plan-fetch pass leaves for the next one (#5813). A pass that received plans measured it: its
+    /// target milliseconds over the plans received (a cut chunk's wasted time included, which can only make the next
+    /// width narrower). A pass cut before it received anything measured only a lower bound, so it records twice the cut
+    /// chunk's share, <c>2 x targetMs / cutWidth</c>: the next width is then at most half the cut one, the halving that
+    /// ends a cut-empty loop. Any other pass (nothing received, nothing cut) keeps the previous figure.
+    /// </summary>
+    public static double? NextMsPerPlan(double? previous, long targetMs, int plansReceived, bool cut, int cutWidth)
+    {
+        if (plansReceived > 0)
+        {
+            return Math.Max(targetMs, 1L) / (double)plansReceived;
+        }
+
+        if (cut && cutWidth > 0)
+        {
+            return 2.0 * Math.Max(targetMs, 1L) / cutWidth;
+        }
+
+        return previous;
+    }
 
     /// <summary>
     /// Appended to the database name in <c>collection_log.slowest_item</c> when the slowest item is a read that timed

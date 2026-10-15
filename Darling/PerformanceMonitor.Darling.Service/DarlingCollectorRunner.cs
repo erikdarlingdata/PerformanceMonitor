@@ -509,6 +509,54 @@ public sealed class DarlingCollectorRunner
     /// <summary>The clock the timed-out warning's UTC day is read from (#5813); a test moves it across midnight.</summary>
     internal Func<DateTime> QueryStoreReadTimeoutClockForTests { get; set; } = static () => DateTime.UtcNow;
 
+    /// <summary>The same once-per-database-per-UTC-day throttle, on the plan fetch's budget line (#5813).</summary>
+    private readonly QueryStoreReadTimeoutLog _queryStorePlanFetchBudgetLog = new();
+
+    /// <summary>
+    /// The per-database, per-pass plan-XML fetch budget (#5813), <see cref="QueryStoreReadBudget.PlanFetchBudget"/> in
+    /// production. Settable so a test can plant slow plans without waiting 30 seconds.
+    /// </summary>
+    internal TimeSpan QueryStorePlanFetchBudgetSpan { get; set; } = QueryStoreReadBudget.PlanFetchBudget;
+
+    /// <summary>
+    /// Each database's last measured plan-fetch time per plan, in milliseconds (#5813), keyed like
+    /// <see cref="_planFetchCarryover"/>. <see cref="QueryStoreReadBudget.PlanFetchWidth"/> sizes the next pass's chunks
+    /// from it, so a database at 2 s a plan asks for about 15 plans a pass instead of being cut at the budget. In memory
+    /// like the size estimate: a restart costs one pass at the full width, which the budget still bounds.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), double> _planFetchMsPerPlan = new();
+
+    /// <summary>The time per plan the next plan-fetch pass of one database will size its chunks from (#5813); null before
+    /// its first measured pass. For tests.</summary>
+    internal double? PlanFetchMsPerPlanForTests(int serverId, string database, string collector) =>
+        _planFetchMsPerPlan.TryGetValue(FetchStateKey(serverId, database, collector), out var ms) ? ms : null;
+
+    /// <summary>
+    /// #5813: one database's plan-XML fetch was bounded by <see cref="QueryStorePlanFetchBudgetSpan"/>, by a cut or by a
+    /// predicted width that left ids for the next pass. Information once per database per UTC day, Debug for the rest
+    /// of that day: it is the budget working, not a fault, and nothing is lost (the ids not received stay in the
+    /// backlog). Nothing new in collection_log: the fetch-phase milliseconds are already in the run's row.
+    /// </summary>
+    private void NoteQueryStorePlanFetchBudget(
+        ServerRuntime server, string databaseName, bool cut, int received, int deferred, int nextWidth, double? msPerPlan)
+    {
+        var how = cut ? "cut at" : "held to";
+        var perPlan = msPerPlan is double ms ? ms.ToString("0", System.Globalization.CultureInfo.InvariantCulture) : "?";
+        if (_queryStorePlanFetchBudgetLog.ShouldWarn(server.ServerId, databaseName, QueryStoreReadTimeoutClockForTests()))
+        {
+            _logger?.LogInformation(
+                "query_store plan fetch on '{Server}' database [{Database}] {How} its {Budget} budget: {Received} plan(s) received, {Deferred} id(s) deferred to the next pass, next pass asks for {NextWidth} ({MsPerPlan} ms a plan). Logged once per database per UTC day.",
+                server.Config.DisplayName, databaseName, how, EnumeratedCollectorDriver.DescribeBudget(QueryStorePlanFetchBudgetSpan),
+                received, deferred, nextWidth, perPlan);
+        }
+        else
+        {
+            _logger?.LogDebug(
+                "query_store plan fetch on '{Server}' database [{Database}] {How} its budget again today: {Received} received, {Deferred} deferred, next {NextWidth}.",
+                server.Config.DisplayName, databaseName, how, received, deferred, nextWidth);
+        }
+    }
+
     /// <summary>
     /// #5813: one database's live Query Store read ran out of <see cref="QueryStoreReadBudgetSpan"/>. Counts it in the run's
     /// fan-out cost under its marked name, so <c>slowest_item</c> names it, and logs it at Warning once per database per UTC
@@ -2881,7 +2929,7 @@ public sealed class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         await FetchQueryStorePlansAndTextAsync(
-                            dbConnection, pgConnection, server, databaseName, definition.Name, context, perDbTimeout, batch, dbToken);
+                            perDbProvider, dbConnection, pgConnection, server, databaseName, definition.Name, context, perDbTimeout, batch, dbToken);
 
                         dbFetchMs = context.PerItemPlanFetchMs + context.PerItemTextFetchMs;
                         sqlMs += dbFetchMs;
@@ -3493,7 +3541,7 @@ public sealed class DarlingCollectorRunner
                            runtime-stats read. One method, because the Azure SQL Database per-database loop runs the
                            same two for each database it reads; the why and the shape are on the method. */
                         await FetchQueryStorePlansAndTextAsync(
-                            targetConnection, pgConnection, server, item, definition.Name, context, itemTimeout, batch, ct);
+                            targetProvider, targetConnection, pgConnection, server, item, definition.Name, context, itemTimeout, batch, ct);
 
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
@@ -5522,6 +5570,7 @@ public sealed class DarlingCollectorRunner
     /// clears the readings first (<see cref="ClearFetchPhaseStamps"/>) and reads them after.</para>
     /// </summary>
     private async Task FetchQueryStorePlansAndTextAsync<TRow>(
+        ITargetProvider targetProvider,
         DbConnection targetConnection,
         NpgsqlConnection storeConnection,
         ServerRuntime server,
@@ -5535,14 +5584,16 @@ public sealed class DarlingCollectorRunner
         /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
            query on purpose - it ships in plan_id order, so a budget cut truncates a SUFFIX,
            which is the only reason the watermark can advance from a cut pass at all. */
-        /* `is SqlConnection` rather than a bare cast, and it does two jobs (merge resolution
-           against #2213's provider seam): the connection here is a provider-neutral
-           DbConnection now, and this fetch is Query-Store-only, so the pattern narrows the
-           type the signature needs AND gates the engine in one expression that cannot drift
-           from either. The enumerated path serves PostgreSQL targets since #2213; query_store
-           declares TargetEngine = SqlServer so it never reaches here for one, but relying on
-           the catalog for that would be an invariant held somewhere else. */
-        if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
+        /* The engine gate: this fetch is Query-Store-only. The enumerated path serves PostgreSQL
+           targets since #2213; query_store declares TargetEngine = SqlServer so it never reaches
+           here for one, but relying on the catalog for that would be an invariant held somewhere
+           else. #5813: the gate was `targetConnection is SqlConnection`, which narrowed the type
+           AND gated the engine, but nothing in either fetch is SqlClient-specific (a command from
+           the run's provider and a DbDataReader), and the type test kept the fake-target harness
+           from ever reaching the fetch. The provider's engine is the same gate in production (the
+           SQL Server provider is the only one that reports SqlServer, and its commands are the
+           SqlCommands the SqlConnection overload built), and it is a fact a fake can state. */
+        if (context.CapturePlanXml && targetProvider.Engine == CollectorTargetEngine.SqlServer)
         {
             /* #2312 investigation: timed so the log split can say whether the invariant
                per-cycle cost lives HERE rather than in the payload - a 0-row cycle's
@@ -5556,7 +5607,7 @@ public sealed class DarlingCollectorRunner
             var planFetchWatch = Stopwatch.StartNew();
             try
             {
-                await FetchAndStorePlansAsync(planFetchConnection, storeConnection,
+                await FetchAndStorePlansAsync(targetProvider, targetConnection, storeConnection,
                     server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), cancellationToken);
             }
             finally
@@ -5574,14 +5625,14 @@ public sealed class DarlingCollectorRunner
 
            Gated on the same flag the payload branches on, so the two can never disagree
            about who owns the text: if the column is nulled, this runs. */
-        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
+        if (context.FetchQueryTextSeparately && targetProvider.Engine == CollectorTargetEngine.SqlServer)
         {
             /* #2312 investigation: same split as the plan fetch above. */
             /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
             var textFetchWatch = Stopwatch.StartNew();
             try
             {
-                await FetchAndStoreQueryTextAsync(textFetchConnection, storeConnection,
+                await FetchAndStoreQueryTextAsync(targetProvider, targetConnection, storeConnection,
                     server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), cancellationToken);
             }
             finally
@@ -5670,7 +5721,8 @@ public sealed class DarlingCollectorRunner
     /// indistinguishable from the client.</para>
     /// </summary>
     private async Task FetchAndStorePlansAsync(
-        SqlConnection sqlConnection,
+        ITargetProvider targetProvider,
+        DbConnection targetConnection,
         NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
@@ -5927,7 +5979,23 @@ public sealed class DarlingCollectorRunner
                residual is meant to expose. */
             var targetMs = 0L;
 
-            foreach (var chunk in attempt.Chunk(PlanFetchIdsPerStatement))
+            /* #5813: the plan fetch's TIME budget for this database and pass, beside the byte budget above.
+               The field's slow query_store runs spent 91 s of 97 here (about 136 plans at up to 2 s each).
+               Each chunk asks for as many plans as the time left fits at this database's last measured time
+               per plan (QueryStoreReadBudget.PlanFetchWidth), so a slow database asks for fewer and fits, and
+               the chunk runs under the time left as a linked token (shutdown and the item budget keep
+               precedence), so a pass that is slower than predicted is still cut at the budget. Either way the
+               ids not received stay in `missing` and go to the carryover, which the next pass fetches first;
+               the uncut-only cleanup below stays off (brokeOnBudget), so no id the cut did not reach is
+               dropped. */
+            var planFetchClock = Stopwatch.StartNew();
+            double? msPerPlan = _planFetchMsPerPlan.TryGetValue(carryKey, out var measuredMsPerPlan) ? measuredMsPerPlan : null;
+            var timeBound = false;
+            var cutOnTime = false;
+            var lastChunkWidth = 0;
+            var offset = 0;
+
+            while (offset < attempt.Count)
             {
                 if (shippedBytes >= budget)
                 {
@@ -5935,16 +6003,32 @@ public sealed class DarlingCollectorRunner
                     break;
                 }
 
+                var timeLeft = QueryStorePlanFetchBudgetSpan - planFetchClock.Elapsed;
+                var width = QueryStoreReadBudget.PlanFetchWidth(timeLeft, msPerPlan, PlanFetchIdsPerStatement, firstChunk: offset == 0);
+                if (width <= 0)
+                {
+                    /* The time left does not fit one more plan: leave the rest to the next pass. */
+                    brokeOnBudget = true;
+                    timeBound = true;
+                    break;
+                }
+
+                var chunk = attempt.GetRange(offset, Math.Min(width, attempt.Count - offset)).ToArray();
+                offset += chunk.Length;
+                lastChunkWidth = chunk.Length;
+
                 var query = QueryStoreCollector.Instance.BuildPlanFetchByIdsQuery(
                     databaseName, context, chunk, budget - shippedBytes);
 
+                using var fetchBudget = EnumeratedCollectorDriver.StartItemBudget(timeLeft, cancellationToken);
+                var fetchToken = fetchBudget?.Token ?? cancellationToken;
                 var chunkWatch = Stopwatch.StartNew();
                 try
                 {
-                    using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
-                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    using var command = CreateCollectorCommand(targetProvider, query, targetConnection, itemTimeout);
+                    await using var reader = await command.ExecuteReaderAsync(fetchToken);
                     attempted.AddRange(chunk);
-                    while (await reader.ReadAsync(cancellationToken))
+                    while (await reader.ReadAsync(fetchToken))
                     {
                         var planXml = reader.IsDBNull(2) ? null : reader.GetString(2);
                         fetched.Add(new FetchedPlan(
@@ -5958,6 +6042,14 @@ public sealed class DarlingCollectorRunner
                         }
                     }
                 }
+                catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(fetchBudget, cancellationToken))
+                {
+                    /* #5813: the plan-fetch time budget fired, not shutdown or the item budget (those propagate
+                       as before). Keep every plan already received; they are written below. */
+                    brokeOnBudget = true;
+                    timeBound = true;
+                    cutOnTime = true;
+                }
                 finally
                 {
                     /* finally, not after the block: a chunk that TIMES OUT is the case this instrumentation
@@ -5969,7 +6061,24 @@ public sealed class DarlingCollectorRunner
                     context.PerItemPlanChunks++;
                     context.PerItemPlanIdsAttempted += chunk.Length;
                 }
+
+                if (cutOnTime)
+                {
+                    break;
+                }
             }
+
+            /* #5813: the time per plan the next pass sizes its chunks from. A pass cut before it received
+               anything records twice the cut chunk's share, so the next pass asks for at most half as many:
+               the statement decompresses every requested plan before it ships one, so the same width would be
+               cut empty on every pass. */
+            var nextMsPerPlan = QueryStoreReadBudget.NextMsPerPlan(msPerPlan, targetMs, fetched.Count, cutOnTime, lastChunkWidth);
+            if (nextMsPerPlan is double nextMs)
+            {
+                _planFetchMsPerPlan[carryKey] = nextMs;
+            }
+
+            var cutEmpty = cutOnTime && fetched.Count == 0;
 
             /* NULL-XML rows count for the cap/catch-up comparison (they shipped, and the writer records
                their content-less marker) but not for the average's divisor (they carried no bytes). */
@@ -5981,8 +6090,12 @@ public sealed class DarlingCollectorRunner
                     plansMeasured++;
                 }
             }
+
+            /* #5813: a pass the time budget ended early stopped short of its cap with ids still owed, which is a
+               backlog, not the drain Learn reads "fewer than the cap" as. Its window is what it received. */
             _observedPlanSize[carryKey] =
-                QueryStorePlanXmlState.Learn(estimate, shippedBytes, fetched.Count, plansMeasured, cap, budget);
+                QueryStorePlanXmlState.Learn(
+                    estimate, shippedBytes, fetched.Count, plansMeasured, timeBound && fetched.Count > 0 ? fetched.Count : cap, budget);
 
             var returned = new HashSet<long>(fetched.Count);
             if (fetched.Count > 0)
@@ -6048,12 +6161,29 @@ public sealed class DarlingCollectorRunner
 
             /* #2776: the pass completed — restore full width. Recorded HERE rather than inside Learn
                because Learn runs before the store write, so a pass that threw would otherwise clear its own
-               backoff on the way down. Reaching this line is the only proof the write actually committed. */
+               backoff on the way down. Reaching this line is the only proof the write actually committed.
+
+               #5813: except a pass the time budget cut before it received any plan. It made no progress, and
+               the same width would be cut empty again, so it counts as a failure: the backoff narrows the
+               next pass's cap as #2776 does for a thrown pass, beside the halved time per plan above. Any plan
+               received is progress and restores full width as before. */
             _observedPlanSize.AddOrUpdate(
                 carryKey,
-                static (_, _) => default,
-                static (_, current, _) => QueryStorePlanXmlState.RecordFetchSuccess(current),
+                cutEmpty
+                    ? static (_, _) => QueryStorePlanXmlState.RecordFetchFailure(default)
+                    : static (_, _) => default,
+                cutEmpty
+                    ? static (_, current, _) => QueryStorePlanXmlState.RecordFetchFailure(current)
+                    : static (_, current, _) => QueryStorePlanXmlState.RecordFetchSuccess(current),
                 0);
+
+            if (timeBound)
+            {
+                NoteQueryStorePlanFetchBudget(
+                    server, databaseName, cutOnTime, fetched.Count, missing.Count,
+                    QueryStoreReadBudget.PlanFetchWidth(QueryStorePlanFetchBudgetSpan, nextMsPerPlan, PlanFetchIdsPerStatement, firstChunk: true),
+                    nextMsPerPlan);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -6116,7 +6246,8 @@ public sealed class DarlingCollectorRunner
     /// exactly as the plan side documents.</para>
     /// </summary>
     private async Task FetchAndStoreQueryTextAsync(
-        SqlConnection sqlConnection,
+        ITargetProvider targetProvider,
+        DbConnection targetConnection,
         NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
@@ -6327,7 +6458,7 @@ public sealed class DarlingCollectorRunner
                 var chunkWatch = Stopwatch.StartNew();
                 try
                 {
-                    using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
+                    using var command = CreateCollectorCommand(targetProvider, query, targetConnection, itemTimeout);
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                     attempted.AddRange(chunk);
                     while (await reader.ReadAsync(cancellationToken))

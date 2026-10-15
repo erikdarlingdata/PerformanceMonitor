@@ -201,7 +201,7 @@ public sealed class QueryStoreTextStoreTests
 
         /* The pass the flip depends on: with the flag on and this call gone, the payload would ship no text
            and nothing would land any, which is the one combination that loses data silently. */
-        Assert.Contains("FetchAndStoreQueryTextAsync(textFetchConnection", source, StringComparison.Ordinal);
+        Assert.Contains("FetchAndStoreQueryTextAsync(targetProvider, targetConnection", source, StringComparison.Ordinal);
     }
 
     /// <summary>

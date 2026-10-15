@@ -172,12 +172,12 @@ public sealed class QueryStoreAzureTextAndPlanFetchTests
         var code = RunnerCode();
         var method = MethodBody(code, "private async Task FetchQueryStorePlansAndTextAsync<TRow>(");
 
-        Assert.Contains("context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection", method, StringComparison.Ordinal);
-        Assert.Contains("context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection", method, StringComparison.Ordinal);
+        Assert.Contains("context.CapturePlanXml && targetProvider.Engine == CollectorTargetEngine.SqlServer", method, StringComparison.Ordinal);
+        Assert.Contains("context.FetchQueryTextSeparately && targetProvider.Engine == CollectorTargetEngine.SqlServer", method, StringComparison.Ordinal);
 
         /* The databaseName parameter reaches both fetches: it is what names the [db].sys.sp_executesql target. */
-        Assert.Contains("FetchAndStorePlansAsync(planFetchConnection, storeConnection,", method, StringComparison.Ordinal);
-        Assert.Contains("FetchAndStoreQueryTextAsync(textFetchConnection, storeConnection,", method, StringComparison.Ordinal);
+        Assert.Contains("FetchAndStorePlansAsync(targetProvider, targetConnection, storeConnection,", method, StringComparison.Ordinal);
+        Assert.Contains("FetchAndStoreQueryTextAsync(targetProvider, targetConnection, storeConnection,", method, StringComparison.Ordinal);
         Assert.Equal(2, Occurrences(method, "server, databaseName, collectorName, context, commandTimeoutSeconds,"));
 
         /* The #2854 rule the shared method inherited: the parent reading is stamped from a finally, so a fetch
