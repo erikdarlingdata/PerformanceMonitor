@@ -25,7 +25,10 @@ public static class InvestigationFormats
     public static bool IsAcceptedReportFormat(short reportFormat) => AcceptedReportFormats.Contains(reportFormat);
 
     /// <summary>The refusal for a report format this build does not accept, naming what it does accept and the brief format.</summary>
-    public static string UnsupportedReportFormatMessage(short reportFormat) =>
+    public static string UnsupportedReportFormatMessage(short reportFormat) => UnsupportedReportFormatMessage(reportFormat, "Darling");
+
+    /// <summary>The same refusal naming <paramref name="product"/> (#5820: Lite's tools say "Lite accepts"; Darling's bytes are unchanged).</summary>
+    public static string UnsupportedReportFormatMessage(short reportFormat, string product) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"report_format {reportFormat} is not supported. Darling accepts report_format {string.Join(", ", AcceptedReportFormats)}. The brief you claimed is brief_format {BriefFormat}.");
+            $"report_format {reportFormat} is not supported. {product} accepts report_format {string.Join(", ", AcceptedReportFormats)}. The brief you claimed is brief_format {BriefFormat}.");
 }

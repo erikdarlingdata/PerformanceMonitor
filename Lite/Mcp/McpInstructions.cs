@@ -19,7 +19,7 @@ internal static class McpInstructions
     public const string Text = Head + "\n\n" + CatalogCensus + Tail;
 
     /// <summary>The census of the whole catalog, as <see cref="Text"/> carries it.</summary>
-    private const string CatalogCensus = "93 tools (89 by default; `mcp_allow_writes` adds the four write tools)";
+    private const string CatalogCensus = "97 tools (89 by default; `mcp_allow_writes` adds the four write tools, `mcp_allow_investigations` the four investigation tools)";
 
     /// <summary>
     /// #5789: the instructions THIS server sends. The census counts <paramref name="served"/> (the tools left after

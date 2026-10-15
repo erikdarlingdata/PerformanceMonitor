@@ -446,18 +446,16 @@ public sealed class McpAlertTools
     public static async Task<string> GetNotificationRoutes(
         LocalDataService dataService,
         ServerManager serverManager,
-        IEnumerable<IInvestigationRequestStore> investigationStores)
+        IInvestigationRequestStore investigationStore)
     {
-        /* #5820: the request store is optional, and the host does not register one until the investigation store ships. A
-           parameter typed as the store itself would be read as a tool argument when nothing is registered, so the tool takes
-           "every registered one" (a container resolves that to an empty list, never to nothing) and uses the first. */
+        /* #5820: the host registers the one investigation store (McpHostService), so the tool takes it directly. */
         try
         {
             return await ReadNotificationRoutesAsync(
                 CreateRouteStore(dataService, serverManager),
                 serverManager.GetAllServers(),
                 await dataService.GetServerTagsAsync(),
-                investigationStores.FirstOrDefault());
+                investigationStore);
         }
         catch (Exception ex)
         {
@@ -476,7 +474,7 @@ public sealed class McpAlertTools
         DuckDbNotificationRouteStore store,
         IReadOnlyCollection<ServerConnection> servers,
         IReadOnlyCollection<ServerTag> tags,
-        IInvestigationRequestStore? requests = null)
+        IInvestigationRequestStore requests)
     {
         var routes = await store.ListAsync();
         var agentUse = await ReadAgentUseAsync(requests);
@@ -502,21 +500,16 @@ public sealed class McpAlertTools
             route_count = routes.Count,
             enabled_route_count = routes.Count(r => r.Enabled),
             routes = routes.Select(r => RoutePayload(r, serverNames, tagNames, agentUse)),
-            /* #5820: false when the investigation request counts were not read (the store is not registered, or the read failed);
-               agent_requests_* are then null. */
+            /* #5820: false when the investigation request counts could not be read (the store's read failed); agent_requests_* are
+               then null. */
             agent_use_read = agentUse is not null,
         }, McpHelpers.JsonOptions);
     }
 
-    /// <summary>Each route's investigation requests in the last hour and day (#5820), or null when there is no request store or
-    /// its read fails: the route list is still answered, with the use unknown.</summary>
-    private static async Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>?> ReadAgentUseAsync(IInvestigationRequestStore? requests)
+    /// <summary>Each route's investigation requests in the last hour and day (#5820), or null when the store's read fails: the
+    /// route list is still answered, with the use unknown.</summary>
+    private static async Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>?> ReadAgentUseAsync(IInvestigationRequestStore requests)
     {
-        if (requests is null)
-        {
-            return null;
-        }
-
         try
         {
             return await requests.RouteUseAsync();

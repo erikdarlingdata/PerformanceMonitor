@@ -85,7 +85,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         new(0, match, teams, slack, generic, pager, smtp, true) { ScopeServerId = server, ScopeTagId = tag };
 
     private async Task<string> ReadAsync() =>
-        await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, await _data.GetServerTagsAsync());
+        await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, await _data.GetServerTagsAsync(), NoUse());
 
     private async Task<(int Fleet, int Server, int Tag, int Orphan, int Root, int Child)> SeedAsync()
     {
@@ -164,7 +164,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
             await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
-        using var doc = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags));
+        using var doc = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags, NoUse()));
         var routes = doc.RootElement.GetProperty("routes").EnumerateArray().ToDictionary(r => r.GetProperty("route_id").GetInt32());
 
         /* The tag route cannot be expanded: it matches nothing, is not orphaned, and says so. Same rule as Darling's loader (#5750). */
@@ -274,8 +274,11 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         }
     }
 
-    /* #5820: the read carries the five agent settings, and the two use counts when the request store answers. With no store
-       registered (the default) or a store that throws, the route list is still answered: counts null, agent_use_read false. */
+    /// <summary>A request store that answers no use: every route's counts read zero.</summary>
+    private static IInvestigationRequestStore NoUse() => RouteUseStore.Create(new Dictionary<int, (int LastHour, int LastDay)>());
+
+    /* #5820: the read carries the five agent settings, and the two use counts when the request store answers. With a store whose
+       read throws, the route list is still answered: counts null, agent_use_read false. */
     [Fact]
     public async Task TheRead_CarriesTheAgentSettings_AndTheUseCountsOnlyWhenTheRequestStoreAnswers()
     {
@@ -286,13 +289,13 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         var plain = await _store.InsertAsync(Route("Performance", teams: TeamsUrl));
         var tags = await _data.GetServerTagsAsync();
 
-        var none = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags)).RootElement;
-        Assert.False(none.GetProperty("agent_use_read").GetBoolean());
+        var none = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags, NoUse())).RootElement;
+        Assert.True(none.GetProperty("agent_use_read").GetBoolean());
         var noneAgent = none.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == agent);
         Assert.Equal((1, 5, 50, 20, 60),
             (noneAgent.GetProperty("agent_level").GetInt32(), noneAgent.GetProperty("agent_max_per_hour").GetInt32(), noneAgent.GetProperty("agent_max_per_day").GetInt32(),
              noneAgent.GetProperty("agent_lease_minutes").GetInt32(), noneAgent.GetProperty("agent_expiry_minutes").GetInt32()));
-        Assert.Equal(JsonValueKind.Null, noneAgent.GetProperty("agent_requests_last_hour").ValueKind);
+        Assert.Equal(0, noneAgent.GetProperty("agent_requests_last_hour").GetInt32());
         var nonePlain = none.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == plain);
         Assert.Equal(JsonValueKind.Null, nonePlain.GetProperty("agent_level").ValueKind);
         Assert.Equal(NotificationRoute.DefaultAgentMaxPerHour, nonePlain.GetProperty("agent_max_per_hour").GetInt32());

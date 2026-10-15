@@ -29,6 +29,7 @@ public sealed class McpHostService : BackgroundService
     private readonly bool _allowWrites;
     private readonly bool _allowInvestigations;
     private readonly McpDataDetail _dataDetail;
+    private readonly IInvestigationRequestStore? _investigationStore;
     private WebApplication? _app;
 
     /// <summary>
@@ -44,7 +45,7 @@ public sealed class McpHostService : BackgroundService
     /// <c>mcp_allow_writes</c> setting). Default off: a write tool is then absent from the served set and a call
     /// to it fails as an unknown tool. See <see cref="McpWritePolicy"/>.</param>
     public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, ScheduleManager? scheduleManager = null, bool allowWrites = false,
-        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full)
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IInvestigationRequestStore? investigationStore = null)
     {
         _dataService = dataService;
         _serverManager = serverManager;
@@ -55,6 +56,7 @@ public sealed class McpHostService : BackgroundService
         _allowWrites = allowWrites;
         _allowInvestigations = allowInvestigations;
         _dataDetail = dataDetail;
+        _investigationStore = investigationStore;
 
         /* #4999: the health read judges each collector by the interval it is scheduled at on that server, the
            same answer the analysis tools bound their reads by (see RegisterAnalysisService below), not by the
@@ -182,6 +184,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpTempDbTools>()
             .WithGeminiCompatibleTools<McpPerfmonTools>()
             .WithGeminiCompatibleTools<McpAlertTools>()
+            /* #5820: the Level 1 investigation tools, served only by the mcp_allow_investigations gate (McpInvestigationPolicy). */
+            .WithGeminiCompatibleTools<McpInvestigationTools>()
             .WithGeminiCompatibleTools<McpJobTools>()
             .WithGeminiCompatibleTools<McpPlanTools>()
             .WithGeminiCompatibleTools<McpConfigTools>()
@@ -248,6 +252,11 @@ public sealed class McpHostService : BackgroundService
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
             /* #5820: the investigation brief's reader and composer, for the claim tool (the composer's own file registers both). */
             PerformanceMonitorLite.Investigations.LiteInvestigationServices.AddInvestigationBrief(builder.Services, _duckDb);
+            /* #5820: the one investigation store MainWindow built, as a singleton, for the four tools and get_notification_routes. */
+            if (_investigationStore is not null)
+            {
+                builder.Services.AddSingleton<IInvestigationRequestStore>(_investigationStore);
+            }
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
