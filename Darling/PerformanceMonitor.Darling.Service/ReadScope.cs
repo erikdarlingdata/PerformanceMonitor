@@ -71,6 +71,7 @@ internal sealed class ReadScope
     private long _waitTicks;
     private DateTime? _windowStart;
     private DateTime? _windowEnd;
+    private bool _noWindow;
 
     /* #5506: the reads in progress on the service right now. Only an outermost scope counts, so a composed panel the MCP
        run_custom_view_panel tool runs (a scope inside the tool's scope) is one read, not two. */
@@ -223,6 +224,9 @@ internal sealed class ReadScope
     /// <summary>The end of the window the read ran with (#5814), UTC, or null when the read noted none.</summary>
     internal DateTime? WindowEndUtc { get { lock (_gate) { return _windowEnd; } } }
 
+    /// <summary>True when the read noted that it ran with no window at all (#5844); see <see cref="NoteNoWindow"/>.</summary>
+    internal bool NotedNoWindow { get { lock (_gate) { return _noWindow; } } }
+
     /// <summary>
     /// Notes the window a read ran with (#5814): the window after the tool resolved its arguments, so a defaulted
     /// <c>hours_back</c> is noted as the 24 hours it read, and a route whose window is fixed in code notes that window.
@@ -239,7 +243,7 @@ internal sealed class ReadScope
 
         lock (scope._gate)
         {
-            if (scope._windowEnd is null)
+            if (scope._windowEnd is null && !scope._noWindow)
             {
                 scope._windowStart = startUtc;
                 scope._windowEnd = endUtc;
@@ -254,6 +258,28 @@ internal sealed class ReadScope
         if (hours > 0 && !double.IsNaN(hours))
         {
             NoteWindow(endUtc.AddHours(-hours), endUtc);
+        }
+    }
+
+    /// <summary>
+    /// Notes that the read ran with no window (#5844): a read of one request by id spans its whole history, so the
+    /// slow-read row records no window, not one lifted from an <c>hours_back</c> the caller sent and the read ignored.
+    /// Silence still means "fall back to the arguments" for every read that notes nothing. Ignored outside a scope; like
+    /// <see cref="NoteWindow(DateTime, DateTime)"/>, the first note stays.
+    /// </summary>
+    internal static void NoteNoWindow()
+    {
+        if (s_current.Value is not { } scope)
+        {
+            return;
+        }
+
+        lock (scope._gate)
+        {
+            if (scope._windowEnd is null)
+            {
+                scope._noWindow = true;
+            }
         }
     }
 

@@ -193,6 +193,13 @@ WHERE slow_read_id IN
             windowStart = Unspecified(notedStart);
             windowEnd = Unspecified(notedEnd);
         }
+        else if (scope.NotedNoWindow)
+        {
+            /* #5844: the read noted it had no window (one request read by id), so an hours_back the caller sent anyway is
+               not lifted onto the row. */
+            windowStart = null;
+            windowEnd = null;
+        }
 
         var timings = scope.Snapshot().OrderBy(t => t.Ordinal).Take(MaxStatementsStored).ToList();
         var statementsTruncated = scope.StatementTotal > timings.Count;
@@ -259,7 +266,16 @@ WHERE slow_read_id IN
             if (hours is > 0)
             {
                 windowEnd = ParseUtc(arguments, "as_of") ?? startedUtc;
-                windowStart = windowEnd.Value.AddHours(-hours.Value);
+                /* #5844: an hours value that reaches past DateTime's range lifts no window; AddHours would throw, and the
+                   row would be lost to the caller's catch. */
+                if (hours.Value < (windowEnd.Value - DateTime.MinValue).TotalHours)
+                {
+                    windowStart = windowEnd.Value.AddHours(-hours.Value);
+                }
+                else
+                {
+                    windowEnd = null;
+                }
             }
         }
 
