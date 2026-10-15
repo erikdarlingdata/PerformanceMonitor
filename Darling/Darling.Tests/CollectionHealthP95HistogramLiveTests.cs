@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -26,7 +27,8 @@ namespace Darling.Tests;
 /// histogram instead of a <c>PERCENTILE_DISC ... WITHIN GROUP</c> in the main aggregate, which had made the whole
 /// aggregate a serial GroupAggregate feeding every run of the window into a per-collector sort. These tests hold the
 /// histogram to the exact discrete percentile computed here from the planted durations, every other column to the
-/// pre-change oracle, and the statement to no ordered-set aggregate.
+/// pre-change oracle, the rollup read's p95 to the exact p95's bucket, and the sweep's peak cycle to the bucket's lower
+/// bound (#5810 review), so bucketing alone never raises a risk.
 /// </summary>
 /* #1776 own-store: each live test mints its own scratch database, so no other class's rows or chunks shape what it
    reads or how its plans come out. */
@@ -38,12 +40,70 @@ public sealed class CollectionHealthP95HistogramLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    [Fact]
-    public void TheStatementHasNoOrderedSetAggregate()
+    /// <summary>
+    /// #5810 review: the peak cycle charges the bucket's LOWER bound. One 5-minute body collector, 40 runs: 36 at 100 ms,
+    /// 2 at the p95's duration and 2 above it in the same bucket, so the read reports the window's max (the bucket's upper
+    /// bound capped at the max). Under 60,000 ms exactly (55,000, bucket 50,945 to 75,024): the upper bound (74,000)
+    /// would cross the sweep budget, the exact p95 and the lower bound do not, so the answer is FITS. Over it by the
+    /// lower bound (80,000, bucket 75,025 to 110,487): BODY_OVERRUN. peak_cycle_note names the bucket basis in both.
+    /// </summary>
+    [Theory]
+    [InlineData(55_000, 74_000, 50_945, "FITS")]
+    [InlineData(80_000, 100_000, 75_025, "BODY_OVERRUN")]
+    public async Task ThePeakCycle_ChargesTheP95BucketsLowerBound_AndTheNoteNamesTheBasis_AgainstDevPostgres(
+        int exactP95Ms, int maxMs, int lowerBoundMs, string expectedRisk)
     {
-        Assert.DoesNotContain("WITHIN GROUP", DarlingDataReader.CollectionHealthSql, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("WITHIN GROUP", CollectionHealthOracleSql.Mcp, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("running_runs * 20 >= timed_runs * 19", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live peak-cycle basis test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
+            var durations = Enumerable.Repeat(100, 36).Concat(new[] { exactP95Ms, exactP95Ms, maxMs, maxMs }).ToArray();
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + u.ord, $2, $3, 'memory_clerks', $4::timestamp - u.ord * interval '2 hours', u.duration_ms, 'SUCCESS', 1
+FROM unnest($5::integer[]) WITH ORDINALITY AS u (duration_ms, ord)",
+                CollectionIdGenerator.Next(), ServerId, ServerName, DarlingMcpTestData.Naive(now), durations);
+
+            /* The bucket the exact p95 falls in, from the shared bounds: the plant means what the parameters say. */
+            var slot = CollectionLogHourly.SlotOf(exactP95Ms);
+            Assert.Equal(slot, CollectionLogHourly.SlotOf(maxMs));
+            Assert.Equal(lowerBoundMs, CollectionLogHourly.LowerBoundOfSlot(slot));
+            Assert.True(CollectionLogHourly.UpperBoundOfSlot(slot) >= maxMs);
+
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            using var doc = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(
+                postgres, ServerName, full_detail: true, cancellationToken: ct));
+            var row = doc.RootElement.GetProperty("collectors").EnumerateArray()
+                .Single(r => r.GetProperty("collector").GetString() == "memory_clerks");
+            Assert.Equal(maxMs, row.GetProperty("p95_duration_ms").GetDouble());
+
+            var sweep = doc.RootElement.GetProperty("sweep_pressure");
+            Assert.Equal(expectedRisk, sweep.GetProperty("peak_cycle_risk").GetString());
+            Assert.Equal(lowerBoundMs, sweep.GetProperty("peak_cycle_ms").GetDouble());
+            Assert.Equal(lowerBoundMs, sweep.GetProperty("peak_collector").GetProperty("peak_run_ms").GetDouble());
+            var note = sweep.GetProperty("peak_cycle_note").GetString();
+            Assert.NotNull(note);
+            Assert.EndsWith(DarlingMcpDataTools.P95BucketBasisSentence, note, StringComparison.Ordinal);
+            Assert.Equal(expectedRisk == "FITS", note == DarlingMcpDataTools.P95BucketBasisSentence);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, DeleteRowsAsync);
+        }
     }
 
     [Fact]

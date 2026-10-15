@@ -4035,6 +4035,8 @@ internal static class DarlingDataReader
                 AvgDurationMs = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4)),
                 MaxDurationMs = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5)),
                 P95DurationMs = reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6)),
+                /* #5810 review: CollectionHealthComposedSql's p95 is always the upper bound of a duration bucket. */
+                P95Bucketed = true,
                 LastSuccessTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 LastRunTime = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                 LastError = reader.IsDBNull(9) ? null : reader.GetString(9),
@@ -5262,6 +5264,17 @@ internal sealed class CollectorHealth
     /// collector describes neither of its populations.
     /// </summary>
     public double P95DurationMs { get; set; }
+
+    /// <summary>
+    /// #5810: true when <see cref="P95DurationMs"/> is the upper bound of a log-spaced duration bucket (the rollup read's
+    /// histogram, up to about 47% above the exact p95) rather than the exact value. The peak-cycle arithmetic then charges
+    /// the bucket's lower bound (<see cref="CollectionLogHourly.P95FloorMs"/>), the smallest value the exact p95 can have.
+    /// </summary>
+    public bool P95Bucketed { get; set; }
+
+    /// <summary>#5810 review: the p95 the sweep's peak-cycle arithmetic charges: <see cref="P95DurationMs"/> when exact,
+    /// its bucket's lower bound when <see cref="P95Bucketed"/>.</summary>
+    public double P95ChargedMs => P95Bucketed ? CollectionLogHourly.P95FloorMs(P95DurationMs) : P95DurationMs;
 
     public DateTime? LastSuccessTime { get; set; }
     public DateTime? LastRunTime { get; set; }

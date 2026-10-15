@@ -54,7 +54,8 @@ public static class CollectionLogHourly
 
     /// <summary>The most missing closed hours one pass rolls up besides the <see cref="RecomputeHours"/> it always
     /// recomputes, newest first (coordinator ruling on #5810): a store with a 7-day backlog is caught up in about 7
-    /// passes, and no pass reads more than about a day of the raw log.</summary>
+    /// passes, and no pass reads more than its own hours of the raw log (at most this many plus <see cref="RecomputeHours"/>):
+    /// the scan is per hour, so a pass late in a backfill reads no more than the first.</summary>
     public const int CatchUpHours = 24;
 
     /// <summary>Command timeout of each of the pass's two statements.</summary>
@@ -114,6 +115,19 @@ public static class CollectionLogHourly
     /// <summary>The largest duration a slot can hold, or null for the slot above an hour, which has no upper bound.</summary>
     public static int? UpperBoundOfSlot(int slot) =>
         slot >= 0 && slot < BoundCount ? DurationBucketBounds[slot] : null;
+
+    /// <summary>The smallest duration a slot can hold: one more than the bound below it, or 0 for the first slot.</summary>
+    public static int LowerBoundOfSlot(int slot) =>
+        slot <= 0 ? 0 : DurationBucketBounds[Math.Min(slot, BoundCount) - 1] + 1;
+
+    /// <summary>
+    /// #5810 review: the smallest value the exact p95 can have, given the p95 the rollup read reports. The read reports
+    /// <c>LEAST(upper bound of the p95's slot, max duration)</c>, a value inside that slot either way, so the value's own
+    /// slot is the p95's slot and its lower bound is the floor. The peak-cycle arithmetic charges this, so bucketing alone
+    /// never raises a risk or names a peak collector the exact p95 would not.
+    /// </summary>
+    public static double P95FloorMs(double reportedP95Ms) =>
+        reportedP95Ms <= 0 ? 0 : LowerBoundOfSlot(SlotOf((long)Math.Ceiling(reportedP95Ms)));
 
     private static string HistogramSql =>
         "ARRAY[" + string.Join(", ", Enumerable.Range(0, SlotCount).Select(s => $"COUNT(*) FILTER (WHERE w.slot = {s})")) + "]::integer[]";
@@ -183,14 +197,22 @@ WITH todo AS
     -- after the upgrade, or passes that failed) is caught up a day per pass instead of in one statement. An hour with
     -- no raw row is not missing, so an outage cannot hold the cap on hours that will never get a row. The series runs
     -- newest first and is filtered in place, so the LIMIT stops the probes at the last hour it takes: a raw-log probe
-    -- of a compressed chunk costs tens of milliseconds, and a sort would make every pass probe every missing hour. The
-    -- probes sit inside a CASE so the planner keeps them as per-row filters in the series' order (an EXISTS in WHERE
-    -- can become a hash join, which loses the order), and the raw probe runs only for an hour the table lacks.
+    -- of a compressed chunk costs tens of milliseconds, and a sort above the filter would make every pass probe every
+    -- missing hour. So the series is sorted first, in a subquery the filter cannot be pushed into (OFFSET 0), and the
+    -- outer ORDER BY states the newest-first contract, which that sorted input satisfies without a second sort. The
+    -- probes sit inside a CASE so the planner keeps them as per-row filters (an EXISTS in WHERE can become a hash join,
+    -- which loses the order), and the raw probe runs only for an hour the table lacks.
     SELECT m.hour_start
     FROM
     (
         SELECT g.hour_start
-        FROM generate_series($3::timestamp - interval '1 hour', $2::timestamp, interval '-1 hour') AS g(hour_start)
+        FROM
+        (
+            SELECT s.hour_start
+            FROM generate_series($3::timestamp - interval '1 hour', $2::timestamp, interval '-1 hour') AS s(hour_start)
+            ORDER BY s.hour_start DESC
+            OFFSET 0
+        ) AS g
         WHERE CASE
                   WHEN EXISTS (SELECT 1 FROM collect.collection_log_hourly AS h WHERE h.hour_start = g.hour_start)
                   THEN FALSE
@@ -200,6 +222,7 @@ WITH todo AS
                                AND   x.collection_time < g.hour_start + interval '1 hour'
                                AND   x.{CollectionCycleRow.NotCycleRowSql})
               END
+        ORDER BY g.hour_start DESC
         LIMIT {CatchUpHours}
     ) AS m
 )
@@ -215,6 +238,10 @@ SELECT
     {AggregatesSql}
 FROM
 (
+    -- Per todo hour (#5810 review): each hour's scan is bounded on both sides by that hour, so a pass reads only its own
+    -- hours and chunk exclusion runs per hour. One range from the oldest todo hour on made pass k of a backfill read k days.
+    -- OFFSET 0 keeps the subquery from being pulled up into a plain join, which the planner ran as one scan of the
+    -- whole retained log against the todo list (4.6 s on a 1.05M-row plant, against 1.45 s for the one-range scan).
     SELECT
         l.server_id,
         l.collector_name,
@@ -224,13 +251,18 @@ FROM
         l.rows_collected,
         l.duration_ms,
         l.slowest_item_ms,
-        date_trunc('hour', l.collection_time) AS hour_start,
+        t.hour_start,
         width_bucket(l.duration_ms - 1, $4::integer[]) AS slot
-    FROM collect.collection_log AS l
-    WHERE l.collection_time >= (SELECT MIN(t.hour_start) FROM todo AS t)
-    AND   l.collection_time < $1::timestamp
-    AND   date_trunc('hour', l.collection_time) IN (SELECT t.hour_start FROM todo AS t)
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    FROM todo AS t
+    CROSS JOIN LATERAL
+    (
+        SELECT x.*
+        FROM collect.collection_log AS x
+        WHERE x.collection_time >= t.hour_start
+        AND   x.collection_time < t.hour_start + interval '1 hour'
+        AND   x.{CollectionCycleRow.NotCycleRowSql}
+        OFFSET 0
+    ) AS l
 ) AS w
 GROUP BY
     w.server_id,
