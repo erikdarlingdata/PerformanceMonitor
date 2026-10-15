@@ -57,6 +57,24 @@ public static class ComposeLimits
     public const long MaxQueryStoreWideRowsTwoScans = 5_400_000;
 
     /// <summary>
+    /// The most raw <c>collect.query_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811),
+    /// judged from the collection log before the statement runs. MEASURED in the field (#5811): a 24 h fleet query_stats panel reads
+    /// 12.2 M rows (12.2 M to 12.4 M a day over a week) and finishes today in at most 35.9 s, about 2.9 us per row; the 45 s budget over
+    /// that is about 15 million. The rule: a false refusal is user-visible breakage, so the limit sits at the worst observed cost per row,
+    /// and the refusal is only for windows that would have run to the statement timeout.
+    /// </summary>
+    public const long MaxRawQueryStatsRows = 15_000_000;
+
+    /// <summary>
+    /// The most raw <c>collect.procedure_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811).
+    /// MEASURED in the field like <see cref="MaxRawQueryStatsRows"/>: a 24 h fleet procedure_stats panel reads 17.3 M to 20.5 M rows a
+    /// day (19.7 M on the last full day) and finishes today in at most 20.8 s, about 1.1 us per row (20.8 s over 19.7 M); the 45 s
+    /// budget over that is about 40 million. Same rule: a false refusal is user-visible breakage, and the refusal is only for windows
+    /// that would have run to the statement timeout.
+    /// </summary>
+    public const long MaxRawProcedureStatsRows = 40_000_000;
+
+    /// <summary>
     /// The weight of an hour served from the rollup of the wide table (<c>collect.query_store_compose_stamp</c>), against 1.0
     /// for an hour read from the wide table itself (#5582). An estimate: the closest measurement is a read at the composer's grain
     /// of 7,040,921 rows of 205 bytes, which took 5.493 s warm, 1.556 s of it I/O. That read is 0.02505 blocks per row; at 22,121

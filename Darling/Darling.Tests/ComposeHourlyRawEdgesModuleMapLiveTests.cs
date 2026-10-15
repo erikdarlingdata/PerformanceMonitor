@@ -198,7 +198,9 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
 
             var (hybrid, raw) = await RunBothAsync(store, PanelByDatabaseAndObject);
             Assert.Contains(Hybrid, (string)hybrid["sql"]!, StringComparison.Ordinal);
-            Assert.DoesNotContain(Overlay, (string)hybrid["sql"]!, StringComparison.Ordinal);
+            /* #5811: with no watermark the module CTE is the window ranking, as raw reads it, at the cost it had before #5811 */
+            Assert.StartsWith("WITH m AS (", (string)hybrid["sql"]!, StringComparison.Ordinal);
+            Assert.Contains("ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle", (string)hybrid["sql"]!, StringComparison.Ordinal);
             Assert.Equal(raw.ToJsonString(), HybridRows(hybrid));
             Assert.Equal(100 + 1000, ValueOf(raw, Database, "usp_Renamed"), 6);
         });
@@ -225,10 +227,52 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
             await store.RefreshAggregateAsync();
 
             var (hybrid, raw) = await RunBothAsync(store, PanelByDatabaseAndObject);
-            AssertOverlayTaken(hybrid);
+            /* #5811: a stale watermark binds no floor, so the module CTE is the window ranking, at the cost it had before #5811 */
+            Assert.StartsWith("WITH m AS (", (string)hybrid["sql"]!, StringComparison.Ordinal);
+            Assert.DoesNotContain("module_map", (string)hybrid["sql"]!, StringComparison.Ordinal);
             Assert.Equal(raw.ToJsonString(), HybridRows(hybrid));
             Assert.Equal(100 + 1000, ValueOf(raw, Database, "usp_Renamed"), 6);
             Assert.Equal(10000, ValueOf(raw, Database, "usp_Fresh"), 6);
+        });
+    }
+
+    /// <summary>#5811, ruling C: with a fresh watermark the overlay reads procedure_stats only from the watermark less the slack, and
+    /// every older handle reads the map. The map row of the early handle is edited after the refresh, so the two readings differ:
+    /// an overlay bounded to the slack reads the map's name, and one that read the whole window would read the procedure_stats
+    /// name the window-wide raw compile reads.</summary>
+    [Fact]
+    public async Task AFreshWatermark_BoundsTheOverlayToTheSlack_AndOlderHandlesReadTheMap()
+    {
+        await RunLiveAsync(async store =>
+        {
+            var (h1, h2) = (store.Layout.H1, store.Layout.H2);
+            await SeedAnchorAsync(store);
+            await ProcAsync(store, ServerA, Database, "usp_Early", "0xE", h1.AddHours(1));
+            await QsAsync(store, ServerA, Database, "HE", "0xE", h1.AddHours(4).AddMinutes(5), 100, 300);
+            await QsAsync(store, ServerA, Database, "HE", "0xE", h2.AddMinutes(10), 1000, 300);
+            await ProcAsync(store, ServerA, Database, "usp_Late", "0xL", h2.AddMinutes(20));
+            await QsAsync(store, ServerA, Database, "HL", "0xL", h1.AddHours(5).AddMinutes(5), 10000, 300);
+            Assert.Equal(2, await store.RefreshMapAsync());
+            Assert.Equal(h2.AddMinutes(20), await store.WatermarkAsync());
+
+            await using (var edit = new NpgsqlCommand("UPDATE collect.module_map SET object_name = 'usp_FromMap' WHERE sql_handle = '0xE'", store.Connection))
+            {
+                Assert.Equal(1, await edit.ExecuteNonQueryAsync(store.Ct));
+            }
+
+            await store.RefreshAggregateAsync();
+
+            var (hybrid, raw) = await RunBothAsync(store, PanelByDatabaseAndObject);
+            AssertOverlayTaken(hybrid);
+            var sql = (string)hybrid["sql"]!;
+            Assert.Contains("LEAST(last_ps.collection_time, $", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("LEAST(last_ps.collection_time, $1)", sql, StringComparison.Ordinal);
+
+            var hybridRows = JsonNode.Parse(HybridRows(hybrid))!.AsArray();
+            Assert.Equal(100 + 1000, ValueOf(hybridRows, Database, "usp_FromMap"), 6);
+            Assert.Equal(10000, ValueOf(hybridRows, Database, "usp_Late"), 6);
+            Assert.Equal(100 + 1000, ValueOf(raw, Database, "usp_Early"), 6);
+            Assert.Equal(10000, ValueOf(raw, Database, "usp_Late"), 6);
         });
     }
 
