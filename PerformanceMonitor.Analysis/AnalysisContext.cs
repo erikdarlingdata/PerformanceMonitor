@@ -259,6 +259,12 @@ public class AnalysisContext
     public DateTime? PlanRegressionWindowStart { get; set; }
 
     /// <summary>
+    /// #5824: how long this pass's PLAN_REGRESSION read took, in milliseconds, whatever its outcome. Null when the read did
+    /// not run on this pass (an engine whose collector has no such read, or a pass that ended before it).
+    /// </summary>
+    public long? PlanRegressionReadMs { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose

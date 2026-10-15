@@ -29,9 +29,16 @@ internal sealed record CycleSkipSnapshot(
     internal long Total => GridSlots.Values.Sum() + HeldSlots.Values.Sum() + DailyLostSlots.Values.Sum();
 }
 
-/// <summary>The measured causes the late run carries in: the previous body's length and its slowest collector, and the time
-/// this body queued for a fleet slot. 0 or null is "not measured".</summary>
-internal readonly record struct CycleSkipCauses(long PrevBodyMs, string? PrevBodySlowestName, long PrevBodySlowestMs, long GateWaitMs);
+/// <summary>The measured causes the late run carries in: the previous body's length and its slowest collector, the time
+/// this body queued for a fleet slot, and (#5824) the previous body's scheduled analysis pass length and how many analysis
+/// passes held fleet slots when this body got its slot. 0 or null is "not measured".</summary>
+internal readonly record struct CycleSkipCauses(
+    long PrevBodyMs,
+    string? PrevBodySlowestName,
+    long PrevBodySlowestMs,
+    long GateWaitMs,
+    long PrevAnalysisMs = 0,
+    int GateWaitAnalysisHolders = 0);
 
 /// <summary>
 /// #5735: the slots one server has lost since its last <c>collection_cycle</c> row, summed over its collectors. The three
@@ -173,6 +180,9 @@ internal static class DarlingCycleSkip
     /// <summary><c>slowest_item</c> when the memory launch guard's hold is the cause.</summary>
     internal const string LaunchGuardHoldName = "launch_guard_hold";
 
+    /// <summary><c>slowest_item</c> when the previous body's scheduled analysis pass is the cause (#5824).</summary>
+    internal const string AnalysisPassName = PerformanceMonitor.Darling.Storage.AnalysisPassRow.CollectorName;
+
     /// <summary><c>slowest_item</c> when no cause was measured.</summary>
     internal const string UnmeasuredName = "collectors";
 
@@ -194,10 +204,7 @@ internal static class DarlingCycleSkip
             }
         }
 
-        var top = perCollector
-            .OrderByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.OrdinalIgnoreCase)
-            .Take(3)
-            .Select(p => string.Create(CultureInfo.InvariantCulture, $"{p.Key} {p.Value}"));
+        var top = TopText(perCollector);
 
         var gapMs = (long)Math.Max(0, (stampUtc - snapshot.EarliestUtc).TotalMilliseconds);
         var heldSlots = snapshot.HeldSlots.Values.Sum();
@@ -216,10 +223,24 @@ internal static class DarlingCycleSkip
                 causes.PrevBodyMs, slowestName, slowestMs));
         }
 
-        if (causes.GateWaitMs >= CauseFloorMs)
+        /* #5824: the previous body's scheduled analysis pass ran after its collectors, inside the same fleet slot, so it is
+           not in PrevBodyMs; until this candidate a slot it held read as "no single cause". */
+        if (causes.PrevAnalysisMs >= CauseFloorMs)
         {
             candidates.Add((
-                string.Create(CultureInfo.InvariantCulture, $"this pass waited {Format(causes.GateWaitMs)} for a fleet collection slot"),
+                string.Create(CultureInfo.InvariantCulture,
+                    $"the previous pass's scheduled analysis held this server's fleet collection slot for {Format(causes.PrevAnalysisMs)} after its collectors"),
+                causes.PrevAnalysisMs, AnalysisPassName, causes.PrevAnalysisMs));
+        }
+
+        if (causes.GateWaitMs >= CauseFloorMs)
+        {
+            var holders = causes.GateWaitAnalysisHolders > 0
+                ? string.Create(CultureInfo.InvariantCulture,
+                    $" ({causes.GateWaitAnalysisHolders} slot(s) were held by scheduled analysis passes when it got one)")
+                : string.Empty;
+            candidates.Add((
+                string.Create(CultureInfo.InvariantCulture, $"this pass waited {Format(causes.GateWaitMs)} for a fleet collection slot{holders}"),
                 causes.GateWaitMs, GateWaitName, causes.GateWaitMs));
         }
 
@@ -264,10 +285,36 @@ internal static class DarlingCycleSkip
         var gap = string.Create(CultureInfo.InvariantCulture,
             $" The gap ran from {snapshot.EarliestUtc:yyyy-MM-dd HH:mm:ss} UTC to {stampUtc:yyyy-MM-dd HH:mm:ss} UTC.");
         var message = string.Create(CultureInfo.InvariantCulture,
-            $"Collection fell behind on this server: {total} slot(s) skipped across {perCollector.Count} collector(s) (top: {string.Join(", ", top)}). Cause: {cause}.{gap}");
+            $"Collection fell behind on this server: {total} slot(s) skipped across {perCollector.Count} collector(s) ({top}). Cause: {cause}.{gap}");
 
         return new CycleSkipReport(
             (int)Math.Min(int.MaxValue, total), durationMs is { } d ? ClampMs(d) : null, item, ClampMs(itemMs), message);
+    }
+
+    /// <summary>
+    /// The per-collector part of the message. Three names, largest first, while the counts set them apart. #5824: a tie is
+    /// not a signal, so when every collector lost the same count the text says so instead of naming three in alphabetical
+    /// order, and when the third and fourth tie the list is given by count.
+    /// </summary>
+    internal static string TopText(IReadOnlyDictionary<string, long> perCollector)
+    {
+        var ranked = perCollector
+            .OrderByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (ranked.Count > 1 && ranked[0].Value == ranked[^1].Value)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"every due collector, {ranked[0].Value} slot(s) each");
+        }
+
+        if (ranked.Count > 3 && ranked[2].Value == ranked[3].Value)
+        {
+            var groups = ranked.GroupBy(p => p.Value).Select(g => g.Count() == 1
+                ? string.Create(CultureInfo.InvariantCulture, $"{g.First().Key} {g.Key}")
+                : string.Create(CultureInfo.InvariantCulture, $"{g.Count()} collectors at {g.Key} slot(s) each")).ToList();
+            return "by count: " + string.Join(", ", groups.Take(3)) + (groups.Count > 3 ? ", fewer on the rest" : string.Empty);
+        }
+
+        return "top: " + string.Join(", ", ranked.Take(3).Select(p => string.Create(CultureInfo.InvariantCulture, $"{p.Key} {p.Value}")));
     }
 
     /// <summary>Milliseconds below one second, one decimal below ten seconds, whole seconds from ten seconds up (Lite's

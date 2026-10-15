@@ -722,6 +722,11 @@ ORDER BY c.regression_factor DESC";
         context.PlanRegressionReadsIntervalTable = null;
         context.PlanRegressionWindowStart = null;
 
+        /* #5824: how long this read took, stamped in the finally whatever the outcome, so the scheduled pass's analysis_pass
+           row in collection_log can say what the store's most expensive analysis read cost on this pass. */
+        context.PlanRegressionReadMs = null;
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+
         /* #5448: the built-days read and the daily read share this transaction (see PlanRegressionDailySql). */
         NpgsqlTransaction? snapshot = null;
         try
@@ -1003,6 +1008,8 @@ ORDER BY c.regression_factor DESC";
             {
                 await snapshot.DisposeAsync();
             }
+
+            context.PlanRegressionReadMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(readStarted).TotalMilliseconds;
         }
     }
 
