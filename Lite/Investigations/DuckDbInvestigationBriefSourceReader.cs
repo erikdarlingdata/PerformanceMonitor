@@ -58,7 +58,8 @@ WHERE request_id = $1";
        history row, so a stamp taken a moment apart from the request row still finds its alert. The link rows carry the
        history row's values and are read first (#5821: an alert that opens or joins before its page is sent writes its link
        rows before its history row); the history row answers only for send_error and for a link written without facts.
-       Both tables hold naive UTC. */
+       Both tables hold naive UTC. The history is read through v_config_alert_log (the hot table unioned with the archive),
+       so an alert that ordinary archival has already moved to Parquet still answers. */
     internal const string AlertsSql = @"
 WITH a AS (
     SELECT DISTINCT ON (alert_time, server_id, metric_name)
@@ -81,7 +82,7 @@ SELECT p.alert_time, p.metric_name, coalesce(p.current_value, l.current_value), 
 FROM picked AS p
 LEFT JOIN LATERAL (
     SELECT cal.current_value, cal.threshold_value, cal.muted, cal.detail_text, cal.send_error, cal.context_json
-    FROM config_alert_log AS cal
+    FROM v_config_alert_log AS cal
     WHERE cal.server_id = p.server_id
       AND cal.metric_name = p.metric_name
       AND cal.alert_time BETWEEN p.alert_time - INTERVAL 5 SECOND AND p.alert_time + INTERVAL 5 SECOND
