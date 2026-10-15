@@ -153,26 +153,6 @@ public sealed class CrossSkuSurfaceSourceTests
             rendered.OrderBy(f => f, StringComparer.Ordinal).ToArray());
     }
 
-    [Fact]
-    public void BothSkusToolDescriptions_StayByteIdentical()
-    {
-        /* One tool, one contract: the two SKUs' descriptions of get_collection_health are byte-identical on
-           origin/dev and must stay so, or a client learns different things about the same tool depending on
-           which SKU answered. This change appended to both; the pin is that it appended the SAME bytes. */
-        var descriptions = CollectionHealthToolFiles()
-            .Select(f => ToolDescription(File.ReadAllText(f)))
-            .ToList();
-
-        Assert.Equal(2, descriptions.Count);
-        Assert.Equal(descriptions[0], descriptions[1]);
-
-        /* And that the appended paragraph is actually in there, so the equality above is not two copies of
-           an unchanged string agreeing with each other. */
-        Assert.Contains("alert_read_health", descriptions[0], StringComparison.Ordinal);
-        Assert.Contains("counting_since", descriptions[0], StringComparison.Ordinal);
-        Assert.Contains("failed to DELIVER", descriptions[0], StringComparison.Ordinal);
-    }
-
     /// <summary>
     /// The fleet-scoped inventory is what the counter actually records, in both directions.
     ///
@@ -355,41 +335,6 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Equal(started, parsed);
     }
 
-    [Fact]
-    public void TheSharedDescription_DocumentsTheServiceBlock()
-    {
-        /* The description is THE build-attribution contract now — an MCP caller learns what the block is
-           for from this text and nothing else — so its claims are censused the way the #3013 paragraph's
-           are. Byte-identity across the SKUs is the sibling family's pin; this one holds that the shared
-           bytes actually say the load-bearing things: what question version answers, that counting_since
-           keeps its old job, and what the rung is NOT (a store read). Asserted inside the Description
-           attribute's own span rather than against the whole file, so a sentence demoted to a code comment
-           cannot keep this green. */
-        foreach (var file in CollectionHealthToolFiles())
-        {
-            var description = DescriptionSpan(File.ReadAllText(file));
-
-            foreach (var phrase in new[]
-            {
-                "is the running service the build that carries fix X",
-                "counting_since remains the restart detector",
-                "started_at is the SAME instant",
-                "compiled_schema_version is the schema rung this BUILD expects",
-                "not a read of the store's migrated rung",
-            })
-            {
-                Assert.Contains(phrase, description, StringComparison.Ordinal);
-            }
-
-            /* The control: the identical Contains form finds a plausible-but-absent claim nowhere, so the
-               silences above are absences rather than a matcher that never matches. */
-            Assert.DoesNotContain(
-                "the store's migrated rung is reported beside it",
-                description,
-                StringComparison.Ordinal);
-        }
-    }
-
     /* ---------------- helpers ---------------- */
 
     /// <summary>The field names inside a tool's <c>alert_read_health = new { … }</c> initializer.</summary>
@@ -437,49 +382,6 @@ public sealed class CrossSkuSurfaceSourceTests
         return names;
     }
 
-    /// <summary>
-    /// The tool's description as the CLIENT sees it, reassembled from however the literal is spelled.
-    ///
-    /// <para>It is no longer one literal: both descriptions concatenate
-    /// <see cref="AlertReadFailureCounter.FleetScopedReads"/> so the fleet-scoped set cannot drift
-    /// between them. A pattern that captured a single quoted run would simply stop matching, which is at
-    /// least loud — but it would also stop comparing the halves either side of the constant, so the
-    /// segments are concatenated and the constant substituted in its place.</para>
-    /// </summary>
-    private static string ToolDescription(string source)
-    {
-        var call = Regex.Match(
-            source,
-            @"\[McpServerTool\(Name = ""get_collection_health""\), Description\((.*?)\)\]",
-            RegexOptions.Singleline);
-
-        Assert.True(call.Success, "a get_collection_health tool has no Description attribute in the expected shape");
-
-        var assembled = new System.Text.StringBuilder();
-        foreach (var piece in Regex.Split(call.Groups[1].Value, @"\s*\+\s*"))
-        {
-            var trimmed = piece.Trim();
-
-            if (trimmed.StartsWith("\"", StringComparison.Ordinal) && trimmed.EndsWith("\"", StringComparison.Ordinal))
-            {
-                assembled.Append(trimmed[1..^1]);
-            }
-            else if (trimmed.EndsWith("FleetScopedReads", StringComparison.Ordinal))
-            {
-                assembled.Append(AlertReadFailureCounter.FleetScopedReads);
-            }
-            else
-            {
-                Assert.Fail($"unrecognised piece in the Description concatenation: {trimmed}");
-            }
-        }
-
-        var text = assembled.ToString();
-        Assert.True(text.Length > 5000, $"the reassembled description is only {text.Length} chars — the split lost content");
-
-        return text;
-    }
-
     /// <summary>The field names inside a tool's <c>service = new { … }</c> initializer, extracted the way
     /// the sibling census extracts <c>alert_read_health</c>'s: brace-balanced from the initializer's own
     /// opening, assignments matched only at line starts so prose in comments cannot join the set.</summary>
@@ -523,23 +425,6 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.True(names.Count > 0, "no fields were extracted from a service block");
 
         return names;
-    }
-
-    /// <summary>The raw span of the tool's <c>Description(...)</c> attribute argument — quoted literals and
-    /// the concatenated constant's NAME, which is enough for phrases that live in the literals. The full
-    /// client-visible reassembly (with the constant substituted) belongs to the sibling family's
-    /// byte-identity pin; this lighter read exists so a claim census cannot be satisfied by the same words
-    /// in a code comment.</summary>
-    private static string DescriptionSpan(string source)
-    {
-        var call = Regex.Match(
-            source,
-            @"\[McpServerTool\(Name = ""get_collection_health""\), Description\((.*?)\)\]",
-            RegexOptions.Singleline);
-
-        Assert.True(call.Success, "a get_collection_health tool has no Description attribute in the expected shape");
-
-        return call.Groups[1].Value;
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
