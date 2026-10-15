@@ -2864,7 +2864,7 @@ public class WebhookAlertService
                 displayName: null, cancellationToken),
             NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
                 delivery, destination, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
-                cancellationToken),
+                cancellationToken: cancellationToken),
             _ => $"{channel} does not carry a resolution post",
         };
     }

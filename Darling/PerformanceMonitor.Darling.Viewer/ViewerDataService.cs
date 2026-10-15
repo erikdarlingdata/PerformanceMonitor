@@ -1224,7 +1224,7 @@ SELECT
     /* V187 (#5825) adds the per-channel resolution flags, the route override and the alert log's resolution columns. Found by
        catalog so the answer does not depend on the connecting role's privileges. Named only in this probe line, never in prose,
        per the V71 finding. */
-    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_log') AND attname = 'resolution_outcome' AND NOT attisdropped)",
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_log') AND attname = 'resolution_outcome' AND NOT attisdropped),
     /* V188 (#5821) adds the alert's values to the investigation link rows. Found by catalog so the answer does not depend on
        the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.investigation_request_alerts') AND attname = 'context_json' AND NOT attisdropped)";
