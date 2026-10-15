@@ -84,8 +84,7 @@ FROM (SELECT unnest($5::VARCHAR[]) AS key) AS k";
        partial-index arbiter (WHERE once_key IS NOT NULL) is not needed. */
     internal const string JournalSql = @"
 INSERT INTO investigation_journal (journal_id, event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
-SELECT coalesce(max(journal_id), 0) + 1, $1, $2, $3, $4, $5, $6, $7, $8, $9
-FROM investigation_journal
+VALUES ((SELECT coalesce(max(journal_id), 0) + 1 FROM investigation_journal), $1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (once_key) DO NOTHING";
 
     internal const string AgentJournalCountSql = @"
@@ -122,8 +121,8 @@ WHERE request_id = $1";
 INSERT INTO investigation_reports
     (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary,
      evidence, server_id, metric_name, dedup_key, story_path_hash)
-SELECT coalesce(max(report_id), 0) + 1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
-FROM investigation_reports";
+VALUES ((SELECT coalesce(max(report_id), 0) + 1 FROM investigation_reports), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        $12, $13, $14)";
 
     internal const string ReportedSql = @"
 UPDATE investigation_requests
