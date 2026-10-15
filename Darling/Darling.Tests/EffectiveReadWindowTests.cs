@@ -15,6 +15,8 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -125,6 +127,77 @@ public sealed class EffectiveReadWindowTests
         Assert.Null(record.WindowEnd);
         Assert.Equal(ReadWindowBand.None, McpToolLatencyFilter.WindowBandOf("get_server_info", Sent("""{"server_name":"SRV1"}"""), Types()));
         Assert.Equal(ReadWindowBand.None, DarlingWebEndpoints.WebWindowBand("get_server_info", _ => null));
+    }
+
+    /* #5844: get_investigation_reports reads the window through ReportsAsync, on MCP and on the web panel alike. The data
+       source points at a closed port and the token is cancelled before the call, so the read stops at its first
+       connection open: the window is noted (or not) before that, and nothing reaches a server. */
+    private static async Task<(SlowReadRecord Record, DateTime? NotedStart)> InvestigationReportsRecord(string? requestId,
+        int hoursBack, JsonObject arguments)
+    {
+        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=none;Database=none;Timeout=1");
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        using var opened = ReadScope.Open(null);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingMcpInvestigationTools.ReportsAsync(
+            postgres, McpDataDetail.Full, null, requestId, hoursBack, cancelled.Token));
+        return (SlowReadLog.Build(opened.Scope, ReadSurface.Mcp, InvestigationReportsTool, ReadOutcome.Ok, 9_000, arguments, null,
+            DateTime.UtcNow), opened.Scope.WindowStartUtc);
+    }
+
+    private const string InvestigationReportsTool = "get_investigation_reports";
+
+    [Fact]
+    public async Task ADefaultedInvestigationReportsCall_RecordsTheTwentyFourHoursItRead()
+    {
+        var declared = typeof(DarlingMcpInvestigationTools).GetMethod(nameof(DarlingMcpInvestigationTools.GetInvestigationReports))!
+            .GetParameters().Single(p => p.Name == "hours_back").DefaultValue;
+        Assert.Equal(24, declared);
+
+        var (record, _) = await InvestigationReportsRecord(null, (int)declared!, new JsonObject());
+
+        Assert.NotNull(record.WindowStart);
+        Assert.Equal(24, Hours(record), 3);
+        Assert.Equal(ReadWindowBand.OneDay, ReadWindowBand.Of(record.WindowStart, record.WindowEnd));
+    }
+
+    [Fact]
+    public async Task AnExplicitInvestigationReportsWindow_RecordsThatSpan_AndARefusedOneRecordsNone()
+    {
+        /* The tool notes the span itself: the row does not depend on lifting hours_back from the sent arguments. */
+        var (record, notedStart) = await InvestigationReportsRecord(null, 72, new JsonObject { ["hours_back"] = 72 });
+        Assert.NotNull(notedStart);
+        Assert.Equal(72, Hours(record), 3);
+        Assert.Equal(ReadWindowBand.SevenDays, ReadWindowBand.Of(record.WindowStart, record.WindowEnd));
+
+        /* Out of range on the window arm: refused with the shared text, before any read, and no window noted. */
+        foreach (var refused in new[] { 0, 169 })
+        {
+            using var opened = ReadScope.Open(null);
+            var answer = await DarlingMcpInvestigationTools.ReportsAsync(null!, McpDataDetail.Full, null, null, refused,
+                CancellationToken.None);
+            Assert.Equal(McpHelpers.ValidateHoursBack(refused), answer);
+            Assert.Null(opened.Scope.WindowStartUtc);
+        }
+    }
+
+    [Fact]
+    public async Task AnInvestigationReportsCallForOneRequest_RecordsNoWindow()
+    {
+        /* hours_back is ignored with request_id, so the row carries no window whatever hours_back says, even when the
+           caller sent it and the arguments would otherwise lift it, and an out-of-range hours_back is not refused: the
+           call goes on to read the request. A value past DateTime's range must not throw into an error envelope either:
+           the helper's read only ends in the cancellation when the call reached the store. */
+        var id = Guid.NewGuid().ToString();
+        foreach (var hoursBack in new[] { 24, 6, 0, 500, 1_000_000_000 })
+        {
+            var (record, notedStart) = await InvestigationReportsRecord(id, hoursBack,
+                new JsonObject { ["request_id"] = id, ["hours_back"] = hoursBack });
+            Assert.Null(notedStart);
+            Assert.Null(record.WindowStart);
+            Assert.Null(record.WindowEnd);
+        }
     }
 
     [Fact]

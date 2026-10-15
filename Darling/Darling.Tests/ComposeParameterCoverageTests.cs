@@ -171,12 +171,16 @@ public sealed class ComposeParameterCoverageTests
         && verdict.HourStartUtc == candidate.HourStartUtc
         && verdict.HourEndUtc == candidate.HourEndUtc;
 
-    /// <summary>The module-overlay rule from intent alone: the run takes the hourly-raw-edges route, the plan joins modules and a
-    /// module map watermark no later than the run's now was supplied, so the compiler binds the overlay floor. Not read back from the compiler's parameters.</summary>
+    /// <summary>The module-overlay rule from intent alone (#5811, ruling C): the run reads raw (the raw or hourly-raw-edges route), the
+    /// plan joins modules, the store has the map, and a module map watermark no later than the run's now was supplied whose floor
+    /// (the watermark less the refresh slack) is later than the window start, so the compiler binds the overlay floor. Not read back
+    /// from the compiler's parameters.</summary>
     internal static bool PredictsModuleOverlayFloorBind(PanelPlan plan, ComposeRunContext context) =>
         context.ModuleMapThrough is { } through && through <= context.NowUtc
+        && through - DarlingModuleMap.WatermarkSlack > context.StartUtc
         && plan.UsesModuleJoin
-        && PredictsHourlyEdgesBinds(plan, context);
+        && !context.ModuleMapMissing
+        && !ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage).IsCagg;
 
     /// <summary>The #4689 rule from intent alone: a wide-eligible run whose common start is later than the
     /// window start, reading the Query Store table. Not read back from the compiler's parameters.</summary>

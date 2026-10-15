@@ -110,32 +110,58 @@ public sealed class ComposeServerScopeByIdTests
 
     /// <summary>The statement scope names the registry and filters the fact on its id. A bare <c>server_name = ANY</c> on a fact is the
     /// shape that read every compressed chunk in full; the only name filters left are the registry's own (<c>reg.</c>) and the module
-    /// map's (<c>mm.</c>, a small table keyed by name with no server_id).</summary>
-    [Fact]
-    public void NoCompiledStatement_FiltersAFactTable_OnServerNameAnyAlone()
+    /// map's (<c>mm.</c>, a small table keyed by name with no server_id). Swept with and without a scoped name no registry row carries,
+    /// since the compiler emits more under that arm.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NoCompiledStatement_FiltersAFactTable_OnServerNameAnyAlone(bool withUnregisteredName)
     {
-        var statements = ScopedStatements(null).ToList();
+        var statements = ScopedStatements(withUnregisteredName ? ["GHOST"] : null).ToList();
         Assert.True(statements.Count >= 6, "the sweep must reach every emitter: " + string.Join(", ", statements.Select(s => s.Label)));
 
+        var exemptions = 0;
         foreach (var (label, sql) in statements)
         {
             Assert.Contains("server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($", sql, StringComparison.Ordinal);
-            foreach (Match m in Regex.Matches(sql, @"[\w.]*server_name = ANY\("))
+
+            /* An unregistered name arms each by-id scope as "(<id scope> OR f.server_name = ANY($n))": that name filter is OR'd with
+               the id scope, not alone, so it leaves the sweep (UnregisteredNames_AreMatchedByStoredName_OnEveryEmitter_AndNothingElse
+               holds that every scope carries it). */
+            var swept = Regex.Replace(sql, ArmedScopePattern, "$1)");
+
+            /* The one documented exemption: the hourly-raw-edges overlay's m_unreg CTE (#5811). A name with no registry row resolves
+               to no id, so its stored server_name is the only filter there is; the PR states the cost. Exempt inside that CTE only. */
+            var overlay = Regex.Match(swept, @"m_unreg AS MATERIALIZED \(\n.*?\n\),\n", RegexOptions.Singleline);
+            foreach (Match m in Regex.Matches(swept, @"[\w.]*server_name = ANY\("))
             {
+                if (m.Value == "pu.server_name = ANY(" && overlay.Success && m.Index > overlay.Index && m.Index < overlay.Index + overlay.Length)
+                {
+                    exemptions++;
+                    continue;
+                }
+
                 Assert.True(
                     m.Value.StartsWith("reg.", StringComparison.Ordinal) || m.Value.StartsWith("mm.", StringComparison.Ordinal),
                     $"{label}: filters on '{m.Value}' - a fact scoped by name reads every compressed chunk in full (#5525).");
             }
         }
+
+        /* With an unregistered name the sweep reaches the m_unreg arm, so the exemption is used, and only there. */
+        Assert.Equal(withUnregisteredName ? 1 : 0, exemptions);
     }
 
+    /// <summary>An id scope armed with the unregistered-name arm; group 1 is the scope without the arm.</summary>
+    private const string ArmedScopePattern =
+        @"(\(\w*\.?server_id = ANY\(ARRAY\(SELECT reg\.server_id FROM collect\.servers AS reg WHERE reg\.server_name = ANY\(\$\d+\)\)\)) OR [\w.]*server_name = ANY\(\$\d+\)\)";
+
     /// <summary>The hourly-raw-edges statement scopes its fact alias once, outside the union, and the planner pushes the id list into
-    /// each arm; the procedure_stats overlay CTE carries its own scope.</summary>
+    /// each arm; the procedure_stats overlay CTE carries its own scope, on the registry rows it reads per server (#5811).</summary>
     [Fact]
     public void HourlyRawEdges_ScopeTheFactAndTheModuleOverlay_ByIdAndTheMapByName()
     {
         var sql = ScopedStatements(null).Single(s => s.Label.StartsWith("hourly raw edges", StringComparison.Ordinal)).Sql;
-        Assert.Contains("          AND " + ByIdScope(3) + "\n", sql, StringComparison.Ordinal);
+        Assert.Contains("    WHERE srv." + ByIdScope(3) + "\n", sql, StringComparison.Ordinal);
         Assert.Contains("  AND f." + ByIdScope(3) + "\n", sql, StringComparison.Ordinal);
         Assert.Contains("      AND mm.server_name = ANY($3)\n", sql, StringComparison.Ordinal);
     }
