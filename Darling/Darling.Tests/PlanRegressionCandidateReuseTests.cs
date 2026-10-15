@@ -203,9 +203,15 @@ public sealed class PlanRegressionCandidateReuseLiveTests
     {
         /* #5812: the scheduled pass (AnalyzeAsync with persistCollectionCaveats, as DarlingWorker calls it, hours back 4)
            reads and fills the entry; a get_analysis_facts call (CollectAndScoreFactsAsync, the tool's own entry point) with
-           hours_back 1 and no as_of then makes no PLAN_REGRESSION read. Proved two ways: pg_stat_statements' entries for
-           every PLAN_REGRESSION read in this database, each held to its query id and stats_since, and the hit and miss
-           counters of the test's own cache (never the process-wide Shared one, which other classes and the worker touch). */
+           hours_back 1 and no as_of then makes no PLAN_REGRESSION read. Proved the way the first test proves it: after the
+           pass the costly plan's rows are deleted from both tables a read can take them from, so the call reports the
+           regression only if it used the pass's candidates, and a read past RefreshAfter finds none. The test's own cache's
+           hit and miss counters (never the process-wide Shared one, which other classes and the worker touch) say which
+           path ran.
+           It once read pg_stat_statements' entries for the reads instead. Those are cluster-wide: this own-store class runs
+           in parallel with classes that call pg_stat_statements_reset() for the whole cluster or fill the hash table until
+           it evicts, so the pass's entry could vanish with no read at all (CI run 38702741139: hits 1, misses 0, and no
+           entry after the call). */
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 reuse test.");
         var ct = TestContext.Current.CancellationToken;
@@ -213,10 +219,6 @@ public sealed class PlanRegressionCandidateReuseLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
-        var preloaded = await ScalarTextAsync(connection, "SELECT current_setting('shared_preload_libraries')", ct);
-        Assert.SkipWhen(!preloaded.Contains("pg_stat_statements", StringComparison.Ordinal),
-            "pg_stat_statements is not in shared_preload_libraries on this server; CI's darling-pg job preloads it.");
-        await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await SeedAndBuildAsync(connection, ct);
 
@@ -231,22 +233,16 @@ VALUES (1, now() - interval '8 days', {ServerId}, '{ServerName}', 'AN5812_WAIT',
         var cache = new PgFactCollector.PlanRegressionCandidateCache();
         ((PgFactCollector)service.EngineFor(null).Collector).PlanRegressionCache = cache;
 
-        var before = await PlanRegressionReadsAsync(connection, ct);
-        Assert.Empty(before);
+        /* The scheduled pass refreshes: it reads live and fills the entry without looking it up, so neither counter moves. */
         var passStarted = DateTime.UtcNow;
         await service.AnalyzeAsync(ServerId, ServerName, 4, ct, persistCollectionCaveats: true);
         var passEnded = DateTime.UtcNow;
-
-        /* The pass's read is one entry of one call. Every later check compares against this entry by its query id AND its
-           stats_since: an entry that pg_stat_statements evicted (pg_stat_statements.max) and a later read made again starts
-           over at one call, so a calls count alone can stand still while a read ran. A missing or remade entry fails the
-           test; it never passes it. */
-        var afterPass = await PlanRegressionReadsAsync(connection, ct);
-        var passRead = Assert.Single(afterPass);
-        Assert.Equal("daily", passRead.Variant);
-        Assert.Equal(1, passRead.Calls);
         Assert.Equal(0, cache.Hits);
         Assert.Equal(0, cache.Misses);
+
+        /* The regression's costly plan is gone from both tables the read can take it from. */
+        await ExecAsync(connection, $"DELETE FROM collect.query_store_interval_latest WHERE server_id = {ServerId} AND plan_id = 12", ct);
+        await ExecAsync(connection, $"DELETE FROM collect.plan_regression_daily WHERE server_id = {ServerId} AND plan_id = 12", ct);
 
         /* The shape carries the day the 14-day window starts on (PlanRegressionWindowFloor). A 1-hour call and the 4-hour
            pass start it on the same day except from 01:00 to 04:00 UTC (from 00:00 to 01:00 both windows start on the day
@@ -263,82 +259,31 @@ VALUES (1, now() - interval '8 days', {ServerId}, '{ServerName}', 'AN5812_WAIT',
         var callFloor = Floor(callStarted, 1);
         Assert.SkipWhen(passFloor != Floor(passEnded, 4) || callFloor != Floor(callEnded, 1),
             "The pass's or the call's 14-day window crossed a UTC midnight while it ran, so its shape is not known; the #5812 reuse check needs both.");
-        var sameDay = passFloor == callFloor;
 
-        Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
-        var afterFacts = await PlanRegressionReadsAsync(connection, ct);
-        var evidence = $"hits {cache.Hits}, misses {cache.Misses}; entries after the pass [{string.Join("; ", afterPass)}], after the call [{string.Join("; ", afterFacts)}]";
-        Assert.True(afterFacts.Any(e => e.SameEntry(passRead)), $"The pass's pg_stat_statements entry is gone or was remade, so the check cannot speak: {evidence}");
-        if (sameDay)
+        if (passFloor == callFloor)
         {
-            /* No PLAN_REGRESSION read of any variant (daily, table or raw): the entries are the pass's, unchanged. */
-            Assert.True(afterPass.SequenceEqual(afterFacts), $"The call made a PLAN_REGRESSION read: {evidence}");
-            Assert.True(cache.Hits == 1 && cache.Misses == 0, $"The call did not reuse the pass's candidates: {evidence}");
+            /* Only the pass's candidates still hold the costly plan: the call reused them and read neither table. */
+            Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
+            Assert.Equal(1, cache.Hits);
+            Assert.Equal(0, cache.Misses);
         }
         else
         {
-            Assert.Equal(passRead.Calls + 1, afterFacts.Single(e => e.SameEntry(passRead)).Calls);
+            /* A different shape: the call looked the entry up, missed, and read the store as it is now. */
+            Assert.DoesNotContain(facts, f => f.Key == "PLAN_REGRESSION");
             Assert.Equal(0, cache.Hits);
+            Assert.Equal(1, cache.Misses);
         }
 
-        /* Past RefreshAfter (set to zero, so the entry is already older than it) the same call reads fresh and refills: one
-           more call on the same entry. */
+        /* Past RefreshAfter (set to zero, so the entry is already older than it) the same call reads fresh: one more miss,
+           and the store as it is now has no regression. */
         var hits = cache.Hits;
         var misses = cache.Misses;
-        var readCalls = afterFacts.Single(e => e.SameEntry(passRead)).Calls;
         cache.RefreshAfter = TimeSpan.Zero;
         var (fresh, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack: 1, cancellationToken: ct);
-        Assert.Contains(fresh, f => f.Key == "PLAN_REGRESSION");
-        var afterFresh = await PlanRegressionReadsAsync(connection, ct);
-        var freshRead = afterFresh.SingleOrDefault(e => e.SameEntry(passRead));
-        Assert.True(freshRead is not null, $"The pass's pg_stat_statements entry is gone or was remade, so the check cannot speak: [{string.Join("; ", afterFresh)}]");
-        Assert.Equal(readCalls + 1, freshRead!.Calls);
+        Assert.DoesNotContain(fresh, f => f.Key == "PLAN_REGRESSION");
         Assert.Equal(hits, cache.Hits);
         Assert.Equal(misses + 1, cache.Misses);
-    }
-
-    /// <summary>One pg_stat_statements entry for a PLAN_REGRESSION candidate read. <see cref="StatsSince"/> is when the entry
-    /// was made, so two reads of it are the same entry only when both match.</summary>
-    private sealed record PlanRegressionReadEntry(long QueryId, string Variant, long Calls, DateTime StatsSince)
-    {
-        public bool SameEntry(PlanRegressionReadEntry other) => QueryId == other.QueryId && StatsSince == other.StatsSince;
-    }
-
-    /// <summary>pg_stat_statements' entries, in this database only, for every PLAN_REGRESSION candidate read: the daily read,
-    /// the table read and the raw read all end <c>FROM plan_agg</c>, so a call that took another source than the pass is
-    /// counted too.</summary>
-    private static async Task<IReadOnlyList<PlanRegressionReadEntry>> PlanRegressionReadsAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand(@"
-SELECT
-    s.queryid,
-    CASE
-        WHEN s.query LIKE '%plan_regression_daily%' THEN 'daily'
-        WHEN s.query LIKE '%FROM query_store_interval_latest%' THEN 'table'
-        ELSE 'raw'
-    END,
-    s.calls,
-    s.stats_since
-FROM pg_stat_statements AS s
-WHERE s.dbid = (SELECT d.oid FROM pg_database AS d WHERE d.datname = current_database())
-AND   s.query LIKE '%FROM plan_agg%'
-AND   s.query NOT LIKE '%pg_stat_statements%'
-ORDER BY
-    s.queryid", connection);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        var entries = new List<PlanRegressionReadEntry>();
-        while (await reader.ReadAsync(ct))
-        {
-            entries.Add(new PlanRegressionReadEntry(reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), reader.GetDateTime(3)));
-        }
-
-        return entries;
-    }
-
-    private static async Task<string> ScalarTextAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand(sql, connection);
-        return (string)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static PgFactCollector Collector(NpgsqlDataSource postgres, PgFactCollector.PlanRegressionCandidateCache cache) =>
