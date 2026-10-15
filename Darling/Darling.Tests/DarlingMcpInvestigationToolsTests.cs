@@ -9,12 +9,15 @@
 using System;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -231,6 +234,202 @@ public sealed class DarlingMcpInvestigationToolsTests
         var message = document.RootElement.GetProperty("message").GetString()!;
         foreach (var field in new[] { "request_id:", "claim_id:", "root_cause:", "summary:" })
             Assert.Contains(field, message, StringComparison.Ordinal);
+    }
+
+    /* ---- review round 2 (M1): get_investigation_reports masks its own fields at mcp.dataDetail ---- */
+
+    private const string Literal = "zq-literal-7731";
+    private const string Login = @"CORP\zq_login";
+    private const string Host = "ZQHOST09";
+
+    /// <summary>Text with a literal, a login and a host, as an agent or a person could write it into any field.</summary>
+    private static string Canaries(string field) =>
+        $"{field}: WHERE name = '{Literal}' AND login_name = N'{Login}' on host {Host}";
+
+    private static InvestigationReportsRead StoredRead()
+    {
+        var request = Guid.NewGuid();
+        var at = new DateTime(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
+        var evidence = new JsonArray(new JsonObject
+        {
+            ["tool"] = "get_blocking",
+            ["arguments"] = new JsonObject { ["server_name"] = "SQLPROD01", ["hours_back"] = 4 },
+            ["key_numbers"] = Canaries("key_numbers"),
+        }).ToJsonString();
+        var brief = new JsonObject
+        {
+            ["brief_format"] = 1,
+            ["data_detail"] = "full",
+            ["findings"] = new JsonArray(new JsonObject { ["category"] = "blocking", ["story"] = Canaries("story") }),
+            ["earlier_reports"] = new JsonArray(new JsonObject
+            {
+                ["verdict"] = "real", ["root_cause"] = Canaries("earlier root_cause"), ["summary"] = Canaries("earlier summary"),
+            }),
+        }.ToJsonString();
+        return new InvestigationReportsRead(
+            [],
+            [new InvestigationReportRow(request, 1, "agent-a", at, "real", Canaries("root_cause"), true, Canaries("summary"), evidence)],
+            [
+                new InvestigationJournalRow(at, request, 7, "closed", "person:" + Login, Canaries("reason"), null),
+                new InvestigationJournalRow(at, request, 7, "claimed", "agent:agent-a", null, null),
+            ],
+            brief);
+    }
+
+    [Fact]
+    public void ReportsAnswer_MaskLiterals_ReplacesEveryFieldsLiteral_KeepsTheStructuredFields()
+    {
+        var answer = DarlingMcpInvestigationTools.ReportsAnswer(StoredRead(), 24, McpDataDetail.MaskLiterals);
+
+        Assert.DoesNotContain(Literal, answer, StringComparison.Ordinal);
+        var root = JsonNode.Parse(answer)!;
+        var report = root["reports"]![0]!;
+        foreach (var text in new[]
+        {
+            (string?)report["root_cause"], (string?)report["summary"], (string?)report["evidence"]![0]!["key_numbers"],
+            (string?)root["journal"]![0]!["reason"], (string?)root["brief"]!["findings"]![0]!["story"],
+            (string?)root["brief"]!["earlier_reports"]![0]!["root_cause"],
+        })
+        {
+            Assert.NotNull(text);
+            Assert.DoesNotContain(Literal, text, StringComparison.Ordinal);
+            Assert.Contains("WHERE name = ", text, StringComparison.Ordinal);
+        }
+
+        Assert.Equal("person:" + Login, (string?)root["journal"]![0]!["actor"]);
+        Assert.Equal("get_blocking", (string?)report["evidence"]![0]!["tool"]);
+        Assert.Equal("real", (string?)report["verdict"]);
+        Assert.Equal("agent-a", (string?)report["agent_id"]);
+        Assert.Equal("maskLiterals", (string?)root["brief"]!["data_detail"]);
+    }
+
+    [Fact]
+    public void ReportsAnswer_MetadataOnly_WithholdsTheFreeText_AndMasksAPersonsLogin()
+    {
+        var answer = DarlingMcpInvestigationTools.ReportsAnswer(StoredRead(), 24, McpDataDetail.MetadataOnly);
+
+        foreach (var canary in new[] { Literal, Login, Host, "zq_login" })
+            Assert.DoesNotContain(canary, answer, StringComparison.Ordinal);
+        var root = JsonNode.Parse(answer)!;
+        var report = root["reports"]![0]!;
+        Assert.Equal(McpDataDetailMasker.WithheldText, (string?)report["root_cause"]);
+        Assert.Equal(McpDataDetailMasker.WithheldText, (string?)report["summary"]);
+        Assert.Equal(McpDataDetailMasker.WithheldText, (string?)report["evidence"]![0]!["key_numbers"]);
+        Assert.Equal(McpDataDetailMasker.WithheldText, (string?)root["journal"]![0]!["reason"]);
+        Assert.StartsWith("person:login#", (string?)root["journal"]![0]!["actor"], StringComparison.Ordinal);
+        Assert.Equal("agent:agent-a", (string?)root["journal"]![1]!["actor"]);
+        Assert.Null(root["journal"]![1]!["reason"]);
+        Assert.Equal(McpDataDetailMasker.WithheldText, (string?)root["brief"]!["findings"]![0]!["story"]);
+        Assert.Equal("blocking", (string?)root["brief"]!["findings"]![0]!["category"]);
+        Assert.Equal(McpDataDetailMasker.WithheldText, (string?)root["brief"]!["earlier_reports"]![0]!["summary"]);
+        Assert.Equal("metadataOnly", (string?)root["brief"]!["data_detail"]);
+        Assert.Equal(4, (int?)report["evidence"]![0]!["arguments"]!["hours_back"]);
+        Assert.True((bool?)report["root_cause_found"]);
+    }
+
+    [Fact]
+    public void ReportsAnswer_Full_ServesTheReportAsStored()
+    {
+        var answer = DarlingMcpInvestigationTools.ReportsAnswer(StoredRead(), 24, McpDataDetail.Full);
+        var root = JsonNode.Parse(answer)!;
+        Assert.Equal(Canaries("root_cause"), (string?)root["reports"]![0]!["root_cause"]);
+        Assert.Equal("person:" + Login, (string?)root["journal"]![0]!["actor"]);
+        Assert.Equal(Canaries("story"), (string?)root["brief"]!["findings"]![0]!["story"]);
+        Assert.Equal("full", (string?)root["brief"]!["data_detail"]);
+        Assert.Equal("ok", (string?)root["status"]);
+    }
+
+    /* ---- review round 2 (M2): report caps, each at the cap and one over ---- */
+
+    private static string EvidenceOf(int items, int valueChars) =>
+        "[" + string.Join(",", Enumerable.Repeat(
+            "{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"" + new string('k', valueChars) + "\"}", items)) + "]";
+
+    [Fact]
+    public void CapProblems_RootCause_8000Passes_8001IsRefused()
+    {
+        Assert.Empty(DarlingMcpInvestigationTools.CapProblems(new string('r', 8000), Evidence));
+        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems(new string('r', 8001), Evidence));
+        Assert.Equal(("root_cause", 8000), (problem.Field, problem.Cap));
+    }
+
+    [Fact]
+    public void CapProblems_Evidence_50ItemsPass_51AreRefused()
+    {
+        Assert.Empty(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(50, 10)));
+        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(51, 10)));
+        Assert.Equal(("evidence", 50), (problem.Field, problem.Cap));
+    }
+
+    [Fact]
+    public void CapProblems_AStringValue_1000Passes_1001IsRefused_NestedToo()
+    {
+        Assert.Empty(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(1, 1000)));
+        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", EvidenceOf(1, 1001)));
+        Assert.Equal(("evidence", 1000), (problem.Field, problem.Cap));
+        var nested = "[{\"tool\":\"t\",\"arguments\":{\"a\":[{\"b\":\"" + new string('x', 1001) + "\"}]},\"key_numbers\":\"1\"}]";
+        Assert.Equal(1000, Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", nested)).Cap);
+    }
+
+    [Fact]
+    public void CapProblems_TheArray_32768BytesPass_32769AreRefused()
+    {
+        /* 32 items of 1,000 characters, then a last item padded to land the printed size exactly on the cap. */
+        var items = Enumerable.Range(0, 32).Select(_ => "{\"key_numbers\":\"" + new string('k', 1000) + "\"}").ToList();
+        string Build(int pad) => "[" + string.Join(",", items.Append("{\"key_numbers\":\"" + new string('p', pad) + "\"}")) + "]";
+        var basis = DarlingMcpInvestigationTools.PgJsonbTextBytes(JsonNode.Parse(Build(0)));
+        var atCap = (int)(DarlingMcpInvestigationTools.MaxEvidenceBytes - basis);
+        Assert.InRange(atCap, 1, 1000);
+
+        Assert.Equal(32768, DarlingMcpInvestigationTools.PgJsonbTextBytes(JsonNode.Parse(Build(atCap))));
+        Assert.Empty(DarlingMcpInvestigationTools.CapProblems("r", Build(atCap)));
+        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", Build(atCap + 1)));
+        Assert.Equal(("evidence", 32768), (problem.Field, problem.Cap));
+    }
+
+    [Theory]
+    [InlineData("[1e3]", 6)]                      // [1000]
+    [InlineData("[1.0E-2]", 7)]                   // [0.010]
+    [InlineData("{\"a\": 1, \"b\": [true, null]}", 27)]
+    [InlineData("[\"<\\u00e9\\u0001\\\"\"]", 15)]  // ["<é\u0001\""]: é is two UTF-8 bytes
+    public void PgJsonbTextBytes_IsTheWidthPostgresPrints(string json, long bytes) =>
+        Assert.Equal(bytes, DarlingMcpInvestigationTools.PgJsonbTextBytes(JsonNode.Parse(json)));
+
+    [Fact]
+    public void PgJsonbTextBytes_AHugeExponent_CannotHideUnderTheCap()
+    {
+        var problem = Assert.Single(DarlingMcpInvestigationTools.CapProblems("r", "[{\"tool\":\"t\",\"arguments\":{\"n\":1e40000},\"key_numbers\":\"1\"}]"));
+        Assert.Equal(32768, problem.Cap);
+    }
+
+    [Fact]
+    public async Task Submit_OverACap_IsRefused_NamingTheFieldAndTheCap_BeforeAnyStoreCall()
+    {
+        /* request_id does not parse, so the tool journals nothing and never reaches the null store. */
+        var answer = await DarlingMcpInvestigationTools.SubmitAsync(
+            null!, "not-a-guid", "", 1, "real", new string('r', 8001), Evidence, "s", null, null, default);
+
+        using var document = JsonDocument.Parse(answer);
+        Assert.Equal("refused", document.RootElement.GetProperty("status").GetString());
+        Assert.Equal("root_cause", document.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Equal(8000, document.RootElement.GetProperty("hints").GetProperty("cap").GetInt32());
+        Assert.Contains("8001 characters, over 8000", document.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    /* ---- review round 2 (L4): an agent id is a name ---- */
+
+    [Theory]
+    [InlineData("agent-a", true)]
+    [InlineData("claude.code_2:lane-C", true)]
+    [InlineData("", false)]
+    [InlineData("agent a", false)]
+    [InlineData("x · closed · person:admin", false)]
+    [InlineData("<b>agent</b>", false)]
+    public void IsValidAgentId_AllowsOnlyTheNameCharset(string agentId, bool valid)
+    {
+        Assert.Equal(valid, InvestigationRequestStore.IsValidAgentId(agentId));
+        Assert.True(InvestigationRequestStore.IsValidAgentId(new string('a', 64)));
+        Assert.False(InvestigationRequestStore.IsValidAgentId(new string('a', 65)));
     }
 
     [Theory]

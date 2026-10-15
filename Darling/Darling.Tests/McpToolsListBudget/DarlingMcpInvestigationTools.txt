@@ -1,6 +1,6 @@
 # DarlingMcpInvestigationTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
 tool claim_investigation_request 264
-param claim_investigation_request.agent_id 41
+param claim_investigation_request.agent_id 38
 param claim_investigation_request.brief_format 11
 param claim_investigation_request.claim_id 39
 param claim_investigation_request.request_id 33

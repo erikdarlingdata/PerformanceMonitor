@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS config.investigation_requests
         ('blocking', 'query_performance', 'resources', 'availability', 'jobs', 'self_monitor', 'other')),
     CONSTRAINT ck_investigation_requests_state CHECK (state IN ('open', 'claimed', 'reported', 'closed', 'expired')),
     CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level = 1),
-    CONSTRAINT ck_investigation_requests_claim_count CHECK (claim_count BETWEEN 0 AND 3)
+    CONSTRAINT ck_investigation_requests_claim_count CHECK (claim_count BETWEEN 0 AND 3),
+    CONSTRAINT ck_investigation_requests_claimed_by CHECK (claimed_by IS NULL OR claimed_by ~ '^[A-Za-z0-9._:-]{1,64}$')
 );
 
 CREATE INDEX IF NOT EXISTS ix_investigation_requests_server_family ON config.investigation_requests (server_id, family, state);
@@ -157,7 +158,13 @@ CREATE TABLE IF NOT EXISTS config.investigation_reports
         REFERENCES config.investigation_requests (request_id) ON DELETE CASCADE,
     CONSTRAINT ck_investigation_reports_verdict CHECK (verdict IN ('real', 'false_positive', 'needs_person')),
     CONSTRAINT ck_investigation_reports_summary CHECK (summary IS NULL OR length(summary) <= 4000),
-    CONSTRAINT ck_investigation_reports_evidence CHECK (jsonb_typeof(evidence) = 'array' AND jsonb_array_length(evidence) >= 1)
+    CONSTRAINT ck_investigation_reports_evidence CHECK (jsonb_typeof(evidence) = 'array' AND jsonb_array_length(evidence) >= 1),
+    CONSTRAINT ck_investigation_reports_agent CHECK (agent_id ~ '^[A-Za-z0-9._:-]{1,64}$'),
+    CONSTRAINT ck_investigation_reports_root_cause CHECK (length(root_cause) <= 8000),
+    CONSTRAINT ck_investigation_reports_evidence_size CHECK (
+        jsonb_array_length(evidence) <= 50
+        AND octet_length(evidence::text) <= 32768
+        AND NOT jsonb_path_exists(evidence, 'strict $.** ? (@.type() == ""string"" && @ like_regex ""^(?:.{200}){5}."" flag ""s"")'))
 );
 
 CREATE INDEX IF NOT EXISTS ix_investigation_reports_story ON config.investigation_reports (story_path_hash, submitted_at);

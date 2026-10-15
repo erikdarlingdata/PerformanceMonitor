@@ -65,9 +65,10 @@ public enum InvestigationClaimOutcome
     /// <summary>No request has that id.</summary>
     NotFound,
 
-    /// <summary>The agent id is longer than <see cref="InvestigationRequestStore.MaxAgentIdLength"/> characters: nothing
+    /// <summary>The agent id is not 1 to <see cref="InvestigationRequestStore.MaxAgentIdLength"/> characters from
+    /// <c>[A-Za-z0-9._:-]</c> (#5632 review round 2, L4): nothing
     /// was read or written.</summary>
-    AgentIdTooLong,
+    AgentIdInvalid,
 
     /// <summary>The request already holds <see cref="InvestigationRequestStore.MaxAgentJournalRows"/> journal rows
     /// written by agents: the call is refused and one <c>journal_capped</c> row says so.</summary>
@@ -96,9 +97,10 @@ public enum InvestigationSubmitOutcome
     /// <summary>No request has that id.</summary>
     NotFound,
 
-    /// <summary>The agent id is longer than <see cref="InvestigationRequestStore.MaxAgentIdLength"/> characters: nothing
+    /// <summary>The agent id is not 1 to <see cref="InvestigationRequestStore.MaxAgentIdLength"/> characters from
+    /// <c>[A-Za-z0-9._:-]</c> (#5632 review round 2, L4): nothing
     /// was read or written.</summary>
-    AgentIdTooLong,
+    AgentIdInvalid,
 
     /// <summary>The request already holds <see cref="InvestigationRequestStore.MaxAgentJournalRows"/> journal rows
     /// written by agents: the report is refused and one <c>journal_capped</c> row says so.</summary>
@@ -211,6 +213,19 @@ public sealed class InvestigationRequestStore
     /// <summary>The longest agent id a claim or a report may carry (#5632 review round 1, L3). It is written into
     /// <c>claimed_by</c>, the journal's <c>actor</c> and the report, so the store refuses a longer one for every caller.</summary>
     public const int MaxAgentIdLength = 64;
+
+    /// <summary>The agent a refusal is journaled under when the caller's agent id is not a valid one, so an id built to
+    /// read as another journal line (the web panel joins a row's fields with a middle dot) is never written.</summary>
+    public const string InvalidAgentId = "invalid";
+
+    /// <summary>
+    /// True when <paramref name="agentId"/> is 1 to <see cref="MaxAgentIdLength"/> characters from <c>[A-Za-z0-9._:-]</c>
+    /// (#5632 review round 2, L4; V184's check constraint), so it cannot carry a separator, a person's prefix with spaces,
+    /// or markup into the journal.
+    /// </summary>
+    public static bool IsValidAgentId(string? agentId) =>
+        !string.IsNullOrEmpty(agentId) && agentId.Length <= MaxAgentIdLength
+        && agentId.All(c => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '.' or '_' or ':' or '-');
 
     /// <summary>The journal rows agents may write on one request (#5632 review round 1, L3). A token holder could otherwise
     /// add a row per guessed claim id, each kept 365 days. The next agent call on that request is refused, and one
@@ -530,15 +545,17 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// <summary>
     /// Claims <paramref name="requestId"/> for <paramref name="agentId"/> under a new claim id with one conditional UPDATE.
     /// When no row returns, one SELECT says why, and the refusal is journaled once per request and reason (an unknown id
-    /// once per hour). An agent id over <see cref="MaxAgentIdLength"/> characters, or a request whose agent journal is full
-    /// (<see cref="MaxAgentJournalRows"/>), is refused first.
+    /// once per hour). An agent id <see cref="IsValidAgentId"/> refuses (journaled once per request under
+    /// <see cref="InvalidAgentId"/>), or a request whose agent journal is full (<see cref="MaxAgentJournalRows"/>), is
+    /// refused first. The <c>claimed</c> row's reason is null (#5632 review round 2, L4): the claim id is a lease identity,
+    /// so it lives only in that row's <c>once_key</c>, which no reader returns.
     /// </summary>
     public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrEmpty(agentId);
-        if (agentId.Length > MaxAgentIdLength)
+        if (!IsValidAgentId(agentId))
         {
-            return new InvestigationClaimResult(InvestigationClaimOutcome.AgentIdTooLong, null, null, 0, "agent_id_too_long");
+            await RecordRefusalAsync(requestId, InvalidAgentId, "claim", "agent_id_invalid", null, cancellationToken);
+            return new InvestigationClaimResult(InvestigationClaimOutcome.AgentIdInvalid, null, null, 0, "agent_id_invalid");
         }
 
         var now = Now();
@@ -564,7 +581,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 var serverId = reader.GetInt32(2);
                 await reader.DisposeAsync();
                 await JournalAsync(connection, transaction, now, requestId, null, serverId, "claimed", actor,
-                    claimId.ToString(), null, null, cancellationToken);
+                    null, null, "claimed:" + claimId.ToString(), cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 return new InvestigationClaimResult(InvestigationClaimOutcome.Claimed, claimId, leaseUntil, claimCount, null);
             }
@@ -638,17 +655,18 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     /// <summary>
     /// Accepts the current claim's report while the request is claimed (lease live or lapsed) or expired under that claim,
-    /// until a newer claim supersedes it. A refusal is journaled once per request, claim and reason (an unknown id once per
-    /// hour). An agent id over <see cref="MaxAgentIdLength"/> characters, or a request whose agent journal is full
-    /// (<see cref="MaxAgentJournalRows"/>), is refused first.
+    /// until a newer claim supersedes it. A refusal is journaled once per request and reason, never per claim id, so guessed
+    /// claim ids cannot fill the request's agent journal (#5632 review round 2, L1; an unknown id once per hour). An agent id
+    /// <see cref="IsValidAgentId"/> refuses, or a request whose agent journal is full (<see cref="MaxAgentJournalRows"/>),
+    /// is refused first.
     /// </summary>
     public async Task<InvestigationSubmitOutcome> SubmitAsync(InvestigationReportSubmission report, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
-        ArgumentException.ThrowIfNullOrEmpty(report.AgentId);
-        if (report.AgentId.Length > MaxAgentIdLength)
+        if (!IsValidAgentId(report.AgentId))
         {
-            return InvestigationSubmitOutcome.AgentIdTooLong;
+            await RecordRefusalAsync(report.RequestId, InvalidAgentId, "submit", "agent_id_invalid", null, cancellationToken);
+            return InvestigationSubmitOutcome.AgentIdInvalid;
         }
 
         var now = Now();
@@ -705,7 +723,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             /* An unknown id: once per hour, as for a claim. A known request's refusals are bounded by its agent cap. */
             var onceKey = state is null
                 ? string.Create(CultureInfo.InvariantCulture, $"refused:submit:not_found:{now:yyyy-MM-ddTHH}")
-                : "refused:submit:" + report.RequestId.ToString() + ":" + report.ClaimId.ToString() + ":" + reason;
+                : "refused:submit:" + report.RequestId.ToString() + ":" + reason;
             await JournalAsync(connection, transaction, now, state is null ? null : report.RequestId, null, state is null ? null : serverId,
                 "refused", actor, "submit:" + reason, null, onceKey, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -772,16 +790,17 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// <summary>
     /// Journals a refusal the tool layer decided (an invalid report, an action proposal at Level 1, an unsupported format)
     /// once per request, operation and reason (#5632 review ruling). An unknown request id is journaled once per hour per
-    /// reason, as the store's own refusals are. An agent id over <see cref="MaxAgentIdLength"/> characters is not journaled.
+    /// reason, as the store's own refusals are. An agent id <see cref="IsValidAgentId"/> refuses is journaled as
+    /// <see cref="InvalidAgentId"/>.
     /// </summary>
     public async Task RecordRefusalAsync(Guid requestId, string agentId, string operation, string reason, string? detailJson,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(operation);
         ArgumentException.ThrowIfNullOrEmpty(reason);
-        if (string.IsNullOrEmpty(agentId) || agentId.Length > MaxAgentIdLength)
+        if (!IsValidAgentId(agentId))
         {
-            return;
+            agentId = InvalidAgentId;
         }
 
         var now = Now();

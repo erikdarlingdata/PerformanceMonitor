@@ -112,6 +112,9 @@ public sealed class InvestigationBriefComposer
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
+    /// <summary>The <c>mcp.dataDetail</c> level the host serves now: what <c>get_investigation_reports</c> masks at.</summary>
+    public McpDataDetail Mode => _dataDetail.Mode;
+
     /// <summary>
     /// The brief for <paramref name="requestId"/> as JSON (<see cref="InvestigationFormats.BriefFormat"/>), or null when no
     /// request has that id. The caller stores it with <c>InvestigationRequestStore.SetBriefAsync</c>.
@@ -383,27 +386,14 @@ public sealed class InvestigationBriefComposer
     /// stay at every level: category, times, database and object names, verdicts, hashes, counts. Only
     /// <paramref name="freeText"/>, the text a person or an agent wrote or engine prose that can quote collected text,
     /// is masked as free text (<see cref="McpDataDetailMasker.FreeText"/>) and set in place of its <c>null</c>
-    /// placeholder. Then each string is cut at <see cref="FieldCharCap"/>. Under <c>full</c> only the cut applies.
+    /// placeholder, through <see cref="InvestigationFieldMasking.Mask"/>, the rule <c>get_investigation_reports</c> shares
+    /// (#5632 review round 2, M1). Then each string is cut at <see cref="FieldCharCap"/>. Under <c>full</c> only the cut
+    /// applies.
     /// </summary>
     private static JsonObject Masked(
         JsonObject node, McpDataDetailMasker masker, CutCounter cut, params (string Key, string? Text)[] freeText)
     {
-        JsonObject result = node;
-        var json = node.ToJsonString();
-        var masked = masker.Json(json);
-        if (!ReferenceEquals(masked, json))
-        {
-            result = !string.Equals(masked, McpDataDetailMasker.Refusal, StringComparison.Ordinal)
-                && JsonNode.Parse(masked) is JsonObject parsed
-                    ? parsed
-                    : new JsonObject { ["withheld"] = McpDataDetailMasker.Refusal };
-        }
-
-        if (!result.ContainsKey("withheld"))
-        {
-            foreach (var (key, text) in freeText)
-                result[key] = masker.FreeText(text);
-        }
+        var result = InvestigationFieldMasking.Mask(node, masker, freeText);
 
         // Cut AFTER masking, so a cut never splits a literal the masker has to see whole.
         cut.CapAll(result);

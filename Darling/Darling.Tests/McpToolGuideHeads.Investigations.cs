@@ -83,9 +83,11 @@ public sealed class McpToolGuideHeadsInvestigationsTests
         Assert.Contains("invalid lists every missing or wrong field at once", submit, StringComparison.Ordinal);
         Assert.Contains("any action_proposals is refused", submit, StringComparison.Ordinal);
         Assert.Contains("proposed_note at most 2,000", submit, StringComparison.Ordinal);
+        Assert.Contains("root_cause at most 8,000; evidence at most 50 items", submit, StringComparison.Ordinal);
+        Assert.Contains("status refused, naming the field and the cap", submit, StringComparison.Ordinal);
 
         var reports = McpToolGuideTests.Served("get_investigation_reports").Tail!;
-        Assert.Contains("stored masked at mcp.dataDetail", reports, StringComparison.Ordinal);
+        Assert.Contains("stored as submitted and masked at answer time", reports, StringComparison.Ordinal);
         Assert.Contains("unreviewed and self-attributed", reports, StringComparison.Ordinal);
         Assert.Contains("at most 200 rows", reports, StringComparison.Ordinal);
     }

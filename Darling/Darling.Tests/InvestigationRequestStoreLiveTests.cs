@@ -265,12 +265,13 @@ FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
         });
     }
 
-    /// <summary>The store bounds what a token holder can write (#5632 review round 1, L3): an agent id over 64 characters
-    /// is refused before anything is read or written; a request takes at most 200 agent-written journal rows, after which
+    /// <summary>The store bounds what a token holder can write (#5632 review round 1, L3; round 2, L4): an agent id over
+    /// 64 characters, or with a character outside <c>[A-Za-z0-9._:-]</c>, is refused and journaled once per request and
+    /// reason under <c>agent:invalid</c>, never under the id it was given; a request takes at most 200 agent-written journal rows, after which
     /// every agent call on it is refused and one <c>journal_capped</c> row records that; and claims of unknown ids journal
     /// once per hour, not once per guessed id.</summary>
     [Fact]
-    public async Task ALongAgentId_IsRefused_AndARequestsAgentJournal_IsCappedAt200_AndUnknownIdsJournalHourly()
+    public async Task AnInvalidAgentId_IsRefusedAndJournaledOnce_AndARequestsAgentJournal_IsCappedAt200_AndUnknownIdsJournalHourly()
     {
         await RunAsync(async (store, connection, ct) =>
         {
@@ -280,20 +281,24 @@ FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
             const string AgentRows = "SELECT count(*) FROM config.investigation_journal WHERE actor LIKE 'agent:%'";
 
             var refused = await store.ClaimAsync(id, tooLong, ct);
-            Assert.Equal(InvestigationClaimOutcome.AgentIdTooLong, refused.Outcome);
-            Assert.Equal("agent_id_too_long", refused.Reason);
-            Assert.Equal("0", await ScalarAsync(connection, AgentRows, ct));
+            Assert.Equal(InvestigationClaimOutcome.AgentIdInvalid, refused.Outcome);
+            Assert.Equal("agent_id_invalid", refused.Reason);
+            /* An id built to read as a person's close on the web panel's journal line: refused, and the once-key holds. */
+            Assert.Equal(InvestigationClaimOutcome.AgentIdInvalid, (await store.ClaimAsync(id, "x · closed · person:admin", ct)).Outcome);
+            Assert.Equal(InvestigationClaimOutcome.AgentIdInvalid, (await store.ClaimAsync(id, string.Empty, ct)).Outcome);
+            Assert.Equal("1|agent:invalid|claim:agent_id_invalid", await ScalarAsync(connection,
+                "SELECT count(*) || '|' || min(actor) || '|' || min(reason) FROM config.investigation_journal WHERE actor LIKE 'agent:%'", ct));
 
             var claim = await store.ClaimAsync(id, longest, ct);
             Assert.Equal(InvestigationClaimOutcome.Claimed, claim.Outcome);
-            Assert.Equal(InvestigationSubmitOutcome.AgentIdTooLong,
+            Assert.Equal(InvestigationSubmitOutcome.AgentIdInvalid,
                 await store.SubmitAsync(Report(id, claim.ClaimId!.Value) with { AgentId = tooLong }, ct));
-            Assert.Equal("1", await ScalarAsync(connection, AgentRows, ct));
+            Assert.Equal("3", await ScalarAsync(connection, AgentRows, ct));
 
             /* 199 agent rows; one more refused submit under a guessed claim id is the 200th. */
             await ExecAsync(connection, $@"
 INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason)
-SELECT '2026-10-14 12:00:00+00', '{id}', 7, 'refused', 'agent:seed', 'submit:lease_lost' FROM generate_series(1, 198)", ct);
+SELECT '2026-10-14 12:00:00+00', '{id}', 7, 'refused', 'agent:seed', 'submit:lease_lost' FROM generate_series(1, 196)", ct);
             Assert.Equal(InvestigationSubmitOutcome.LeaseLost, await store.SubmitAsync(Report(id, Guid.NewGuid()), ct));
             Assert.Equal("200", await ScalarAsync(connection, AgentRows, ct));
 
@@ -315,6 +320,105 @@ FROM config.investigation_journal WHERE actor LIKE 'agent:%'", ct));
             Assert.Equal("1|1", await ScalarAsync(connection, @"
 SELECT count(*) FILTER (WHERE reason = 'claim:not_found') || '|' || count(*) FILTER (WHERE reason = 'submit:not_found')
 FROM config.investigation_journal", ct));
+        });
+    }
+
+    /// <summary>#5632 review round 2, L1 and L4: 200 submits under guessed claim ids write ONE <c>lease_lost</c> row (its
+    /// once-key names the request and the reason, never a claim id), so the real claim holder's report still lands; and
+    /// the <c>claimed</c> row publishes no claim id: its reason is null and the id lives only in the unreturned once-key.</summary>
+    [Fact]
+    public async Task GuessedClaimIds_JournalLeaseLostOnce_TheHoldersReportLands_AndTheClaimedRowHidesTheClaimId()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, claim.Outcome);
+            var claimId = claim.ClaimId!.Value.ToString();
+            Assert.Equal("1|0|claimed:" + claimId, await ScalarAsync(connection, @"
+SELECT count(*) || '|' || count(reason) || '|' || min(once_key)
+FROM config.investigation_journal WHERE event = 'claimed'", ct));
+
+            for (var i = 0; i < 200; i++)
+                Assert.Equal(InvestigationSubmitOutcome.LeaseLost, await store.SubmitAsync(Report(id, Guid.NewGuid()), ct));
+            Assert.Equal("1|refused:submit:" + id + ":lease_lost", await ScalarAsync(connection, @"
+SELECT count(*) || '|' || min(once_key)
+FROM config.investigation_journal WHERE reason = 'submit:lease_lost'", ct));
+
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(id, claim.ClaimId!.Value), ct));
+            Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_reports", ct));
+
+            /* No reader returns a claim id: the report read's journal holds none of it. */
+            var read = await store.ReadReportsAsync(id, null, T0.AddDays(-1), 10, 200, ct);
+            Assert.DoesNotContain(read.Journal, j => (j.Reason ?? string.Empty).Contains(claimId, StringComparison.Ordinal)
+                || (j.DetailJson ?? string.Empty).Contains(claimId, StringComparison.Ordinal));
+        });
+    }
+
+    /// <summary>#5632 review round 2, M2 and L4: V184 holds the caps the tool enforces, so a writer that skips the tool still
+    /// cannot store an oversized report or an agent id outside <c>[A-Za-z0-9._:-]{1,64}</c>. Each cap passes at the cap
+    /// and refuses one over it (23514).</summary>
+    [Fact]
+    public async Task V184Checks_HoldTheReportCaps_AtTheCapAndOneOver()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+
+            async Task<string?> InsertAsync(string agent, string rootCause, string evidence)
+            {
+                await using var tx = await connection.BeginTransactionAsync(ct);
+                await using var command = new NpgsqlCommand(@"
+INSERT INTO config.investigation_reports (request_id, report_format, agent_id, claim_id, verdict, root_cause, evidence, server_id)
+VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
+                command.Parameters.Add(new NpgsqlParameter<Guid> { TypedValue = id });
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = agent });
+                command.Parameters.Add(new NpgsqlParameter<Guid> { TypedValue = Guid.NewGuid() });
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = rootCause });
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = evidence });
+                try
+                {
+                    await command.ExecuteNonQueryAsync(ct);
+                    return null;
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.CheckViolation)
+                {
+                    return ex.ConstraintName;
+                }
+                finally
+                {
+                    await tx.RollbackAsync(ct);
+                }
+            }
+
+            static string Items(int count, int valueChars) =>
+                "[" + string.Join(",", Enumerable.Repeat("{\"tool\":\"" + new string('t', valueChars) + "\"}", count)) + "]";
+
+            Assert.Null(await InsertAsync(new string('a', 64), new string('r', 8000), Items(50, 10)));
+            Assert.Equal("ck_investigation_reports_root_cause", await InsertAsync("a", new string('r', 8001), Items(1, 10)));
+            Assert.Equal("ck_investigation_reports_evidence_size", await InsertAsync("a", "r", Items(51, 10)));
+            Assert.Null(await InsertAsync("a", "r", Items(1, 1000)));
+            Assert.Equal("ck_investigation_reports_evidence_size", await InsertAsync("a", "r", Items(1, 1001)));
+            Assert.Equal("ck_investigation_reports_evidence_size",
+                await InsertAsync("a", "r", "[{\"arguments\":{\"deep\":[\"" + new string('d', 1001) + "\"]}}]"));
+            /* 32 strings of 1,000 characters print as 32 * 1,000 plus their quotes, keys and separators: over 32,768. */
+            Assert.Equal("ck_investigation_reports_evidence_size", await InsertAsync("a", "r", Items(33, 1000)));
+            Assert.Equal("ck_investigation_reports_agent", await InsertAsync(new string('a', 65), "r", Items(1, 10)));
+            Assert.Equal("ck_investigation_reports_agent", await InsertAsync("agent a", "r", Items(1, 10)));
+
+            /* The tool's byte measure is never below what PostgreSQL prints, so a report the tool passes never trips the
+               check: exact on these, wider only where the relaxed encoder escapes a character PostgreSQL keeps raw. */
+            foreach (var json in new[]
+            {
+                "[1e3, 1.0E-2, -0.5e1, 12.340]", "[{\"a\": {\"b\": [true, false, null, {}, []]}}]",
+                "[\"<\\u00e9\\u0001\\\"\\\\ \\n\\t\"]", Items(3, 7),
+            })
+            {
+                var printed = long.Parse((await ScalarAsync(connection, $"SELECT octet_length('{json.Replace("'", "''")}'::jsonb::text)", ct))!,
+                    CultureInfo.InvariantCulture);
+                Assert.Equal(printed, PerformanceMonitor.Darling.Service.Mcp.DarlingMcpInvestigationTools.PgJsonbTextBytes(
+                    System.Text.Json.Nodes.JsonNode.Parse(json)));
+            }
         });
     }
 
