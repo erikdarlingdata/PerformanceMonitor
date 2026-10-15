@@ -56,7 +56,7 @@ public static class QueryStoreBackgroundIndexes
 
     /// <summary>
     /// Command deadline for a build and a drop, in seconds. A build reads a whole heap (about 108 s at 25 GB for the
-    /// BRIN, several minutes at a full 9 days' retention). Two hours leaves headroom on a slow volume while still
+    /// BRIN, several minutes at a full 10 days' retention, 9 before #5809). Two hours leaves headroom on a slow volume while still
     /// bounding a build stuck behind a long transaction; shutdown cancels it sooner.
     /// </summary>
     public const int BuildTimeoutSeconds = 7200;
