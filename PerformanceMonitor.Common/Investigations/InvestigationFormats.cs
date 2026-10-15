@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 
-namespace PerformanceMonitor.Darling.Service.Investigations;
+namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// The format numbers of Level 1 investigations (#5632 Phase A, plan section 7): the shape of the brief Darling composes

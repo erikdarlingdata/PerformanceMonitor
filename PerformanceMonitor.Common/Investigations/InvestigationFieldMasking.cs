@@ -2,9 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
-using PerformanceMonitor.Common;
-
-namespace PerformanceMonitor.Darling.Service.Investigations;
+namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// The one masking rule for investigation fields at <c>mcp.dataDetail</c> (#5632 R3), shared by the brief composer and

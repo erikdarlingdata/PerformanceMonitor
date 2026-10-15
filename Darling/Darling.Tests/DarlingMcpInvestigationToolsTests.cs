@@ -443,9 +443,9 @@ public sealed class DarlingMcpInvestigationToolsTests
     [InlineData("<b>agent</b>", false)]
     public void IsValidAgentId_AllowsOnlyTheNameCharset(string agentId, bool valid)
     {
-        Assert.Equal(valid, InvestigationRequestStore.IsValidAgentId(agentId));
-        Assert.True(InvestigationRequestStore.IsValidAgentId(new string('a', 64)));
-        Assert.False(InvestigationRequestStore.IsValidAgentId(new string('a', 65)));
+        Assert.Equal(valid, InvestigationRules.IsValidAgentId(agentId));
+        Assert.True(InvestigationRules.IsValidAgentId(new string('a', 64)));
+        Assert.False(InvestigationRules.IsValidAgentId(new string('a', 65)));
     }
 
     [Theory]

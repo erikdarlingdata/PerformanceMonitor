@@ -70,10 +70,6 @@ public sealed class DarlingMcpInvestigationTools
     /// <summary>The most journal rows one report read returns.</summary>
     internal const int JournalLimit = 200;
 
-    /// <summary>What a valid agent id is (#5632 review round 2, L4).</summary>
-    internal const string AgentIdRule =
-        "agent_id is required: 1 to 64 characters, each a letter, a digit, '.', '_', ':' or '-'.";
-
     /// <summary>The agent a submit refusal is journaled under when its claim_id resolves to no claim holder.</summary>
     internal const string UnclaimedAgent = "unclaimed";
 
@@ -391,11 +387,11 @@ public sealed class DarlingMcpInvestigationTools
         try
         {
             /* #5632 review round 2, L4: an agent id is a name, not text, so it cannot pose as another journal line. */
-            if (!InvestigationRequestStore.IsValidAgentId(agent_id))
+            if (!InvestigationRules.IsValidAgentId(agent_id))
             {
-                await store.RecordRefusalAsync(requestId, InvestigationRequestStore.InvalidAgentId, "claim", "agent_id_invalid", null,
+                await store.RecordRefusalAsync(requestId, InvestigationRules.InvalidAgentId, "claim", "agent_id_invalid", null,
                     cancellationToken);
-                return McpHelpers.Refusal("agent_id", AgentIdRule);
+                return McpHelpers.Refusal("agent_id", InvestigationRules.AgentIdRule);
             }
 
             if (brief_format is not null && brief_format != InvestigationFormats.BriefFormat)
@@ -560,9 +556,9 @@ public sealed class DarlingMcpInvestigationTools
                 InvestigationSubmitOutcome.AlreadyReported => Status("already_reported", "The request already holds a report."),
                 InvestigationSubmitOutcome.NotOpen => Status("not_open", "The request is closed."),
                 InvestigationSubmitOutcome.NotFound => Status("not_found", $"No investigation request has id {requestId}."),
-                InvestigationSubmitOutcome.AgentIdInvalid => Status("agent_id_invalid", "The claim's agent id is not valid. " + AgentIdRule),
+                InvestigationSubmitOutcome.AgentIdInvalid => Status("agent_id_invalid", "The claim's agent id is not valid. " + InvestigationRules.AgentIdRule),
                 _ => Status("journal_capped",
-                    $"The request already holds {InvestigationRequestStore.MaxAgentJournalRows} agent journal rows; the report was refused."),
+                    $"The request already holds {InvestigationRules.MaxAgentJournalRows} agent journal rows; the report was refused."),
             };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -951,13 +947,13 @@ public sealed class DarlingMcpInvestigationTools
         InvestigationClaimOutcome.AlreadyClaimed => "Another claim holds a live lease on this request.",
         InvestigationClaimOutcome.NotOpen => claim.Reason switch
         {
-            "claim_limit" => $"The request has used its {InvestigationRequestStore.MaxClaims} claims.",
+            "claim_limit" => $"The request has used its {InvestigationRules.MaxClaims} claims.",
             { } reason => $"The request is not open to a claim: {reason}.",
             _ => "The request is not open to a claim.",
         },
         InvestigationClaimOutcome.NotFound => "No investigation request has that id.",
-        InvestigationClaimOutcome.AgentIdInvalid => AgentIdRule,
-        _ => $"The request already holds {InvestigationRequestStore.MaxAgentJournalRows} agent journal rows; the claim was refused.",
+        InvestigationClaimOutcome.AgentIdInvalid => InvestigationRules.AgentIdRule,
+        _ => $"The request already holds {InvestigationRules.MaxAgentJournalRows} agent journal rows; the claim was refused.",
     };
 
     private static string Status(string status, string message) =>
