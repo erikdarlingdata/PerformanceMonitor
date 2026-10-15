@@ -11275,6 +11275,30 @@ AND   j.hypertable_name = '{relation}'", connection))
             {
                 _logger.LogWarning("Read-latency flush failed; this hour's histogram rows are dropped: {Message}", ex.Message);
             }
+
+            /* #5810: the hourly rollup get_collection_health reads for its closed hours. Last on the tick and in its own slice
+               of the budget, so its first pass after the upgrade (a backfill of the whole window) cannot cost the flushes
+               above their rows. A failed or canceled pass loses nothing: the next one starts from the newest rolled hour,
+               and the read takes the hours after it from the raw log. */
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
+            }
+
+            using var hourlyBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+            hourlyBudget.CancelAfter(CollectionLogHourly.PassSliceBudget);
+            try
+            {
+                await CollectionLogHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, hourlyBudget.Token);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                || (hourlyBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+            {
+                _logger.LogWarning(
+                    "Collection log hourly rollup failed (SqlState {SqlState}); the next pass retries from the newest rolled hour: {Message}",
+                    (ex as PostgresException)?.SqlState ?? "n/a", ex.Message);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

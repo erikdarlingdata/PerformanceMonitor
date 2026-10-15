@@ -14675,7 +14675,16 @@ AND   js.last_run_status = 'Success'";
     /// feeds asserts the rollup-coverage gate is the cause and tells the reader not to arm the policy by
     /// hand, which would be wrong advice about a retention policy this product never created (review
     /// catch). The mutating siblings ConvergeRetentionHorizonSql / SetRetentionScheduleSql scope the same
-    /// way.</summary>
+    /// way.
+    ///
+    /// <para>#5858: the chunks are counted on the relation they belong to. A retention policy on a continuous
+    /// aggregate reports the aggregate's view as its hypertable, while <c>timescaledb_information.chunks</c>
+    /// lists the aggregate's chunks under its materialization hypertable, so a count keyed on the job's own
+    /// name read zero chunks and no span for every aggregate policy, and the Retention Held alert could never
+    /// fire for one. The <c>LEFT JOIN</c> to <c>continuous_aggregates</c> resolves the materialization the way
+    /// <see cref="CompressionActivitySql"/> does (#3581) and falls through to the job's own identity for a
+    /// plain hypertable. The projected name stays the job's, so the aggregate is still reported by its view
+    /// name.</para></summary>
     public const string RetentionHoldReadSql = @"
 SELECT
     j.job_id,
@@ -14690,13 +14699,16 @@ SELECT
     END,
     COALESCE((j.config->>'darling_armed')::boolean, false)
 FROM timescaledb_information.jobs AS j
+LEFT JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  ca.view_schema = j.hypertable_schema
+  AND ca.view_name   = j.hypertable_name
 LEFT JOIN LATERAL (
     SELECT
         min(ch.range_start) AS oldest_range_start,
         count(*)::bigint AS chunk_count
     FROM timescaledb_information.chunks AS ch
-    WHERE ch.hypertable_schema = j.hypertable_schema
-      AND ch.hypertable_name   = j.hypertable_name
+    WHERE ch.hypertable_schema = coalesce(ca.materialization_hypertable_schema, j.hypertable_schema)
+      AND ch.hypertable_name   = coalesce(ca.materialization_hypertable_name, j.hypertable_name)
 ) AS c ON true
 WHERE j.proc_name = 'policy_retention'
   AND j.hypertable_schema = 'collect'";
