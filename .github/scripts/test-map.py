@@ -70,6 +70,23 @@ COLLECTION_ATTR = re.compile(r'\[\s*Collection\(\s*"([^"]+)"')
 # fixture, and every member depends on it (#5459: a PgMigrations.cs change broke 389 classes, 8 of them unmapped).
 COLLECTION_SHARE = 0.5
 COLLECTION_MIN_MEMBERS = 5
+# Classes that keep a wide Darling text pattern (#5876). Before the fix every class of a test file that spelled
+# `ReadRepoFile("Darling", ...)` got `Darling/**`: 685 classes, so a one-file test change selected about 650 of them.
+# These classes failed on pull requests whose change the narrower map did not select (`ci-select.py --replay --map`
+# on the failure corpus shows the misses), most often live-store collisions with a sibling test file, so they keep a
+# wider pattern until a replay shows they can lose it.
+#   KEEP_DARLING_PRODUCT: every product project under `Darling/` (the product files a change touched).
+#   KEEP_DARLING_TREE: all of `Darling/`, test project included (the failing change was a sibling test file).
+KEEP_DARLING_PRODUCT = frozenset({
+    "AlertReadFailureSurfaceTests", "AvailabilityGroupsTabRefreshTests", "DarlingDeployRollbackRetentionTests",
+    "PgTargetAnomalyTests", "PgTargetQueriesTests", "PgTargetWaitTests", "QueryStoreTopDailyRungTests",
+    "RetiredBaselineAggregateLiveTests", "ViewerEventDataStartTests",
+})
+KEEP_DARLING_TREE = frozenset({
+    "DailySummaryNotCarriedLiveTests", "DarlingMissingCredentialMessageTests", "IntervalHonestHourlyRollupLiveTests",
+    "MaterializationHoleRepairTests", "McpZeroIsAMeasurementTests", "PgTargetBlockingTests", "PgTargetSessionsTests",
+    "PgTargetTempTests", "SharedBaselineCacheLiveTests",
+})
 MAX_OVERFLOW_FILES = 60  # a class that would be a hole may take the files of a type declared in more files than the cap
 # A repo path written in a comment or doc cref (`Lite/Analysis/AnomalyDetector.cs:120`): the author names the file the
 # class pins, so a change to it selects the class (#5459 slice 4, the Darling/Lite twin pairs).
@@ -261,6 +278,16 @@ class Repo:
                     if len(inner) >= 6 and TOOL_NAME.match(inner):
                         self.tools.setdefault(inner, set()).add(f)
 
+    def tree_patterns(self, top: str) -> list[str]:
+        """A source that names a top-level directory and reads text may read anything under it. A directory that holds
+        a test project (`Darling/` holds `Darling/Darling.Tests`) gives one pattern per product child, so that the
+        pattern does not select the class for every change to a test file (#5876); any other directory is `top/**`."""
+        kids = sorted(d for d in self.dirs if d.startswith(top + "/") and d.count("/") == 1)
+        product = [d for d in kids if not TEST_DIR.search(d + "/")]
+        if not product or len(product) == len(kids):
+            return [top + "/**"]
+        return [d + "/**" for d in product]
+
     def resolve(self, candidate: str, reads_text: bool) -> list[str]:
         """Patterns for a path-like literal of a test source; empty when it names nothing in the checkout."""
         key = (candidate, reads_text)
@@ -283,7 +310,7 @@ class Repo:
             if c.rsplit(".", 1)[-1] in FILE_EXT and "." in c:
                 hits = self.by_basename.get(c, [])
                 return hits if 0 < len(hits) <= MAX_BASENAME_MATCHES else []
-            return [c + "/**"] if reads_text and c in self.top_dirs else []
+            return self.tree_patterns(c) if reads_text and c in self.top_dirs else []
         return [c + "/**"] if c in self.dirs else []
 
 
@@ -293,16 +320,26 @@ def analyze_source(text: str, repo: Repo, own_file: str, own_types: set[str]) ->
     literals = [unescape(m) for m in LITERAL.findall(text)]
     candidates = list(literals)
     candidates += [m for m in COMMENT_PATH.findall(text) if m.rsplit(".", 1)[-1] in FILE_EXT]
+    run_use: dict[str, int] = {}  # a bare directory name -> how many times a run that resolves to files already names it
     for run in RUN.findall(text):
         parts = [unescape(x) for x in LITERAL.findall(run)]
         if all(PATHLIKE.match(p) for p in parts):
-            candidates.append("/".join(p.strip("/") for p in parts))
+            joined = "/".join(p.strip("/") for p in parts)
+            candidates.append(joined)
+            if repo.resolve(joined, reads):
+                for p in parts:
+                    run_use[p] = run_use.get(p, 0) + 1
     patterns: dict[str, None] = {}
     bare_glob = False
     for cand in dict.fromkeys(candidates):
         cand = cand.replace("\\", "/")
         if "*" in cand and "/" not in cand.strip("/") and PATHLIKE.match(cand):
             bare_glob = True  # `*.cs`, `*`: a search pattern that names no place, so it cannot narrow a tree walk
+            continue
+        # `ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "X.cs")` names the file through the run;
+        # its first segment alone is not a read of the whole `Darling/` tree (#5876). A bare name that is used on its
+        # own anywhere else in the source (`Path.Combine(root, "Darling")`) still resolves to its tree.
+        if "/" not in cand.strip("/") and run_use.get(cand, 0) and run_use[cand] >= literals.count(cand):
             continue
         for pat in repo.resolve(cand, reads):
             if pat != own_file:
@@ -518,6 +555,10 @@ def build_map(root: str, tracked: list[str], shards: dict[str, list[dict]], sha:
             if src and not src["guard"]:
                 named_by = sorted(refs.get(cls, set()) - set(own))
                 pats = "tree" if src["tree"] else list(dict.fromkeys(list(src["patterns"]) + named_by))
+                if pats != "tree" and cls in KEEP_DARLING_TREE:
+                    pats.append("Darling/**")
+                elif pats != "tree" and cls in KEEP_DARLING_PRODUCT:
+                    pats += repo.tree_patterns("Darling")
                 # A class that would be a hole (no product file, no pattern) takes the files of the partial types it
                 # names, however many there are; past the cap it reads the tree. More files, never fewer.
                 if not pats and not any(not TEST_DIR.search(f) for f in files) and src["overflow"]:
