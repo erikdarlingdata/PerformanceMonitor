@@ -296,13 +296,13 @@ public partial class ServerTab : UserControl
         {
             case 0: await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
             case 1: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
-            case 2: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case QueriesTabIndex: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
             case 3: break; // Plan Viewer — no queries
             case 4: await RefreshCpuAsync(hoursBack, fromDate, toDate); break;
             case 5: await RefreshMemoryAsync(hoursBack, fromDate, toDate, subTabOnly); break;
             case 6: await RefreshFileIoAsync(hoursBack, fromDate, toDate); break;
             case 7: await RefreshTempDbAsync(hoursBack, fromDate, toDate); break;
-            case 8: await RefreshBlockingAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case BlockingTabIndex: await RefreshBlockingAsync(hoursBack, fromDate, toDate, subTabOnly); break;
             case 9: await RefreshPerfmonAsync(hoursBack, fromDate, toDate); break;
             case 10: await RefreshRunningJobsAsync(hoursBack, fromDate, toDate); break;
             case 11: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
@@ -413,7 +413,7 @@ public partial class ServerTab : UserControl
                         UpdateQueryStoreDurationTrendChart(qsdt.Result, hoursBack, fromDate, toDate, disc.Result);
                         UpdateExecutionCountTrendChart(ect.Result, hoursBack, fromDate, toDate, disc.Result);
                         break;
-                    case 1: // Active Queries
+                    case ActiveQueriesSubTabIndex: // Active Queries
                         var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
                         _querySnapshotsFilterMgr!.UpdateData(snapshots);
                         LiveSnapshotIndicator.Text = "";
@@ -425,7 +425,7 @@ public partial class ServerTab : UserControl
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
                         }
                         break;
-                    case 2: // Top Queries by Duration
+                    case TopQueriesByDurationSubTabIndex: // Top Queries by Duration
                         var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter));
                         _queryStatsFilterMgr!.UpdateData(queryStats);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
@@ -967,7 +967,7 @@ public partial class ServerTab : UserControl
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
                         }
                         break;
-                    case 2: // Blocked Process Reports
+                    case BlockedProcessReportsSubTabIndex: // Blocked Process Reports
                         var bprRead = await Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
                         var bpr = bprRead.Rows;
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
@@ -981,7 +981,7 @@ public partial class ServerTab : UserControl
                         }
                         await LoadBlockingSlicerAsync();
                         break;
-                    case 3: // Deadlocks
+                    case DeadlocksSubTabIndex: // Deadlocks
                         var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate));
                         var dlrDetails = await ParseDeadlocksOffUiThreadAsync(dlr);
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
