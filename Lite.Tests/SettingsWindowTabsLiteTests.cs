@@ -25,8 +25,11 @@ namespace Lite.Tests;
 /// <summary>
 /// #5846: Lite's Settings window, split into tabs like the Darling Viewer's. These build the real window (on a throwaway
 /// config folder) and check what an operator meets: every control on a tab, a value on a hidden tab still saved, a Save
-/// with an invalid value opening the tab that holds it, and the window reopening on the last tab.
+/// with an invalid value opening the tab that holds it, and the window reopening on the last tab. #5881: in the
+/// <c>app-alert-statics</c> collection, because the window reads and writes the process-wide <c>App</c> alert statics, and
+/// <c>LiteAlertForwardingTests</c> (same collection) rewrites <c>App.AlertCooldownMinutes</c> while this class's apply runs.
 /// </summary>
+[Collection("app-alert-statics")]
 public sealed class SettingsWindowTabsLiteTests : IDisposable
 {
     private readonly string _configDir = Path.Combine(Path.GetTempPath(), $"lite-settings-tabs-{Guid.NewGuid():N}");
@@ -100,6 +103,42 @@ public sealed class SettingsWindowTabsLiteTests : IDisposable
 
             Assert.Equal(0, errors.Count);
             Assert.Equal(7, root["alert_cooldown_minutes"]!.GetValue<int>());
+        });
+    }
+
+    /// <summary>#5881: the cooldown saved is the one in the box, not whatever the process-wide static holds at the
+    /// root write. A second thread rewrites the static the whole time the window applies; the root must still carry the
+    /// typed value on every pass.</summary>
+    [Fact]
+    public void TheSavedCooldown_IsTheBoxValue_WhileAnotherThreadRewritesTheStatic()
+    {
+        StaTestThread.Run(() =>
+        {
+            var window = NewWindow();
+            window.AlertCooldownBox.Text = "7";
+            using var stop = new System.Threading.ManualResetEventSlim();
+            var hammer = new System.Threading.Thread(() =>
+            {
+                while (!stop.IsSet)
+                    App.AlertCooldownMinutes = 9;
+            });
+            hammer.Start();
+            try
+            {
+                for (var i = 0; i < 300; i++)
+                {
+                    var root = new JsonObject();
+                    var errors = new SettingsValidationErrors();
+                    window.ApplyAlertSettings(root, errors);
+                    Assert.Equal(0, errors.Count);
+                    Assert.Equal(7, root["alert_cooldown_minutes"]!.GetValue<int>());
+                }
+            }
+            finally
+            {
+                stop.Set();
+                hammer.Join();
+            }
         });
     }
 

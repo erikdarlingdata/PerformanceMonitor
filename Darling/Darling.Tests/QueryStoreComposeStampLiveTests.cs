@@ -407,7 +407,7 @@ SELECT md5(
             }
 
             Assert.Equal(before, await TextAsync(connection, Fingerprint, ct));
-            /* Four since V187 (#5867) added the failure record. */
+            /* Four since V189 (#5867) added the failure record. */
             Assert.Equal(4, await CountAsync(connection, "SELECT count(*) FROM pg_class WHERE relnamespace = 'collect'::regnamespace AND relname LIKE 'query_store_compose_stamp%' AND relkind = 'r'", ct));
             bodySucceeded = true;
         }

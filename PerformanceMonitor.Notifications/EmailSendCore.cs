@@ -105,6 +105,10 @@ public sealed class EmailSendCore
     /// not a failed delivery, and the deliverer's shutdown path writes no history row for it. It is the only
     /// exception this method throws. Optional so every caller that has no token to give compiles unchanged.
     /// </param>
+    /// <param name="investigationJson">
+    /// #5821: the investigation request this alert opened or joined, already composed and masked, for the generic
+    /// webhook's <c>{{investigation_json}}</c> token. Null (Lite, and every alert that opened none) renders it empty.
+    /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
         string serverName,
@@ -116,6 +120,7 @@ public sealed class EmailSendCore
         string? detailText = null,
         string? displayName = null,
         AlertNotificationMode? deliveryMode = null,
+        string? investigationJson = null,
         CancellationToken cancellationToken = default)
     {
         var emailOutcome = AlertChannelOutcome.NotAttempted;
@@ -297,7 +302,7 @@ public sealed class EmailSendCore
         {
             webhook = await _webhookAlertService.TrySendWebhookAlertsAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName,
-                deliveryMode, cancellationToken);
+                deliveryMode, investigationJson, cancellationToken);
         }
 
         /* #3598: the two paths resolve the same pure function over the same inputs, so whichever one ran is
@@ -325,6 +330,32 @@ public sealed class EmailSendCore
     /// <summary>Gets email delivery health summary (consecutive failures + last error).</summary>
     public (int ConsecutiveFailures, string? LastError) GetEmailHealth() =>
         (_consecutiveFailures, _lastFailureError);
+
+    /// <summary>
+    /// Sends one alert resolution email (#5825) to the recipients the fire it closes went to. No cooldown, budget or
+    /// route: the caller already knows the destination, and a delivered fire always gets its one clear. Null when the
+    /// send succeeded, the SMTP error when it did not. Never throws.
+    /// </summary>
+    internal async Task<string?> TrySendResolutionEmailAsync(string recipients, AlertResolutionFacts facts)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var title = facts.Title;
+        var serverName = facts.ServerName;
+        try
+        {
+            var subject = $"[SQL Monitor Resolved] {title} on {serverName}";
+            /* The resolution's own body: its facts as the data table, not the fire's value and threshold rows. */
+            var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildResolutionEmail(facts, _branding);
+            await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, context: null, recipients: recipients);
+            _logger.LogInformation($"Alert resolution email sent for {title} on {serverName}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"ALERT RESOLUTION EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
+            return ex.Message;
+        }
+    }
 
     /// <summary>
     /// Sends a test email to verify SMTP configuration. Returns null on success, or the error

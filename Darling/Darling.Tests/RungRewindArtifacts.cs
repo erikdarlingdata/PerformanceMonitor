@@ -169,7 +169,7 @@ ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     }
 
     /// <summary>
-    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's sentinel for V186), with its index. Safe on a store that
+    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's V186 sentinel), with its index. Safe on a store that
     /// never had it. Nothing before V186 reads it.
     /// </summary>
     internal static async Task DropV186SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
@@ -179,10 +179,47 @@ ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     }
 
     /// <summary>
-    /// V187 (#5867): <c>collect.query_store_compose_stamp_failures</c> (the probe's newest sentinel), the compose builder's
-    /// failure record. Safe on a store that never had it. Nothing before V187 reads it.
+    /// V187 (#5825): the four per-channel resolution flags, the route override and the alert log's three resolution columns
+    /// (<c>resolution_outcome</c> is the probe's newest sentinel). Safe on a store that never had them.
     /// </summary>
     internal static async Task DropV187SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS config.config_notification
+    DROP COLUMN IF EXISTS slack_send_resolutions,
+    DROP COLUMN IF EXISTS teams_send_resolutions,
+    DROP COLUMN IF EXISTS generic_send_resolutions,
+    DROP COLUMN IF EXISTS email_send_resolutions;
+ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS send_resolutions;
+ALTER TABLE IF EXISTS config.config_alert_log
+    DROP COLUMN IF EXISTS resolution_sent_at,
+    DROP COLUMN IF EXISTS resolution_channels,
+    DROP COLUMN IF EXISTS resolution_outcome;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V188 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
+    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
+    /// below V188 reads every alert value from the history row, as it did before.
+    /// </summary>
+    internal static async Task DropV188SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS config.investigation_request_alerts
+    DROP COLUMN IF EXISTS current_value,
+    DROP COLUMN IF EXISTS threshold_value,
+    DROP COLUMN IF EXISTS muted,
+    DROP COLUMN IF EXISTS detail_text,
+    DROP COLUMN IF EXISTS context_json;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c> (the probe's newest sentinel), the compose builder's
+    /// failure record. Safe on a store that never had it. Nothing before V189 reads it.
+    /// </summary>
+    internal static async Task DropV189SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.query_store_compose_stamp_failures;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);

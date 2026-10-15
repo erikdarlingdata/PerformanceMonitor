@@ -196,6 +196,10 @@ public class WebhookAlertService
     /// merely times out is different: it ends as that channel's recorded <see cref="AlertChannelOutcome.Failed"/>.
     /// Optional so every caller that has no token to give compiles unchanged.
     /// </param>
+    /// <param name="investigationJson">
+    /// #5821: the generic channel's <c>{{investigation_json}}</c> value, composed and masked by the caller; null renders
+    /// the token empty. No other channel reads it.
+    /// </param>
     public async Task<WebhookFanoutResult> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
@@ -206,6 +210,7 @@ public class WebhookAlertService
         string? detailText = null,
         string? displayName = null,
         AlertNotificationMode? deliveryMode = null,
+        string? investigationJson = null,
         CancellationToken cancellationToken = default)
     {
         /* Answered before the cooldown and the budget, not after. A channel that does not exist cannot be
@@ -386,7 +391,7 @@ public class WebhookAlertService
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, cancellationToken));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -875,7 +880,9 @@ public class WebhookAlertService
             if (!string.IsNullOrEmpty(database))
                 facts.Add(new { name = "Database", value = TeamsEscape(database) });
             facts.Add(new { name = "Current Value", value = TeamsEscape(currentValue) });
-            facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
+            /* #5825: an alert resolution has no threshold, and an empty fact says nothing. */
+            if (!string.IsNullOrEmpty(thresholdValue))
+                facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
             facts.Add(new { name = "Time (UTC)", value = utcNow.ToString("yyyy-MM-dd HH:mm:ss") });
             facts.Add(new { name = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
@@ -2034,7 +2041,9 @@ public class WebhookAlertService
             if (!string.IsNullOrEmpty(database))
                 fields.Add(new { type = "mrkdwn", text = $"*Database:*\n{SlackEscape(database)}" });
             fields.Add(new { type = "mrkdwn", text = $"*Current Value:*\n{SlackEscape(currentValue)}" });
-            fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{SlackEscape(thresholdValue)}" });
+            /* #5825: an alert resolution has no threshold, and an empty field says nothing. */
+            if (!string.IsNullOrEmpty(thresholdValue))
+                fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{SlackEscape(thresholdValue)}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (UTC):*\n{utcNow:yyyy-MM-dd HH:mm:ss}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (Local):*\n{localNow:yyyy-MM-dd HH:mm:ss}" });
         }
@@ -2152,6 +2161,7 @@ public class WebhookAlertService
         string? triageUrl,
         string? detailText,
         DateTime nowUtc,
+        string? investigationJson = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -2176,7 +2186,7 @@ public class WebhookAlertService
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: settings.GenericWebhookBodyTemplate, serverId: serverId,
-                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc);
+                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc, investigationJson: investigationJson);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -2313,6 +2323,14 @@ public class WebhookAlertService
     /// needs the prose on its own — mapped into a ticket body field, say — rather than mixed with the
     /// flattened structure.
     /// </para>
+    /// <para>
+    /// #5821: <c>{{investigation_json}}</c> is the investigation request the alert opened or joined (Darling only), as one
+    /// JSON object the caller has already composed and masked at <c>mcp.dataDetail</c>. It is the one token whose
+    /// rendering follows where the template puts it: unquoted (<c>"investigation": {{investigation_json}}</c>) it is the
+    /// raw object, and inside a string literal (<c>"investigation": "{{investigation_json}}"</c>) it is that object's text,
+    /// JSON-escaped, so both templates post well-formed JSON. With no request (no agent route, a muted alert, a report,
+    /// a recovery, a route at its limit, Lite) it is the empty string: <c>""</c> bare, nothing inside quotes.
+    /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
         string metricName,
@@ -2326,7 +2344,8 @@ public class WebhookAlertService
         string serverId = "",
         string? triageUrl = null,
         string? detailText = null,
-        DateTime? nowUtc = null)
+        DateTime? nowUtc = null,
+        string? investigationJson = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -2376,7 +2395,57 @@ public class WebhookAlertService
            literal text of another token (e.g. a server name "{{timestamp}}") is left verbatim rather than
            re-expanded — which chained .Replace() calls would do, letting one field pull another's contents
            into itself. An unknown "{{foo}}" isn't in the alternation, so it stays literal (today's behavior). */
-        return s_genericPlaceholders.Replace(template, m => values[m.Groups[1].Value]);
+        return s_genericPlaceholders.Replace(template, m =>
+            m.Groups[1].Value == InvestigationToken
+                ? InvestigationValue(investigationJson, InsideJsonString(template, m.Index))
+                : values[m.Groups[1].Value]);
+    }
+
+    private const string InvestigationToken = "investigation_json";
+
+    /// <summary>
+    /// #5821: whether a generic body template places <c>{{investigation_json}}</c>. A blank template is the default, which
+    /// does not, so Darling reads an investigation request back for a page only when its operator asked for it.
+    /// </summary>
+    public static bool TemplateCarriesInvestigationToken(string? bodyTemplate) =>
+        !string.IsNullOrWhiteSpace(bodyTemplate)
+        && bodyTemplate.Contains("{{" + InvestigationToken + "}}", StringComparison.Ordinal);
+
+    /// <summary>
+    /// <c>{{investigation_json}}</c>'s text at its place in the template (#5821): inside a string literal the object's
+    /// JSON-escaped text (nothing when there is no request); bare, the raw object (<c>""</c> when there is none).
+    /// </summary>
+    private static string InvestigationValue(string? investigationJson, bool insideString)
+    {
+        if (string.IsNullOrWhiteSpace(investigationJson))
+        {
+            return insideString ? "" : "\"\"";
+        }
+
+        return insideString ? EscapeForJson(investigationJson) : investigationJson;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="index"/> in the operator's template falls inside a JSON string literal: counts the
+    /// unescaped double quotes before it. Read on the raw template, whose tokens hold no quotes.
+    /// </summary>
+    internal static bool InsideJsonString(string template, int index)
+    {
+        var inside = false;
+        for (var i = 0; i < index; i++)
+        {
+            var c = template[i];
+            if (inside && c == '\\')
+            {
+                i++;
+            }
+            else if (c == '"')
+            {
+                inside = !inside;
+            }
+        }
+
+        return inside;
     }
 
     /// <summary>
@@ -2393,7 +2462,7 @@ public class WebhookAlertService
     {
         "metric", "server", "value", "threshold", "severity",
         "context_json", "incidents_json", "dedup_key", "resource_name", "database", "triage_url",
-        "context", "timestamp", "detail"
+        "context", "timestamp", "detail", InvestigationToken
     };
 
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
@@ -2716,8 +2785,8 @@ public class WebhookAlertService
     #region PagerDuty
 
     /// <summary>
-    /// Closes the PagerDuty incident an external alert's fire opened (#5654), and does nothing else: a clear is never an
-    /// email, Teams, Slack or generic webhook post. Sends a <c>resolve</c> on the dedup key the fire's trigger used
+    /// Closes the PagerDuty incident an external alert's fire opened (#5654), and does nothing else: the clear's email,
+    /// Teams, Slack and generic webhook posts are #5825's resolution send. Sends a <c>resolve</c> on the dedup key the fire's trigger used
     /// (<paramref name="firingMetric"/> on <paramref name="serverId"/>), to the routing key the route resolves for that
     /// metric, and only when PagerDuty auto-resolve is on. Returns <see cref="AlertChannelOutcome.NotAttempted"/> when it
     /// is off or PagerDuty is not routed for the metric, <see cref="AlertChannelOutcome.Delivered"/> or
@@ -2767,6 +2836,62 @@ public class WebhookAlertService
         }
     }
 
+    /// <summary>
+    /// Posts one alert resolution (#5825) to the Teams, Slack or generic webhook destination its fire reached, in that
+    /// channel's alert shape with <paramref name="title"/> (the resolution's own name, such as "CPU Resolved") as the
+    /// headline. No cooldown and no route: the caller passes the destination the fire used. Null when the post
+    /// succeeded, the error text when it did not; never throws except for the caller's own cancellation.
+    /// </summary>
+    internal async Task<string?> TrySendResolutionAsync(
+        string channel, string destination, AlertResolutionFacts facts, string serverId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var delivery = _settings.SnapshotForDelivery();
+        /* The card's Server fact names the server; the detail prose carries the alert, when it fired and cleared, how
+           long it lasted and the last value; the card's time is the clear's. No threshold row. */
+        var detailText = facts.DetailText();
+        var title = facts.Title;
+        var serverName = facts.ServerName;
+        var triageUrl = facts.TriageUrl;
+        var now = facts.ClearedAtUtc;
+        return channel switch
+        {
+            NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
+                delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                displayName: null, cancellationToken),
+            NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
+                delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                displayName: null, cancellationToken),
+            NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
+                delivery, destination, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
+                cancellationToken: cancellationToken),
+            _ => $"{channel} does not carry a resolution post",
+        };
+    }
+
+    /// <summary>
+    /// Closes one PagerDuty incident an alert's fire opened (#5825): a <c>resolve</c> on <paramref name="dedupKey"/> (the
+    /// key the fire's trigger used) to <paramref name="routingKey"/> (the service the fire went to). The caller checks
+    /// <c>pagerduty_auto_resolve</c>. A delivered resolve clears the fire's cooldown entry, as
+    /// <see cref="TrySendPagerDutyResolveAsync"/> does, so the next fire opens a new incident. Null when it posted, the
+    /// error text when it did not; never throws except for the caller's own cancellation.
+    /// </summary>
+    internal async Task<string?> TrySendPagerDutyResolveAsync(
+        string routingKey, string dedupKey, string firingMetric, string serverName, string serverId, string? detailText,
+        CancellationToken cancellationToken = default)
+    {
+        var error = await TrySendPagerDutyAlertAsync(
+            _settings.SnapshotForDelivery(), autoResolve: true, routingKey, firingMetric, serverName, "resolved", "", serverId,
+            context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
+            resolveIncident: true, dedupKeyOverride: dedupKey, cancellationToken: cancellationToken);
+        if (error is null)
+        {
+            _cooldown.ClearMetric(serverId, firingMetric, null);
+        }
+
+        return error;
+    }
+
     internal Func<string, string, Task<string?>>? PostPagerDutyAsyncOverride { get; set; }
 
     /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
@@ -2786,14 +2911,16 @@ public class WebhookAlertService
         DateTime nowUtc,
         string? displayName = null,
         bool resolveIncident = false,
+        string? dedupKeyOverride = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
                the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable
-               metric+server key when there is no incident. */
-            var dedupKey = DerivePagerDutyDedupKey(serverId, metricName, context, autoResolve);
+               metric+server key when there is no incident. #5825: an alert resolution passes the key its fire
+               opened, because the clear carries no incidents to derive it from. */
+            var dedupKey = dedupKeyOverride ?? DerivePagerDutyDedupKey(serverId, metricName, context, autoResolve);
 
             /* #3598: the routed routing key (a PagerDuty SERVICE is a destination); the EU-region flag and
                proxy stay the parent's. */

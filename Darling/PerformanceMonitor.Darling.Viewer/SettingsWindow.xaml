@@ -525,6 +525,8 @@
                                            FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="SmtpEnabledCheckBox" Content="Enable email alerts" Margin="0,8,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}" Checked="SmtpEnabledCheckBox_Changed" Unchecked="SmtpEnabledCheckBox_Changed"/>
+                                <CheckBox x:Name="EmailSendResolutionsCheckBox" Content="Send resolutions: tell the recipients when the alert clears" Margin="20,4,0,0"
+                                          Foreground="{DynamicResource ForegroundBrush}" ToolTip="When an alert clears, send that to the destinations its fire reached. A notification route can override this for its own destinations."/>
                                 <Grid Margin="20,6,0,0">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="100"/>
@@ -588,6 +590,8 @@
                                            FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="TeamsWebhookEnabledCheckBox" Content="Enable Teams notifications" Margin="0,8,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}" Checked="TeamsWebhookEnabledCheckBox_Changed" Unchecked="TeamsWebhookEnabledCheckBox_Changed"/>
+                                <CheckBox x:Name="TeamsSendResolutionsCheckBox" Content="Send resolutions: tell Teams when the alert clears" Margin="20,4,0,0"
+                                          Foreground="{DynamicResource ForegroundBrush}" ToolTip="When an alert clears, send that to the destinations its fire reached. A notification route can override this for its own destinations."/>
                                 <Grid Margin="20,6,0,0">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="110"/>
@@ -632,6 +636,8 @@
                                            FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="SlackWebhookEnabledCheckBox" Content="Enable Slack notifications" Margin="0,8,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}" Checked="SlackWebhookEnabledCheckBox_Changed" Unchecked="SlackWebhookEnabledCheckBox_Changed"/>
+                                <CheckBox x:Name="SlackSendResolutionsCheckBox" Content="Send resolutions: tell Slack when the alert clears" Margin="20,4,0,0"
+                                          Foreground="{DynamicResource ForegroundBrush}" ToolTip="When an alert clears, send that to the destinations its fire reached. A notification route can override this for its own destinations."/>
                                 <Grid Margin="20,6,0,0">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="110"/>
@@ -725,6 +731,8 @@
                                            FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="GenericWebhookEnabledCheckBox" Content="Enable generic webhook" Margin="0,8,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}" Checked="GenericWebhookEnabledCheckBox_Changed" Unchecked="GenericWebhookEnabledCheckBox_Changed"/>
+                                <CheckBox x:Name="GenericSendResolutionsCheckBox" Content="Send resolutions: tell the webhook when the alert clears" Margin="20,4,0,0"
+                                          Foreground="{DynamicResource ForegroundBrush}" ToolTip="When an alert clears, send that to the destinations its fire reached. A notification route can override this for its own destinations."/>
                                 <Grid Margin="20,6,0,0">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="110"/>
@@ -773,6 +781,10 @@
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
                                     <Run FontFamily="Consolas" Text="{}{{context_json}} {{incidents_json}} {{dedup_key}} {{resource_name}} {{database}} {{triage_url}}"/>
+                                </TextBlock>
+                                <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                                    <Run FontFamily="Consolas" Text="{}{{investigation_json}}"/>
+                                    <Run Text=" : the investigation request the alert opened or joined, as one JSON object (unquoted it is the object, inside quotes its escaped text); empty when the alert opened none (no agent level on its route, muted, a report or a recovery). Once an agent has claimed the request it carries the brief, masked at mcp.dataDetail: at full, the shipped default, that is the brief as stored (findings, approved notes, the environment profile, earlier agents' root causes, the alerts' details), sent to this URL."/>
                                 </TextBlock>
                                 <TextBlock Margin="20,6,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run FontWeight="SemiBold" Text="Example — re-run a GitHub Actions workflow when an alert fires:"/>

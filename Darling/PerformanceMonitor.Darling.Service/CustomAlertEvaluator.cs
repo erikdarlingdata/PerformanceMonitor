@@ -712,8 +712,16 @@ public sealed class CustomAlertEvaluator
 
         try
         {
-            await _historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(
-                new AlertResolution(serverKey, displayName, metricName, title, message)));
+            var resolution = new AlertResolution(serverKey, displayName, metricName, title, message);
+            /* #5825: a custom alert's clear follows the same setting as every other clear. */
+            if (_deliverer is IAlertResolutionSender sender)
+            {
+                await sender.DeliverResolutionAsync(resolution);
+            }
+            else
+            {
+                await _historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution));
+            }
         }
         catch (Exception ex)
         {

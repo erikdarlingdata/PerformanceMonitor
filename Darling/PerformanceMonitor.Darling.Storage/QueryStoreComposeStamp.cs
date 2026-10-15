@@ -91,9 +91,9 @@ public static class QueryStoreComposeStamp
 
     private const int CommandTimeoutSeconds = BuildStatementTimeoutSeconds + 30;
 
-    /// <summary>The store schema version of the rung that creates <see cref="FailuresTable"/> (V187, #5867). The number is the next
+    /// <summary>The store schema version of the rung that creates <see cref="FailuresTable"/> (V189, #5867). The number is the next
     /// free rung when this was written; it is renumbered at merge if another rung took it first.</summary>
-    public const int FailuresRungVersion = 187;
+    public const int FailuresRungVersion = 189;
 
     /// <summary>The failure record of each hour whose last build threw (#5867): one row per hour, removed when the hour builds.</summary>
     public const string FailuresTable = "collect.query_store_compose_stamp_failures";
@@ -315,13 +315,13 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
 
     /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
     /// <summary>
-    /// V187 (#5867): the failure record of the hours whose build threw. One row per hour, written by <see cref="RecordFailureSql"/>
+    /// V189 (#5867): the failure record of the hours whose build threw. One row per hour, written by <see cref="RecordFailureSql"/>
     /// after the failed build rolled back, and deleted by the build that succeeds (in its own transaction) or by the cleanup once the
     /// hour falls below the floor. <c>retry_at</c> is on the store's clock, as the plan's "now" is; the plan skips an hour
     /// until it is due. <c>last_timeout_seconds</c> is the <c>statement_timeout</c> the failed attempt ran under. Naive UTC.
     /// </summary>
     public const string FailuresCreateSql = """
-/* V187 (#5867): one row per Query Store compose hour whose last build failed: how many times in a row, the last error, and when
+/* V189 (#5867): one row per Query Store compose hour whose last build failed: how many times in a row, the last error, and when
    the builder tries it again. The builder deletes the row when the hour builds. Naive UTC throughout. */
 CREATE TABLE IF NOT EXISTS collect.query_store_compose_stamp_failures
 (

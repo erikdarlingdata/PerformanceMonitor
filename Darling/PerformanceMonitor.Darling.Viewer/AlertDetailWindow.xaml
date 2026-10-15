@@ -50,6 +50,9 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Time:" FontWeight="SemiBold"
@@ -94,6 +97,21 @@
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" Visibility="Collapsed"/>
             <TextBox Grid.Row="7" Grid.Column="1" x:Name="SampleAgeText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4" Visibility="Collapsed"/>
+
+            <!-- #5825: a resolution row's send, below #5642's sample-age row; the three rows are collapsed on every
+                 other row. Selectable values, as every header value is since #5847. -->
+            <TextBlock Grid.Row="8" Grid.Column="0" x:Name="ResolutionSentAtLabel" Text="Resolution sent:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBox Grid.Row="8" Grid.Column="1" x:Name="ResolutionSentAtText"
+                     Style="{StaticResource SelectableValueText}" Margin="0,4"/>
+            <TextBlock Grid.Row="9" Grid.Column="0" x:Name="ResolutionChannelsLabel" Text="Resolution channels:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBox Grid.Row="9" Grid.Column="1" x:Name="ResolutionChannelsText"
+                     Style="{StaticResource SelectableValueText}" Margin="0,4"/>
+            <TextBlock Grid.Row="10" Grid.Column="0" x:Name="ResolutionOutcomeLabel" Text="Resolution outcome:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBox Grid.Row="10" Grid.Column="1" x:Name="ResolutionOutcomeText"
+                     Style="{StaticResource SelectableValueText}" Margin="0,4"/>
         </Grid>
 
         <!-- Muted indicator -->

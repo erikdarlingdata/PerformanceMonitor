@@ -8850,7 +8850,15 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
             AlertFiringLog.Resolved(resolution.ServerName, resolution.Title, resolution.Message));
         try
         {
-            await _historyStore.RecordAlertAsync(BuildResolutionRecord(resolution));
+            /* #5825: the service's own clears follow the same setting as every other clear. */
+            if (_deliverer is IAlertResolutionSender sender)
+            {
+                await sender.DeliverResolutionAsync(resolution, cancellationToken: cancellationToken);
+            }
+            else
+            {
+                await _historyStore.RecordAlertAsync(BuildResolutionRecord(resolution));
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

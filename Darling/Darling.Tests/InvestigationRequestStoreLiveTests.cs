@@ -88,6 +88,34 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
     /// constant <c>{server}:{metric}</c> key every alert of a metric carries joins nothing on its own. An alert 29 minutes
     /// after the request opened joins it; one 31 minutes after opens a new request, though the first is still claimed.
     /// A reported request is final: a later alert inside its window opens a new one.</summary>
+    /// <summary>#5821: the generic webhook's read-back of the request an alert opened or joined, with its stored brief.</summary>
+    [Fact]
+    public async Task ReadRequest_ReturnsTheRequestAndItsBrief_AndNullForAnUnknownId()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+
+            var opened = await store.ReadRequestAsync(id, ct);
+            Assert.NotNull(opened);
+            Assert.Equal((id, "open", "blocking", "srv-7", 1), (opened!.Value.Row.RequestId, opened.Value.Row.State,
+                opened.Value.Row.Family, opened.Value.Row.ServerName, opened.Value.Row.AlertCount));
+            Assert.Null(opened.Value.Brief);
+
+            _now = T0.AddMinutes(5);
+            var joined = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(id, joined.RequestId);
+            var claim = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.True(await store.SetBriefAsync(id, claim.ClaimId!.Value, 1, "{\"brief_format\":1,\"data_detail\":\"full\"}", ct));
+
+            var claimed = await store.ReadRequestAsync(id, ct);
+            Assert.Equal(("claimed", 2, "agent-a"), (claimed!.Value.Row.State, claimed.Value.Row.AlertCount, claimed.Value.Row.ClaimedBy));
+            Assert.Contains("\"data_detail\"", claimed.Value.Brief, StringComparison.Ordinal);
+
+            Assert.Null(await store.ReadRequestAsync(Guid.NewGuid(), ct));
+        });
+    }
+
     [Fact]
     public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlertAt31MinutesOpensANewOne_AndAReportedOneIsFinal()
     {
@@ -547,6 +575,8 @@ GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {mcp};";
 
             Assert.Equal("false|true|true|true|true", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
 
+            await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);

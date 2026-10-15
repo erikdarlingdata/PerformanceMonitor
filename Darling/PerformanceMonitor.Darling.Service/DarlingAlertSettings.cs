@@ -434,6 +434,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /* V166: the store column (authoritative), so a Viewer save lands on the next firing without a restart. */
     public bool PagerDutyAutoResolve => Opened.Webhooks.PagerDutyAutoResolve;
 
+    /// <summary>V187 (#5825): the per-channel "send resolutions" flags, read live from the store like the toggle above.
+    /// The send path asks <see cref="NotificationRouteResolutions.SendsResolutions"/> with these and the route that
+    /// carried the fire.</summary>
+    public ResolutionChannelFlags ResolutionFlags => ResolutionChannelFlags.From(Opened.Webhooks, _config.Smtp);
+
     /// <summary>#3598 (V131): the sparse notification routes, read live through the by-reference config seam
     /// like every sibling — <c>StoreConfigProvider.ApplyToConfig</c> swaps the list on every beacon change,
     /// which the routes table's own trigger bumps, so a route authored in the Viewer lands on the next firing
