@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pre-push.sh: a local copy of the gates CI runs first on a pull request, in three stages. Run it from the worktree
 # root BEFORE EVERY PUSH (bash .github/scripts/pre-push.sh). It prints result lines only ([FAIL], Total:) and ends
-# with one GATE GREEN / GATE RED line. GATE GREEN means these three stages passed; CI decides the rest (#5833).
+# with one GATE GREEN / GATE RED / GATE STOP line. GATE GREEN means these three stages passed; CI decides the rest (#5833).
 #   1. Debug build of both test projects (Darling.Tests, Lite.Tests).
 #   2. The whole Stage=Guard trait of both suites with -failSkips: exactly CI's guard-tests job.
 #   3. The test classes this diff needs: the classes CI's test map selects (ci-select.py map-select over the newest
@@ -10,12 +10,24 @@
 #      diff, or the hunk's enclosing declaration, or an added file's type). Symbols are added in order of how many
 #      test files name them; once the union would pass the cap the rest are dropped and listed, since a symbol named
 #      by most of the suite is the suite (the laptop never runs a full suite: CI decides).
-# Flags: --dry-run (steps 1-2 skipped, step 3 only lists the classes), --skip-build, --no-map (symbol set only).
-# Environment: PRE_PUSH_CAP (class cap, default 250); PRE_PUSH_CACHE (test-map cache, default pre-push-cache in the
-# repository's common .git directory, which every worktree shares and git never commits).
-# Exit 1 on any failure. Live classes in the selection skip without a rig; the Skipped count is printed so you see it.
+#   The map and the symbol scan both name a class by its simple name; the runner's -class filter matches only the
+#   full name and runs nothing for any other (Total: 0, exit 0), so every name is resolved against the build's own
+#   class listing (-list classes/json), exactly as CI's shard scripts do, and run in batches under the command-line
+#   limit (#5868).
+# Flags: --dry-run (steps 1-2 skipped; step 3 lists the classes and each batch's class count and length, resolved
+# against an existing Debug build when there is one), --skip-build, --no-map (symbol set only).
+# Environment: PRE_PUSH_CAP (test-file cap of the symbol set, default 250); PRE_PUSH_MAX_CLASSES (the most classes of
+# one project the laptop runs, default 400: above it the selection is the whole suite, a STOP); PRE_PUSH_ARG_BUDGET
+# (the characters of -class arguments per batch, default 30000, as CI's run-darling-pg-shard.ps1); PRE_PUSH_SELECTION
+# (a map-select selection JSON used instead of the nightly map, for replays and the script's tests); PRE_PUSH_CACHE
+# (test-map cache, default pre-push-cache in the repository's common .git directory, which every worktree shares and
+# git never commits).
+# Outcomes: GATE GREEN (exit 0). GATE RED (exit 1): a build, a run or a class listing failed, or a run reported
+# Total: 0 (it matched nothing, which the runner does not count as a failure). GATE STOP (exit 3): the selection is
+# the whole suite, which the laptop never runs; the Guard stage still ran, and a red in it wins over the stop.
+# Live classes in the selection skip without a rig; the Skipped count is printed so you see it.
 set -uo pipefail
-DRY=0; BUILD=1; MAP=1; CAP=${PRE_PUSH_CAP:-250}
+DRY=0; BUILD=1; MAP=1; CAP=${PRE_PUSH_CAP:-250}; MAXC=${PRE_PUSH_MAX_CLASSES:-400}; BUDGET=${PRE_PUSH_ARG_BUDGET:-30000}
 for a in "$@"; do case "$a" in --dry-run) DRY=1;; --skip-build) BUILD=0;; --no-map) MAP=0;; *) echo "unknown flag $a"; exit 2;; esac; done
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "GATE RED: not inside a git worktree"; exit 1; }
 cd "$root" || exit 1
@@ -29,13 +41,19 @@ LITE=Lite.Tests/Lite.Tests.csproj
 TESTDIRS="Darling/Darling.Tests Lite.Tests"
 red=()
 
-run_suite() { # run_suite <label> <project> <args...>: prints result lines, records a red on failure
-  local label=$1 proj=$2; shift 2
+run_suite() { # run_suite <label> <what> <project> <args...>: prints result lines, records a red on failure
+  local label=$1 what=$2 proj=$3; shift 3
   local out="$SCRATCH/$label.log"
   dotnet run --project "$proj" -c Debug --no-build -- "$@" > "$out" 2>&1
   local rc=$?
   grep -E '\[FAIL\]|Total: ' "$out" | sed "s/^/  [$label] /" | cut -c1-200
-  if [ $rc -ne 0 ]; then red+=("$label (exit $rc; log $out)"); fi
+  if [ $rc -ne 0 ]; then red+=("$label (exit $rc; log $out)"); return; fi
+  # #5868: a filter that matches nothing exits 0 with Total: 0, so exit 0 alone is not a pass.
+  local total; total=$(grep -oE 'Total: [0-9]+' "$out" | tail -n 1 | grep -oE '[0-9]+')
+  if [ -z "$total" ] || [ "$total" -eq 0 ]; then
+    echo "  [$label] $what ran 0 tests: the filter matched nothing"
+    red+=("$label $what ran 0 tests (log $out)")
+  fi
 }
 
 # 1. build
@@ -52,8 +70,8 @@ fi
 # 2. the whole Guard stage of both suites, as CI's guard-tests job runs it
 if [ $DRY -eq 0 ]; then
   echo "guard: Stage=Guard of both suites"
-  run_suite guard-darling "$DARLING" -trait Stage=Guard -failSkips
-  run_suite guard-lite "$LITE" -trait Stage=Guard -failSkips
+  run_suite guard-darling "Stage=Guard" "$DARLING" -trait Stage=Guard -failSkips
+  run_suite guard-lite "Stage=Guard" "$LITE" -trait Stage=Guard -failSkips
 fi
 
 # 3. the classes this diff needs
@@ -65,9 +83,15 @@ echo "diff: $(wc -l < "$SCRATCH/changed.txt" | tr -d ' ') changed files since me
 # Initialised empty: under set -u a declared but unassigned array is unbound, and an empty selection read as GATE RED.
 declare -A want_d=() want_l=()
 if [ $MAP -eq 1 ]; then
-  mapfile=""
-  for id in $(gh api "repos/erikdarlingdata/PerformanceMonitor/actions/workflows/nightly.yml/runs?status=success&per_page=8" \
-      --jq '.workflow_runs[] | select(.event == "schedule" or .event == "workflow_dispatch") | .id' 2>/dev/null); do
+  # PRE_PUSH_SELECTION replaces the nightly map and map-select (a replay, or the script's own tests)
+  mapfile=${PRE_PUSH_SELECTION:-}; ids=""
+  if [ -n "$mapfile" ]; then
+    cp "$mapfile" "$SCRATCH/selection.json" || { echo "GATE RED: cannot read PRE_PUSH_SELECTION $mapfile"; exit 1; }
+  else
+    ids=$(gh api "repos/erikdarlingdata/PerformanceMonitor/actions/workflows/nightly.yml/runs?status=success&per_page=8" \
+      --jq '.workflow_runs[] | select(.event == "schedule" or .event == "workflow_dispatch") | .id' 2>/dev/null)
+  fi
+  for id in $ids; do
     if [ -f "$CACHE/map-$id/test-map.json.gz" ]; then mapfile="$CACHE/map-$id/test-map.json.gz"; break; fi
     if gh run download "$id" -n test-map -D "$CACHE/map-$id" > /dev/null 2>&1 && [ -f "$CACHE/map-$id/test-map.json.gz" ]; then
       mapfile="$CACHE/map-$id/test-map.json.gz"; break
@@ -76,7 +100,7 @@ if [ $MAP -eq 1 ]; then
   done
   if [ -z "$mapfile" ]; then
     echo "map: no nightly test-map artifact could be fetched; symbol set only"
-  elif ! timeout 120 python .github/scripts/ci-select.py map-select --map "$mapfile" --event pull_request --base-ref dev \
+  elif [ -z "${PRE_PUSH_SELECTION:-}" ] && ! timeout 120 python .github/scripts/ci-select.py map-select --map "$mapfile" --event pull_request --base-ref dev \
         --base "$base" --files-from "$SCRATCH/changed.txt" --out "$SCRATCH/selection.json" > "$SCRATCH/map-select.log" 2>&1; then
     echo "map: map-select failed (log $SCRATCH/map-select.log); symbol set only"
   else
@@ -136,29 +160,97 @@ if [ -n "$files" ]; then
       }' 2>/dev/null | sort -u > "$SCRATCH/classes.txt"
   while IFS=$'\t' read -r f full; do
     [ -n "$full" ] || continue
-    case "$f" in Lite.Tests/*) want_l["$full"]=sym;; *) want_d["$full"]=sym;; esac
+    case "$f" in Lite.Tests/*) want_l["${full##*[.+/]}"]=sym;; *) want_d["${full##*[.+/]}"]=sym;; esac
   done < "$SCRATCH/classes.txt"
 fi
-echo "classes: darling ${#want_d[@]}, lite ${#want_l[@]} (symbols: $nnames candidates; lists in $SCRATCH)"
-
-run_classes() { # run_classes <label> <project> <names...>: chunks of 150 -class arguments
-  local label=$1 proj=$2; shift 2
-  local -a chunk=(); local i=0
-  for c in "$@"; do
-    chunk+=(-class "$c"); i=$((i+1))
-    if [ $i -ge 150 ]; then run_suite "$label" "$proj" "${chunk[@]}"; chunk=(); i=0; fi
-  done
-  [ ${#chunk[@]} -gt 0 ] && run_suite "$label" "$proj" "${chunk[@]}"
+# #5868: the runner's -class filter takes a full name, and a simple name matches nothing (Total: 0, exit 0), so every
+# selected name is resolved against the build's own class listing, keyed by the simple name split on [.+/] as
+# test-map.py, ci-select.py and run-darling-pg-shard.ps1 key it. A name with no test class in the listing (a helper
+# class of a symbol file, a class the map holds but this build no longer has) is counted, not run.
+list_classes() { # list_classes <project> <outfile>: one full class name per line, from the runner's -list classes/json
+  dotnet run --project "$1" -c Debug --no-build -- -list classes/json > "$2.raw" 2>&1 || return 1
+  python -c '
+import json, sys
+rows = [l for l in open(sys.argv[1], encoding="utf-8", errors="replace") if l.lstrip().startswith("[")]
+names = json.loads(rows[0]) if len(rows) == 1 else []
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write("".join(n + "\n" for n in names))
+sys.exit(0 if names else 1)' "$2.raw" "$2"
 }
+declare -A sel_n=() miss_n=(); resolved=1
+for suite in darling lite; do
+  if [ $suite = darling ]; then proj=$DARLING; keys=("${!want_d[@]}"); else proj=$LITE; keys=("${!want_l[@]}"); fi
+  : > "$SCRATCH/keys-$suite.txt"; : > "$SCRATCH/selected-$suite.txt"; : > "$SCRATCH/unlisted-$suite.txt"
+  sel_n[$suite]=0; miss_n[$suite]=0
+  [ ${#keys[@]} -gt 0 ] || continue
+  printf '%s\n' "${keys[@]}" | sort > "$SCRATCH/keys-$suite.txt"
+  if ! list_classes "$proj" "$SCRATCH/listing-$suite.txt"; then
+    if [ $DRY -eq 1 ]; then
+      # no Debug build to list: the batches below are cut from the simple names, so their lengths run short
+      resolved=0; cp "$SCRATCH/keys-$suite.txt" "$SCRATCH/selected-$suite.txt"
+    else
+      echo "  [classes-$suite] the class listing of $proj failed (log $SCRATCH/listing-$suite.txt.raw)"
+      red+=("classes-$suite class listing failed (log $SCRATCH/listing-$suite.txt.raw)")
+    fi
+  else
+    awk -v miss="$SCRATCH/unlisted-$suite.txt" '
+      NR == FNR { want[$0] = 1; next }
+      { k = $0; sub(/.*[.+\/]/, "", k); if (k in want) { print; hit[k] = 1 } }
+      END { for (w in want) if (!(w in hit)) print w > miss }' "$SCRATCH/keys-$suite.txt" "$SCRATCH/listing-$suite.txt" \
+      | sort -u > "$SCRATCH/selected-$suite.txt"
+  fi
+  sel_n[$suite]=$(wc -l < "$SCRATCH/selected-$suite.txt" | tr -d ' ')
+  miss_n[$suite]=$(wc -l < "$SCRATCH/unlisted-$suite.txt" | tr -d ' ')
+done
+echo "classes: darling ${sel_n[darling]}, lite ${sel_n[lite]} (selected names: darling ${#want_d[@]}, lite ${#want_l[@]}; symbols: $nnames candidates; lists in $SCRATCH)"
+if [ $resolved -eq 0 ]; then
+  echo "classes: not resolved, no Debug build to list (simple names; build once for the real batches)"
+elif [ $((miss_n[darling] + miss_n[lite])) -gt 0 ]; then
+  echo "unlisted: darling ${miss_n[darling]}, lite ${miss_n[lite]} selected names are no test class of this build (e.g. $(cat "$SCRATCH/unlisted-darling.txt" "$SCRATCH/unlisted-lite.txt" | sort | head -n 5 | tr '\n' ' ' | cut -c1-160))"
+fi
+
+# #5868: the laptop never runs a full suite, so a selection the size of the suite is a STOP, never a GREEN.
+stop=0
+if [ "${sel_n[darling]}" -gt "$MAXC" ] || [ "${sel_n[lite]}" -gt "$MAXC" ]; then stop=1; fi
+
+# batches cut by the length of their -class arguments, under the command-line limit (32,767 characters on Windows)
+for suite in darling lite; do
+  rm -f "$SCRATCH"/batch-$suite-*.txt
+  [ -s "$SCRATCH/selected-$suite.txt" ] || continue
+  awk -v budget="$BUDGET" -v pre="$SCRATCH/batch-$suite-" '
+    BEGIN { b = 1 }
+    { cost = length("-class") + 1 + length($0) + 1
+      if (n > 0 && len + cost > budget) { close(pre b ".txt"); b++; len = 0; n = 0 }
+      print > (pre b ".txt"); len += cost; n++ }' "$SCRATCH/selected-$suite.txt"
+done
+nbatch=0
+run_batches() { # run_batches <suite> <project>: every batch of the suite, even after one fails
+  local suite=$1 proj=$2 i nb f c len; local -a names args
+  nb=$(ls "$SCRATCH"/batch-$suite-*.txt 2>/dev/null | wc -l | tr -d ' ')
+  for ((i = 1; i <= nb; i++)); do
+    f="$SCRATCH/batch-$suite-$i.txt"; mapfile -t names < "$f"; args=(); len=0
+    for c in "${names[@]}"; do args+=(-class "$c"); len=$((len + 8 + ${#c})); done
+    nbatch=$((nbatch + 1))
+    if [ $DRY -eq 1 ]; then
+      echo "  [classes-$suite] batch $i of $nb: ${#names[@]} classes, $len characters of -class arguments"
+    else
+      run_suite "classes-$suite-$i" "batch $i of $nb (${#names[@]} classes)" "$proj" "${args[@]}"
+    fi
+  done
+}
+
+stopline="GATE STOP: selection is the whole suite (darling ${sel_n[darling]}, lite ${sel_n[lite]}): run the brief's classes; CI decides"
 if [ $DRY -eq 1 ]; then
-  printf '  darling: %s\n' "${!want_d[@]}" | sort
-  printf '  lite: %s\n' "${!want_l[@]}" | sort
+  sed 's/^/  darling: /' "$SCRATCH/selected-darling.txt"
+  sed 's/^/  lite: /' "$SCRATCH/selected-lite.txt"
+  run_batches darling "$DARLING"; run_batches lite "$LITE"
+  if [ $stop -eq 1 ]; then echo "$stopline (over PRE_PUSH_MAX_CLASSES=$MAXC in one project; dry run, nothing built or run)"; exit 3; fi
   echo "GATE DRY-RUN: nothing built or run"; exit 0
 fi
-[ ${#want_d[@]} -gt 0 ] && run_classes classes-darling "$DARLING" "${!want_d[@]}"
-[ ${#want_l[@]} -gt 0 ] && run_classes classes-lite "$LITE" "${!want_l[@]}"
-
-if [ ${#red[@]} -eq 0 ]; then
-  echo "GATE GREEN: guard stage of both suites and ${#want_d[@]}+${#want_l[@]} selected classes passed (logs $SCRATCH)"; exit 0
+# a red Guard stage or listing already decides the gate, and a STOP runs no selected class at all
+if [ ${#red[@]} -eq 0 ] && [ $stop -eq 0 ]; then
+  run_batches darling "$DARLING"; run_batches lite "$LITE"
 fi
-echo "GATE RED: ${red[*]}"; exit 1
+
+if [ ${#red[@]} -gt 0 ]; then echo "GATE RED: ${red[*]}"; exit 1; fi
+if [ $stop -eq 1 ]; then echo "$stopline (over PRE_PUSH_MAX_CLASSES=$MAXC in one project; no selected class ran; logs $SCRATCH)"; exit 3; fi
+echo "GATE GREEN: guard stage of both suites and ${sel_n[darling]}+${sel_n[lite]} selected classes in $nbatch batches passed (logs $SCRATCH)"; exit 0
