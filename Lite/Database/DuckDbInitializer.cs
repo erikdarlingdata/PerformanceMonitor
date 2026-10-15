@@ -2967,6 +2967,23 @@ public partial class DuckDbInitializer : IDisposable
             /* #5775: a table that an earlier build of this unreleased step already created has no generation columns; the
                shared list adds them (a fresh table has them from the CREATE). */
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(69));
+
+            /* #5820, the same unreleased step: the six Level 1 investigation tables. New tables with no row to backfill,
+               so non-fatal the same way: a table that fails here leaves investigations unavailable (the store's reads and
+               writes fail and the alert path goes on without opening a request), and the table statements that follow
+               retry each CREATE on the next start. Each table is its own try, so one failure does not skip the rest. */
+            _logger?.LogInformation("Running migration to v69: adding the investigation tables (Level 1 investigations)");
+            foreach (var statement in Schema.InvestigationTableStatements())
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection, statement);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v69 investigation tables encountered an error (non-fatal): {Error}", ex.Message);
+                }
+            }
         }
     }
 
