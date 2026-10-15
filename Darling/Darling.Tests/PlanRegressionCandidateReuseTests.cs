@@ -233,7 +233,9 @@ VALUES (1, now() - interval '8 days', {ServerId}, '{ServerName}', 'AN5812_WAIT',
 
         var before = await PlanRegressionReadsAsync(connection, ct);
         Assert.Empty(before);
+        var passStarted = DateTime.UtcNow;
         await service.AnalyzeAsync(ServerId, ServerName, 4, ct, persistCollectionCaveats: true);
+        var passEnded = DateTime.UtcNow;
 
         /* The pass's read is one entry of one call. Every later check compares against this entry by its query id AND its
            stats_since: an entry that pg_stat_statements evicted (pg_stat_statements.max) and a later read made again starts
@@ -246,12 +248,23 @@ VALUES (1, now() - interval '8 days', {ServerId}, '{ServerName}', 'AN5812_WAIT',
         Assert.Equal(0, cache.Hits);
         Assert.Equal(0, cache.Misses);
 
-        /* The shape carries the day the 14-day window starts on. A 1-hour call and the 4-hour pass start it on the same
-           day except in the first four hours of a UTC day; then the call is a different shape and reads live. */
-        var now = DateTime.UtcNow;
-        var sameDay = now.AddHours(-4 - 24 * PgFactCollector.PlanRegressionWindowDays).Date == now.AddHours(-1 - 24 * PgFactCollector.PlanRegressionWindowDays).Date;
-
+        /* The shape carries the day the 14-day window starts on (PlanRegressionWindowFloor). A 1-hour call and the 4-hour
+           pass start it on the same day except from 01:00 to 04:00 UTC (from 00:00 to 01:00 both windows start on the day
+           before); then the call is a different shape and reads live. Each window ends on a clock read inside its own call,
+           so each floor is computed at both ends of that call; when either pair crosses a midnight the test cannot tell
+           which shape the call had, and it skips (#5812 review L5: a clock read after the pass, crossing 04:00 UTC, made
+           sameDay true for a pass whose window started a day earlier). */
+        static DateTime Floor(DateTime windowEnd, int hours) =>
+            PgFactCollector.PlanRegressionWindowFloor(windowEnd.AddHours(-hours - 24 * PgFactCollector.PlanRegressionWindowDays));
+        var passFloor = Floor(passStarted, 4);
+        var callStarted = DateTime.UtcNow;
         var (facts, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack: 1, cancellationToken: ct);
+        var callEnded = DateTime.UtcNow;
+        var callFloor = Floor(callStarted, 1);
+        Assert.SkipWhen(passFloor != Floor(passEnded, 4) || callFloor != Floor(callEnded, 1),
+            "The pass's or the call's 14-day window crossed a UTC midnight while it ran, so its shape is not known; the #5812 reuse check needs both.");
+        var sameDay = passFloor == callFloor;
+
         Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
         var afterFacts = await PlanRegressionReadsAsync(connection, ct);
         var evidence = $"hits {cache.Hits}, misses {cache.Misses}; entries after the pass [{string.Join("; ", afterPass)}], after the call [{string.Join("; ", afterFacts)}]";
