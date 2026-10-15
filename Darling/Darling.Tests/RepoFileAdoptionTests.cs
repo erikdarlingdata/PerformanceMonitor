@@ -205,7 +205,6 @@ public sealed class RepoFileAdoptionTests
            one. */
         "McpPageContractTests.cs",
         "NightlyVersionInjectionTests.cs",
-        "PgCpuCapacityHeadroomTests.cs",
         "PgIndexBloatGridReachTests.cs",
         "PgLoggingCollectorOffTests.cs",
         /* #3691 (V138): its V102-restatement pin anchors the generated column tail across two line breaks

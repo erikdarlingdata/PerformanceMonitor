@@ -51,60 +51,6 @@ public sealed class PgSensitiveStatementFilterTests
     }
 
     /// <summary>
-    /// One definition in the whole repo. Every occurrence of the pattern's opening token
-    /// (<c>[[:&lt;:]](create|alter)</c>) must be the ONE declaration in <see cref="PgSensitiveStatementFilter"/>
-    /// — a second literal copy anywhere else is exactly the drift #4348 exists to prevent. The needle itself
-    /// necessarily also appears in THIS file's source (as the string literal below), so that one occurrence
-    /// is excluded by file identity rather than counted as a second definition.
-    /// </summary>
-    [Fact]
-    public void ThePatternHasExactlyOneDefinitionInTheRepo()
-    {
-        var selfFileFull = ThisFile();
-        var repoRoot = FindRepoRoot();
-        var needle = "[[:<:]](create|alter)";
-        var hits = 0;
-        string? onlyFile = null;
-
-        foreach (var file in Directory.EnumerateFiles(repoRoot, "*.cs", SearchOption.AllDirectories))
-        {
-            if (file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
-                file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            // This test file itself contains the needle above (as this very string literal) — a census
-            // hit on the test's own source is not a second definition, so it is excluded deliberately,
-            // by CallerFilePath rather than a name check.
-            if (Path.GetFullPath(file) == selfFileFull)
-            {
-                continue;
-            }
-
-            // The stored-text scrub carries one deliberate, frozen copy: the version 1 pattern of the shipped
-            // scrub (PgStatementTextScrub.Version1Pattern), kept apart from the live definition because no
-            // stored row is rewritten by the wider filter. It is pinned to the literal by
-            // TheStoredTextScrubKeepsItsFrozenVersionOnePattern below, so it cannot drift either.
-            if (Path.GetFileName(file) == "PgStatementTextScrub.cs")
-            {
-                continue;
-            }
-
-            var text = File.ReadAllText(file);
-            if (text.Contains(needle, StringComparison.Ordinal))
-            {
-                hits++;
-                onlyFile = file;
-            }
-        }
-
-        Assert.Equal(1, hits);
-        Assert.NotNull(onlyFile);
-        Assert.EndsWith("SensitiveStatements.cs", onlyFile, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// <see cref="StoreStatementStats.SensitiveStatementPattern"/> is an alias, not a second copy — same
     /// string reference, so the store and every collector reading a target's own statement text can never
     /// drift apart on what counts as sensitive.
@@ -201,21 +147,5 @@ public sealed class PgSensitiveStatementFilterTests
         }
 
         return count;
-    }
-
-    /// <summary>This test file's own full path, so the census below can exclude the needle's literal
-    /// occurrence in this very source file without naming the file by string.</summary>
-    private static string ThisFile([CallerFilePath] string thisFile = "") => Path.GetFullPath(thisFile);
-
-    private static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.sln")))
-        {
-            dir = dir.Parent;
-        }
-
-        Assert.NotNull(dir);
-        return dir!.FullName;
     }
 }

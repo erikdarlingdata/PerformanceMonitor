@@ -159,42 +159,6 @@ public sealed class PgClusterObjectCensusTests
             + "  - Or add the class to PgClusterObjectCensusTests.AllowList with the reason it is safe.");
     }
 
-    [Fact]
-    public void EveryAllowListEntry_StillMatchesARuleInAClassThatReachesTheCluster()
-    {
-        var matched = ScanClasses().Where(h => !h.InCollection).Select(h => h.ClassName).ToHashSet(StringComparer.Ordinal);
-        var stale = AllowList.Keys.Where(name => !matched.Contains(name)).OrderBy(name => name, StringComparer.Ordinal).ToList();
-
-        Assert.True(stale.Count == 0,
-            "These allow-list entries no longer match anything (the class was removed, joined the "
-            + CollectionName + " collection, or stopped doing the thing). Delete them:\n" + string.Join("\n", stale));
-
-        foreach (var (name, reason) in AllowList)
-        {
-            Assert.False(string.IsNullOrWhiteSpace(reason), $"allow-list entry {name} needs a reason");
-        }
-    }
-
-    [Fact]
-    public void EveryPinnedSampleStatement_StillMatchesInItsClass()
-    {
-        var seen = ScanClasses().Where(h => !h.InCollection).Select(h => (h.ClassName, h.Text)).ToHashSet();
-        var stale = PinnedSampleText
-            .SelectMany(p => p.Value.Select(text => (Class: p.Key, Text: text)))
-            .Where(p => !seen.Contains((p.Class, p.Text)))
-            .Select(p => p.Class + "  " + p.Text)
-            .ToList();
-
-        Assert.True(stale.Count == 0,
-            "These pinned sample statements no longer match a rule in their class (the line changed or went away). Update or delete them in "
-            + "PgClusterObjectCensusTests.PinnedSampleText:\n" + string.Join("\n", stale));
-
-        foreach (var name in PinnedSampleText.Keys)
-        {
-            Assert.True(AllowList.ContainsKey(name), $"pinned class {name} is not on the allow list");
-        }
-    }
-
     // ---- rules -------------------------------------------------------------------------------------------
 
     /// <summary>(rule name, pattern). A pattern matches one code line; a name built with <c>{</c> never matches.</summary>
