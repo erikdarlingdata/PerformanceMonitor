@@ -689,7 +689,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* The single-table reads are private, so the split cannot be reintroduced -- asserted so that
            widening either back to public is a decision someone makes here rather than a quiet edit. */
         Assert.Contains("private static async Task<AlertSettingsReadRow?> ReadAlertSettingsAsync", reader, StringComparison.Ordinal);
-        Assert.Contains("private static async Task<int?> ReadDeliveryCooldownAsync", reader, StringComparison.Ordinal);
+        /* #5825: the delivery read also carries the per-channel resolution flags, so it returns a DeliveryRead. */
+        Assert.Contains("private static async Task<DeliveryRead?> ReadDeliveryAsync", reader, StringComparison.Ordinal);
 
         /* And both tool paths go through the combined entry point -- get_alert_settings and the post-write
            re-read, which is the one described to the caller as the authoritative merged state. */

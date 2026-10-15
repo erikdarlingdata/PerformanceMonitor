@@ -1139,7 +1139,10 @@ BEGIN
    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
               WHERE attrelid = 'config.config_notification'::regclass
                 AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
-      EXECUTE 'GRANT UPDATE (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions) ON config.config_notification TO mcp';
+      EXECUTE $v186$
+GRANT UPDATE (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+    ON config.config_notification TO mcp;
+$v186$;
    END IF;
 END $$;
 GRANT UPDATE (enabled, modified_at), DELETE ON config.config_notification_routes TO mcp;

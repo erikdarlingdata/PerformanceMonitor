@@ -170,6 +170,12 @@ public sealed class PlanRegressionRowcountRungTests
         /* V184 (#5632) and V185 (#5812) sit above V183 and go absent too. */
         withoutLater[ProbeOrdinal + 9] = false;
         withoutLater[ProbeOrdinal + 10] = false;
+        /* V186 (#5825) and any later rung's sentinel go absent too. */
+        for (var i = ProbeOrdinal + 11; i < withoutLater.Length; i++)
+        {
+            withoutLater[i] = false;
+        }
+
         Assert.Equal(RungVersion, (int)method.Invoke(null, withoutLater)!);
 
         var behind = (object[])withoutLater.Clone();

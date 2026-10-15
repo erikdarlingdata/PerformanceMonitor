@@ -216,9 +216,11 @@ public sealed class McpAlertSettingsKeyTests
     /// → Alerts), so a provenance key here could only ever read <c>file</c>: a constant dressed as a reading,
     /// which is exactly the placeholder this array's history rejected. Lite's <c>uncorroborated_route</c> and
     /// <c>uncorroborated_route_note</c> still compare — the route and the where-to-edit note are real on both
-    /// SKUs. Paid for by <see cref="GetAlertSettings_OmitsUncorroboratedRouteSource_BecauseLiteHasOneHomeForTheKnob"/>.</para></summary>
+    /// SKUs. Paid for by <see cref="GetAlertSettings_OmitsUncorroboratedRouteSource_BecauseLiteHasOneHomeForTheKnob"/>.</para>
+    /// <para><c>delivery.send_resolutions</c> (#5825): Darling sends an alert's resolution to the channels that got it,
+    /// opt-in per channel. The issue's decision 4 left Lite out of scope, so Lite has no such setting to report.</para></summary>
     private static readonly string[] LiteOmittedMembers =
-        { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold", "analysis.uncorroborated_route_source" };
+        { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold", "analysis.uncorroborated_route_source", "delivery.send_resolutions" };
 
     /// <summary>
     /// Darling's <c>BuildAlertSettingsPayload</c> shape read out of Darling's SOURCE — each top-level key in
@@ -528,10 +530,14 @@ public sealed class McpAlertSettingsKeyTests
         /* Pinned as an exact set, so a fourth member-level exemption cannot be added without this test
            being the place someone justifies it — the same guard the smtp assertion applies to groups, and
            the non-empty successor to the Assert.Empty that stood in the parity test while the array was
-           empty. The third entry is #3712's; its paying test is the one below. */
+           empty. The third entry is #3712's; its paying test is the one below. The fourth is #5825's: Darling's
+           per-channel send-resolutions flags, which Lite does not have (Lite is out of that issue's scope); it is paid
+           for by the two lines after this one. */
         Assert.Equal(
-            new[] { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold", "analysis.uncorroborated_route_source" },
+            new[] { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold", "analysis.uncorroborated_route_source", "delivery.send_resolutions" },
             LiteOmittedMembers);
+        Assert.Contains("send_resolutions", darling.Single(g => g.Key == "delivery").Value);
+        Assert.DoesNotContain("send_resolutions", KeysOf(root.GetProperty("delivery")));
     }
 
     /// <summary>

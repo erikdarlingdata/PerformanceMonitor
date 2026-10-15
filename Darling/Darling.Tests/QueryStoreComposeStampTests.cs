@@ -449,44 +449,28 @@ public sealed class QueryStoreComposeStampTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal + 12, arity - 1);
         Assert.Equal("hasQueryStoreComposeStamp", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
-        behind[ProbeOrdinal + 1] = false;
-        behind[ProbeOrdinal + 2] = false;
-        behind[ProbeOrdinal + 3] = false;
-        behind[ProbeOrdinal + 4] = false;
-        behind[ProbeOrdinal + 5] = false;
-        behind[ProbeOrdinal + 6] = false;
-        behind[ProbeOrdinal + 7] = false;
-        /* V181's (#5750), V182's (#5506), V183's (#5793), V184's (#5632) and V185's (#5812) sentinels sit above V173's, so a store missing V173 is
+        /* Every later rung's sentinel (V174 up to the top, #5825's V186 included) sits above V173's, so a store missing V173 is
            missing them too; leaving any true would map the store to that rung. */
-        behind[ProbeOrdinal + 8] = false;
-        behind[ProbeOrdinal + 9] = false;
-        behind[ProbeOrdinal + 10] = false;
-        behind[ProbeOrdinal + 11] = false;
-        behind[ProbeOrdinal + 12] = false;
+        var behind = (object[])all.Clone();
+        for (var i = ProbeOrdinal; i < arity; i++)
+        {
+            behind[i] = false;
+        }
+
         Assert.Equal(172, (int)method.Invoke(null, behind)!);
 
-        /* Everything through V173's sentinel true and the newer one false maps to V173 itself. */
+        /* Everything through V173's sentinel true and every newer one false maps to V173 itself. */
         var atThisRung = (object[])all.Clone();
-        atThisRung[ProbeOrdinal + 1] = false;
-        atThisRung[ProbeOrdinal + 2] = false;
-        atThisRung[ProbeOrdinal + 3] = false;
-        atThisRung[ProbeOrdinal + 4] = false;
-        atThisRung[ProbeOrdinal + 5] = false;
-        atThisRung[ProbeOrdinal + 6] = false;
-        atThisRung[ProbeOrdinal + 7] = false;
-        atThisRung[ProbeOrdinal + 8] = false;
-        atThisRung[ProbeOrdinal + 9] = false;
-        atThisRung[ProbeOrdinal + 10] = false;
-        atThisRung[ProbeOrdinal + 11] = false;
-        atThisRung[ProbeOrdinal + 12] = false;
+        for (var i = ProbeOrdinal + 1; i < arity; i++)
+        {
+            atThisRung[i] = false;
+        }
+
         Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var arm = viewer.IndexOf("if (hasQueryStoreComposeStamp)", StringComparison.Ordinal);

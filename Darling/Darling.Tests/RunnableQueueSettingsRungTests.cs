@@ -120,6 +120,12 @@ public sealed class RunnableQueueSettingsRungTests
         /* With V182's sentinel (#5506) absent too the answer is V181's. */
         /* With V185's sentinel (#5812) absent the answer is V184's (#5632); with V184's absent too, V183's. */
         var withoutV185 = (object[])all.Clone();
+        /* V186 (#5825) and any later rung's sentinel are absent in every case below. */
+        for (var i = ProbeOrdinal + 9; i < withoutV185.Length; i++)
+        {
+            withoutV185[i] = false;
+        }
+
         withoutV185[ProbeOrdinal + 8] = false;
         Assert.Equal(184, (int)method.Invoke(null, withoutV185)!);
 
