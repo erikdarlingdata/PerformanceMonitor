@@ -62,7 +62,8 @@ base=$(git merge-base origin/dev HEAD) || { echo "GATE RED: no merge base with o
 git diff --no-renames --name-only "$base" HEAD > "$SCRATCH/changed.txt"
 echo "diff: $(wc -l < "$SCRATCH/changed.txt" | tr -d ' ') changed files since merge base ${base:0:9}"
 
-declare -A want_d want_l
+# Initialised empty: under set -u a declared but unassigned array is unbound, and an empty selection read as GATE RED.
+declare -A want_d=() want_l=()
 if [ $MAP -eq 1 ]; then
   mapfile=""
   for id in $(gh api "repos/erikdarlingdata/PerformanceMonitor/actions/workflows/nightly.yml/runs?status=success&per_page=8" \
