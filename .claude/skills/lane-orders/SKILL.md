@@ -191,6 +191,11 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
   selection is the whole suite (darling N, lite M)` (exit 3) means the selection is over 400 classes in one project,
   which the laptop never runs: push on its green Guard lines plus your brief's own classes, and CI decides the rest.
   `--dry-run` lists the classes and each batch's size. CI decides the rest.
+  The map's part (#5872) is the same set a pull request's CI passes run: a test, docs or `.github/` diff gets no
+  drift, so it selects its own classes, their xunit collection mates, the classes that read its files as text and
+  the always-run ones (`Stage=Guard`, whole-tree readers, `Gate=Env`, new test classes): about 330 Darling classes,
+  but a Darling test file still reaches the 685 classes whose map text pattern is `Darling/**`. `selection.json`
+  names each file the map did not know under `unknown`.
 - **Run the classes that name what you changed.** Run `python .github/scripts/ci-select.py local-classes
   --base origin/dev`, then run its `-class` lines, plus `-class "*Census*"`, `-class "*Ratchet*"` and
   `-trait Stage=Guard`. It lists the test classes whose source names a symbol your change declares or edits, most

@@ -302,6 +302,80 @@ public sealed class TestMapProducerGuardTests : IDisposable
         }
     }
 
+    /// <summary>#5876: a test source that names a directory that holds a test project (`Darling/`) must not select the
+    /// class for every change to a test file of that project. Before the fix the first segment of
+    /// `ReadRepoFile("Darling", "X", "Y.cs")` resolved on its own to `Darling/**`.</summary>
+    [Fact]
+    public void ARunOfPathSegments_NamesItsFile_NotTheWholeTopDirectory_AndABareTopDirectoryExcludesTheTestProject()
+    {
+        Write("tracked.txt", string.Join("\n", new[]
+        {
+            "Darling/Darling.Tests/RunHeadTests.cs", "Darling/Darling.Tests/WholeTests.cs",
+            "Darling/Darling.Tests/SharedBaselineCacheLiveTests.cs", "Darling/Darling.Tests/PgTargetWaitTests.cs",
+            "Darling/PerformanceMonitor.Darling.Service/Svc.cs", "Darling/PerformanceMonitor.Darling.Storage/Store.cs",
+        }));
+        Write("Darling/Darling.Tests/RunHeadTests.cs", """
+            public sealed class RunHeadTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Svc.cs"); }
+            }
+            """);
+        Write("Darling/Darling.Tests/WholeTests.cs", """
+            public sealed class WholeTests
+            {
+                public void Reads(string name)
+                {
+                    var d = Path.Combine(RepoRoot(), "Darling");
+                    File.ReadAllText(Path.Combine(d, name));
+                }
+            }
+            """);
+        Write("Darling/Darling.Tests/SharedBaselineCacheLiveTests.cs", """
+            public sealed class SharedBaselineCacheLiveTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Svc.cs"); }
+            }
+            """);
+        Write("Darling/Darling.Tests/PgTargetWaitTests.cs", """
+            public sealed class PgTargetWaitTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Svc.cs"); }
+            }
+            """);
+        Write("shards/a/shard-darling-0.json", ShardJson("darling", 0,
+            ("Ns.RunHeadTests", Array.Empty<string>(), 0.1, 1, 0),
+            ("Ns.WholeTests", Array.Empty<string>(), 0.1, 1, 0),
+            ("Ns.SharedBaselineCacheLiveTests", Array.Empty<string>(), 0.1, 1, 0),
+            ("Ns.PgTargetWaitTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("shards/b/shard-lite-0.json", ShardJson("lite", 0, ("Ns.BetaTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("Lite.Tests/BetaTests.cs", "public sealed class BetaTests { public void Runs() { } }\n");
+
+        var (code, output, map) = Build();
+        Assert.True(code == 0, output);
+        using (map)
+        {
+            var patterns = map!.RootElement.GetProperty("text_patterns");
+            List<string?> Of(string cls) => patterns.GetProperty(cls).EnumerateArray().Select(e => e.GetString()).ToList();
+
+            Assert.Equal(new List<string?> { "Darling/PerformanceMonitor.Darling.Service/Svc.cs" }, Of("RunHeadTests"));
+
+            var whole = Of("WholeTests");
+            Assert.Contains("Darling/PerformanceMonitor.Darling.Service/**", whole);
+            Assert.Contains("Darling/PerformanceMonitor.Darling.Storage/**", whole);
+            Assert.DoesNotContain("Darling/**", whole);
+            Assert.DoesNotContain(whole, p => p!.StartsWith("Darling/Darling.Tests", StringComparison.Ordinal));
+
+            // A class the replay of the failure corpus showed missing failures keeps the wide pattern (KEEP_DARLING_TREE),
+            // or every product project (KEEP_DARLING_PRODUCT); both still carry the file it names.
+            var kept = Of("SharedBaselineCacheLiveTests");
+            Assert.Contains("Darling/**", kept);
+            Assert.Contains("Darling/PerformanceMonitor.Darling.Service/Svc.cs", kept);
+            var product = Of("PgTargetWaitTests");
+            Assert.Contains("Darling/PerformanceMonitor.Darling.Storage/**", product);
+            Assert.DoesNotContain("Darling/**", product);
+        }
+    }
+
     [Fact]
     public void TheSummary_NamesTheHoles_AndTheSize()
     {
