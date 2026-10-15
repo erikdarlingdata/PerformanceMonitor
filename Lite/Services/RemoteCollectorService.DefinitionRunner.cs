@@ -1178,15 +1178,6 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// Writes ONE batch (one enumerated item / one database, or the whole result set for a plain
-    /// collector) to DuckDB via a single appender on the caller's already-open connection (#1556). The
-    /// three collection paths route through here so the storage logic — the prefix columns, the positional
-    /// payload — lives once. Disposing the appender FLUSHES the batch, so on a mid-run abort the batches
-    /// already written stay committed (commit-1..N-1). An empty batch opens no appender and returns 0
-    /// (rows_collected = Σ non-empty batch counts). Synchronous (the DuckDB appender API is), returning the
-    /// count so the driver can await it as a completed task.
-    /// </summary>
-    /// <summary>
     /// #5813 review: adds a failed database's SQL slice to the run's blended SQL time, on the Azure per-database loop,
     /// when the fault came before the straight path folded it. Darling's <c>FoldFailedSlice</c> twin. Null means the
     /// fault came before the timed region began: nothing to add.
@@ -1202,6 +1193,15 @@ public partial class RemoteCollectorService
         sqlMs += sqlSlice.ElapsedMilliseconds;
     }
 
+    /// <summary>
+    /// Writes ONE batch (one enumerated item / one database, or the whole result set for a plain
+    /// collector) to DuckDB via a single appender on the caller's already-open connection (#1556). The
+    /// three collection paths route through here so the storage logic — the prefix columns, the positional
+    /// payload — lives once. Disposing the appender FLUSHES the batch, so on a mid-run abort the batches
+    /// already written stay committed (commit-1..N-1). An empty batch opens no appender and returns 0
+    /// (rows_collected = Σ non-empty batch counts). Synchronous (the DuckDB appender API is), returning the
+    /// count so the driver can await it as a completed task.
+    /// </summary>
     private static int WriteBatch<TRow>(
         DuckDBConnection duckConnection,
         ICollectorDefinition<TRow> definition,
