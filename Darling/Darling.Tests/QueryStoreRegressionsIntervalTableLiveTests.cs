@@ -265,9 +265,11 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(90, row.BaselineExecCount);
         Assert.Equal(42, row.RecentExecCount);
 
-        var served = await DarlingQueryStoreRegressionReader.GetQueryStoreRegressionsAsync(
+        var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
             postgres, ServerId, start, end, DatabaseFilter.One(Db), 50, baselineStart, ct);
-        Assert.Equal(raw, served.Select(Describe).ToList());
+        Assert.Equal(raw, served.Rows.Select(Describe).ToList());
+        /* The tool's history_source names the tier that answered. */
+        Assert.Equal("interval_table", served.Source);
 
         /* The viewer's grid takes the same route to the same rows. */
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
@@ -295,9 +297,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, baselineStart.AddDays(1), ct);
         Assert.Null(await DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync(
             postgres, ServerId, start, end, DatabaseFilter.One(Db), 50, baselineStart, ct));
-        var fallback = await DarlingQueryStoreRegressionReader.GetQueryStoreRegressionsAsync(
+        var fallback = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
             postgres, ServerId, start, end, DatabaseFilter.One(Db), 50, baselineStart, ct);
-        Assert.Equal(raw, fallback.Select(Describe).ToList());
+        Assert.Equal(raw, fallback.Rows.Select(Describe).ToList());
+        Assert.Equal("raw", fallback.Source);
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
             Assert.Null(await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, ct));

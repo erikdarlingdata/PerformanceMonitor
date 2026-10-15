@@ -297,6 +297,10 @@ internal static class DarlingQueryStoreRegressionReader
     /// </summary>
     public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
 
+    /* A named constant, as DarlingMcpQueryStoreHistoryTools spells it, so the store-receiver census reads the
+       construction as `new NpgsqlCommand(<name>, connection)` on a store-pool connection (#5809). */
+    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
+
     /// <summary>
     /// Whether this server has Query Store rows BEFORE the window, and whether it has any INSIDE it.
     /// <para>One round trip for the two facts that decide what an empty result means, and it is run only
@@ -340,12 +344,22 @@ internal static class DarlingQueryStoreRegressionReader
     public static async Task<List<RegressionRow>> GetQueryStoreRegressionsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         DatabaseFilter databases, int limit, DateTime baselineStartUtc, CancellationToken cancellationToken = default)
+        => (await ReadQueryStoreRegressionsAsync(
+            postgres, serverId, startUtc, endUtc, databases, limit, baselineStartUtc, cancellationToken)).Rows;
+
+    /// <summary>
+    /// <see cref="GetQueryStoreRegressionsAsync"/> with the tier that answered: <see cref="ReadScope.SourceIntervalTable"/>
+    /// or <see cref="ReadScope.SourceRaw"/>, the words <c>get_query_store_top</c>'s <c>history_source</c> uses (#5809).
+    /// </summary>
+    public static async Task<(List<RegressionRow> Rows, string Source)> ReadQueryStoreRegressionsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        DatabaseFilter databases, int limit, DateTime baselineStartUtc, CancellationToken cancellationToken = default)
     {
         var tableRows = await TryGetQueryStoreRegressionsFromTableAsync(
             postgres, serverId, startUtc, endUtc, databases, limit, baselineStartUtc, cancellationToken);
         if (tableRows is not null)
         {
-            return tableRows;
+            return (tableRows, ReadScope.SourceIntervalTable);
         }
 
         await using var command = postgres.CreateCommand(QueryStoreRegressionsSql);
@@ -354,7 +368,7 @@ internal static class DarlingQueryStoreRegressionReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = await ReadRowsAsync(reader, cancellationToken);
         ReadScope.NoteSource(ReadScope.SourceRaw);
-        return rows;
+        return (rows, ReadScope.SourceRaw);
     }
 
     /// <summary>
@@ -383,7 +397,7 @@ internal static class DarlingQueryStoreRegressionReader
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
-            await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
