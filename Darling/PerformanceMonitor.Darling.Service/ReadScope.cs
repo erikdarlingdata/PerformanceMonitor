@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -79,16 +80,90 @@ internal sealed class ReadScope
         StartedUtc = DateTime.UtcNow;
         _parent = parent;
         InFlightAtStart = inFlightAtStart;
+        _counting = parent is null ? 1 : 0;
     }
 
     private readonly ReadScope? _parent;
+
+    /* 1 while this outermost scope is counted in s_inFlight; 0 for a nested scope, and while the read waits for an
+       admission slot (#5506 part 3). Exchanged, so a scope is uncounted exactly once. */
+    private int _counting;
 
     /// <summary>The reads in progress on the service right now (#5506).</summary>
     internal static int InFlight => Volatile.Read(ref s_inFlight);
 
     /// <summary>How many other reads were already in progress on the service when this read started (#5506). A nested
     /// scope carries its outermost scope's count.</summary>
-    internal int InFlightAtStart { get; }
+    internal int InFlightAtStart { get; private set; }
+
+    /// <summary>Whether this scope counts in <see cref="InFlight"/> now: an outermost scope does, except while its read waits
+    /// in the admission queue (<see cref="AdmitAsync"/>).</summary>
+    internal bool IsCounted => Volatile.Read(ref _counting) == 1;
+
+    /// <summary>
+    /// #5506 part 3: admits a read with this flow's scope uncounted while it waits. A read that queues for an admission
+    /// slot is not running, so it leaves <see cref="InFlight"/> until the slot is granted (or refused, or the caller
+    /// leaves), and its <see cref="InFlightAtStart"/> is taken again then: <c>max_in_flight</c> counts reads running,
+    /// as it did before admission existed. Not async itself: <see cref="ReadAdmission.AdmitAsync"/> sets its nesting
+    /// marker in the caller's flow, and an async wrapper would undo that marker on return.
+    /// </summary>
+    internal static Task<ReadAdmissionTicket> AdmitAsync(ReadAdmission admission, ReadSurface surface, string route, string? band,
+        CancellationToken cancellationToken)
+    {
+        var admitting = admission.AdmitAsync(surface, route, band, cancellationToken);
+        if (admitting.IsCompleted || s_current.Value is not { } current)
+        {
+            return admitting;
+        }
+
+        var outermost = current;
+        while (outermost._parent is { } parent)
+        {
+            outermost = parent;
+        }
+
+        if (Interlocked.Exchange(ref outermost._counting, 0) == 0)
+        {
+            return admitting;
+        }
+
+        Interlocked.Decrement(ref s_inFlight);
+        return ResumeAfterAsync(admitting, outermost);
+
+        static async Task<ReadAdmissionTicket> ResumeAfterAsync(Task<ReadAdmissionTicket> admitting, ReadScope scope)
+        {
+            try
+            {
+                return await admitting.ConfigureAwait(false);
+            }
+            finally
+            {
+                scope.InFlightAtStart = Interlocked.Increment(ref s_inFlight) - 1;
+                Volatile.Write(ref scope._counting, 1);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #5506 part 3 (round 2, L3): this flow's outermost scope stops counting in <see cref="InFlight"/> for the rest of its
+    /// life. A caller answered from the read cache, or one that joined a read another caller runs, runs no read of its
+    /// own, so it must not count in <c>max_in_flight</c> or in another read's <see cref="InFlightAtStart"/> while it waits
+    /// (round 1, L7: reads running only), as a read waiting for an admission slot does not (<see cref="AdmitAsync"/>).
+    /// Exchanged, so the scope is uncounted exactly once whatever else uncounts it.
+    /// </summary>
+    internal void Uncount()
+    {
+        var outermost = this;
+        while (outermost._parent is { } parent)
+        {
+            outermost = parent;
+        }
+
+        if (Interlocked.Exchange(ref outermost._counting, 0) == 1)
+        {
+            Interlocked.Decrement(ref s_inFlight);
+        }
+    }
 
     /// <summary>The time this read waited for a store connection, in milliseconds, apart from its run time (#5506): the
     /// pool's queue wait plus the time to open a new physical connection, summed over every connection the read took.
@@ -324,7 +399,7 @@ internal sealed class ReadScope
         public void Dispose()
         {
             s_current.Value = _previous;
-            if (_counted)
+            if (_counted && Interlocked.Exchange(ref Scope._counting, 0) == 1)
             {
                 Interlocked.Decrement(ref s_inFlight);
             }

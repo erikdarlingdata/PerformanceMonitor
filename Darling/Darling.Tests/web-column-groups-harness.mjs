@@ -110,6 +110,16 @@ const scenarios = {
     ths(w2)[1].fire("click"); // sort a visible column afterwards
     out.byA = col0(w2);
   },
+  admissionStatus() {
+    /* #5506 part 3: get_read_latency's grid names statusKey "admission"; the live object draws one line above the grid. */
+    const plain = cols.map(({ group, ...c }) => c);
+    const desc = { rowsKey: "rows", columns: plain, title: "R", statusKey: "admission" };
+    const w = VIZ.table({ rows, admission: { limit: 2, running: 1, queued: 3 } }, desc);
+    out.childClasses = w.children.map((c) => c.className);
+    out.line = w.children[0].textContent;
+    out.offLine = VIZ.table({ rows, admission: { limit: 0, running: 4, queued: 0 } }, desc).children[0].textContent;
+    out.noneTop = VIZ.table({ rows }, desc).className;
+  },
   async exportAll() {
     const texts = [];
     Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async (t) => { texts.push(t); } } }, configurable: true, writable: true });

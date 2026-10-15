@@ -290,7 +290,24 @@ function vizTable(data, desc) {
      a function from the rows to the rows in the order to show. A header click still sorts from there. */
   const rows = typeof desc.orderRows === "function" && Array.isArray(read) ? desc.orderRows(read) : read;
   /* #5244: a filtered read that has a snapshot but no row for the chosen databases must not say there is no snapshot. */
-  return gridTable(rows, rows.length ? desc : { ...desc, emptyText: dbFilteredEmptyText(desc.read, desc.emptyText, desc.dbScope) });
+  const grid = gridTable(rows, rows.length ? desc : { ...desc, emptyText: dbFilteredEmptyText(desc.read, desc.emptyText, desc.dbScope) });
+  /* #5506 part 3: `statusKey` names a live-state object in the payload (get_read_latency's admission, never stored) that
+     draws as one line above the grid; a payload without it draws the grid alone. */
+  const line = desc.statusKey === "admission" ? admissionLine(getPath(data, desc.statusKey)) : null;
+  return line ? el("div", {}, [noticeStrip(line), grid]) : grid;
+}
+
+/**
+ * #5506 part 3: the status line of get_read_latency's grid, from the answer's live `admission` object: the long reads
+ * running and waiting in this service process right now, against the limit (0 is no limit). Null when the answer has none.
+ */
+function admissionLine(admission) {
+  if (!admission || typeof admission !== "object") return null;
+  const running = Number(admission.running) || 0;
+  const queued = Number(admission.queued) || 0;
+  const limit = Number(admission.limit) || 0;
+  const slots = limit > 0 ? `${running} of ${limit} long-read slots in use` : `${running} long reads running (no limit set)`;
+  return `Now, in this service process: ${slots}, ${queued} waiting.`;
 }
 
 /** The grid every table on the web draws through (#4843): sort, column groups, per-column filters, Copy cell / row /

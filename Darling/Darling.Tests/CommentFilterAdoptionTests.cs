@@ -85,7 +85,7 @@ public sealed class CommentFilterAdoptionTests
     /// name a new entry.
     ///
     /// <para>Four kinds live here and they are not the same kind. Eight <b>collect</b> a doc-comment run,
-    /// where the prefix is what defines the run. Three read a <b>stated, measured</b> bound off a named file each.
+    /// where the prefix is what defines the run. Four read a <b>stated, measured</b> bound off a named file each.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
     /// </summary>
@@ -207,6 +207,20 @@ public sealed class CommentFilterAdoptionTests
             + "the loud direction. A sibling public const between the comment and the constant (a pair declared "
             + "under one comment) is skipped only while nothing has been collected yet; the arranged-input test "
             + "in the class pins both edges.",
+
+        ["Darling.Tests/ReadAdmissionCoverageCensusTests.cs"] =
+            "STATED BOUND, and asking for the walker would BREAK it. Two scans read the Darling.Service sources line by "
+            + "line. The ReadScope.Open( census drops a line whose trimmed text starts with /// ; the route census "
+            + "(EveryMappedRoute_IsAdmittedOrExemptWithAReason) drops a .MapGet( / .MapPost( / .MapPut( / .MapDelete( / "
+            + ".MapPatch( match whose text before it on its line, trimmed, starts with // or *. Both READ string "
+            + "literals - the route census keys on the route literal the call passes, and then reads the handler text "
+            + "after it for AdmitWebRouteAsync( - and the walker blanks literal text, so adopting it would blank the "
+            + "very thing the scan reads and pass for the wrong reason. Stated bound: the filters read one line, so a "
+            + "call written inside a /* */ block comment on a line that does not begin with * or /*, or after a "
+            + "trailing // comment's code, is counted as a site - a spurious extra site or route, the loud direction, "
+            + "because the per-file counts and the route roster are asserted at set equality and the extra entry "
+            + "fails there. A // line that mentions ReadScope.Open( is counted too, the same loud direction. "
+            + "Measurement-dependent, not permanent: the sources it reads carry no such comment today.",
     };
 
     /// <summary>

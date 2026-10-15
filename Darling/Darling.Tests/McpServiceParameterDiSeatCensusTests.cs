@@ -79,8 +79,8 @@ public sealed class McpServiceParameterDiSeatCensusTests
             "argument instead of resolved from DI.");
 
         /* A change worth knowing about even when nothing is missing: today's distinct complex service types are
-           exactly these ten (AnalyzerConfig, DarlingMcpAddServersPolicy, InvestigationBriefComposer, MonitoredServerRegistryState (get_fleet_overview's Azure master scope), NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
-           StoreHostProfileCache, ReadLatencyRecorder) — pin the set so an eleventh type appearing here is a deliberate
+           exactly these eleven (AnalyzerConfig, DarlingMcpAddServersPolicy, InvestigationBriefComposer, MonitoredServerRegistryState (get_fleet_overview's Azure master scope), NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
+           StoreHostProfileCache, ReadLatencyRecorder, ReadAdmission) — pin the set so a twelfth type appearing here is a deliberate
            addition rather than a silent one. StoreHostProfileCache added deliberately (#4214 round-1 review,
            Medium 2): get_store_host's 5-minute shared cache, registered via the typed-generic
            AddSingleton<StoreHostProfileCache> overload this test's own Contains check requires. AnalyzerConfig
@@ -93,9 +93,11 @@ public sealed class McpServiceParameterDiSeatCensusTests
            overload. It is a service type so that a client cannot supply it and the token in McpConfig stays out of
            DI. InvestigationBriefComposer added deliberately (#5632 Phase A): claim_investigation_request composes the
            brief at claim time, registered by ConfigureMcpServices via the typed-generic
-           AddSingleton<InvestigationBriefComposer> overload (its reader behind it, AddSingleton<IInvestigationBriefSourceReader>). */
+           AddSingleton<InvestigationBriefComposer> overload (its reader behind it, AddSingleton<IInvestigationBriefSourceReader>).
+           ReadAdmission added by #5506 part 3: get_read_latency's live admission counts, registered via the
+           typed-generic AddSingleton<ReadAdmission> overload. */
         Assert.Equal(
-            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "InvestigationBriefComposer", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "InvestigationBriefComposer", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadAdmission", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

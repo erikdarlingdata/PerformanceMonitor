@@ -62,7 +62,7 @@ public sealed class TimescaleContinuousAggregateTests
     /// aggregation is OFF (the runtime is pinned at 2.28.1); and turning it on would not surface un-materialized
     /// history anyway, because the watermark is a hard partition rather than a fallback.
     ///
-    /// <para>What makes the pin LOAD-BEARING rather than merely accurate: <c>RollupCoverageProbeSql</c> and
+    /// <para>What makes the pin LOAD-BEARING rather than merely accurate: <c>RollupColdFloorSql</c> and
     /// <c>RetentionArmSafetySql</c> both read <c>min(bucket)</c> to mean "the oldest bucket this rollup has
     /// MATERIALIZED". Adding <c>materialized_only = false</c> would union the raw branch in, so an EMPTY
     /// materialization would report RAW's oldest row as the rollup's floor. The router would then believe a
@@ -91,13 +91,14 @@ public sealed class TimescaleContinuousAggregateTests
 
         /* The probe and the arming gate must keep reading the SAME expression off the SAME relation, or
            "covered" would mean two different things to the router and to the purge. */
-        var probe = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All);
+        var probe = TimescaleSupport.RollupColdFloorSql(TimescaleSupport.QueryStatsHourlyView);
+        var rawProbe = TimescaleSupport.RawFloorProbeSql(TimescaleSupport.RolledRawTables);
         var arming = TimescaleSupport.RetentionArmSafetySql(
             "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsHourlyView });
 
         Assert.Contains($"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", probe, StringComparison.Ordinal);
         Assert.Contains($"min(bucket) FROM collect.{TimescaleSupport.QueryStatsHourlyView}", arming, StringComparison.Ordinal);
-        Assert.Contains("min(collection_time) FROM collect.query_stats", probe, StringComparison.Ordinal);
+        Assert.Contains("min(collection_time) FROM collect.query_stats", rawProbe, StringComparison.Ordinal);
         Assert.Contains("min(collection_time) FROM collect.query_stats", arming, StringComparison.Ordinal);
     }
 

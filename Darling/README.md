@@ -927,6 +927,14 @@ A **file-only** block (not seeded into the control plane): it describes the depl
 
 An optional outbound ping to a dead-man's-switch URL, off unless `url` is set. File-only: the web Admin and MCP cannot edit it, and no page returns it. See [Watching the service from outside](#watching-the-service-from-outside).
 
+### reads (optional)
+
+`reads.maxHeavyReads` (default 2) is how many long reads the MCP server and the web dashboard run at once. A read is long when the 90th percentile of its tool or page is above 2 seconds at that window size over the last 7 days (with no history yet, a 7-day or longer window counts as long). Up to 16 more long reads wait, oldest first, for up to 45 seconds; past that a read is refused: `busy` on MCP and HTTP 429 with `Retry-After` on the web. Short reads, the health reads (`get_read_latency`, `get_slow_reads`, `get_collection_health`, `get_collection_log`, `get_store_metrics`, `get_store_log`, `list_servers`) and MCP write tools never wait. `0` turns the limit off. The limit is per service process: the WPF viewer reads the store directly and is not counted. The value is read when each server starts.
+
+An identical long read is answered from memory for a short time: 15 seconds for a read with no window or a window up to 1 hour, 30 seconds up to 24 hours, 60 seconds up to 7 days and 120 seconds beyond. A read answered from memory takes no slot. The cache is per service process too.
+
+`get_read_latency` (and its grid on the web) counts these per route and window size. `count` and the percentiles cover only the reads that ran. `queued` is the reads that waited for a slot, `queue_wait_ms` their summed wait and `queue_wait_p95_ms` the 95th percentile of that wait. `rejected` is the reads answered `busy` or 429, `cache_hits` the reads answered from memory and `cancelled` the reads whose caller left. `wait_total_ms` stays the wait for a store connection only. The `admission` object is the live state of this process since it started: the limit, the long reads running and waiting now, and per route the reads admitted, queued, refused, answered from memory and missed by the cache. It is not stored, so it starts again at zero after a restart.
+
 ### No Schedule Knobs, by Design
 
 There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.

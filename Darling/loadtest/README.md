@@ -147,7 +147,7 @@ Each copy reads its source partition again. That is the price of a run that can 
 
     Each window ends one second after the newest Query Store row of the server, not at the current time. The step passes that time as `as_of` to the MCP tools and the web routes. It also passes it as `windowEnd` to the panel, unless `panel.json` sets its own window. The `as_of` column of the table shows it. If the server has no query in the day before that time, the step prints a line that says it skips `get_query_store_query_history`.
 
-    A read that answers with a `status` of `error`, `invalid`, `not_found`, `unavailable`, `precondition`, `not_collected` or a timeout is listed as `failed`, with the message. A read like that returns in a few milliseconds, so it is not a fast read. Check that the outcome column says `ok` for every read before you use the times.
+    A read that answers with a `status` of `error`, `invalid`, `not_found`, `unavailable`, `precondition`, `not_collected`, `busy` or a timeout is listed as `failed`, with the message. A web read refused with HTTP 429 is listed as `failed` too. A read like that returns in a few milliseconds, so it is not a fast read. Check that the outcome column says `ok` for every read before you use the times.
 2. Wait for the next full hour. The service writes `collect.read_latency` once an hour.
 3. Run the read times, with the start time from step 1:
 
@@ -183,7 +183,7 @@ Each copy reads its source partition again. That is the price of a run that can 
 
 | Step | Limit |
 |---|---|
-| Reads through MCP and the web dashboard | 5 s. A read at or above 5 s is a slow read (`SlowReadLog.DefaultThresholdMs`). Every outcome must be `ok`. |
+| Reads through MCP and the web dashboard | 5 s. A read at or above 5 s is a slow read (`SlowReadLog.DefaultThresholdMs`). Every outcome is `ok`, `fallback_raw`, `gate_failed`, `queue_wait` or `cache_hit`; a `busy` or `cancelled` row fails the run. `wait_total_ms` and the slow reads' `wait_ms` are the wait for a store connection only. The time a read waited for a long-read slot is in `queued` and `queue_wait_ms`, from the `queue_wait` rows, and is not part of the read's own time. |
 | A Custom Views panel | 45 s, which is 75% of its 60 s statement timeout (`ComposeSpec`). |
 | Hourly work | `hourly_total_ms` from the Jobs step must stay well under one hour. It is the time of the three Query Store builders and the convergence pass on one tick. A `deferred` count above 0 on tick after tick is a backlog that does not clear, and fails the limit. |
 | Daily purge | The newest `data_retention` run must finish without an error. |

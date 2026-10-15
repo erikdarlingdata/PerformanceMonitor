@@ -75,7 +75,16 @@ public sealed class DarlingMcpReadLatencyTools
         + "fallback. window_band is the width of the window the read asked for: 1h (up to 1 hour), 24h (over 1 hour up to 24), "
         + "7d (over 24 hours up to 7 days), 7d+ (longer), or none (the read asked for no window). "
         + "max_in_flight is the most other reads already running on the service when one of these reads started. "
-        + "wait_total_ms is the summed part of these reads' time spent waiting for a store connection rather than running. "
+        + "wait_total_ms is the summed part of these reads' time spent waiting for a store connection rather than running; it never includes "
+        + "time spent waiting for a long-read slot. "
+        + "Since #5506 the service runs only a few long reads at once, and the rows that are not a read running are counted on their own, "
+        + "outside count, mean_ms, max_ms, the percentiles, max_in_flight and wait_total_ms: queued is the reads that waited for a long-read "
+        + "slot, queue_wait_ms their summed wait and queue_wait_p95_ms the 95th percentile of that wait (a bucket upper bound like the others, "
+        + "null when none waited); rejected is the reads answered busy (HTTP 429 on the web) because the slots and their queue were full; "
+        + "cache_hits is the reads answered from the service's short-lived read cache; cancelled is the reads whose caller left before "
+        + "they finished. A cache miss is a read that ran, so it is in count. A route whose only rows are these shows count 0. "
+        + "When the host admits long reads, admission is this service process's live state since it started (never stored): limit, "
+        + "running, queued, and per route the reads admitted, queued, rejected, answered from the cache and missed by it. "
         + "Rows stored before schema V182 read as band none with 0 for both. "
         + "distinct_callers is the most different callers (MCP clients by name and version, web sessions by a salted hash that "
         + "holds no personal data) that read the route in any one hour of the window, 0 on rows stored before schema V183. At most 1,000 are counted per hour; 1,000 means at least that many. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
@@ -91,6 +100,7 @@ public sealed class DarlingMcpReadLatencyTools
         [Description("Optional: scope to one surface (web, compose, or mcp).")] string? surface = null,
         [Description("Optional: scope to one route (read/panel name).")] string? route = null,
         [Description("Maximum rows to return. Default 25; max 1000.")] int limit = DefaultLimit,
+        ReadAdmission? admission = null,
         CancellationToken cancellationToken = default)
     {
         var hoursError = McpHelpers.ValidateHoursBack(hours);
@@ -112,12 +122,16 @@ public sealed class DarlingMcpReadLatencyTools
             var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, cancellationToken);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status(
-                    "empty",
-                    $"No read recorded in the last {hours} hour(s)" +
+                var emptyMessage = $"No read recorded in the last {hours} hour(s)" +
                     (string.IsNullOrWhiteSpace(surface) && string.IsNullOrWhiteSpace(route) ? "" : " for that filter") +
                     ". The service records an hourly histogram per (surface, route, outcome, window band); a store before " +
-                    "schema V148, or a quiet window, has no row.");
+                    "schema V148, or a quiet window, has no row.";
+
+                /* #5506 part 3: rows flush hourly, so a quiet store window can still have long reads running or queued right
+                   now; the empty answer carries the live admission object too, under hints. */
+                return AdmissionObject(admission) is { } emptyAdmission
+                    ? McpHelpers.Status("empty", emptyMessage, new { admission = emptyAdmission })
+                    : McpHelpers.Status("empty", emptyMessage);
             }
 
             var projected = rows.Select(r =>
@@ -125,12 +139,16 @@ public sealed class DarlingMcpReadLatencyTools
                 var p50 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.50, r.MaxMs);
                 var p95 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.95, r.MaxMs);
                 var p99 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.99, r.MaxMs);
+                var queueP95 = r.QueueWaitBucketCounts is { } queueBuckets
+                    ? ReadLatencyPercentiles.FromBuckets(queueBuckets, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.95, r.QueueWaitMaxMs)
+                    : null;
                 return new
                 {
                     Row = r,
                     P50 = p50,
                     P95 = p95,
                     P99 = p99,
+                    QueueP95 = queueP95,
                 };
             })
             /* p95 desc, then count desc — the worst tail leads, and among equal tails the busiest route
@@ -163,14 +181,50 @@ public sealed class DarlingMcpReadLatencyTools
                 max_in_flight = x.Row.MaxInFlight,
                 wait_total_ms = x.Row.WaitTotalMs,
                 distinct_callers = x.Row.DistinctCallers,
+                queued = x.Row.Queued,
+                queue_wait_ms = x.Row.QueueWaitMs,
+                queue_wait_p95_ms = x.QueueP95?.UpperBoundMs,
+                rejected = x.Row.Rejected,
+                cache_hits = x.Row.CacheHits,
+                cancelled = x.Row.Cancelled,
             }).ToArray();
 
-            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes);
+            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_read_latency", ex);
         }
+    }
+
+    /// <summary>#5506 part 3: the live admission counts of THIS process since it started (never stored, so they reset on a
+    /// restart and do not cover another service on the same store): the limit, the long reads running and waiting now,
+    /// and per route the long reads admitted, queued and refused. Null when the host has no admission.</summary>
+    internal static object? AdmissionObject(ReadAdmission? admission)
+    {
+        if (admission is null)
+        {
+            return null;
+        }
+
+        var stats = admission.Stats();
+        return new
+        {
+            scope = "this service process, since it started",
+            limit = stats.Limit,
+            running = stats.Running,
+            queued = stats.Queued,
+            routes = stats.Routes.Select(r => new
+            {
+                surface = r.Surface,
+                route = r.Route,
+                admitted = r.Admitted,
+                queued = r.Queued,
+                rejected = r.Rejected,
+                cache_hits = r.CacheHits,
+                cache_misses = r.CacheMisses,
+            }).ToArray(),
+        };
     }
 
     /// <summary>
@@ -179,9 +233,22 @@ public sealed class DarlingMcpReadLatencyTools
     /// serialized and, while it is over budget with more than one row, the last row is dropped and it is
     /// serialized again — the envelope's own digits and the true/false spelling depend on the final page.
     /// </summary>
-    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes)
+    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes, object? admission = null)
     {
-        string Envelope(IReadOnlyList<object> page, bool truncated) => JsonSerializer.Serialize(new
+        string Envelope(IReadOnlyList<object> page, bool truncated) => admission is not null
+            ? JsonSerializer.Serialize(new
+            {
+                hours,
+                surface,
+                route,
+                note = BucketEstimateNote,
+                admission,
+                truncated,
+                reads_returned = page.Count,
+                reads_total = shaped.Count,
+                reads = page,
+            })
+            : JsonSerializer.Serialize(new
         {
             hours,
             surface,

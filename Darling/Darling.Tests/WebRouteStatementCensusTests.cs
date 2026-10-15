@@ -86,6 +86,12 @@ public sealed class WebRouteStatementCensusTests
         (new Regex(@"^Results\s*\.\s*NoContent\s*\(\s*\)$", RegexOptions.Compiled), "no body"),
         (new Regex(@"^Results\s*\.\s*Json\s*\(\s*DarlingWebFailureLog\s*\.\s*Body\s*\(", RegexOptions.Compiled),
             "DarlingWebFailureLog.Body is one fixed sentence per failure class, never the exception text"),
+        (new Regex(@"^(?:RunWebReadAsync\s*\(\s*context\s*\)$|new\s+WebReadAnswer\s*\(\s*(?:ToHttpResult\s*\(|BusyResult\s*\(\s*refusal\s*\)|Results\s*\.\s*Json\s*\(\s*DarlingWebFailureLog\s*\.\s*Body\s*\())", RegexOptions.Compiled),
+            "#5506 part 3: the read loop's RunWebReadAsync, whose every answer is a WebReadAnswer around ToHttpResult, BusyResult or DarlingWebFailureLog.Body"),
+        (new Regex(@"^(?:\(\s*await\s+(?:RunWebReadAsync\s*\(\s*context\s*\)|flight\s*\.\s*WaitAsync\s*\(\s*callerAborted\s*\))\s*\)|shared)\s*\.\s*Answer$", RegexOptions.Compiled),
+            "#5506 part 3: a WebReadAnswer.Answer, which the read loop's RunWebReadAsync builds only from ToHttpResult, BusyResult or DarlingWebFailureLog.Body; the read cache hands one read's answer to the callers that joined it"),
+        (new Regex(@"^(?:DarlingWebEndpoints\s*\.\s*)?BusyResult\s*\(\s*(?:refusal|busy)\s*\)$", RegexOptions.Compiled),
+            "#5506 part 3: the fixed admission refusal (a limit, a count and a retry-after), never a tool string"),
         (new Regex(@"^ServerErrorResult\s*\(", RegexOptions.Compiled),
             "answers DarlingWebFailureLog.Body(sentence): a fixed sentence, the argument only reaches the log"),
     };

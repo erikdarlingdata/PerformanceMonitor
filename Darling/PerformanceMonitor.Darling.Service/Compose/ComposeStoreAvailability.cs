@@ -225,7 +225,11 @@ internal static class ComposeStoreAvailability
         lock (entry)
         {
             entry.Answer = answer;
-            entry.Probed = true;
+
+            /* #5808: an answer with a floor still pending (the background drain is measuring a view that has no last
+               floor) is served to this probe's waiters and not cached, so the next call re-probes, a catalog read,
+               and routes on the measured floor once it lands instead of the null one for the whole interval. */
+            entry.Probed = !answer.Coverage.FloorsPending;
             entry.ProbedAtUtc = DateTime.UtcNow;
         }
 

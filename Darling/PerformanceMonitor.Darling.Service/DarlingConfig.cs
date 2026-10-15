@@ -373,6 +373,21 @@ public sealed class DarlingConfig
 
     private HeartbeatConfig _heartbeat = new();
 
+    /// <summary>
+    /// Read admission (#5506): how many long reads the MCP and web hosts run at once. File-only, like <see cref="Peers"/>;
+    /// see <see cref="ReadsConfig"/>. Omit it for the default.
+    /// </summary>
+    [JsonPropertyName("reads")]
+    public ReadsConfig Reads
+    {
+        get => _reads;
+
+        /* "reads": null means the defaults, the same as an absent block (the #5460 heartbeat rule). */
+        set => _reads = value ?? new();
+    }
+
+    private ReadsConfig _reads = new();
+
     public static string ResolveConfigPath(string? explicitPath = null) =>
         ResolveConfigPath(explicitPath, Environment.GetEnvironmentVariable);
 
@@ -2882,4 +2897,17 @@ public sealed class PeerStoreConfig
     /// </summary>
     [JsonPropertyName("matches")]
     public List<string> Matches { get; set; } = new();
+}
+
+/// <summary>
+/// Read admission (#5506). A read whose route took 2 seconds or more at its window size is a long read; at most
+/// <see cref="MaxHeavyReads"/> of them run at once, up to 16 more wait for up to 45 seconds, and past that a read is
+/// refused as busy. Short reads never wait. The limit is per service process: the MCP and web hosts share it, and the
+/// WPF viewer, which reads the store directly, is not counted. File-only; read when each host starts.
+/// </summary>
+public sealed class ReadsConfig
+{
+    /// <summary>How many long reads run at once (default 2). 0 turns the limit off.</summary>
+    [JsonPropertyName("maxHeavyReads")]
+    public int MaxHeavyReads { get; set; } = ReadAdmission.DefaultMaxHeavyReads;
 }

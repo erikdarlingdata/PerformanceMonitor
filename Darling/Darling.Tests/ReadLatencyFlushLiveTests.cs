@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -340,5 +341,152 @@ public sealed class ReadLatencyFlushLiveTests
 
         using var read = new NpgsqlCommand("SELECT count(*) FROM collect.read_latency", connection);
         Assert.Equal(0L, await read.ExecuteScalarAsync(ct));
+    }
+
+    /// <summary>
+    /// #5506 part 3: <see cref="DarlingReadLatencyReader.GetSummaryAsync"/>'s SQL keeps the rows that are not a read running
+    /// (queue_wait, busy, cache_hit, cancelled) out of the run count, the run histogram, total, max, max_in_flight and
+    /// wait_total_ms, and counts them in their own columns, with the queue wait's own histogram; and
+    /// <see cref="DarlingMcpReadLatencyTools.GetReadLatency"/> projects them. A route with only such rows still answers, with
+    /// a run count of zero.
+    /// </summary>
+    [Fact]
+    public async Task TheReader_KeepsAdmissionRowsOutOfTheRunFigures_AndCountsThemOnTheirOwn()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 read-latency reader pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        const string route = "get_wait_stats";
+        var band = ReadWindowBand.OneDay;
+        var accumulator = new ReadLatencyAccumulator();
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Ok, 100, band, 2, 30, "client-a/1.0");
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Ok, 3_000, band, 1, 0, "client-a/1.0");
+        /* Each admission row carries an in-flight count and a wait that must not reach the run figures. */
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.QueueWait, 400, band, 9, 500, "client-a/1.0");
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.QueueWait, 400, band, 9, 500, "client-a/1.0");
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.QueueWait, 2_500, band, 9, 500, "client-a/1.0");
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Busy, 45_000, band, 9, 500, "client-a/1.0");
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Cancelled, 60_000, band, 9, 500, "client-a/1.0");
+        /* A cache hit is stored as the text cache_hit; Limit stands in for it here and is relabelled below. */
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Limit, 70_000, band, 9, 500, "client-a/1.0");
+        accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Limit, 70_000, band, 9, 500, "client-a/1.0");
+        accumulator.Record(ReadSurface.Web, "get_fleet_overview", ReadOutcome.Busy, 0, ReadWindowBand.OneHour, 0, 0, null);
+        await accumulator.FlushAsync(connection, DateTime.UtcNow.AddHours(-1), logger: null, ct);
+        await using (var relabel = new NpgsqlCommand("UPDATE collect.read_latency SET outcome = 'cache_hit' WHERE outcome = 'limit'", connection))
+        {
+            Assert.Equal(1, await relabel.ExecuteNonQueryAsync(ct));
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, DateTime.UtcNow.AddHours(-24), surface: null, route: null, ct);
+
+        var wait = Assert.Single(rows, r => r.Route == route);
+        Assert.Equal((2L, 3_100L, 3_000L, 2, 30L), (wait.RunCount, wait.TotalMs, wait.MaxMs, wait.MaxInFlight, wait.WaitTotalMs));
+        Assert.Equal(2L, wait.BucketCounts.Sum());
+        Assert.Equal((3L, 3_300L, 2_500L), (wait.Queued, wait.QueueWaitMs, wait.QueueWaitMaxMs));
+        Assert.Equal(3L, wait.QueueWaitBucketCounts!.Sum());
+        Assert.Equal((1L, 2L, 1L), (wait.Rejected, wait.CacheHits, wait.Cancelled));
+
+        var fleet = Assert.Single(rows, r => r.Route == "get_fleet_overview");
+        Assert.Equal((0L, 0L, 1L), (fleet.RunCount, fleet.MaxMs, fleet.Rejected));
+        Assert.Equal(0L, fleet.BucketCounts.Sum());
+
+        var json = await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours: 24, route: route, cancellationToken: ct);
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        var row = Assert.Single(document.RootElement.GetProperty("reads").EnumerateArray());
+        Assert.Equal(2, row.GetProperty("count").GetInt64());
+        Assert.Equal(3_000, row.GetProperty("p95_ms").GetInt64());
+        Assert.Equal(30, row.GetProperty("wait_total_ms").GetInt64());
+        Assert.Equal(3, row.GetProperty("queued").GetInt64());
+        Assert.Equal(3_300, row.GetProperty("queue_wait_ms").GetInt64());
+        /* 400, 400 and 2,500 ms: the 95th percentile lands in the (2,000, 3,000] bucket, capped to the 2,500 ms maximum. */
+        Assert.Equal(2_500, row.GetProperty("queue_wait_p95_ms").GetInt64());
+        Assert.Equal(1, row.GetProperty("rejected").GetInt64());
+        Assert.Equal(2, row.GetProperty("cache_hits").GetInt64());
+        Assert.Equal(1, row.GetProperty("cancelled").GetInt64());
+
+        /* The empty answer carries the live admission object too, under hints. */
+        var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, logger: null);
+        var empty = await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours: 24, route: "no_such_route", admission: admission, cancellationToken: ct);
+        using var emptyDocument = System.Text.Json.JsonDocument.Parse(empty);
+        Assert.Equal("empty", emptyDocument.RootElement.GetProperty("status").GetString());
+        var live = emptyDocument.RootElement.GetProperty("hints").GetProperty("admission");
+        Assert.Equal((ReadAdmission.DefaultMaxHeavyReads, 0, 0), (live.GetProperty("limit").GetInt32(), live.GetProperty("running").GetInt32(), live.GetProperty("queued").GetInt32()));
+    }
+
+    /// <summary>
+    /// #5506 part 3: <see cref="ReadAdmission.ClassificationSql"/> run against PostgreSQL. The long-read table is the 7-day
+    /// p90 per (surface, route, band) from flushed ok, fallback_raw and gate_failed rows only: errors, timeouts and the
+    /// admission rows do not move it, the two surfaces keep separate entries, and a row older than 7 days is not read
+    /// (that pair falls back to the window-size rule).
+    /// </summary>
+    [Fact]
+    public async Task TheLongReadTable_IsThe7DayP90PerSurfaceRouteAndBand_FromCompletedReadsOnly()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 long-read table pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var day = ReadWindowBand.OneDay;
+        var recent = new ReadLatencyAccumulator();
+        for (var i = 0; i < 8; i++)
+        {
+            recent.Record(ReadSurface.Web, "get_heavy", ReadOutcome.Ok, 2_500, day, 0, 0);
+        }
+
+        recent.Record(ReadSurface.Web, "get_heavy", ReadOutcome.FallbackRaw, 2_500, day, 0, 0);
+        recent.Record(ReadSurface.Web, "get_heavy", ReadOutcome.GateFailed, 2_500, day, 0, 0);
+        for (var i = 0; i < 30; i++)
+        {
+            /* Fast errors would pull the p90 under the threshold if they were counted. */
+            recent.Record(ReadSurface.Web, "get_heavy", ReadOutcome.Error, 100, day, 0, 0);
+        }
+
+        for (var i = 0; i < 10; i++)
+        {
+            recent.Record(ReadSurface.Web, "get_light", ReadOutcome.Ok, 100, day, 0, 0);
+            recent.Record(ReadSurface.Web, "get_light", ReadOutcome.QueueWait, 60_000, day, 0, 0);
+            recent.Record(ReadSurface.Web, "get_light", ReadOutcome.Busy, 60_000, day, 0, 0);
+            recent.Record(ReadSurface.Web, "get_light", ReadOutcome.Timeout, 60_000, day, 0, 0);
+            recent.Record(ReadSurface.Web, "get_light", ReadOutcome.Cancelled, 60_000, day, 0, 0);
+            recent.Record(ReadSurface.Mcp, "get_heavy", ReadOutcome.Ok, 100, day, 0, 0);
+        }
+
+        await recent.FlushAsync(connection, DateTime.UtcNow.AddHours(-1), logger: null, ct);
+
+        var old = new ReadLatencyAccumulator();
+        old.Record(ReadSurface.Web, "get_old", ReadOutcome.Ok, 9_000, ReadWindowBand.OneHour, 0, 0);
+        await old.FlushAsync(connection, DateTime.UtcNow.AddDays(-8), logger: null, ct);
+
+        var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, logger: null);
+        Assert.True(await admission.RefreshAsync(connection, live: null, ct));
+
+        /* Ten completed reads of 2,500 ms: the p90 bucket is (2,000, 3,000], capped to the 2,500 ms maximum. */
+        Assert.True(admission.IsHeavy(ReadSurface.Web, "get_heavy", day, out var heavyMs));
+        Assert.Equal(2_500, heavyMs);
+        Assert.False(admission.IsHeavy(ReadSurface.Web, "get_light", day, out var lightMs));
+        Assert.Equal(100, lightMs);
+        Assert.False(admission.IsHeavy(ReadSurface.Mcp, "get_heavy", day, out var mcpMs));
+        Assert.Equal(100, mcpMs);
+
+        /* No row in the last 7 days: the window-size rule, with the threshold as the expected time. */
+        Assert.False(admission.IsHeavy(ReadSurface.Web, "get_old", ReadWindowBand.OneHour, out var oldMs));
+        Assert.Equal(ReadAdmission.HeavyThresholdMs, oldMs);
+        Assert.True(admission.IsHeavy(ReadSurface.Web, "get_heavy", ReadWindowBand.SevenDays, out _));
     }
 }

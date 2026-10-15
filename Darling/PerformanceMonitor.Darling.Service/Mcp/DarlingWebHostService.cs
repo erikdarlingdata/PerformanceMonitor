@@ -144,12 +144,16 @@ public sealed class DarlingWebHostService : BackgroundService
     /* #5097: where the web recorders offer a slow or failed read; null in a test-constructed host. */
     private readonly SlowReadLog? _slowReads;
 
+    /* #5506 part 3: the process's one read admission, shared with the MCP host; null in a test-constructed host. */
+    private readonly ReadAdmission? _readAdmission;
+
     /// <summary>The live monitored-server registry, so the read tools scope an Azure master target's blocking and deadlock facts per call.</summary>
     private readonly MonitoredServerRegistryState? _registryState;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null)
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null)
     {
         _slowReads = slowReads;
+        _readAdmission = readAdmission;
         _registryState = registryState;
         _logger = logger;
         _state = state;
@@ -209,6 +213,9 @@ public sealed class DarlingWebHostService : BackgroundService
                 try
                 {
                     config = DarlingConfig.Load();
+
+                    /* #5506 part 3: reads.maxHeavyReads is file-only and read when the host starts. */
+                    _readAdmission?.Configure(config.Reads.MaxHeavyReads);
                 }
                 catch (Exception ex)
                 {
@@ -1417,7 +1424,29 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads);
+        /* #5506 part 3: a successful web write (a 2xx answer to a non-GET /api/* request, except the compose run, the rule
+           validator and the rule test) moves the read cache's write generation, so no cached answer from before it is
+           served again. Round 2, L2: moved as the 2xx starts, before its first byte leaves, as the MCP surface moves it
+           before answering, so a browser that refreshes the moment the write answers never reads the entry from before
+           it. A response always starts (an empty one at the end of the pipeline), so the callback always runs. */
+        if (_readAdmission is { } readAdmission)
+        {
+            app.Use(async (context, next) =>
+            {
+                context.Response.OnStarting(() =>
+                {
+                    if (ReadResultCache.IsWebWrite(context.Request.Method, context.Request.Path.Value ?? string.Empty, context.Response.StatusCode))
+                    {
+                        readAdmission.Cache.BumpGeneration();
+                    }
+
+                    return Task.CompletedTask;
+                });
+                await next(context);
+            });
+        }
+
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes

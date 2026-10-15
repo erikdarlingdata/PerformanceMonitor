@@ -262,7 +262,7 @@ public sealed class McpMissMessageParityPinTests
            reworded it alone would teach one client to read a failure as text again. The example envelope is
            pinned byte-for-byte because it is the one place the shape is spelled out for a reader. */
         "Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
-        "It is the fifth `status` word and the only one that is not an answer about the data: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema.",
+        "It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema.",
 
         /* #3739 — refusals one shape. The sentences that teach a caller the SIXTH status word: a refusal (a
            parameter the tool cannot honor, a server name that resolves to nothing, a required parameter not
@@ -271,9 +271,11 @@ public sealed class McpMissMessageParityPinTests
            then. Until #3739 each SKU carried its own trailing sentence here (Lite: "not this envelope";
            Darling: "a handful of the PostgreSQL reads wrap that sentence in the same `error` envelope") because
            the two said different true things; now they say the same true thing and the whole paragraph is
-           shared. The example envelope is pinned byte-for-byte for the reason the failure's is. */
+           shared. The example envelope is pinned byte-for-byte for the reason the failure's is. The count of status words
+           that follows is not shared since #5506 part 3: Darling adds a seventh, busy (a long read refused at its queue),
+           which Lite does not have. */
         "A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{\"status\":\"invalid\",\"message\":\"<what was refused, and what is accepted>\",\"hints\":{\"parameter\":\"<parameter_name>\"}}`.",
-        "The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. Six `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call).",
+        "The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there.",
     };
 
     [Theory]

@@ -1448,9 +1448,14 @@ LIMIT 1";
     /* #5097: the slow-read record's queue; its one writer runs from the startup path once the store is migrated. */
     private readonly SlowReadLog? _slowReads;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null)
+    /* #5506 part 3: the read admission the MCP and web hosts share. The worker only builds its long-read table (at start
+       and at each hourly flush); its own reads never go through admission. */
+    private readonly ReadAdmission? _readAdmission;
+
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null)
     {
         _slowReads = slowReads;
+        _readAdmission = readAdmission;
         _mcpTlsCertState = mcpTlsCertState;
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -2851,6 +2856,10 @@ LIMIT 1";
 
         /* #5097: the slow-read writer, drained at shutdown. Failure-isolated inside; it never ends before shutdown. */
         var slowReadWriter = _slowReads is null ? Task.CompletedTask : _slowReads.RunAsync(postgres, _logger, stoppingToken);
+
+        /* #5506 part 3: the long-read table, built once the store is migrated. Never throws; until it finishes, and if it
+           fails, the window-size rule decides which reads are long. */
+        var readAdmissionTable = _readAdmission is null ? Task.CompletedTask : _readAdmission.RefreshAsync(postgres, _readLatency, stoppingToken);
 
         /* #4348: the one-time scrub of collected statement text (collect.pg_statement_text,
            collect.pg_blocking_edges) an older build stored before the shared sensitive-statement filter
@@ -4461,6 +4470,16 @@ LIMIT 1";
         try
         {
             await settingScrub;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
+        /* And the long-read table's first build (#5506 part 3). */
+        try
+        {
+            await readAdmissionTable;
         }
         catch (OperationCanceledException)
         {
@@ -11196,6 +11215,26 @@ AND   j.hypertable_name = '{relation}'", connection))
                failure — a bad read-latency flush must not cost the collector_cost series its hourly row, and
                vice versa (collector_cost's own catch above already isolates it from everything ABOVE this
                line). */
+            /* #5506 part 3: the long-read table is rebuilt BEFORE the flush drains this hour's samples, so it reads them
+               from memory and the stored hours from the table, and counts each once. A failed rebuild keeps the last one
+               and never costs the flush. */
+            if (_readAdmission is not null)
+            {
+                /* Its own slice of the budget, like the history above: the scan reads seven days, and a canceled slice must
+                   not cancel the flush below, which the same connection then runs. */
+                var readAdmission = _readAdmission;
+                await ReadAdmission.RunRebuildSliceAsync(
+                    token => readAdmission.RefreshAsync(connection, _readLatency, token),
+                    ReadAdmission.RebuildSliceBudget, _logger, budget.Token);
+
+                /* A canceled slice can leave the connection closed or broken. */
+                if (connection.State != ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(budget.Token);
+                }
+            }
+
             try
             {
                 await _readLatency.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);

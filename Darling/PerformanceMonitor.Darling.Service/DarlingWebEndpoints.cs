@@ -310,7 +310,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -320,7 +320,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            the same process (six test classes call MapAll, and xUnit runs classes in parallel) took the samples
            of a server built before it. Production calls MapAll once, so nothing changes there. A caller with
            no accumulator (a test that maps the routes directly) records nothing. */
-        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger, slowReads);
+        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger, slowReads, readAdmission);
 
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -364,6 +364,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ToHttpResult(fleetRangeRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, 0, context.RequestAborted);
             }
 
+            /* #5506 part 3: admitted, and recorded, under its MCP twin's name and window band, so the long-read table learns
+               this route from its own samples. */
+            using var readScope = ReadScope.Open(logger);
+            var fleetBand = ReadWindowBand.Of(hours);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, "get_fleet_overview", fleetBand, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, "get_fleet_overview", fleetBand, context, readScope.Scope);
+
             var now = DateTime.UtcNow;
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-hours), now, now, worstCount,
@@ -372,6 +384,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
                 logger: logger,
                 cancellationToken: context.RequestAborted);
+            run.Complete(ReadOutcome.Ok);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
         });
 
@@ -384,8 +397,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            to the 32 KB cap (the response is compressed on the wire, #4188); only get_ag_health keeps that cap. */
         app.MapGet("/api/ag", async (HttpContext context) =>
         {
+            /* #5506 part 3 (round 1, M3): admitted, and recorded, under its MCP twin get_ag_health and its window band, like /api/fleet (D8). */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, AgHealthRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, AgHealthRoute, ReadWindowBand.None, context, readScope.Scope);
             var result = await DarlingAgReader.GetAgHealthAsync(
                 postgres, null, DateTime.UtcNow, responseByteBudget: null, cancellationToken: context.RequestAborted);
+            run.Complete(ReadOutcome.Ok);
             return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 
@@ -400,96 +423,200 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState))
+        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState, readAdmission))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
                 var stopwatch = Stopwatch.StartNew();
-                string result;
                 using var readScope = ReadScope.Open(logger);
                 readScope.Scope.CaptureStatements = true;
-                try
+
+                /* #5506 part 3: admission, after the scope and the band. A refused read answers 429 and records busy; a
+                   browser that leaves the queue records cancelled; a queued read records its wait as one queue_wait
+                   sample. The recorded elapsed time starts after admission (D1). */
+                /* #5644 W22: ?hours=abc / ?hours=1.5 (or any other integer knob) was read as the default and answered
+                   200 for a different window than the one asked for, while ?hours=500 got a 400. Refused up front now,
+                   before any tool runs, in the same envelope the range refusals use; and (#5506 part 3, round 1 L5) before
+                   the cache and admission, so a malformed request on a heavy route is never queued or refused busy. */
+                if (NonIntegerParamRefusal(context) is { } nonIntegerRefusal)
                 {
-                    /* #5644 W22: ?hours=abc / ?hours=1.5 (or any other integer knob) was read as the default and answered
-                       200 for a different window than the one asked for, while ?hours=500 got a 400. Refused up front now,
-                       before any tool runs, in the same envelope the range refusals use. */
-                    if (NonIntegerParamRefusal(context) is { } nonIntegerRefusal)
+                    return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                var admissionBand = WebWindowBand(name, key => First(context, key));
+                /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
+                   or runs once and is stored (the text before the statement sweep, which ToHttpResult runs on every answer).
+                   The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
+                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand))
+                {
+                    var cache = admission.Cache;
+                    var ttl = ReadResultCache.TtlOf(admissionBand);
+                    /* Round 2, L4: each value of a repeated name is passed apart (StringValues.ToString() joins them with a comma,
+                       which ?database=x%2Cy also gives); the key escapes every name and value. */
+                    var key = ReadCacheKey.ForWeb(name,
+                        context.Request.Query.SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))),
+                        cache.Generation, cache, ttl);
+                    if (cache.TryGet(key, out var stored))
                     {
-                        return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                        /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
+                        readScope.Scope.Uncount();
+                        admission.NoteCacheHit(ReadSurface.Web, name);
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        return ToHttpResult(stored, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
                     }
 
-                    /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
-                       taken once here and handed to both the read and the note check. A request with its own anchor
-                       is left as sent. */
-                    var askedAsOf = AsOf(context);
-                    if (askedAsOf is null && WebDataStartNote.CappedByRead.ContainsKey(name))
+                    /* D6: the read runs once, under the flight's token, which is cancelled only when every caller waiting for it
+                       has left; each caller waits with its own. It runs on a detached copy of the first caller's request
+                       (round 1, C3), never by swapping that request's RequestAborted: the first caller's own abort must
+                       still end its own request (the #4276 backstop reads RequestAborted to tell a browser that left from a
+                       failure), and the read must not touch a request that has ended. */
+                    var callerAborted = context.RequestAborted;
+                    var joinedAt = Stopwatch.StartNew();
+                    var flight = cache.Join(key, ttl, token => RunWebReadAsync(DetachedReadContext(context, token)), read => read.Text);
+                    if (flight.IsLead)
                     {
-                        askedAsOf = WebDataStartNote.FormatWindowEnd(DateTime.UtcNow);
-                        context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);
+                        admission.NoteCacheMiss(ReadSurface.Web, name);
+                        return (await flight.WaitAsync(callerAborted)).Answer;
                     }
 
-                    result = await handler(context, postgres, analysis);
+                    /* Round 2, L3: a joined caller runs no read while it waits for the shared one. Round 2, M1: it records only its
+                       own outcome (busy, cancelled, or cache_hit for the shared answer), never the read's, which the lead records
+                       once: N joiners of one timed-out read are not N + 1 timeouts, and their shorter waits never reach the
+                       percentiles or the hourly p90 table. */
+                    readScope.Scope.Uncount();
+                    try
+                    {
+                        var shared = await flight.WaitAsync(callerAborted);
+                        var joinedOutcome = ReadResultCache.JoinedOutcome(shared.Outcome, callerAborted);
+                        if (joinedOutcome == ReadOutcome.CacheHit)
+                        {
+                            admission.NoteCacheHit(ReadSurface.Web, name);
+                        }
 
-                    /* #5644 W22: the tools' own window parameter is hours_back, but a web caller sends hours; a refusal for an
-                       out-of-range one (?hours=-5, ?hours=500) is worded in the caller's own parameter. */
-                    result = NameWindowParameterTheCallerSent(result, key => First(context, key));
+                        RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
+                        return shared.Text is { } text
+                            ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted)
+                            : shared.Answer;
+                    }
+                    catch (Exception ex)
+                    {
+                        var thrown = ReadResultCache.JoinedOutcome(
+                            ReadOutcomeClassifier.Classify(ex, callerAborted) == ReadOutcome.Cancelled ? ReadOutcome.Cancelled : null, callerAborted);
+                        if (thrown == ReadOutcome.CacheHit)
+                        {
+                            admission.NoteCacheHit(ReadSurface.Web, name);
+                        }
 
-                    /* #4966: a grid over a window says where its table's data starts when that is after the window's
-                       start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
-                       failed probe returns the tool's answer as it was. */
-                    var askedHours = QueryInt(context, "hours", "hours_back", 0);
-                    result = await WebDataStartNote.AddAsync(
-                        postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
+                        RecordWebReadLatency(readLatencyRecorder, name, thrown, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
+                        throw;
+                    }
                 }
-                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+
+                return (await RunWebReadAsync(context)).Answer;
+
+                /* The read itself, on the request it is given: the caller's own, or a detached copy for a shared read. */
+                async Task<WebReadAnswer> RunWebReadAsync(HttpContext context)
                 {
-                    /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
-                       top-of-pipeline backstop (which already owns this exact classification) sees the same
-                       exception rather than this catch turning it into a written body for a caller who is gone. */
-                    throw;
+                    string result;
+                    using var ticket = readAdmission is null || !ReadAdmission.IsAdmitted(name)
+                        ? ReadAdmissionTicket.Passed
+                        : await ReadScope.AdmitAsync(readAdmission, ReadSurface.Web, name, admissionBand, context.RequestAborted);
+                    if (ticket.Refusal is { } refusal)
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Busy, ticket.QueueMs ?? 0, context, readScope.Scope);
+                        return new WebReadAnswer(BusyResult(refusal), null, ReadOutcome.Busy);
+                    }
+
+                    if (ticket.CallerLeft)
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, context, readScope.Scope);
+                        context.RequestAborted.ThrowIfCancellationRequested();
+                    }
+
+                    if (ticket.QueueMs is { } queueMs)
+                    {
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.QueueWait, queueMs, context, readScope.Scope);
+                    }
+
+                    stopwatch.Restart();
+                    try
+                    {
+                        /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
+                           taken once here and handed to both the read and the note check. A request with its own anchor
+                           is left as sent. */
+                        var askedAsOf = AsOf(context);
+                        if (askedAsOf is null && WebDataStartNote.CappedByRead.ContainsKey(name))
+                        {
+                            askedAsOf = WebDataStartNote.FormatWindowEnd(DateTime.UtcNow);
+                            context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);
+                        }
+
+                        result = await handler(context, postgres, analysis);
+
+                        /* #5644 W22: the tools' own window parameter is hours_back, but a web caller sends hours; a refusal for an
+                           out-of-range one (?hours=-5, ?hours=500) is worded in the caller's own parameter. */
+                        result = NameWindowParameterTheCallerSent(result, key => First(context, key));
+
+                        /* #4966: a grid over a window says where its table's data starts when that is after the window's
+                           start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
+                           failed probe returns the tool's answer as it was. */
+                        var askedHours = QueryInt(context, "hours", "hours_back", 0);
+                        result = await WebDataStartNote.AddAsync(
+                            postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
+                    }
+                    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                    {
+                        /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
+                           top-of-pipeline backstop (which already owns this exact classification) sees the same
+                           exception rather than this catch turning it into a written body for a caller who is gone. */
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
+                           (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
+                        context.RequestAborted.ThrowIfCancellationRequested();
+
+                        /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
+                           McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
+                           Reported and answered directly from the real Exception here — ServerErrorResult's
+                           sentence-based classifier is for the FAR more common case below, where the exception is
+                           already gone by the time a tool's own catch handed back its envelope. Answering here
+                           too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
+                           routing this through FormatError first would make ToHttpResult's classifier re-derive
+                           from text what this catch already knows structurally, and log it a second time. */
+                        DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                        var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
+                        RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
+                        return new WebReadAnswer(Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex)), null, thrownOutcome);
+                    }
+
+                    /* #4442 scope 2: recorded on BOTH arms of this loop -- here for a tool result that made it
+                       back as a string (success, or a tool's own caught-and-formatted failure), above for a
+                       binding-layer throw the try/catch above answers directly. ClassifyToolResponse's
+                       ServerError arm is the only shape that can carry a 57014 sentence (a tool that caught its
+                       own statement_timeout and formatted it); everything else that reaches here is Ok. */
+                    var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
+                        ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
+                        : ReadOutcome.Ok;
+                    var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
+                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                    OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
+                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
+
+                    /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
+                    ThrowIfCallerGone(result, context.RequestAborted);
+                    var cacheable = resolvedOutcome == ReadOutcome.Ok && ClassifyToolResponse(result) == ToolResponseKind.JsonPassthrough
+                        && ReadResultCache.IsCacheableText(result, gcf: false);
+                    return new WebReadAnswer(ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted),
+                        cacheable ? result : null, resolvedOutcome);
                 }
-                catch (Exception ex)
-                {
-                    /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
-                       (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
-                    context.RequestAborted.ThrowIfCancellationRequested();
-
-                    /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
-                       McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
-                       Reported and answered directly from the real Exception here — ServerErrorResult's
-                       sentence-based classifier is for the FAR more common case below, where the exception is
-                       already gone by the time a tool's own catch handed back its envelope. Answering here
-                       too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
-                       routing this through FormatError first would make ToHttpResult's classifier re-derive
-                       from text what this catch already knows structurally, and log it a second time. */
-                    DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
-                    var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
-                    RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
-                    OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
-                    return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
-                }
-
-                /* #4442 scope 2: recorded on BOTH arms of this loop -- here for a tool result that made it
-                   back as a string (success, or a tool's own caught-and-formatted failure), above for a
-                   binding-layer throw the try/catch above answers directly. ClassifyToolResponse's
-                   ServerError arm is the only shape that can carry a 57014 sentence (a tool that caught its
-                   own statement_timeout and formatted it); everything else that reaches here is Ok. */
-                var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
-                    ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
-                    : ReadOutcome.Ok;
-                var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
-                RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
-                OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
-                    resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
-
-                /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
-                ThrowIfCallerGone(result, context.RequestAborted);
-                return ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             });
         }
 
-        MapCustomViews(app, postgres, logger, readLatencyRecorder);
-        MapCustomAlerts(app, postgres, logger);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission);
+        MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
         MapAdminServers(app, postgres);
@@ -500,17 +627,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
            DarlingFleetSweepEndpoints for the span discipline, the seat posture, and why its logger
            seat takes the service logger threaded here rather than app.Logger. */
-        DarlingFleetSweepEndpoints.Map(app, postgres, logger);
+        DarlingFleetSweepEndpoints.Map(app, postgres, logger, readAdmission, readLatencyRecorder);
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
-        DarlingTriageEndpoint.Map(app, postgres, analysis, logger);
+        DarlingTriageEndpoint.Map(app, postgres, analysis, logger, readAdmission, readLatencyRecorder);
 
         /* The alert-notebook binding endpoint (#4222 slice C): the mechanical conversion of a firing into a
            read-only notebook definition. Same reach as the triage page it sits beside - everything it
            serves is already reachable through /api/read/*. */
-        AlertNotebookEndpoint.Map(app, postgres, analysis, logger);
-        DarlingServerDatabasesEndpoint.Map(app, postgres, logger); // #5245: the database picker's list
+        AlertNotebookEndpoint.Map(app, postgres, analysis, logger, readAdmission, readLatencyRecorder);
+        DarlingServerDatabasesEndpoint.Map(app, postgres, logger, readAdmission, readLatencyRecorder); // #5245: the database picker's list
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
@@ -526,7 +653,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder)
+    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
+        ReadAdmission? readAdmission)
     {
         var store = new CustomViewStore(postgres);
 
@@ -547,20 +675,33 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            resolver's refusal, not a silent fall back to the fleet's numbers. */
         app.MapGet("/api/catalog", async (HttpContext context) =>
         {
+            /* #5506 part 3 (round 2, L5): it reads the store (the schedule overrides, and the server resolver for ?server=), so
+               it is admitted, and recorded, under its MCP twin describe_custom_view_catalog: a light read passes at once. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, CatalogRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, CatalogRoute, ReadWindowBand.None, context, readScope.Scope);
             var serverName = context.Request.Query["server"].ToString();
             if (string.IsNullOrWhiteSpace(serverName))
             {
                 var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
+                run.Complete(ReadOutcome.Ok);
                 return JsonNodeResult(BuildCatalogNode(null, fleetSchedules));
             }
 
             var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
             if (resolveError != null)
             {
+                run.Complete(ReadOutcome.Ok);
                 return JsonNodeResult(JsonNode.Parse(resolveError)!.AsObject());
             }
 
             var schedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, resolved.ServerId, context.RequestAborted);
+            run.Complete(ReadOutcome.Ok);
             return JsonNodeResult(BuildCatalogNode(resolved.ServerId, schedules));
         });
 
@@ -707,10 +848,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
             var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true,
-                caller: WebReadCaller(context));
+                caller: WebReadCaller(context), cacheHost: ReadSurface.Web);
+            if (outcome.PayloadText is { } payloadText)
+            {
+                return Results.Text(payloadText, "application/json");
+            }
+
             if (outcome.Payload is not null)
             {
                 return JsonNodeResult(outcome.Payload);
+            }
+
+            /* #5506 part 3: the runner refused the panel at admission. */
+            if (outcome.Busy is { } busy)
+            {
+                return BusyResult(busy);
             }
 
             /* #5678: any failed run for a browser that has left is not logged: a store fault, the generic catch's sentence, and a
@@ -743,7 +895,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// naming the gate. The store/evaluator run on the host's least-privilege VIEWER pool (the same
     /// <paramref name="postgres"/> the reads and <c>/api/compose/run</c> use — never the owner pool).
     /// </summary>
-    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null)
     {
         var store = new CustomAlertRuleStore(postgres);
 
@@ -917,8 +1069,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
+            /* #5506 part 3: a rule test reads collected data like any read, admitted and recorded under its MCP twin's name. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, "test_custom_alert_rule", ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, "test_custom_alert_rule", ReadWindowBand.None, context, readScope.Scope);
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson);
+            run.Complete(ToolResultOutcome(result, context.RequestAborted));
             return ToHttpResult(result, "/api/alerts/test", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
     }
@@ -2435,12 +2597,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// stay what they always were either way, so run_custom_view_panel's MCP answer never changes.
     /// <see cref="AuthorSqlState"/> (#4293 round 2) is set only on the author-actionable PostgresException arm,
     /// so the web log line can name the SQLSTATE without re-deriving it.</summary>
-    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null, string? AuthorSqlState = null, bool IsNotFound = false)
+    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null, string? AuthorSqlState = null, bool IsNotFound = false, ReadAdmissionRefusal? Busy = null, string? PayloadText = null)
     {
+        /// <summary>#5506 part 3: the panel was refused at admission. The MCP tool answers <c>busy</c>, the web route 429.</summary>
+        internal static ComposeRunOutcome Refused(ReadAdmissionRefusal refusal) => new(null, refusal.Sentence, false, null, null, false, refusal);
+
         /// <summary>W13: the scoped server is not registered and nothing is stored under its name. The MCP tool answers <c>not_found</c>, the web route 404.</summary>
         internal static ComposeRunOutcome NotFound(string error) => new(null, error, false, null, null, true);
 
         internal static ComposeRunOutcome Ok(JsonObject payload) => new(payload, null, false);
+
+        /// <summary>#5506 part 3 (round 1, C1): a panel answered from the read cache. <see cref="PayloadText"/> is the text the
+        /// run that stored it answered, so the caller writes the same bytes; <see cref="Payload"/> is parsed from it for a
+        /// caller that reads the object.</summary>
+        internal static ComposeRunOutcome FromCache(string payloadText) =>
+            new((JsonObject)JsonNode.Parse(payloadText)!, null, false, PayloadText: payloadText);
 
         internal static ComposeRunOutcome BadRequest(string error) => new(null, error, false);
 
@@ -2666,7 +2837,92 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
         ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false,
-        Action<Exception>? onRunException = null, DateTime? nowUtc = null, string? caller = null)
+        Action<Exception>? onRunException = null, DateTime? nowUtc = null, string? caller = null, ReadSurface? cacheHost = null)
+    {
+        /* #5506 part 3 (round 1, C1): a heavy panel is answered from the read cache, joins an identical run in flight, or
+           runs once and is stored, as /api/read and the MCP reads are. The host that runs it (cacheHost: web or mcp) is
+           part of the key (D4): the two serialize the payload differently and the web adds its data-start fields, so
+           their entries are never shared. What is stored is the exact text the host answers (PayloadText), so a hit is
+           byte-identical to the run that stored it. A hit skips admission. */
+        var admission = readLatency?.Admission;
+        if (cacheHost is { } host && admission is not null
+            && admission.IsCached(ReadSurface.Compose, ComposeRouteLabel(body), ComposeWindowBand(body)))
+        {
+            return await RunComposedPanelCachedAsync(postgres, body, readLatency!, admission, host,
+                clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, onRunException, nowUtc, caller, cancellationToken);
+        }
+
+        return await RunComposedPanelAdmittedAsync(postgres, body, readLatency, clientDeadlineHeadroomSeconds,
+            remapClientTimeout, includeDataStartFields, onRunException, nowUtc, caller, cacheHost, cancellationToken);
+    }
+
+    private static async Task<ComposeRunOutcome> RunComposedPanelCachedAsync(
+        NpgsqlDataSource postgres, JsonObject body, ReadLatencyRecorder readLatency,
+        ReadAdmission admission, ReadSurface host, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields,
+        Action<Exception>? onRunException, DateTime? nowUtc, string? caller, System.Threading.CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        using var readScope = ReadScope.Open(readLatency.Logger);
+        var composeRoute = ComposeRouteLabel(body);
+        var composeBand = ComposeWindowBand(body);
+        var recordCaller = caller ?? ReadCaller.AmbientMcpCaller;
+        var cache = admission.Cache;
+        var ttl = ReadResultCache.TtlOf(composeBand);
+        var key = ReadCacheKey.ForCompose(host, composeRoute, body.ToJsonString(), cache.Generation, cache, ttl);
+        if (cache.TryGet(key, out var stored))
+        {
+            /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
+            readScope.Scope.Uncount();
+            admission.NoteCacheHit(ReadSurface.Compose, composeRoute);
+            RecordAdmissionSample(readLatency, composeRoute, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
+            return ComposeRunOutcome.FromCache(stored);
+        }
+
+        /* D6: the run is shared; the caller that starts it records its real outcome inside the run. Round 2, M1: a caller
+           that joined records only its own outcome with its own elapsed time (busy, cancelled, or cache_hit for the shared
+           answer), never the run's, so one run counts once. */
+        var flight = cache.Join(key, ttl,
+            token => RunComposedPanelAdmittedAsync(postgres, body, readLatency, clientDeadlineHeadroomSeconds, remapClientTimeout,
+                includeDataStartFields, onRunException, nowUtc, caller, host, token),
+            run => run.PayloadText is { } text && ReadResultCache.IsCacheableText(text, gcf: false) ? text : null);
+        if (flight.IsLead)
+        {
+            admission.NoteCacheMiss(ReadSurface.Compose, composeRoute);
+            return await flight.WaitAsync(cancellationToken);
+        }
+
+        /* Round 2, L3: a joined caller runs no read while it waits for the shared one. */
+        readScope.Scope.Uncount();
+        try
+        {
+            var shared = await flight.WaitAsync(cancellationToken);
+            var joinedOutcome = ReadResultCache.JoinedOutcome(shared.Busy is not null ? ReadOutcome.Busy : null, cancellationToken);
+            if (joinedOutcome == ReadOutcome.CacheHit)
+            {
+                admission.NoteCacheHit(ReadSurface.Compose, composeRoute);
+            }
+
+            RecordAdmissionSample(readLatency, composeRoute, joinedOutcome, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
+            return shared;
+        }
+        catch (Exception ex)
+        {
+            var thrown = ReadResultCache.JoinedOutcome(
+                ReadOutcomeClassifier.Classify(ex, cancellationToken) == ReadOutcome.Cancelled ? ReadOutcome.Cancelled : null, cancellationToken);
+            if (thrown == ReadOutcome.CacheHit)
+            {
+                admission.NoteCacheHit(ReadSurface.Compose, composeRoute);
+            }
+
+            RecordAdmissionSample(readLatency, composeRoute, thrown, stopwatch.ElapsedMilliseconds, composeBand, readScope.Scope, recordCaller);
+            throw;
+        }
+    }
+
+    private static async Task<ComposeRunOutcome> RunComposedPanelAdmittedAsync(
+        NpgsqlDataSource postgres, JsonObject body,
+        ReadLatencyRecorder? readLatency, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields,
+        Action<Exception>? onRunException, DateTime? nowUtc, string? caller, ReadSurface? cacheHost, System.Threading.CancellationToken cancellationToken)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -2678,7 +2934,41 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var stopwatch = Stopwatch.StartNew();
         using var readScope = ReadScope.Open(readLatency?.Logger);
         readScope.Scope.CaptureStatements = true;
+
+        /* #5506 part 3: admission, after the scope and the band, under the same route label and band the run records.
+           A refusal records busy, a caller that leaves the queue records cancelled, and a queued run records its wait as
+           one queue_wait sample; the recorded elapsed time starts after admission (D1). */
+        var admission = readLatency?.Admission;
+        var composeRoute = ComposeRouteLabel(body);
+        var composeBand = ComposeWindowBand(body);
+        using var ticket = admission is null
+            ? ReadAdmissionTicket.Passed
+            : await ReadScope.AdmitAsync(admission, ReadSurface.Compose, composeRoute, composeBand, cancellationToken);
+        if (ticket.Refusal is { } refusal)
+        {
+            RecordAdmissionSample(readLatency, composeRoute, ReadOutcome.Busy, ticket.QueueMs ?? 0, composeBand, readScope.Scope, caller ?? ReadCaller.AmbientMcpCaller);
+            return ComposeRunOutcome.Refused(refusal);
+        }
+
+        if (ticket.CallerLeft)
+        {
+            RecordAdmissionSample(readLatency, composeRoute, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, composeBand, readScope.Scope, caller ?? ReadCaller.AmbientMcpCaller);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        if (ticket.QueueMs is { } queueMs)
+        {
+            RecordAdmissionSample(readLatency, composeRoute, ReadOutcome.QueueWait, queueMs, composeBand, readScope.Scope, caller ?? ReadCaller.AmbientMcpCaller);
+        }
+
+        stopwatch.Restart();
         var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
+        /* Round 1, C1: the text the host answers, taken once here so a cached copy of it is the same bytes. */
+        if (cacheHost is { } host && outcome.Payload is { } payload)
+        {
+            outcome = outcome with { PayloadText = host == ReadSurface.Mcp ? payload.ToJsonString(McpHelpers.JsonOptions) : payload.ToJsonString() };
+        }
+
         /* #5793: the web route passes its session hash; the MCP tool passes none, and the tool filter's ambient caller
            names the client instead. */
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback, readScope.Scope,
@@ -2690,6 +2980,183 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// panel's own measure key when the body parsed that far, else a fixed catch-all -- bounded cardinality
     /// either way (the compose catalog's own measure keys, never the caller's free text).</summary>
     private const string ComposeUnknownRouteLabel = "compose:unknown";
+
+    /// <summary>#5506 part 3 (round 2, L5): the MCP twin <c>/api/catalog</c> is admitted and recorded under.</summary>
+    internal const string CatalogRoute = "describe_custom_view_catalog";
+
+    /// <summary>#5506 part 3 (round 1, M3): the name <c>/api/ag</c> is admitted and recorded under, its MCP twin's.</summary>
+    internal const string AgHealthRoute = "get_ag_health";
+
+    /// <summary>#5506 part 3: the web answer to a refused read: 429, a <c>Retry-After</c> header, and <c>{"error": sentence}</c>,
+    /// which the page already shows (<c>wwwroot/js/util.js</c> reads <c>body.error</c>).</summary>
+    internal static IResult BusyResult(ReadAdmissionRefusal refusal) =>
+        new RetryAfterResult(ErrorResult(refusal.Sentence, StatusCodes.Status429TooManyRequests), refusal.RetryAfterSeconds);
+
+    /// <summary>An answer with a <c>Retry-After</c> header, set on the response it is written to (round 1, C3): a busy
+    /// answer made by a shared read reaches every caller of that read with the header, not only the first.</summary>
+    private sealed class RetryAfterResult(IResult inner, int retryAfterSeconds) : IResult
+    {
+        public Task ExecuteAsync(HttpContext httpContext)
+        {
+            httpContext.Response.Headers.RetryAfter = retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+            return inner.ExecuteAsync(httpContext);
+        }
+    }
+
+    /// <summary>
+    /// #5506 part 3 (round 1, C3): a copy of a read request for a read several callers share. It carries what a read
+    /// handler and the recording read (method, path, query string, headers and cookies, user, services, remote address)
+    /// and <paramref name="readToken"/> as its <c>RequestAborted</c>, so the shared read runs under the flight's token while
+    /// the caller's own request keeps its own, and nothing the read does (its <c>as_of</c> added to the query string)
+    /// changes the caller's request.
+    /// </summary>
+    internal static HttpContext DetachedReadContext(HttpContext source, CancellationToken readToken)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var copy = new DefaultHttpContext
+        {
+            RequestAborted = readToken,
+            User = source.User,
+            RequestServices = source.RequestServices,
+        };
+        var from = source.Request;
+        var to = copy.Request;
+        to.Method = from.Method;
+        to.Scheme = from.Scheme;
+        to.Host = from.Host;
+        to.PathBase = from.PathBase;
+        to.Path = from.Path;
+        to.QueryString = from.QueryString;
+        foreach (var header in from.Headers)
+        {
+            to.Headers[header.Key] = header.Value;
+        }
+
+        copy.Connection.RemoteIpAddress = source.Connection.RemoteIpAddress;
+        return copy;
+    }
+
+    /// <summary>#5506 part 3: admits a dedicated web read route (<c>/api/fleet</c>, <c>/api/triage</c>,
+    /// <c>/api/alerts/test</c>) and, given a recorder and the route's open scope, records its admission sample under the
+    /// <c>web</c> surface and <paramref name="route"/> as the read loop does: <c>busy</c> when refused, <c>cancelled</c> when
+    /// the browser left the queue, <c>queue_wait</c> when it waited. The run itself is recorded by <see cref="WebRouteRun"/>.
+    /// A browser that leaves the queue ends the request, as the read loop's #4276 arm does.</summary>
+    internal static Task<ReadAdmissionTicket> AdmitWebRouteAsync(ReadAdmission? admission, string route, string band, HttpContext context,
+        ReadLatencyRecorder? recorder = null, ReadScope? scope = null)
+    {
+        if (admission is null)
+        {
+            return Task.FromResult(ReadAdmissionTicket.Passed);
+        }
+
+        /* Not async (round 1, L4): AdmitAsync sets the nesting marker in the CALLER's flow, and an async method undoes
+           every AsyncLocal it sets when it returns, so a read nested under this route would take a second slot (a
+           deadlock at a limit of 1). Only the recording below runs in an async continuation; it sets no AsyncLocal. */
+        return RecordAsync(ReadScope.AdmitAsync(admission, ReadSurface.Web, route, band, context.RequestAborted));
+
+        async Task<ReadAdmissionTicket> RecordAsync(Task<ReadAdmissionTicket> admitting)
+        {
+            var ticket = await admitting;
+            if (ticket.Refusal is not null)
+            {
+                RecordWebRouteSample(recorder, route, ReadOutcome.Busy, ticket.QueueMs ?? 0, band, scope, context);
+            }
+            else if (ticket.CallerLeft)
+            {
+                RecordWebRouteSample(recorder, route, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, band, scope, context);
+                ticket.Dispose();
+                context.RequestAborted.ThrowIfCancellationRequested();
+            }
+            else if (ticket.QueueMs is { } queueMs)
+            {
+                RecordWebRouteSample(recorder, route, ReadOutcome.QueueWait, queueMs, band, scope, context);
+            }
+
+            return ticket;
+        }
+    }
+
+    /// <summary>#5506 part 3: one sample of a dedicated web read route under the <c>web</c> surface. Never throws into the
+    /// request; a missing recorder or scope records nothing.</summary>
+    internal static void RecordWebRouteSample(ReadLatencyRecorder? recorder, string route, ReadOutcome outcome, long elapsedMs, string band, ReadScope? scope, HttpContext context)
+    {
+        if (recorder is null || scope is null)
+        {
+            return;
+        }
+
+        try
+        {
+            recorder.Accumulator?.Record(ReadSurface.Web, route, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs, WebReadCaller(context));
+        }
+        catch (Exception ex)
+        {
+            recorder.Logger?.LogDebug(ex, "Read-latency recording failed for the web route {Route}.", route);
+        }
+    }
+
+    /// <summary>The outcome of a tool answer, as the read loop classifies it: a server-error envelope by its sentence
+    /// (a caught 57014 is a timeout), anything else <c>ok</c>.</summary>
+    internal static ReadOutcome ToolResultOutcome(string result, System.Threading.CancellationToken requestAborted) =>
+        ClassifyToolResponse(result) == ToolResponseKind.ServerError
+            ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), requestAborted)
+            : ReadOutcome.Ok;
+
+    /// <summary>
+    /// #5506 part 3: the run sample of a dedicated web read route (<c>/api/fleet</c>, <c>/api/triage</c>,
+    /// <c>/api/alerts/test</c>), so the long-read table (<see cref="ReadAdmission"/>) learns these routes from their own
+    /// p90 instead of the window-size rule alone. Created once the read may run, so the elapsed time starts after
+    /// admission (D1). Disposing records once: the outcome given to <see cref="Complete"/>, a fallback the scope noted on an
+    /// <c>ok</c>, or, when the route threw before completing, <c>cancelled</c> for a browser that left and <c>error</c>
+    /// otherwise.
+    /// </summary>
+    internal sealed class WebRouteRun : IDisposable
+    {
+        private readonly ReadLatencyRecorder? _recorder;
+        private readonly string _route;
+        private readonly string _band;
+        private readonly HttpContext _context;
+        private readonly ReadScope _scope;
+        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private ReadOutcome? _outcome;
+        private int _recorded;
+
+        internal WebRouteRun(ReadLatencyRecorder? recorder, string route, string band, HttpContext context, ReadScope scope)
+        {
+            _recorder = recorder;
+            _route = route;
+            _band = band;
+            _context = context;
+            _scope = scope;
+        }
+
+        /// <summary>The outcome the route answered with.</summary>
+        internal void Complete(ReadOutcome outcome) => _outcome = outcome;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _recorded, 1) != 0)
+            {
+                return;
+            }
+
+            var outcome = _outcome ?? (_context.RequestAborted.IsCancellationRequested ? ReadOutcome.Cancelled : ReadOutcome.Error);
+            RecordWebRouteSample(_recorder, _route, ReadScope.Resolve(outcome, _scope.Fallback), _stopwatch.ElapsedMilliseconds, _band, _scope, _context);
+        }
+    }
+
+    /// <summary>#5506 part 3: one admission sample of a composed-panel run (busy, cancelled in the queue, or queue_wait).</summary>
+    private static void RecordAdmissionSample(ReadLatencyRecorder? recorder, string route, ReadOutcome outcome, long elapsedMs, string band, ReadScope scope, string? caller)
+    {
+        try
+        {
+            recorder?.Accumulator?.Record(ReadSurface.Compose, route, outcome, elapsedMs, band, scope.InFlightAtStart, 0, caller);
+        }
+        catch (Exception ex)
+        {
+            recorder?.Logger?.LogDebug(ex, "Read-latency recording failed for a composed-panel admission.");
+        }
+    }
 
     /// <summary>Records one <c>/api/read/&lt;name&gt;</c> sample under the <c>web</c> surface -- <paramref
     /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
@@ -5602,8 +6069,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// touches). <see cref="MapAll"/> builds the dispatch with the web host's own config; a caller with none
     /// gets the tool's own "unavailable" envelope rather than a null-reference throw if that one entry is ever
     /// invoked without it.</para>
+    /// <para><paramref name="readAdmission"/> (#5506 part 3) reaches only the <c>get_read_latency</c> mirror, for the same live
+    /// <c>admission</c> object the MCP tool returns; a dispatch built without it answers without that object.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null)
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null, ReadAdmission? readAdmission = null)
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -5895,7 +6364,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
             ["get_slow_reads"] = (c, pg, an) => DarlingMcpSlowReadTools.GetSlowReads(pg, Hours(c, DarlingMcpSlowReadTools.DefaultHours), Server(c), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpSlowReadTools.DefaultLimit), false, c.RequestAborted),
-            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), c.RequestAborted),
+            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), readAdmission, c.RequestAborted),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -6051,6 +6520,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /* ─────────────────────────── response mapping ─────────────────────────── */
+
+    /// <summary>#5506 part 3: one web read's answer: what the caller gets, the text the read cache may store (null when
+    /// it may not), and the outcome a caller that joined the read records (null when the read recorded nothing).</summary>
+    private sealed record WebReadAnswer(IResult Answer, string? Text, ReadOutcome? Outcome);
 
     /// <summary>How a tool's returned string maps to an HTTP outcome — the four kinds of outcome a tool has
     /// (data or a miss; a failure; a refusal; a bare string nothing shapes any more), each with its code.</summary>

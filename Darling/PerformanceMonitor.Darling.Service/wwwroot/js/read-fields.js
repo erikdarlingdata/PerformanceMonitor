@@ -725,6 +725,8 @@ export const READ_FIELDS = {
     table: {
       rowsKey: "reads",
       emptyText: "No reads were recorded in this window.",
+      /* #5506 part 3: the live long-read admission of this service process (never stored), above the stored rows. */
+      statusKey: "admission",
       columns: [
         { key: "surface", label: "Surface" },
         { key: "route", label: "Route" },
@@ -739,7 +741,14 @@ export const READ_FIELDS = {
         { key: "fallbacks", label: "Fallbacks", format: "int" },
         { key: "gate_failures", label: "Gate failures", format: "int" },
         { key: "max_in_flight", label: "Max in flight", format: "int" },
+        /* #5506 part 3 (round 2, L6): the wait for a store connection only; the admission queue's wait is its own column. */
         { key: "wait_total_ms", label: "Store wait", format: "ms" },
+        { key: "queued", label: "Queued", format: "int" },
+        { key: "queue_wait_ms", label: "Queue wait", format: "ms" },
+        { key: "queue_wait_p95_ms", label: "Queue p95", format: "ms" },
+        { key: "rejected", label: "Busy", format: "int" },
+        { key: "cache_hits", label: "Cache hits", format: "int" },
+        { key: "cancelled", label: "Cancelled", format: "int" },
         { key: "distinct_callers", label: "Callers", format: "int" },
       ],
     },

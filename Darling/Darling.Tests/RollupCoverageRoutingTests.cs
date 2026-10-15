@@ -194,7 +194,7 @@ public sealed class RollupCoverageRoutingTests
     [Fact]
     public void CoverageProbe_CoversEveryRoutedViewAndEveryRolledRawTable()
     {
-        var sql = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All);
+        var rawSql = TimescaleSupport.RawFloorProbeSql(TimescaleSupport.RolledRawTables);
 
         foreach (var view in new[]
         {
@@ -204,7 +204,7 @@ public sealed class RollupCoverageRoutingTests
             TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsDailyView,
         })
         {
-            Assert.Contains($"(SELECT {TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{view})", sql, StringComparison.Ordinal);
+            Assert.Contains($"(SELECT {TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{view})", TimescaleSupport.RollupColdFloorSql(view), StringComparison.Ordinal);
 
             /* And every routed view must resolve to a raw table, or its ladder would have no floor to fall to. */
             Assert.NotNull(RollupCoverage.RawTableFor(view));
@@ -212,7 +212,7 @@ public sealed class RollupCoverageRoutingTests
 
         foreach (var rawTable in TimescaleSupport.RolledRawTables)
         {
-            Assert.Contains($"(SELECT min(collection_time) FROM collect.{rawTable})", sql, StringComparison.Ordinal);
+            Assert.Contains($"(SELECT min(collection_time) FROM collect.{rawTable})", rawSql, StringComparison.Ordinal);
         }
 
         /* The probe's view list IS the availability probe's view list — a rollup added to one and not the other
@@ -226,38 +226,34 @@ public sealed class RollupCoverageRoutingTests
     }
 
     /// <summary>
-    /// WATCHED (mutation): name an absent view anyway and the probe raises 42P01, killing the whole cycle — so
+    /// WATCHED (mutation): name an absent view in a statement and it raises 42P01, killing the whole cycle, so
     /// coverage would be permanently unknown on exactly the partially-built stores #1664 exists for. A relation
-    /// is resolved at PARSE time, so no in-statement <c>to_regclass</c> guard can save it; the SQL must simply
-    /// not mention it. The column COUNT stays fixed either way, or the reader's ordinals would shift with the
-    /// store's shape.
+    /// is resolved at PARSE time, so no in-statement <c>to_regclass</c> guard can save it. #5808: the cycle names a
+    /// rollup relation only in a one-view statement (<see cref="TimescaleSupport.RollupColdFloorSql"/>) it runs for a
+    /// view availability proved present; the shared reads name none. The raw-floor read names no rollup at all, so
+    /// a plain-PostgreSQL store still reads its raw floors, and the chunk-catalog read lists only present views (as
+    /// literals, never as relations) and is skipped when none is present.
     /// </summary>
     [Fact]
     public void CoverageProbe_NeverNamesAViewTheStoreDoesNotHave()
     {
         var partial = RollupAvailability.All with { QueryGrainDaily = false, QueryStoreGrainHourly = false };
-        var sql = TimescaleSupport.RollupCoverageProbeSql(partial);
+        var catalog = TimescaleSupport.RollupOldestChunkSql(partial);
 
-        Assert.DoesNotContain($"collect.{TimescaleSupport.QueryStatsDailyView}", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain($"collect.{TimescaleSupport.QueryStoreStatsHourlyView}", sql, StringComparison.Ordinal);
-        Assert.Contains($"collect.{TimescaleSupport.QueryStatsHourlyView}", sql, StringComparison.Ordinal);
+        Assert.NotNull(catalog);
+        Assert.DoesNotContain($"'{TimescaleSupport.QueryStatsDailyView}'", catalog, StringComparison.Ordinal);
+        Assert.DoesNotContain($"'{TimescaleSupport.QueryStoreStatsHourlyView}'", catalog, StringComparison.Ordinal);
+        Assert.Contains($"'{TimescaleSupport.QueryStatsHourlyView}'", catalog, StringComparison.Ordinal);
 
-        /* Plain PostgreSQL: no rollup named at all, but the raw floors still read. */
-        var none = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.None);
+        /* Plain PostgreSQL: no catalog read at all, and the raw floors still read without naming a rollup. */
+        Assert.Null(TimescaleSupport.RollupOldestChunkSql(RollupAvailability.None));
+        var raw = TimescaleSupport.RawFloorProbeSql(TimescaleSupport.RolledRawTables);
         foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews)
         {
-            Assert.DoesNotContain($"collect.{view}", none, StringComparison.Ordinal);
+            Assert.DoesNotContain($"collect.{view}", raw, StringComparison.Ordinal);
         }
 
-        Assert.Contains("min(collection_time) FROM collect.query_stats)", none, StringComparison.Ordinal);
-
-        /* Fixed column count across every shape (every rollup + the 3 raw tables), derived from the source
-           lists so adding a rollup cannot silently leave the reader indexing past the end. */
-        foreach (var shape in new[] { RollupAvailability.All, partial, RollupAvailability.None })
-        {
-            var columns = TimescaleSupport.RollupCoverageProbeSql(shape)["SELECT ".Length..].Split(", ");
-            Assert.Equal(TimescaleSupport.RollupViews.Length + TimescaleSupport.RolledRawTables.Length, columns.Length);
-        }
+        Assert.Contains("min(collection_time) FROM collect.query_stats)", raw, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the per-ladder lookup ─────────────────────────── */

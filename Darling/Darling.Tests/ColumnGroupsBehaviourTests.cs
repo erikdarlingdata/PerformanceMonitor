@@ -120,4 +120,17 @@ public sealed class ColumnGroupsBehaviourTests
         Assert.Equal("Name\tA\tB\tC\nx\t3\t30\t1\ny\t1\t10\t3\nz\t2\t20\t2", Str(r, "copy"));
         Assert.Equal(new[] { "col-picker", "grid-tools", "table-wrap" }, Arr(r, "stripOrder"));
     }
+
+    /// <summary>#5506 part 3: a table descriptor with <c>statusKey: "admission"</c> (get_read_latency's grid) draws the
+    /// payload's live admission object as one notice line above the grid, says when no limit is set, and draws the grid alone
+    /// when the payload has no such object.</summary>
+    [Fact]
+    public void TheAdmissionStatusKey_DrawsOneLineAboveTheGrid_OnlyWhenThePayloadCarriesIt()
+    {
+        var r = Run("admissionStatus");
+        Assert.Equal(new[] { "strip notice", "grid-box" }, Arr(r, "childClasses"));
+        Assert.Equal("Now, in this service process: 1 of 2 long-read slots in use, 3 waiting.", Str(r, "line"));
+        Assert.Equal("Now, in this service process: 4 long reads running (no limit set), 0 waiting.", Str(r, "offLine"));
+        Assert.Equal("grid-box", Str(r, "noneTop"));
+    }
 }
