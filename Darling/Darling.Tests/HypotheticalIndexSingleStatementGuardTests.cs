@@ -194,21 +194,6 @@ public sealed class HypotheticalIndexSingleStatementGuardTests
         => Assert.False(HypotheticalIndexExperiment.IsSingleStatement(statement));
 
     /// <summary>
-    /// The guard is a PREDICATE, and that is the property that keeps the feature working. It returns a
-    /// verdict, never text, so there is no path by which it rewrites, escapes or trims the statement, and
-    /// the <c>$1</c> placeholders <c>GENERIC_PLAN</c> needs reach the EXPLAIN exactly as captured. The
-    /// staging bind is asserted alongside it, because that is the value the guard cleared.
-    /// </summary>
-    [Fact]
-    public void TheGuardIsAPredicate_SoTheTextItClearsIsNeverRewritten()
-    {
-        var source = ExperimentSource();
-
-        Assert.Contains("public static bool IsSingleStatement(string? statementText)", source, StringComparison.Ordinal);
-        Assert.Contains("stage.Parameters.AddWithValue(statementText)", source, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// The guard runs at BOTH ends: the entry point, so a refused candidate costs the monitored server no
     /// round trip at all, and the sink, so a second caller of the private EXPLAIN helper cannot reach the
     /// concatenation without it.

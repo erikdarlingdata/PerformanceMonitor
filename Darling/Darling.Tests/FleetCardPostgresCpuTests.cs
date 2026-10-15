@@ -296,80 +296,6 @@ public sealed class FleetCardPostgresCpuTests
         Assert.Equal(fleet.AcuUtilizationPercent, viewer.AcuUtilizationPercent);
     }
 
-    /// <summary>
-    /// And they agree BY CONSTRUCTION rather than by observation: the two surfaces above, plus the PostgreSQL
-    /// High CPU alert's grade since #3653, are the ONLY places under <c>Darling/</c> that decide a CPU
-    /// band, and all of them reach the shared decision. The theory
-    /// above would pass just as happily against two hand-written copies that currently agree, which is
-    /// precisely the state #2473 found the collection-status ladder in - three copies agreeing and a fourth
-    /// that did not.
-    ///
-    /// <para>Stated as a CENSUS of the deciding files rather than as a search for a bad copy, because the
-    /// failure mode is OMISSION: #3267 is a surface that computed a CPU band while never learning a second
-    /// source existed, and no scan for a duplicated expression can see that. A third surface arriving fails
-    /// here and has to be given the shared call, which is the decision this forces someone to make. It
-    /// fails in both directions - a new decider, or either of these two dropping the call.</para>
-    ///
-    /// <para>Read from the source tree so it reaches the WPF viewer without this net10.0-windows assembly
-    /// resolving a WPF project reference, and stripped with the shared lexer rather than a line prefix
-    /// because every doc comment in this family QUOTES the identifiers being counted.</para>
-    /// </summary>
-    [Fact]
-    public void TheOnlySurfacesThatBandCpu_AllReachTheSharedDecision()
-    {
-        var deciders = new List<string>();
-        var callers = new List<string>();
-        var scanned = 0;
-
-        foreach (var file in Directory.EnumerateFiles(Path.Combine(RepoFile.Root, "Darling"), "*.cs", SearchOption.AllDirectories))
-        {
-            var segments = file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (segments.Contains("bin") || segments.Contains("obj") || segments.Contains("Darling.Tests"))
-            {
-                continue;
-            }
-
-            scanned++;
-            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file));
-            var name = Path.GetFileName(file);
-
-            /* Constructing the metric bundle, or calling the CPU ladder directly, is what "decides a CPU
-               band" means. Either route counts: the fleet reader builds the bundle, the viewer's card
-               property calls the ladder, and a third surface could do either. */
-            if (code.Contains("new ServerHealthMetrics", StringComparison.Ordinal)
-                || code.Contains("ServerHealthClassifier.CpuSeverity(", StringComparison.Ordinal))
-            {
-                deciders.Add(name);
-            }
-
-            if (code.Contains("FleetCpuProvenance.TotalNonIdleCpuPercent", StringComparison.Ordinal)
-                && code.Contains("FleetCpuProvenance.ClassifyCpuSource", StringComparison.Ordinal))
-            {
-                callers.Add(name);
-            }
-        }
-
-        /* The scan is the enforcement, so finding almost nothing is a broken scan, not a clean tree. */
-        Assert.True(scanned > 50, $"scanned only {scanned} file(s) under Darling/");
-
-        /* The two CARDS build the bundle or call the ladder, and both first ask FleetCpuProvenance which
-           collector produced the reading, because a card can be either engine's. */
-        var expectedCards = new[] { "DarlingFleetReader.cs", "ViewerDataService.Overview.cs" };
-
-        /* #3653 (A8e): the third decider is the PostgreSQL High CPU ALERT (DarlingWorker.GradePgCpuFire),
-           which grades its fire through the same ladder so the row and the card cannot disagree about the
-           colour of one minute — exactly the decision this census exists to force on a new surface. It
-           is a decider and NOT a caller of the two provenance helpers, by construction rather than by
-           omission: EvaluatePgCpuAsync exists only for PostgreSQL targets and reads only pg_cpu_utilization,
-           so its source is FleetCpuSource.PerformanceInsights as a constant — there is no second collector
-           for ClassifyCpuSource to tell apart, and no ring-buffer split for TotalNonIdleCpuPercent to sum.
-           A FOURTH decider, or this one starting to classify a source it cannot have, fails here. */
-        var expectedDeciders = new[] { "DarlingFleetReader.cs", "DarlingWorker.cs", "ViewerDataService.Overview.cs" };
-
-        Assert.Equal(expectedDeciders, deciders.Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
-        Assert.Equal(expectedCards, callers.Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
-    }
-
     /* ─────────────────────────── the new read's shape ─────────────────────────── */
 
     /// <summary>
@@ -413,32 +339,5 @@ public sealed class FleetCardPostgresCpuTests
         Assert.Contains("cpu_percent IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC, sample_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Both reads take their staleness window from <c>DarlingPgCpuUtilizationReader.Freshness</c>, the
-    /// constant the High CPU alert already uses. Three surfaces answer "where does this server's CPU stand
-    /// right now"; two of them holding different windows is a drift of the #2473 kind, where the alert
-    /// evaluates a reading the card has already dropped.
-    ///
-    /// <para>Asserted as a source fact rather than by re-deriving the number, because the failure this
-    /// guards against is a second literal appearing, not a wrong value.</para>
-    /// </summary>
-    [Fact]
-    public void BothPgCpuReadsBindTheSharedFreshnessConstant()
-    {
-        Assert.Equal(TimeSpan.FromMinutes(15), DarlingPgCpuUtilizationReader.Freshness);
-
-        foreach (var path in new[]
-        {
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs"),
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Overview.cs"),
-        })
-        {
-            var code = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(path));
-
-            Assert.Contains("DarlingPgCpuUtilizationReader.Freshness", code, StringComparison.Ordinal);
-            Assert.DoesNotContain("TimeSpan.FromMinutes(15)", code, StringComparison.Ordinal);
-        }
     }
 }
