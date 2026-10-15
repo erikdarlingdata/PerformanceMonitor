@@ -90,7 +90,7 @@ public sealed class DarlingMcpAlertTools
         CancellationToken cancellationToken = default)
     {
         /* #5562 ruling R8: the alert table keeps 90 days and the read is capped by its row limit (DarlingAlertReader LIMIT), so it reaches the retention. */
-        var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_alert_history"), out var windowEnd);
+        var hoursError = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_alert_history"), out var windowEnd);
         if (hoursError != null) return hoursError;
         var limitError = McpHelpers.ValidateTop(limit);
         if (limitError != null) return limitError;

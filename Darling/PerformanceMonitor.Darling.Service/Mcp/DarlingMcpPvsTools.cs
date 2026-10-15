@@ -61,7 +61,7 @@ public sealed class DarlingMcpPvsTools
 
         if (trend_hours_back != 0)
         {
-            var validation = McpHelpers.ValidateHoursBack(trend_hours_back);
+            var validation = DarlingReadWindow.ValidateHoursBack(trend_hours_back);
             if (validation != null) return validation;
         }
 

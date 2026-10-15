@@ -113,7 +113,7 @@ public sealed partial class DarlingMcpFinOpsTools
             return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
 
         /* storage_growth validates its own window (24, or 7 to 90 whole days): the shared ceiling is 168 hours. */
-        var validation = normalized == StorageGrowthView ? null : McpHelpers.ValidateHoursBack(hours_back);
+        var validation = normalized == StorageGrowthView ? null : DarlingReadWindow.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
         var maxLimit = MaxLimitFor(normalized);
         if (limit < 1 || limit > maxLimit)
