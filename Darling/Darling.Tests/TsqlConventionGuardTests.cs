@@ -1542,6 +1542,12 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.ServerManagement.cs SelectedTabCollectorScope",
         "Darling/PerformanceMonitor.Darling.Viewer/ManageServersWindow.xaml.cs LastCollectedDisplay",
         "Darling/PerformanceMonitor.Darling.Viewer/SettingsWindow.xaml.cs BuildViewerPreferences",
+        /* #5632: three expression-bodied members whose bodies open with a property pattern (`is { } x`,
+           `is ComboBoxItem { Content: string text }`) before the rest of the conditional: the walk's brace match
+           closes each range at the pattern's own closing brace, as #4917 below. */
+        "Darling/PerformanceMonitor.Darling.Viewer/InvestigationsWindow.xaml.cs SelectedStateFilter",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Investigations.cs InvestigationProfileScopeReason",
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Investigations.cs LeaseDisplay",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Blocking.cs EventTimeLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Deadlock.cs DeadlockTimeLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.JobHistory.cs RunTimeLocal",
