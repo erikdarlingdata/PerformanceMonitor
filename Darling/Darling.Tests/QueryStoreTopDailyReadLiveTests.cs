@@ -52,9 +52,10 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// deliberately changed both statements: the over-fetch <c>LIMIT $4 + 5</c> became the round's candidate limit and
     /// the tail gained the page / count-row wrapper, and re-taken again for #5420, which deliberately bounded the tail's
     /// inline-text fallback to the read's window (<c>collection_time &gt;= $2</c> and <c>&lt;= $3</c>), and re-taken for #5523, which deliberately added the table read's upper <c>first_execution_time</c> bound (<c>&lt;= $3 + </c>the slack, twelve hours). The split pin is the
-    /// tail-sharing assert below.</summary>
-    private const string RawSqlHash = "836D1C99489C7EC952E327EE1CE1C40D7B94DE3270EC67D9249D32D05634CC33";
-    private const string TableSqlHash = "7B5AF0879E0AF1B75762318E4B41645D370939B2B0FFAEB768FCD9B589B2AB79";
+    /// tail-sharing assert below. Re-taken for #5815, which deliberately sorted the page's candidates before the text lateral
+    /// so <c>LIMIT $4</c> stops the text lookups at a full page (rows and order unchanged).</summary>
+    private const string RawSqlHash = "FFEB749BC29FF0D7FE9CFBF66BFA2558375D35A1468939F8AC20538A8C5010FA";
+    private const string TableSqlHash = "3A61826D037A9C443633396F5811478028E5EB3EC6CE238005ED6E61AD6D4265";
 
     private static string Hash(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));
@@ -71,7 +72,7 @@ public sealed class QueryStoreTopDailyReadLiveTests
     {
         var daily = DarlingDataReader.QueryStoreTopDailyTableSql.ReplaceLineEndings("\n");
         var table = DarlingDataReader.QueryStoreTopTableSql.ReplaceLineEndings("\n");
-        var tail = table[table.IndexOf("SELECT\n    r.database_name,", StringComparison.Ordinal)..];
+        var tail = table[table.IndexOf("SELECT\n    p.database_name,", StringComparison.Ordinal)..];   /* #5815: the page now selects from p */
         Assert.EndsWith(tail, daily, StringComparison.Ordinal);
         Assert.Contains("$7::text IS NULL OR module_name = $7", daily, StringComparison.Ordinal);
         Assert.Contains("LIMIT $10", daily, StringComparison.Ordinal);   /* #5313: the candidate limit, bound after the two dates */

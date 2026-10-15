@@ -702,10 +702,13 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text[] IS NULL OR database_name = ANY($5)", sql, StringComparison.Ordinal);
         Assert.Contains("$6::text IS NULL OR execution_type_desc = $6", sql, StringComparison.Ordinal);
-        Assert.Contains("r.execution_type_desc", sql, StringComparison.Ordinal);
+        /* #5815: the page projects from p (the candidates sorted before the text lateral, r.* plus the text),
+           so both columns reach the result as p.<column>; r.execution_type_desc alone would still match the
+           page's ORDER BY tie-break without proving the column is returned. */
+        Assert.Contains("p.execution_type_desc,", sql, StringComparison.Ordinal);
         Assert.Contains("$7::text IS NULL OR module_name = $7", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(module_name) AS module_name", sql, StringComparison.Ordinal);
-        Assert.Contains("r.module_name", sql, StringComparison.Ordinal);
+        Assert.Contains("p.module_name,", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(execution_count)", sql, StringComparison.Ordinal);
     }
 
