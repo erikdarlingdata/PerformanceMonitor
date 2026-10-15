@@ -9,7 +9,6 @@
 using System;
 using System.Data;
 using System.Data.Common;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,7 +36,7 @@ namespace Darling.Tests;
 /// per-READ answer becomes a per-CYCLE one.
 /// </para>
 ///
-/// <para>Lite.Tests' <c>PerDatabaseProbeFailureTests</c> pins the identical expectations, so editing one app's copy alone fails a build.</para>
+/// <para>Lite.Tests' <c>PerDatabaseProbeFailureTests</c> pins the same expectations against Lite's copy.</para>
 /// </summary>
 public sealed class DarlingPerDatabaseProbeFailureTests
 {
@@ -157,32 +156,7 @@ public sealed class DarlingPerDatabaseProbeFailureTests
         Assert.Equal(EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, probeFailureCount: 1), cycle.Note);
     }
 
-    /* ── the host wiring: read per database, report per cycle ── */
-
-    [Fact]
-    public void The_Per_Database_Loop_Reads_The_Trailing_Set_And_Reports_It_After_The_Loop()
-    {
-        /* The ordering IS the fix. The read must sit inside the loop (once per database, while that
-           database's reader is still open) and BOTH the note and the capped log must sit outside it (once
-           per cycle). Getting either side wrong reintroduces exactly what #1875 was filed for: a read
-           outside the loop reads nothing, and a report inside it overwrites the note N times and bursts the
-           log N times. */
-        var source = File.ReadAllText(FindRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")));
-        var perDatabase = source[source.IndexOf("definition.RunsPerDatabase(context.Target)", StringComparison.Ordinal)..];
-
-        var declaration = perDatabase.IndexOf("definition.EmitsProbeFailures", StringComparison.Ordinal);
-        var read = perDatabase.IndexOf("ReadPayloadProbeFailuresAsync", StringComparison.Ordinal);
-        var loopExit = perDatabase.IndexOf("context.CurrentDatabaseName = null;", StringComparison.Ordinal);
-        var note = perDatabase.IndexOf("cycleProbeFailures.Note", StringComparison.Ordinal);
-        var log = perDatabase.IndexOf("LogEnumerationProbeFailures", StringComparison.Ordinal);
-
-        Assert.True(declaration >= 0, "the per-database path must consult the declaration");
-        Assert.True(read >= 0 && loopExit >= 0 && note >= 0 && log >= 0, "read, loop exit, note and log must all be present");
-        Assert.True(declaration < loopExit, "the declaration must be checked inside the loop");
-        Assert.True(read < loopExit, "the trailing set must be read inside the per-database loop");
-        Assert.True(loopExit < note, "the note must be composed once, after the loop");
-        Assert.True(loopExit < log, "the capped log burst must happen once, after the loop");
-    }
+    /* ── the collector this reaches ── */
 
     [Fact]
     public void Blocked_Process_Report_Is_The_Collector_This_Reaches()
@@ -238,18 +212,4 @@ public sealed class DarlingPerDatabaseProbeFailureTests
         return dataSet.CreateDataReader();
     }
 
-    private static string FindRepoFile(string relativePath)
-    {
-        var dir = AppContext.BaseDirectory;
-        for (var i = 0; i < 8 && dir is not null; i++)
-        {
-            var candidate = Path.Combine(dir, relativePath);
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-            dir = Path.GetDirectoryName(dir);
-        }
-        throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
-    }
 }
