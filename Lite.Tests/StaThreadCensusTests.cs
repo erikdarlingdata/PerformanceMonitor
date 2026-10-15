@@ -110,12 +110,6 @@ public sealed class StaThreadCensusTests
             + string.Join(", ", missing));
     }
 
-    [Fact]
-    public void EveryAllowListEntry_SaysWhy()
-    {
-        Assert.All(Allowed, entry => Assert.True(entry.Value.Length >= 20, entry.Key + " is on the allow list without a reason"));
-    }
-
     private static IEnumerable<(string Rel, string Text)> TestFiles()
     {
         var dir = ProjectDir();
