@@ -68,8 +68,8 @@ FROM generate_series(@f::timestamp, @t::timestamp, interval '1 day') AS d (d)
 CROSS JOIN generate_series(1, @p) AS n",
             ("s", ServerA), ("f", window), ("t", today), ("p", plans));
         await ExecAsync(connection, @"
-INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, built_at, source_rows, built_through)
-SELECT @s, d.d::date, 0, 0, d.d, 0, CASE WHEN d.d = @t THEN @w ELSE d.d + interval '1 day' END
+INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, partial_seq, built_at, source_rows, built_through)
+SELECT @s, d.d::date, 0, CASE WHEN d.d = @t THEN NULL ELSE 0 END, CASE WHEN d.d = @t THEN 0 END, d.d, 0, CASE WHEN d.d = @t THEN @w END
 FROM generate_series(@f::timestamp, @t::timestamp, interval '1 day') AS d (d)",
             ("s", ServerA), ("f", window), ("t", today), ("w", watermark));
         await ExecAsync(connection,

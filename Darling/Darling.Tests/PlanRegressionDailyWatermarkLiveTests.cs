@@ -233,6 +233,270 @@ AND   (   (last_execution_time::date = @d2 AND first_execution_time >= @w2)
 
     /* ---------------------------------------------------------------------------------------------------------- */
 
+    /// <summary>
+    /// #5812 (fix A): the tick's two stamps that are not builds, on the store's clock. Server A is idle: its T - 2 is partial
+    /// at 22:00 with nothing after it, and its today is partial an hour below the current watermark with nothing after it.
+    /// Server B has a row in today's span. Before the plan, the idle advance stamps A's T - 2 whole and A's today at the
+    /// watermark, and tomorrow is stamped for both with no totals. The plan then holds B's today only (A's today has no slot).
+    /// After the tick, A's floor is today's watermark, and A's read (T - 2 whole) equals the interval-table read.
+    /// </summary>
+    [Fact]
+    public async Task ATick_AdvancesAnIdleDayWithoutABuild_StampsTomorrow_AndTheFloorIsTodaysWatermark()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 stamp test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var now = await SettledStoreNowAsync(connection, ct);
+        var today = now.Date;
+        var todayDay = DateOnly.FromDateTime(today);
+        var watermark = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-PlanRegressionDaily.PartialWatermarkLagHours);
+        var window = today.AddDays(-14);
+
+        await SeedAsync(connection, today.AddDays(-16), today.AddDays(-2), 40, ct);
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
+        await EnrollAsync(connection, ServerA, today.AddDays(-20), ct);
+        await EnrollAsync(connection, ServerB, today.AddDays(-20), ct);
+
+        for (var d = window.AddDays(-1); d < today.AddDays(-2); d = d.AddDays(1))
+        {
+            await BuildAsync(connection, DateOnly.FromDateTime(d), d.AddDays(1), ct);
+        }
+
+        var tMinus2 = DateOnly.FromDateTime(today.AddDays(-2));
+        await BuildAsync(connection, tMinus2, today.AddDays(-2).AddHours(22), ct);
+        await BuildAsync(connection, DateOnly.FromDateTime(today.AddDays(-1)), today, ct);
+        await BuildAsync(connection, todayDay, watermark.AddHours(-1), ct);
+
+        /* Server B: every day whole, today partial an hour below the watermark, and one row of today inside that hour. */
+        await ExecAsync(connection, @"
+INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, partial_seq, built_through, built_at, source_rows)
+SELECT @s, g::date, 0, CASE WHEN g::date = @d THEN NULL ELSE 0 END, CASE WHEN g::date = @d THEN 0 END,
+       CASE WHEN g::date = @d THEN @t END, @t, 0
+FROM generate_series(@f::timestamp, @d::timestamp, interval '1 day') AS g",
+            ct, ("s", ServerB), ("d", todayDay), ("f", window.AddDays(-1)), ("t", watermark.AddHours(-1)));
+        await ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_latest
+(
+    server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+    collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+    last_execution_time, is_forced_plan, force_failure_count
+)
+VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb', 10, 100, 100, @f + interval '20 minutes', false, 0)",
+            ct, ("s", ServerB), ("f", watermark.AddMinutes(-30)));
+
+        var (advanced, stamped) = await PlanRegressionDaily.StampWithoutBuildAsync(connection, now, ct);
+        Assert.Equal(2, advanced);
+        Assert.Equal(2, stamped);
+
+        var plan = await PlanRegressionDaily.PlanBuildsAsync(connection, now, ct);
+        Assert.Equal(new[] { new PlanRegressionDaily.Build(ServerB, todayDay) }, plan.ToArray());
+
+        await using (var source = NpgsqlDataSource.Create(scratch.ConnectionString))
+        {
+            var tick = await PlanRegressionDaily.RunTickAsync(source, now, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+            Assert.Equal(new PlanRegressionDaily.TickResult(1, 0, 0, 0, 0, 0, 0), tick);
+        }
+
+        const string Stamp = "SELECT COALESCE(built_seq::text, '-') || '|' || COALESCE(partial_seq::text, '-') || '|' || late_seq || '|' || COALESCE(to_char(built_through, 'YYYY-MM-DD HH24:MI'), '-') FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d";
+        var w = watermark.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        Assert.Equal($"-|0|0|{w}", await TextAsync(connection, Stamp, ct, ("s", ServerA), ("d", todayDay)));
+        Assert.Equal("0|-|0|-", await TextAsync(connection, Stamp, ct, ("s", ServerA), ("d", tMinus2)));
+        Assert.Equal($"-|0|0|{w}", await TextAsync(connection, Stamp, ct, ("s", ServerA), ("d", todayDay.AddDays(1))));
+        Assert.Equal($"-|0|0|{w}", await TextAsync(connection, Stamp, ct, ("s", ServerB), ("d", todayDay)));
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily WHERE day = @d", ct, ("d", todayDay.AddDays(1))));
+        Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d", ct, ("s", ServerB), ("d", todayDay)));
+
+        var built = await BuiltDaysAsync(connection, window, ct);
+        Assert.Null(built.Single(b => b.Day == tMinus2).Through);
+        Assert.Equal(watermark, PgFactCollector.PlanRegressionLiveFloorWithWatermarks(PgFactCollector.PlanRegressionWindowFloor(window), built));
+        var daily = await DailyRowsAsync(connection, window, built, ct);
+        Assert.NotEmpty(daily);
+        Assert.Equal(await TableRowsAsync(connection, window, ct), daily);
+    }
+
+    /// <summary>
+    /// #5812 M3: the seam between the builder's watermark, the trigger's bound and the read. A real build of today on the
+    /// store's clock stamps <c>built_through</c> two hours before the current hour. Set an hour back, the idle advance stamps it
+    /// to the watermark again. A row of today that starts 30 minutes below that watermark, written through the real trigger,
+    /// moves the day's <c>late_seq</c>, so the stamped day is stale, and the daily read equals the interval-table read.
+    /// </summary>
+    [Fact]
+    public async Task ABuildOnTheStoreClock_StampsTwoHoursBeforeTheHour_AndAWriteBelowAnAdvancedWatermarkMarksTheDay()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 seam test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var now = await SettledStoreNowAsync(connection, ct);
+        var today = now.Date;
+        var todayDay = DateOnly.FromDateTime(today);
+        var window = today.AddDays(-14);
+
+        await SeedAsync(connection, today.AddDays(-16), today.AddDays(-1), 40, ct);
+        await EnrollAsync(connection, ServerA, today.AddDays(-20), ct);
+        for (var d = window.AddDays(-1); d < today; d = d.AddDays(1))
+        {
+            await BuildAsync(connection, DateOnly.FromDateTime(d), d.AddDays(1), ct);
+        }
+
+        var watermark = Convert.ToDateTime(await TextAsync(connection,
+            "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
+
+        /* Today's rows, all more than an hour below the watermark, planted with the trigger off (they are not late writes). */
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
+        await TodayRowAsync(connection, 1, watermark.AddMinutes(-90), ct);
+        await TodayRowAsync(connection, 2, watermark.AddHours(-2), ct);
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late", ct);
+
+        Assert.Equal(2L, await PlanRegressionDaily.BuildDayAsync(connection, ServerA, todayDay, now, ct));
+        const string Through = "SELECT to_char(built_through, 'YYYY-MM-DD HH24:MI:SS') FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d";
+        Assert.Equal(await TextAsync(connection,
+                "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct),
+            await TextAsync(connection, Through, ct, ("s", ServerA), ("d", todayDay)));
+
+        /* As if built an hour ago: the idle advance (nothing in the last hour) stamps it to the watermark again. */
+        await ExecAsync(connection, "UPDATE collect.plan_regression_daily_built SET built_through = @t WHERE server_id = @s AND day = @d",
+            ct, ("s", ServerA), ("d", todayDay), ("t", watermark.AddHours(-1)));
+        var (advanced, _) = await PlanRegressionDaily.StampWithoutBuildAsync(connection, now, ct);
+        Assert.Equal(1, advanced);
+        Assert.Equal(watermark.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            await TextAsync(connection, Through, ct, ("s", ServerA), ("d", todayDay)));
+        var seq = await ScalarAsync(connection, "SELECT partial_seq FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d",
+            ct, ("s", ServerA), ("d", todayDay));
+        Assert.Equal(seq, await ScalarAsync(connection, "SELECT late_seq FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d",
+            ct, ("s", ServerA), ("d", todayDay)));
+
+        /* The late write, through the real trigger: 30 minutes below the watermark, so below the trigger's bound too. */
+        await TodayRowAsync(connection, 3, watermark.AddMinutes(-30), ct);
+        Assert.True(await ScalarAsync(connection, "SELECT late_seq FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d",
+            ct, ("s", ServerA), ("d", todayDay)) > seq);
+
+        var built = await BuiltDaysAsync(connection, window, ct);
+        Assert.DoesNotContain(built, b => b.Day == todayDay);
+        Assert.Equal(await TableRowsAsync(connection, window, ct), await DailyRowsAsync(connection, window, built, ct));
+    }
+
+    /// <summary>
+    /// #5812 M1: a partial build is invisible to code from before V184. A partial day fails V183's validity predicate
+    /// (<c>built_seq = late_seq</c>), so a V183 reader reads it live. A V183 builder's whole build after it (the old stamp,
+    /// which sets <c>built_seq</c> and leaves <c>partial_seq</c> and <c>built_through</c> as they were) reads as whole, and the
+    /// daily read counts no row twice: it equals the interval-table read.
+    /// </summary>
+    [Fact]
+    public async Task APartialDay_IsUnbuiltToTheV183Predicate_AndAV183WholeBuildAfterItReadsWhole_WithNoDoubleCount()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 pre-V184 test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var today = LiveClock.Now().Date; // #5608
+        var window = today.AddDays(-14);
+        await SeedAsync(connection, today.AddDays(-16), today.AddDays(-3), 40, ct);
+        await CoverageAsync(connection, today.AddDays(-20), ct);
+        for (var d = window.AddDays(-1); d < today; d = d.AddDays(1))
+        {
+            await BuildAsync(connection, DateOnly.FromDateTime(d), d.AddDays(1), ct);
+        }
+
+        var day = DateOnly.FromDateTime(today.AddDays(-3));
+        var dayStart = today.AddDays(-3);
+        await BuildAsync(connection, day, dayStart.AddHours(12), ct);
+
+        const string V183Valid = "SELECT count(*) FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d AND built_seq = late_seq";
+        Assert.Equal(0L, await ScalarAsync(connection, V183Valid, ct, ("s", ServerA), ("d", day)));
+        var built = await BuiltDaysAsync(connection, window, ct);
+        Assert.Equal(dayStart.AddHours(12), built.Single(b => b.Day == day).Through);
+        Assert.Equal(await TableRowsAsync(connection, window, ct), await DailyRowsAsync(connection, window, built, ct));
+
+        /* A V183 builder rebuilds the day whole: its aggregate (the watermark at the next midnight) and its stamp. */
+        await ExecAsync(connection, "DELETE FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d", ct, ("s", ServerA), ("d", day));
+        await using (var build = new NpgsqlCommand(PlanRegressionDaily.BuildDaySql, connection))
+        {
+            build.Parameters.AddWithValue(ServerA);
+            build.Parameters.AddWithValue(NpgsqlDbType.Date, day);
+            build.Parameters.AddWithValue(NpgsqlDbType.Timestamp, dayStart.AddDays(1));
+            build.Parameters.AddWithValue(NpgsqlDbType.Timestamp, dayStart.AddDays(-1));
+            build.Parameters.AddWithValue(NpgsqlDbType.Timestamp, dayStart.AddDays(1));
+            await build.ExecuteScalarAsync(ct);
+        }
+
+        await ExecAsync(connection,
+            "UPDATE collect.plan_regression_daily_built SET built_seq = late_seq, built_at = @d, source_rows = 0 WHERE server_id = @s AND day = @d",
+            ct, ("s", ServerA), ("d", day));
+        Assert.Equal(1L, await ScalarAsync(connection, V183Valid, ct, ("s", ServerA), ("d", day)));
+        Assert.Equal(1L, await ScalarAsync(connection,
+            "SELECT count(*) FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d AND partial_seq = late_seq AND built_through IS NOT NULL",
+            ct, ("s", ServerA), ("d", day)));
+
+        built = await BuiltDaysAsync(connection, window, ct);
+        Assert.Null(built.Single(b => b.Day == day).Through);
+        Assert.Equal(await TableRowsAsync(connection, window, ct), await DailyRowsAsync(connection, window, built, ct));
+    }
+
+    private const int ServerB = -5812402;
+
+    /// <summary>The store's clock (naive UTC), settled: skips before 04:00 UTC (today's rows two hours below the
+    /// watermark would start before midnight) and waits out an hour boundary less than three minutes off, so the test and the statements read one hour.</summary>
+    private static async Task<DateTime> SettledStoreNowAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        const string Sql = "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')";
+        var now = Convert.ToDateTime(await TextAsync(connection, Sql, ct), CultureInfo.InvariantCulture);
+        var wait = PlanRegressionDailyTriggerLiveTests.WaitPastTheHour(now, TimeSpan.FromMinutes(3));
+        if (wait > TimeSpan.Zero)
+        {
+            await Task.Delay(wait, ct);
+            now = Convert.ToDateTime(await TextAsync(connection, Sql, ct), CultureInfo.InvariantCulture);
+        }
+
+        Assert.SkipWhen(now.Hour < 4, "Before 04:00 UTC the rows two hours below today's watermark would start before midnight; the #5812 stamp tests need them inside today.");
+        return now;
+    }
+
+    /// <summary>Enrolls a server (enabled) with a coverage claim.</summary>
+    private static async Task EnrollAsync(NpgsqlConnection connection, int serverId, DateTime filledSince, CancellationToken ct)
+    {
+        await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (@s, 'wm' || @s, TRUE) ON CONFLICT (server_id) DO NOTHING",
+            ct, ("s", serverId));
+        await ExecAsync(connection,
+            "INSERT INTO collect.query_store_interval_latest_coverage (server_id, filled_since, applied_through) VALUES (@s, @f, @f) ON CONFLICT (server_id) DO UPDATE SET filled_since = EXCLUDED.filled_since",
+            ct, ("s", serverId), ("f", filledSince));
+    }
+
+    /// <summary>One interval row of server A's today, of its own query, 20 minutes long.</summary>
+    private static Task TodayRowAsync(NpgsqlConnection connection, int query, DateTime first, CancellationToken ct) =>
+        ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_latest
+(
+    server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+    collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+    last_execution_time, is_forced_plan, force_failure_count
+)
+VALUES (@s, 'wmdb', 900000 + @q, 9000000 + @q, NULL, 900 + @q, @f, @f + interval '35 minutes', 'hasht' || @q, 'qht' || @q, 100, 1000, 1000, @f + interval '20 minutes', false, 0)",
+            ct, ("s", ServerA), ("q", query), ("f", first));
+
+    private static async Task<string> TextAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        AddParameters(command, parameters);
+        return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) ?? "";
+    }
+
     /// <summary>Two-plan intervals for every day from <paramref name="first"/> through <paramref name="last"/>: query q
     /// starts at hour q % 22, plan 2 runs a minute after plan 1 and costs four times as much, so every query is a regression
     /// candidate. The late-row trigger is off for the load (a seed is not a late arrival).</summary>
@@ -284,7 +548,7 @@ CROSS JOIN generate_series(1, 2) AS p", ct, ("s", ServerA), ("f", first), ("l", 
         }
 
         await ExecAsync(connection,
-            "UPDATE collect.plan_regression_daily_built SET built_seq = @q, built_at = @d, source_rows = 0, built_through = @t WHERE server_id = @s AND day = @d",
+            "UPDATE collect.plan_regression_daily_built SET " + PartialAwareStamp + ", built_at = @d, source_rows = 0 WHERE server_id = @s AND day = @d",
             ct, ("s", ServerA), ("d", day), ("q", seq), ("t", through));
     }
 
@@ -427,6 +691,12 @@ CROSS JOIN generate_series(1, 2) AS p", ct, ("s", ServerA), ("f", first), ("l", 
         AddParameters(command, parameters);
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
     }
+
+    /// <summary>The stamp <c>PlanRegressionDaily.MarkBuiltSql</c> writes (#5812): a watermark at the next midnight is a whole build
+    /// (<c>built_seq</c>), an earlier one a partial build (<c>partial_seq</c> and <c>built_through</c>, <c>built_seq</c> NULL).</summary>
+    private const string PartialAwareStamp = "built_seq = CASE WHEN @t::timestamp >= (@d::date + 1)::timestamp THEN @q::bigint END, "
+        + "partial_seq = CASE WHEN @t::timestamp >= (@d::date + 1)::timestamp THEN NULL ELSE @q::bigint END, "
+        + "built_through = CASE WHEN @t::timestamp >= (@d::date + 1)::timestamp THEN NULL ELSE @t::timestamp END";
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {

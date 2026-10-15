@@ -131,15 +131,17 @@ ALTER TABLE IF EXISTS collect.slow_reads
     }
 
     /// <summary>
-    /// V184 (#5812): the partial-day watermark column of <c>collect.plan_regression_daily_built</c> (the probe's newest
-    /// sentinel). Safe on a store that never had it. A day built under V184 keeps its row and reads as a whole-day build, as
-    /// every day built before V184 does.
+    /// V184 (#5812): the partial-day columns of <c>collect.plan_regression_daily_built</c>, <c>built_through</c> (the probe's
+    /// newest sentinel) and <c>partial_seq</c>. Safe on a store that never had them. A whole build made under V184 keeps
+    /// <c>built_seq = late_seq</c> and reads as a whole-day build, as every day built before V184 does. A partial build already
+    /// has <c>built_seq</c> NULL, so V183 reads it as not built, and its V183 builder rebuilds it whole.
     /// </summary>
     internal static async Task DropV184SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(@"
 ALTER TABLE IF EXISTS collect.plan_regression_daily_built
-    DROP COLUMN IF EXISTS built_through;", connection);
+    DROP COLUMN IF EXISTS built_through,
+    DROP COLUMN IF EXISTS partial_seq;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

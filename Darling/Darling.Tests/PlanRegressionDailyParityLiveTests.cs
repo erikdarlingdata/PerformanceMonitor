@@ -365,7 +365,7 @@ public sealed class PlanRegressionDailyParityLiveTests
         }
 
         await ExecAsync(connection,
-            "UPDATE collect.plan_regression_daily_built SET built_seq = @q, built_at = @d, source_rows = 0, built_through = @t WHERE server_id = @s AND day = @d",
+            "UPDATE collect.plan_regression_daily_built SET " + PartialAwareStamp + ", built_at = @d, source_rows = 0 WHERE server_id = @s AND day = @d",
             ct, ("d", d), ("q", seq), ("t", watermark));
     }
 
@@ -388,6 +388,12 @@ public sealed class PlanRegressionDailyParityLiveTests
 
         return rows;
     }
+
+    /// <summary>The stamp <c>PlanRegressionDaily.MarkBuiltSql</c> writes (#5812): a watermark at the next midnight is a whole build
+    /// (<c>built_seq</c>), an earlier one a partial build (<c>partial_seq</c> and <c>built_through</c>, <c>built_seq</c> NULL).</summary>
+    private const string PartialAwareStamp = "built_seq = CASE WHEN @t::timestamp >= (@d::date + 1)::timestamp THEN @q::bigint END, "
+        + "partial_seq = CASE WHEN @t::timestamp >= (@d::date + 1)::timestamp THEN NULL ELSE @q::bigint END, "
+        + "built_through = CASE WHEN @t::timestamp >= (@d::date + 1)::timestamp THEN NULL ELSE @t::timestamp END";
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
