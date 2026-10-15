@@ -1191,6 +1191,18 @@ public partial class SettingsWindow : Window
         window.ShowDialog();
     }
 
+    /// <summary>#5632 Phase A: the investigations an agent route opens, beside the routes that open them.</summary>
+    private void ManageInvestigationsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        var window = new InvestigationsWindow(_dataService) { Owner = this };
+        window.ShowDialog();
+    }
+
     private void UpdateAlertPreviewText()
     {
         var parts = new List<string>();

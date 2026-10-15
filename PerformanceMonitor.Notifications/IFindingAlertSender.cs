@@ -159,6 +159,11 @@ public static class FindingSummary
 /// defaulted to Page so a caller that predates the gate (the deprecated Dashboard, the test-send paths) keeps
 /// its behaviour byte for byte; the shared notification service always states it.
 /// </param>
+/// <param name="StoryPathHash">
+/// #5632 Phase A: the lead finding's FULL story path hash. <c>MetricName</c> carries only its first eight characters,
+/// so the investigation request a page opens takes the whole hash from here. Null when the producer has none (every
+/// caller that predates it, and Lite, which opens no request).
+/// </param>
 public sealed record FindingAlert(
     string MetricName,
     string ServerName,
@@ -170,7 +175,8 @@ public sealed record FindingAlert(
     double NotifyThreshold,
     string DetailText,
     bool DeliverDetailText,
-    FindingRoute Route = FindingRoute.Page)
+    FindingRoute Route = FindingRoute.Page,
+    string? StoryPathHash = null)
 {
     /// <summary>
     /// The prose a delivery channel should render for this alert, or null when the structured

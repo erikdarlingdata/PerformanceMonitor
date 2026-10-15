@@ -143,17 +143,19 @@ public sealed class StatementFilterBlockingReadsLiveTests
     {
         var sb = new StringBuilder();
         sb.Append("<deadlock><victim-list><victimProcess id=\"process1a\"/></victim-list><process-list>");
-        sb.Append("<process id=\"process1a\" spid=\"61\" status=\"suspended\" currentdbname=\"").Append(Db).Append("\" loginname=\"l\">")
+        sb.Append("<process id=\"process1a\" spid=\"61\" status=\"suspended\" currentdbname=\"").Append(Db).Append("\" loginname=\"" + StatementFilterCensus.LoginCanary + "\">")
           .Append("<executionStack><frame procname=\"adhoc\" line=\"1\">").Append(StatementScrubCanary.CanaryStatement).Append("</frame></executionStack>")
           .Append("<inputbuf>").Append(StatementScrubCanary.CanaryStatement).Append("</inputbuf></process>");
-        sb.Append("<process id=\"process2b\" spid=\"62\" status=\"suspended\" currentdbname=\"").Append(Db).Append("\" loginname=\"l\">")
+        sb.Append("<process id=\"process2b\" spid=\"62\" status=\"suspended\" currentdbname=\"").Append(Db).Append("\" loginname=\"" + StatementFilterCensus.LoginCanary + "\">")
           .Append("<executionStack><frame procname=\"adhoc\" line=\"1\">").Append(StatementScrubCanary.PlainStatement).Append("</frame></executionStack>")
           .Append("<inputbuf>").Append(StatementScrubCanary.PlainStatement).Append("</inputbuf></process>");
         for (int i = 0; i < paddingProcesses; i++)
         {
-            sb.Append("<process id=\"processpad").Append(i).Append("\" spid=\"").Append(100 + i % 900).Append("\" status=\"suspended\" currentdbname=\"").Append(Db).Append("\" loginname=\"l\">")
+            sb.Append("<process id=\"processpad").Append(i).Append("\" spid=\"").Append(100 + i % 900).Append("\" status=\"suspended\" currentdbname=\"").Append(Db).Append("\" loginname=\"" + StatementFilterCensus.LoginCanary + "\">")
               .Append("<executionStack><frame procname=\"adhoc\" line=\"1\">SELECT canary_pad_ssf FROM dbo.pad WHERE id = @c</frame></executionStack>")
-              .Append("<inputbuf>SELECT canary_pad_ssf FROM dbo.pad WHERE id = @c</inputbuf></process>");
+              /* #5632 (R3): the first pad's input buffer holds the census literals, so the keyed census reaches inputbuf. */
+              .Append("<inputbuf>").Append(i == 0 ? StatementFilterCensus.MaskStatement : "SELECT canary_pad_ssf FROM dbo.pad WHERE id = @c")
+              .Append("</inputbuf></process>");
         }
 
         sb.Append("</process-list><resource-list><keylock objectname=\"").Append(Db).Append(".dbo.t\"><owner-list><owner id=\"process2b\" mode=\"X\"/></owner-list>")
@@ -163,10 +165,10 @@ public sealed class StatementFilterBlockingReadsLiveTests
 
     private static string BlockedProcessReport() =>
         "<blocked-process-report monitorLoop=\"1\"><blocked-process>"
-        + "<process id=\"processB1\" waittime=\"12000\" status=\"suspended\" spid=\"61\" ecid=\"0\" clientapp=\"app\" hostname=\"h\" loginname=\"l\">"
+        + "<process id=\"processB1\" waittime=\"12000\" status=\"suspended\" spid=\"61\" ecid=\"0\" clientapp=\"app\" hostname=\"" + StatementFilterCensus.HostCanary + "\" loginname=\"" + StatementFilterCensus.LoginCanary + "\">"
         + "<executionStack><frame line=\"1\" stmtstart=\"0\" sqlhandle=\"0x01\">" + StatementScrubCanary.CanaryStatement + "</frame></executionStack>"
         + "<inputbuf>" + StatementScrubCanary.CanaryStatement + "</inputbuf></process></blocked-process>"
-        + "<blocking-process><process status=\"suspended\" spid=\"62\" ecid=\"0\" clientapp=\"app\" hostname=\"h\" loginname=\"l\">"
+        + "<blocking-process><process status=\"suspended\" spid=\"62\" ecid=\"0\" clientapp=\"app\" hostname=\"" + StatementFilterCensus.HostCanary + "\" loginname=\"" + StatementFilterCensus.LoginCanary + "\">"
         + "<executionStack/><inputbuf>" + StatementScrubCanary.PlainStatement + "</inputbuf></process></blocking-process></blocked-process-report>";
 
     [Fact]
@@ -209,7 +211,7 @@ VALUES ($1, $2, $3, $4, $5, 12000, 62, 61, 0, 0, 'suspended', $6, $7, $8, $9)",
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-                CollectionIdGenerator.Next(), t.AddSeconds(5), ServerId, ServerName, Db, t, "process1a", StatementScrubCanary.CanaryStatement, DeadlockGraph(0));
+                CollectionIdGenerator.Next(), t.AddSeconds(5), ServerId, ServerName, Db, t, "process1a", StatementScrubCanary.CanaryStatement, DeadlockGraph(1));
 
             /* row 20 */
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
@@ -222,7 +224,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 CollectionIdGenerator.Next(), t.AddSeconds(5), ServerId, ServerName, t, "rpc_completed", Db, 4_000_000L, StatementScrubCanary.PlainStatement);
 
             /* row 21: a severe ErrorLog entry whose text_data is the canary, and a plain one beside it. */
-            foreach (var (text, offset) in new[] { (StatementScrubCanary.CanaryStatement, 0), (StatementScrubCanary.PlainStatement, 1) })
+            foreach (var (text, offset) in new[] { (StatementScrubCanary.CanaryStatement, 0), (StatementScrubCanary.PlainStatement, 1), (StatementFilterCensus.MaskStatement, 2) })
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO default_trace_events
@@ -243,6 +245,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
 
             /* Every row is checked before the test fails, so one run names each row that leaks. */
             var failures = new List<string>();
+            var found = new List<string>();
             /* A row whose reader judges the statement itself (#5320: the cut-and-judge reads) names its stored column in
                `readerJudges`; the store must still hold the canary there, and the reader's own answer is held to the marker. The
                other rows return the stored text raw and the host filter is what withholds it. */
@@ -261,6 +264,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
                         AssertFiltered(label, raw, filtered);
                     }
                     more?.Invoke(filtered);
+                    /* #5632 (R3): the keyed mcp.dataDetail census of the same answer. */
+                    found.AddRange(await StatementFilterCensus.AssertKeyedMaskingAsync(host, label, raw));
                 }
                 catch (Exception ex)
                 {
@@ -288,6 +293,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
             await Check("22 get_health_parser_significant_waits", await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, ServerName, cancellationToken: ct));
             await Check("23 get_health_parser_severe_errors", await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, cancellationToken: ct));
             Assert.True(failures.Count == 0, string.Join(" | ", failures));
+            StatementFilterCensus.AssertPlanted(found, StatementFilterCensus.LoginCanary, StatementFilterCensus.HostCanary,
+                StatementFilterCensus.LiteralCanary, StatementFilterCensus.NumericCanary);
 
             bodySucceeded = true;
         }

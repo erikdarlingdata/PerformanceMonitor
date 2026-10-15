@@ -389,6 +389,11 @@
     "enabled": false,
     "port": 5152,
 
+    // Uncomment to serve claim_investigation_request and submit_investigation_report to your own agent (#5632).
+    // They write only investigation state, need a bearer token (mcp.network.encryptedToken or token), and stay
+    // off while "allowWrites" is on: one token cannot tell an agent from a person. Default off.
+    // "allowInvestigations": true,
+
     // Uncomment to expose MCP on the LAN (a comma already follows "port" above):
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.

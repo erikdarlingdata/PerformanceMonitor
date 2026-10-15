@@ -6,7 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -25,6 +28,26 @@ public sealed class MuteRulesPageTests
     public void ThePageReadsGetMuteRules_IncludingPausedAndExpiredRules()
     {
         Assert.Contains("readTool(\"get_mute_rules\", { enabled_only: false })", Page());
+    }
+
+    /// <summary>
+    /// #5632: get_mute_rules renamed <c>summary</c> to <c>match_summary</c>, and the page kept reading <c>r.summary</c>, so
+    /// its Scope column and its delete dialog fell back to "Every alert" for every rule. Each field the page reads off a rule
+    /// row must be one the tool's per-rule projection (<c>BuildMuteRulePayload</c>) returns, so the next rename fails here.
+    /// </summary>
+    [Fact]
+    public void EveryRuleFieldThePageReads_IsOneTheToolReturns()
+    {
+        var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs").ReplaceLineEndings("\n");
+        var start = tools.IndexOf("private static object BuildMuteRulePayload(MuteRule r) => new", StringComparison.Ordinal);
+        Assert.True(start >= 0, "Darling source lost: BuildMuteRulePayload");
+        var end = tools.IndexOf("\n    };", start, StringComparison.Ordinal);
+        var returned = Regex.Matches(tools[start..end], @"(?m)^ {8}([a-z_]+) = ").Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("match_summary", returned);
+
+        var read = Regex.Matches(Page(), @"\b(?:r|rule)\.([a-z_]+)\b").Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToList();
+        Assert.Contains("match_summary", read);
+        Assert.All(read, field => Assert.True(returned.Contains(field), $"mute-rules.js reads r.{field}, which get_mute_rules does not return."));
     }
 
     [Fact]

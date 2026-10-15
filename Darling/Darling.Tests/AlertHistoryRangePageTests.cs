@@ -167,6 +167,32 @@ public sealed class AlertHistoryRangePageTests
         Assert.True(shown.GetProperty("dismissed").GetBoolean());
     }
 
+    /// <summary>#5632 Phase A: the Investigations panel reads nothing until it is opened, then lists each request with its
+    /// newest report's verdict and summary from the two /api/read reads, reads one request's journal on that row's first
+    /// expand, re-reads on the poll only while open, and never writes (the web role is SELECT-only).</summary>
+    [Fact]
+    public void TheInvestigationsPanel_ReadsWhenOpened_ShowsTheNewestVerdict_AndTheJournalOnExpand_AndNeverWrites()
+    {
+        var r = Run("investigations");
+        Assert.Equal(0, r.GetProperty("readsBeforeOpen").GetInt32());
+        Assert.True(r.GetProperty("panelFound").GetBoolean());
+        Assert.Equal(new[] { "/api/read/list_investigation_requests", "/api/read/get_investigation_reports" },
+            r.GetProperty("reads").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.True(r.GetProperty("alertTableFirst").GetBoolean());
+        var rows = r.GetProperty("rows").EnumerateArray().Select(x => x.GetString()!).ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.Contains("reported3reala long blocking chain from the nightly ETL", rows[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("older report", rows[0], StringComparison.Ordinal);
+        Assert.Contains("open1", rows[1], StringComparison.Ordinal);
+        var journal = r.GetProperty("journal").GetString()!;
+        Assert.Contains("opened · service", journal, StringComparison.Ordinal);
+        Assert.Contains("reported · agent:agent-a", journal, StringComparison.Ordinal);
+        Assert.Equal(1, r.GetProperty("journalRead").GetInt32());
+        Assert.Equal(2, r.GetProperty("pollReads").GetInt32());
+        Assert.Equal(0, r.GetProperty("closedPollReads").GetInt32());
+        Assert.Equal(0, r.GetProperty("writes").GetArrayLength());
+    }
+
     [Fact]
     public void ATruncatedReplySaysMoreAlertsExistAndAClearOneDoesNot()
     {

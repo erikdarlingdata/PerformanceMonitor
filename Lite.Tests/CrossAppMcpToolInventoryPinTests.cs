@@ -62,11 +62,6 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "unmute_analysis_finding",
     };
 
-    // Lite-missing MCP tools -- parity board Tier 2; the ratchet only shrinks. All 18 formerly-Darling-only
-    // tools were ported to Lite (latch/spinlock, plan-cache bloat + cpu-scheduler pressure, resource
-    // semaphore, default-trace events, daily summary, the three config-change tools, and the eight
-    // system_health parser tools). A NEW Darling-only tool must be either ported to Lite or added here.
-
     [Fact]
     public void DarlingMcpTools_AreASupersetOfLite_ExceptKnownNamingDrift()
     {
