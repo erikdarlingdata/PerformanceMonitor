@@ -69,11 +69,11 @@ let investigationsReply = { status: "ok", requests: [
   { request_id: REQ, opened_at: "2026-10-14T12:00:00.0000000", server_name: "srv-a", family: "blocking", state: "reported", alert_count: 3 },
   { request_id: "22222222-2222-2222-2222-222222222222", opened_at: "2026-10-14T11:00:00.0000000", server_name: "srv-b", family: "resources", state: "open", alert_count: 1 },
 ] };
-const reportsReply = { status: "ok", reports: [
+let reportsReply = { status: "ok", reports: [
   { request_id: REQ, submitted_at: "2026-10-14T12:05:00", verdict: "false_positive", summary: "older report" },
   { request_id: REQ, submitted_at: "2026-10-14T12:10:00", verdict: "real", summary: "a long blocking chain from the nightly ETL" },
 ] };
-const journalReply = { status: "ok", journal: [
+let journalReply = { status: "ok", journal: [
   { request_id: REQ, event_time: "2026-10-14T12:00:00", event: "opened", actor: "service" },
   { request_id: REQ, event_time: "2026-10-14T12:10:00", event: "reported", actor: "agent:agent-a" },
 ] };
@@ -242,6 +242,23 @@ try {
       urls.length = 0; await renderAlerts(main); out.pollReads = invReads().length;
       panel.open = false; urls.length = 0; await renderAlerts(main); out.closedPollReads = invReads().length;
       out.writes = urls.filter((u) => !u.startsWith("/api/read") && !u.startsWith("/api/session") && !u.includes("/api/catalog"));
+    },
+    /* #5834: each read is a page; the panel says when the list, the reports read or a journal held more. */
+    async investigationsTruncated() {
+      alertsReply = { alerts: [row(1)], truncated: false };
+      const openPanel = async (truncated) => {
+        investigationsReply = { ...investigationsReply, truncated };
+        reportsReply = { ...reportsReply, truncated };
+        journalReply = { ...journalReply, journal_truncated: truncated };
+        const main = newMain(); await renderAlerts(main);
+        const panel = main.all("details").find((d) => d.textContent.startsWith("Investigations"));
+        panel.open = true; panel.fire("toggle"); await settle();
+        const journal = panel.all("table")[0].children[1].children[0].all("details")[0];
+        journal.open = true; journal.fire("toggle"); await settle();
+        return { panel: panel.textContent, journal: journal.textContent };
+      };
+      out.clear = await openPanel(false);
+      out.cut = await openPanel(true);
     },
     async mute() {
       alertsReply = { alerts: [row(1)], truncated: false };
