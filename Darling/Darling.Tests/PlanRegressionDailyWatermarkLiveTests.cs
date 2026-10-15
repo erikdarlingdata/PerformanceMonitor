@@ -394,6 +394,73 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
     }
 
     /// <summary>
+    /// #5812 (review round 1, the lock-free stamps): <see cref="PlanRegressionDaily.AdvanceIdleSql"/> and
+    /// <see cref="PlanRegressionDaily.StampTomorrowSql"/> take no per-server lock. A builder holds server A's lock mid-build of
+    /// a partial day (it has read the day's <c>late_seq</c> and its watermark, and aggregates next) while a second builder's
+    /// tick runs both stamps; the idle advance restamps that day. The build then finishes. The day reads consistent: its
+    /// totals plus the live rows after its watermark equal the interval-table read, so no row is counted twice or lost, and
+    /// tomorrow, stamped or not, has no totals. The open day is the watermark's own, as in the seam test.
+    /// </summary>
+    [Fact]
+    public async Task TheTicksStampsDuringAHeldPartialBuild_LeaveTheDayConsistent_AndTomorrowWithoutTotals()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 stamp race test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var now = await SettledStoreNowAsync(connection, ct, skipBeforeFour: false);
+        var watermark = Convert.ToDateTime(await TextAsync(connection,
+            "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
+        Assert.SkipWhen(watermark.AddHours(-2).Date != watermark.Date,
+            "From 02:00 to 04:00 UTC the rows two hours below the watermark would cross midnight; the #5812 stamp race test needs them inside the watermark's day.");
+
+        var open = watermark.Date;
+        var openDay = DateOnly.FromDateTime(open);
+        var window = open.AddDays(-14);
+        await SeedAsync(connection, open.AddDays(-16), open.AddDays(-1), 40, ct);
+        await EnrollAsync(connection, ServerA, open.AddDays(-20), ct);
+        for (var d = window.AddDays(-1); d < open; d = d.AddDays(1))
+        {
+            await BuildAsync(connection, DateOnly.FromDateTime(d), d.AddDays(1), ct);
+        }
+
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
+        await TodayRowAsync(connection, 1, watermark.AddMinutes(-90), ct);
+        await TodayRowAsync(connection, 2, watermark.AddHours(-2), ct);
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late", ct);
+
+        /* A partial build, set an hour back, so the idle advance has a day to restamp. */
+        Assert.Equal(2L, await PlanRegressionDaily.BuildDayAsync(connection, ServerA, openDay, now, ct));
+        await ExecAsync(connection, "UPDATE collect.plan_regression_daily_built SET built_through = @t WHERE server_id = @s AND day = @d",
+            ct, ("s", ServerA), ("d", openDay), ("t", watermark.AddHours(-1)));
+
+        /* The builder holds server A's lock, has read late_seq and the watermark, and aggregates next: the tick's stamps run. */
+        await using var builder = new NpgsqlConnection(scratch.ConnectionString);
+        await builder.OpenAsync(ct);
+        var advanced = -1;
+        var built = await PlanRegressionDaily.BuildDayAsync(builder, ServerA, openDay, now, ct, async inner =>
+        {
+            (advanced, _) = await PlanRegressionDaily.StampWithoutBuildAsync(connection, now, inner);
+        });
+        Assert.Equal(1, advanced);
+        Assert.Equal(2L, built);
+
+        const string Row = "SELECT to_char(built_through, 'YYYY-MM-DD HH24:MI:SS') || ' ' || (partial_seq = late_seq) || ' ' || (built_seq IS NULL) FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d";
+        Assert.Equal(watermark.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " true true",
+            await TextAsync(connection, Row, ct, ("s", ServerA), ("d", openDay)));
+        var days = await BuiltDaysAsync(connection, window, ct);
+        Assert.Equal(watermark, days.Single(b => b.Day == openDay).Through);
+        Assert.Equal(await TableRowsAsync(connection, window, ct), await DailyRowsAsync(connection, window, days, ct));
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily WHERE server_id = @s AND day > @d",
+            ct, ("s", ServerA), ("d", DateOnly.FromDateTime(now.Date))));
+    }
+
+    /// <summary>
     /// #5812 M1: a partial build is invisible to code from before V184. A partial day fails V183's validity predicate
     /// (<c>built_seq = late_seq</c>), so a V183 reader reads it live. A V183 builder's whole build after it (the old stamp,
     /// which sets <c>built_seq</c> and leaves <c>partial_seq</c> and <c>built_through</c> as they were) reads as whole, and the

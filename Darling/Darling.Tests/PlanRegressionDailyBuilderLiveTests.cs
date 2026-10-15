@@ -229,9 +229,12 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             Assert.Equal(BuiltDays, skipped.Skipped);
             Assert.Equal(0, skipped.Failed);
             Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
-            /* #5812: tomorrow is stamped (no row dated it, no totals) by one statement that needs no lock: it writes only while
-               the day's late_seq has not moved and it holds no valid build. No built day is stamped. */
-            Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built WHERE built_seq IS NOT NULL AND day <= DATE '2026-03-20'", ct));
+            /* #5812: tomorrow is stamped by one statement that needs no lock: it writes only while the day's late_seq has not
+               moved and it holds no valid build. It is the one stamped day, with no source rows, and (the count above) no
+               totals. A stamp during a held partial build is proven consistent by
+               PlanRegressionDailyWatermarkLiveTests.TheTicksStampsDuringAHeldPartialBuild_... */
+            Assert.Equal("2026-03-21 0", await ScalarAsync(connection,
+                "SELECT string_agg(day::text || ' ' || source_rows, ',') FROM collect.plan_regression_daily_built WHERE built_seq IS NOT NULL OR partial_seq IS NOT NULL", ct));
 
             await held.CommitAsync(ct);
             var built = await PlanRegressionDaily.RunTickAsync(source, Now, NullLogger.Instance, ct);
