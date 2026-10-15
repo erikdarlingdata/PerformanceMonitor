@@ -123,7 +123,7 @@ public sealed class DarlingMcpTrendTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 0.86 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_memory_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_memory_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -198,7 +198,7 @@ public sealed class DarlingMcpTrendTools
         /* #5574: reaches the raw table's 30-day retention (720 h); 1.3 s cold at 30 days on a large store once the compressed perfmon_stats
            data was re-grouped by counter (it read 11.2 s while the compression grouped by server only, so the read decoded every counter's
            name). The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_perfmon_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_perfmon_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -313,7 +313,7 @@ public sealed class DarlingMcpTrendTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 6.3 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_file_io_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_file_io_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         /* An unusable width is a fault in the request whatever the window holds, so it is refused before anything
@@ -405,7 +405,7 @@ public sealed class DarlingMcpTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -538,7 +538,7 @@ public sealed class DarlingMcpTrendTools
         if (error != null) return error;
 
         /* #5562: a bucketed trend that routes through the hourly rollup opts in to the 90-day reach WebReadReach declares; every other read keeps 168. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_duration_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_duration_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -633,7 +633,7 @@ public sealed class DarlingMcpTrendTools
         if (error != null) return error;
 
         /* #5562: a bucketed trend that routes through the hourly rollup opts in to the 90-day reach WebReadReach declares; every other read keeps 168. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_procedure_duration_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_procedure_duration_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -706,7 +706,7 @@ public sealed class DarlingMcpTrendTools
         if (error != null) return error;
 
         /* #5562: a bucketed trend that routes through the hourly rollup opts in to the 90-day reach WebReadReach declares; every other read keeps 168. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_store_duration_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_store_duration_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try

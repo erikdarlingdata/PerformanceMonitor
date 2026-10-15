@@ -83,6 +83,7 @@ public sealed class StatementFilterQueryReadsLiveTests
 
             var reads = ReadsFor(postgres, tool, ct);
             Assert.NotEmpty(reads);
+            var found = new List<string>();
             foreach (var (form, readerJudges, read) in reads)
             {
                 string label = tool + " (" + form + ")";
@@ -117,6 +118,10 @@ public sealed class StatementFilterQueryReadsLiveTests
                         throw new Xunit.Sdk.XunitException(label + ": " + ex.Message);
                     }
                 }
+                /* #5632 (R3): the keyed census. No field of this answer may still carry a literal canary under maskLiterals or
+                   metadataOnly, nor a login or host canary under metadataOnly. */
+                found.AddRange(await StatementFilterCensus.AssertKeyedMaskingAsync(host, label, raw));
+
                 /* The no-hit page: nothing to withhold, so the answer is the raw read, byte for byte. The host is built with GCF
                    pinned off (#5320), so no other class's DARLING_OUTPUT_FORMAT reaches it and the identity holds every run. */
                 string clean = await read(CleanServer);
@@ -126,6 +131,13 @@ public sealed class StatementFilterQueryReadsLiveTests
 
                 _output.WriteLine($"{label}: no-hit page {Encoding.UTF8.GetByteCount(clean):N0} bytes raw, {Encoding.UTF8.GetByteCount(cleanFiltered):N0} bytes filtered; canary page {Encoding.UTF8.GetByteCount(raw):N0} raw, {Encoding.UTF8.GetByteCount(filtered):N0} filtered.");
             }
+
+            /* The heatmap answers one top statement per cell, and the canary statement ties the census row for it, so only
+               the reads that list every statement prove the plant. */
+            if (tool != "get_query_heatmap")
+                StatementFilterCensus.AssertPlanted(found, StatementFilterCensus.LiteralCanary, StatementFilterCensus.NumericCanary);
+            if (tool == "get_active_queries")
+                StatementFilterCensus.AssertPlanted(found, StatementFilterCensus.LoginCanary, StatementFilterCensus.HostCanary);
 
             bodySucceeded = true;
         }
@@ -186,6 +198,8 @@ public sealed class StatementFilterQueryReadsLiveTests
         var texts = new List<(string Text, string Tag)>();
         if (withCanary) texts.Add((StatementScrubCanary.CanaryStatement, "C"));
         texts.Add((StatementScrubCanary.PlainStatement, "P"));
+        /* #5632 (R3): the keyed mcp.dataDetail census's literal canaries, in a statement the statement filter keeps. */
+        if (withCanary) texts.Add((StatementFilterCensus.MaskStatement, "M"));
 
         switch (tool)
         {
@@ -197,7 +211,7 @@ public sealed class StatementFilterQueryReadsLiveTests
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)",
                         CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-5 - i)), serverId, serverName, 100 + i, Db,
                         "00 00:00:05.125", texts[i].Text, "running", 0, null, 0L, 1000L, 1500L, 10_000L, 50L, 7L, 0m,
-                        "Read Committed", 1, 0, "app_svc", "APPSRV01", "MyOrderService.Worker", 0, 0,
+                        "Read Committed", 1, 0, StatementFilterCensus.LoginCanary, StatementFilterCensus.HostCanary, "MyOrderService.Worker", 0, 0,
                         "KEY: 5:72057594043432960 (a1b2c3d4e5f6)", 12.5m, "0x" + (0x1A2B3C4D5E6F7080L + i).ToString("X16"));
                 }
 

@@ -65,7 +65,7 @@ public sealed class DarlingMcpTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         /* Null when the caller sent no anchor, and that distinction is load-bearing here rather than
@@ -323,7 +323,7 @@ public sealed class DarlingMcpTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         /* #3541 A13: an unknown source is refused with the whole accepted set, never applied as a filter
@@ -463,7 +463,7 @@ public sealed class DarlingMcpTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
         /* #5633 item 12: an omitted baseline follows hours_back, and an explicit one must leave the two windows
            disjoint (baseline_hours_back >= 2 x hours_back); one shared check, so both products refuse alike. */
@@ -1150,7 +1150,7 @@ public sealed class DarlingMcpTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         /* Null for an absent anchor — see analyze_server's note. */

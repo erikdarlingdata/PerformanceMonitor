@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -146,12 +147,22 @@ public sealed class StatementFilterPlanReadsLiveTests
             AssertFiltered("deadlock victim plan", victim, deadlock.PlanXml);
 
             /* The tools that read through the seam: the same plan, filtered, and the analysis of it holds no secret. */
-            AssertFiltered("get_plan_xml", statsInline, await DarlingMcpPlanTools.GetPlanXml(postgres, "0xQSINLINE", ServerName, cancellationToken: ct));
+            string planXmlAnswer = await DarlingMcpPlanTools.GetPlanXml(postgres, "0xQSINLINE", ServerName, cancellationToken: ct);
+            AssertFiltered("get_plan_xml", statsInline, planXmlAnswer);
             string analysis = await DarlingMcpPlanTools.AnalyzeQueryPlan(postgres, "0xQSINLINE", ServerName, cancellationToken: ct);
             foreach (string needle in StatementScrubCanary.SecretNeedles)
                 Assert.DoesNotContain(needle, analysis, StringComparison.Ordinal);
             using (var doc = JsonDocument.Parse(analysis))
                 Assert.Contains(StatementFilterCensus.Marker, doc.RootElement.ToString(), StringComparison.Ordinal);
+
+            /* #5632 (R3): the keyed mcp.dataDetail census of both tool answers. The kept statement's ParameterCompiledValue and
+               the plan's ConstValue literals may survive neither masked level, in any field. */
+            using (var host = await StatementFilterCensus.BuildHostAsync())
+            {
+                var found = new List<string>(await StatementFilterCensus.AssertKeyedMaskingAsync(host, "get_plan_xml", planXmlAnswer));
+                found.AddRange(await StatementFilterCensus.AssertKeyedMaskingAsync(host, "analyze_query_plan", analysis));
+                StatementFilterCensus.AssertPlanted(found, "param-canary-ssf");
+            }
 
             bodySucceeded = true;
         }

@@ -237,7 +237,7 @@ function statusOf(r) {
 
 function ruleRow(r, canEdit) {
   const st = statusOf(r);
-  const scope = r.summary || "Every alert";
+  const scope = r.match_summary || "Every alert";
   const cells = [
     el("td", {}, [el("span", { class: st === "Enabled" ? "status-cell sev-Healthy" : "paused-badge", text: st })]),
     el("td", { text: scope, title: r.server_id != null ? "server_id " + r.server_id : null }),
@@ -274,7 +274,7 @@ async function toggle(r) {
 }
 
 async function remove(r) {
-  if (!window.confirm("Delete this mute rule permanently?\n\n" + (r.summary || "Every alert") + "\n\nPausing keeps the rule; deleting cannot be undone.")) return;
+  if (!window.confirm("Delete this mute rule permanently?\n\n" + (r.match_summary || "Every alert") + "\n\nPausing keeps the rule; deleting cannot be undone.")) return;
   const res = await deleteRule(r.id);
   if (res.kind !== "ok" && res.kind !== "notfound") return notify(res.message, true);
   await refreshList(live);

@@ -676,8 +676,11 @@ export async function renderAlerts(main) {
     el("label", { class: "range-control" }, [dismissedBox, el("span", { text: "Show dismissed" })]),
     filter,
   ]);
-  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, seq: 0, dismiss: null };
-  mount(main, canMute ? [headEl, buildDismissBar(live), noticeBox, tableBox] : [headEl, noticeBox, tableBox]);
+  const investigations = buildInvestigationsPanel();
+  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, seq: 0, dismiss: null, investigations };
+  mount(main, canMute
+    ? [headEl, buildDismissBar(live), noticeBox, tableBox, investigations.panel]
+    : [headEl, noticeBox, tableBox, investigations.panel]);
 
   /* A changed choice refetches and reconciles the table that is already drawn, the same path a poll tick takes.
      It also drops the checked rows: they were picked from the list the old choice showed. */
@@ -695,12 +698,118 @@ export async function renderAlerts(main) {
   await refreshAlerts(live);
 }
 
+/* #5632 Phase A: the Investigations panel, read only. The web seat's role is SELECT-only on the investigation tables, so
+ * the panel lists and never closes a request, decides a note or saves a profile (the desktop viewer's Investigations
+ * window does those). It is a collapsed <details> under the alert table that reads only when opened: a closed panel
+ * costs the page nothing, and the 60 s poll re-reads it only while it is open. Two reads over /api/read:
+ * list_investigation_requests (the requests, state computed by the store's list) and get_investigation_reports (the
+ * reports of the same window, joined here to show each request's latest verdict and summary). A request's journal is
+ * read on first expand of its row, for that request only. Every value reaches the DOM through el()/textContent. */
+const INVESTIGATION_HOURS = 168;
+
+const INVESTIGATION_COLUMNS = [
+  { key: "opened_at", label: "Opened", format: "time" },
+  { key: "server_name", label: "Server" },
+  { key: "family", label: "Family" },
+  { key: "state", label: "State" },
+  { key: "alert_count", label: "Alerts" },
+  { key: "verdict", label: "Verdict" },
+  { key: "summary", label: "Summary" },
+  { key: "journal", label: "Journal", csv: false, render: (r) => journalCell(r) },
+];
+
+/* The rows of a reply under `key`, or the reply itself when it is an array; [] for anything else. */
+function rowsUnder(data, key) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data[key])) return data[key];
+  return [];
+}
+
+/* The requests of list_investigation_requests, each with the verdict and summary of its newest report from
+ * get_investigation_reports (by submitted_at; a request with no report shows none). Pure, so the harness checks it. */
+export function investigationRows(listData, reportsData) {
+  const latest = new Map();
+  for (const rep of rowsUnder(reportsData, "reports")) {
+    if (!rep || rep.request_id == null) continue;
+    const prev = latest.get(String(rep.request_id));
+    if (!prev || String(rep.submitted_at || "") > String(prev.submitted_at || "")) latest.set(String(rep.request_id), rep);
+  }
+  return rowsUnder(listData, "requests").map((r) => {
+    const rep = latest.get(String(r.request_id)) || null;
+    return {
+      request_id: r.request_id,
+      opened_at: r.opened_at,
+      server_name: r.server_name,
+      family: r.family,
+      state: r.state,
+      alert_count: r.alert_count,
+      verdict: rep ? rep.verdict : null,
+      summary: rep ? (rep.summary || rep.root_cause || null) : null,
+    };
+  });
+}
+
+/* One journal row as a line: time, event, actor and the reason when there is one. */
+function journalLine(j) {
+  const when = parseUtc(j.event_time);
+  return [when ? when.toLocaleString() : String(j.event_time || ""), j.event, j.actor, j.reason].filter((x) => x != null && x !== "").join(" · ");
+}
+
+/* The row's journal, read on the first expand for this request only. A failed read is not kept: opening it again asks again. */
+function journalCell(r) {
+  const body = el("div", {});
+  const node = disclosure("Journal", body);
+  let built = false;
+  node.addEventListener("toggle", async () => {
+    if (built || !node.open) return;
+    built = true;
+    mount(body, [loadingStrip()]);
+    const res = await readTool("get_investigation_reports", { request_id: r.request_id, hours_back: INVESTIGATION_HOURS });
+    if (res.kind === "error") { built = false; mount(body, errorStrip(res.message)); return; }
+    const rows = res.kind === "empty" ? [] : rowsUnder(res.data, "journal").filter((j) => j && String(j.request_id ?? r.request_id) === String(r.request_id));
+    mount(body, rows.length ? rows.map((j) => el("div", { text: journalLine(j) })) : [emptyStrip("No journal rows for this request.")]);
+  });
+  return node;
+}
+
+function buildInvestigationsPanel() {
+  const box = el("div", {});
+  const panel = el("details", { class: "disclosure investigations-panel" }, [
+    el("summary", { class: "disc-summary", text: "Investigations (agent requests, read only)" }),
+    box,
+  ]);
+  const state = { panel, box, seq: 0 };
+  panel.addEventListener("toggle", () => { if (panel.open) refreshInvestigations(state); });
+  return state;
+}
+
+async function refreshInvestigations(state) {
+  const seq = ++state.seq;
+  if (!state.box.firstChild) mount(state.box, loadingStrip("Loading investigations…"));
+  const [list, reports] = await Promise.all([
+    readTool("list_investigation_requests", { limit: 100 }),
+    readTool("get_investigation_reports", { hours_back: INVESTIGATION_HOURS }),
+  ]);
+  if (seq !== state.seq) return;
+  if (list.kind === "error" || list.kind === "empty") {
+    mount(state.box, list.kind === "error" ? errorStrip(list.message) : emptyStrip(list.message));
+    return;
+  }
+  const rows = investigationRows(list.data, reports.kind === "error" || reports.kind === "empty" ? null : reports.data);
+  if (!rows.length) { mount(state.box, emptyStrip("No investigation requests.")); return; }
+  const parts = [VIZ.table({ requests: rows }, { rowsKey: "requests", columns: INVESTIGATION_COLUMNS })];
+  if (reports.kind === "error") parts.unshift(noticeStrip("The reports could not be read, so no verdicts are shown: " + reports.message));
+  mount(state.box, parts);
+}
+
 /* Re-fetches with the current choices, then hands the new alerts to drawAlerts() to reconcile in place. Unlike
  * the first mount, a poll tick never shows the loading strip - the previous table stays exactly as it is until
  * the new page is ready, so a healthy 60s tick with no new alert produces no visible change and no DOM churn at
  * all. A changed window or server reconciles the same way: rows that left the window are removed, new ones land
  * in order. A reply that arrives after a newer request was made is dropped. */
 async function refreshAlerts(state) {
+  /* #5632 Phase A: an open Investigations panel is re-read with the alerts; a closed one is not read at all. */
+  if (state.investigations && state.investigations.panel.open) await refreshInvestigations(state.investigations);
   const seq = ++state.seq;
   const req = readRequest();
   const res = req.error ? { kind: "error", message: "This range cannot be read yet: " + req.error } : await readTool("get_alert_history", req.params);

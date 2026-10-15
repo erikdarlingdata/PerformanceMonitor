@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -112,19 +112,20 @@ public sealed class AwsPerServerRoleRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750) and V182's (#5506) sentinels are next; V183's (#5793) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 14})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 15})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 15})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 16})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* A newer rung's sentinel (V183's, #5793) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 14, arity - 1);
+        /* A newer rung's sentinel (V184's, #5632) is the last argument. */
+        Assert.Equal(ProbeOrdinal + 15, arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);

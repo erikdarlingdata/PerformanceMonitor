@@ -47,6 +47,9 @@ public sealed class NotificationRoutesRungTests
 
     private static readonly string[] DestinationColumns = { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "smtp_recipients" };
 
+    /* The agent channel's five columns (V184, #5632), last in every reader. */
+    private static readonly string[] AgentColumns = { "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes" };
+
     private static PgMigrations.Migration V131 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     /* ---- the rung ------------------------------------------------------------------------------------ */
@@ -156,7 +159,7 @@ public sealed class NotificationRoutesRungTests
         var parent = DarlingManagedRoles.ViewerRestrictedConfigTables.Single(a => a.Table == "config_notification");
 
         Assert.Equal(new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" }, acl.SecretColumns);
-        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }, acl.NonSecretColumns);
+        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns), acl.NonSecretColumns);
 
         foreach (var column in DestinationColumns)
         {
@@ -166,7 +169,7 @@ public sealed class NotificationRoutesRungTests
         }
 
         /* Every column in the DDL is in exactly one list. */
-        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).ToList();
+        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).ToList();
         var classified = acl.SecretColumns.Concat(acl.NonSecretColumns).ToList();
         Assert.Equal(ddlColumns.OrderBy(c => c, StringComparer.Ordinal), classified.OrderBy(c => c, StringComparer.Ordinal));
         Assert.Equal(classified.Count, classified.Distinct(StringComparer.Ordinal).Count());
@@ -236,8 +239,9 @@ public sealed class NotificationRoutesRungTests
     public void TheServiceReader_TheViewerWriter_AndTheDdl_NameTheSameColumnsInTheSameOrder()
     {
         var serviceSelect = ColumnsOf(StoreConfigProvider.NotificationRoutesSelectSql, "SELECT", "FROM");
-        /* The scope columns (V181, #5750) follow, set by init so the constructor below is unchanged. */
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }), serviceSelect);
+        /* The scope columns (V181, #5750) follow, then the agent columns (V184, #5632), both set by init so the constructor
+           below is unchanged. */
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns), serviceSelect);
         Assert.EndsWith("ORDER BY route_id", StoreConfigProvider.NotificationRoutesSelectSql, StringComparison.Ordinal);
 
         /* The constructor's parameter order IS the SELECT's order, so a reader ordinal cannot re-map a column. */
@@ -245,14 +249,17 @@ public sealed class NotificationRoutesRungTests
         Assert.Equal(new[] { "RouteId", "MetricMatch", "TeamsUrl", "SlackUrl", "GenericUrl", "PagerDutyRoutingKey", "SmtpRecipients", "Enabled" }, ctor);
 
         var viewerSelect = ColumnsOf(ViewerDataService.NotificationRoutesSelectSql, "SELECT", "FROM");
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }), viewerSelect);
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns), viewerSelect);
+        Assert.Equal(
+            new[] { "route_id", "metric_match", "smtp_recipients", "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns),
+            ColumnsOf(ViewerDataService.NotificationRoutesSelectNoSecretSql, "SELECT", "FROM"));
 
         var insert = ColumnsOf(ViewerDataService.NotificationRouteInsertSql, "(", ")");
-        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id", "modified_at" }), insert);
+        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "modified_at" }), insert);
         Assert.DoesNotContain("route_id", insert);
         Assert.Contains("RETURNING route_id", ViewerDataService.NotificationRouteInsertSql, StringComparison.Ordinal);
 
-        foreach (var column in DestinationColumns.Concat(new[] { "metric_match", "enabled", "scope_server_id", "scope_tag_id", "modified_at" }))
+        foreach (var column in DestinationColumns.Concat(AgentColumns).Concat(new[] { "metric_match", "enabled", "scope_server_id", "scope_tag_id", "modified_at" }))
         {
             Assert.Contains($"{column} = ", ViewerDataService.NotificationRouteUpdateSql, StringComparison.Ordinal);
         }
@@ -288,6 +295,17 @@ public sealed class NotificationRoutesRungTests
         Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = AlertFamily.Reports }));
         Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = AlertFamily.Reports, SmtpRecipients = "a@example.invalid" }));
         Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Deadlocks Detected", PagerDutyRoutingKey = "k" }));
+
+        /* #5632: the agent channel is a destination of its own, so an agent-only route is a route that does something,
+           Investigate or Off (Off stops a broader agent route); the limits are the V184 CHECK's bounds. */
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1 }));
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Analysis: queries", AgentLevel = 0 }));
+        Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 2 }));
+        Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentMaxPerHour = 61 }));
+        Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentMaxPerDay = 0 }));
+        Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentLeaseMinutes = 4 }));
+        Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentExpiryMinutes = 1441 }));
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentMaxPerHour = 60, AgentMaxPerDay = 500, AgentLeaseMinutes = 120, AgentExpiryMinutes = 15 }));
     }
 
     /* ---- the probe (three sites, one rung behind the top) -------------------------------------------- */
@@ -361,7 +379,9 @@ public sealed class NotificationRoutesRungTests
         Assert.Contains("cannot silence a channel the parent has", readDescription, StringComparison.Ordinal);
         /* #5750: scope first, then the metric levels inside a scope. */
         Assert.Contains("Resolution order per channel: scope first", readDescription, StringComparison.Ordinal);
-        Assert.Contains("matching the metric EXACTLY, then its FAMILY, then * (scoped routes only), then the parent", readDescription, StringComparison.Ordinal);
+        /* #5632: the analysis category level sits between the exact and the family levels. */
+        Assert.Contains("matching the metric EXACTLY, then an analysis finding's CATEGORY", readDescription, StringComparison.Ordinal);
+        Assert.Contains("FAMILY, then * (scoped routes only), then the parent", readDescription, StringComparison.Ordinal);
         Assert.Contains("orphaned = true, and matches nothing", readDescription, StringComparison.Ordinal);
         Assert.Contains("Routing sits AFTER the cooldown", readDescription, StringComparison.Ordinal);
         Assert.Contains("are NOT reported", readDescription, StringComparison.Ordinal);
@@ -440,6 +460,11 @@ public sealed class NotificationRoutesLivePostgresTests
                 insert.Parameters.AddWithValue(true);
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value }); /* scope_server_id (V181, #5750) */
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value }); /* scope_tag_id */
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint, Value = DBNull.Value }); /* agent_level (V184, #5632) */
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentMaxPerHour });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentMaxPerDay });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentLeaseMinutes });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentExpiryMinutes });
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 

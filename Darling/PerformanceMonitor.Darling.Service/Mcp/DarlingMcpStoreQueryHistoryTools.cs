@@ -237,7 +237,9 @@ GROUP BY f.queryid";
 
         try
         {
-            var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-hours_back), DateTimeKind.Unspecified);
+            var nowUtc = DateTime.UtcNow;
+            ReadScope.NoteWindow(hours_back, nowUtc); // #5814: its own 90-day check, so it notes the window itself
+            var windowStart = DateTime.SpecifyKind(nowUtc.AddHours(-hours_back), DateTimeKind.Unspecified);
 
             var gate = await PreconditionAsync(postgres, cancellationToken);
             if (gate.Message is { } message)

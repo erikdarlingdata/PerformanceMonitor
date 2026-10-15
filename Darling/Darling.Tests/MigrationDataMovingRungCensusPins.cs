@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -240,6 +240,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "over the stored rows. The table holds one row per hour per surface, route and outcome that was read, kept "
             + "90 days: at most a few hundred thousand narrow rows, so the build takes about a second. The three ADD "
             + "COLUMNs carry constant defaults and rewrite nothing. It does not move the lock-wait floor."),
+        new(
+            184,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_notification_routes (#5632, created V131): the agent CHECK is "
+            + "validated against every stored route, whose five new columns are NULL or their constant defaults at this "
+            + "rung. The routes table holds a handful of operator-written rows, so the scan is instant and touches no data "
+            + "an earlier rung created beyond that table. The six investigation tables are created empty. It does not move "
+            + "the lock-wait floor."),
         new(
             175,
             SetsTheFloor: false,

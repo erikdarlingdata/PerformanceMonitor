@@ -105,6 +105,8 @@ internal static class StatementFilterCensus
 
         var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
+        // #5632: the mcp.dataDetail level the host serves, as the service registers it; FilterThroughHostAsync sets it per call.
+        builder.Services.AddSingleton(new McpDataDetailSetting(McpDataDetail.Full));
         if (gcf is bool pinned)
         {
             builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(pinned));
@@ -137,19 +139,91 @@ internal static class StatementFilterCensus
         return app.GetTestServer();
     }
 
+    /// <summary>The bearer token <see cref="BuildLiveHostAsync"/> gates on: long enough to clear the network bind's floor,
+    /// so the investigations arm resolves on.</summary>
+    public const string LiveHostToken = "l8-contract-token-5632-0123456789abcdef0123456789abcdef";
+
+    /// <summary>
+    /// The REAL MCP host over a live store (#5632 Phase A, L8; review round 1 asked for it, as <see cref="BuildHostAsync"/>
+    /// holds a dummy data source and no write policy). It registers <paramref name="storeConnectionString"/> as the store,
+    /// serves <paramref name="dataDetail"/>, resolves the write policy as a start does from <c>mcp.allowInvestigations</c>
+    /// on and <c>mcp.allowWrites</c> off with <paramref name="bearerToken"/>, and gates every request on that token
+    /// (loopback included, as a start that serves the investigation tools does). Call it with
+    /// <see cref="CallRealToolAsync"/>'s <c>bearerToken</c>. Dispose it with the test.
+    /// </summary>
+    public static async Task<TestServer> BuildLiveHostAsync(
+        string storeConnectionString, McpDataDetail dataDetail, string bearerToken = LiveHostToken)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+
+        var postgres = NpgsqlDataSource.Create(storeConnectionString);
+        builder.Services.AddSingleton(postgres);
+        builder.Services.AddSingleton(new McpDataDetailSetting(dataDetail));
+        builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(false));
+        var sharedBaselines = new BaselineCache();
+        builder.Services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(
+            postgres, planFetcher: null, logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+            baselineCache: sharedBaselines));
+        builder.Services.AddSingleton<Microsoft.Extensions.Logging.ILogger>(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var writes = DarlingMcpWritePolicy.ResolveForStart(
+            new McpConfig { AllowInvestigations = true, AllowWrites = false }, bearerToken, out var tokenProblem);
+        Assert.Null(tokenProblem);
+        Assert.True(writes.Investigations && !writes.Writes && !writes.ServerAdmin, "The live host must serve the investigation arm only.");
+
+        DarlingMcpHostService.ConfigureMcpServices(
+            builder.Services, DarlingPeerDirectory.Snapshot.Empty, new ReadLatencyAccumulator(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, null, writes);
+
+        var app = builder.Build();
+        var host = new DarlingMcpHostService(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingMcpHostService>.Instance,
+            new McpRuntimeState(),
+            new MonitoredServerRegistryState());
+        host.ConfigurePipeline(
+            app, networkMode: false, networkListenIp: null,
+            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), bearerToken: bearerToken, requireTokenWhenLoopbackOnly: true);
+
+        await app.StartAsync();
+        return app.GetTestServer();
+    }
+
+    /// <summary>The HTTP status of a <c>tools/call</c> sent with <paramref name="bearerToken"/> (none when null), for the
+    /// gate checks on <see cref="BuildLiveHostAsync"/>.</summary>
+    public static async Task<int> CallStatusAsync(TestServer server, string toolName, string? bearerToken)
+    {
+        string body = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = 1,
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject { ["name"] = toolName, ["arguments"] = new JsonObject() },
+        }.ToJsonString();
+        var ctx = await SendAsync(server, "/", body, bearerToken);
+        return ctx.Response.StatusCode;
+    }
+
     /// <summary>Sends <paramref name="rawToolText"/> through the host's registered filters as a tool's result and
-    /// returns what a client would receive.</summary>
+    /// returns what a client would receive. <paramref name="dataDetail"/> is the <c>mcp.dataDetail</c> level the host
+    /// serves for this call (#5632), set back to <c>full</c> afterwards; one host serves one call at a time here.</summary>
     public static async Task<(string Text, bool IsError)> FilterThroughHostAsync(
-        TestServer server, string rawToolText, bool isError = false, string path = "/")
+        TestServer server, string rawToolText, bool isError = false, string path = "/",
+        McpDataDetail dataDetail = McpDataDetail.Full)
     {
         string key = Guid.NewGuid().ToString("N");
         s_payloads[key] = (rawToolText, isError);
+        var setting = server.Services.GetRequiredService<McpDataDetailSetting>();
+        setting.Mode = dataDetail;
         try
         {
             return await CallRealToolAsync(server, ProbeName, new JsonObject { ["key"] = key }, path);
         }
         finally
         {
+            setting.Mode = McpDataDetail.Full;
             s_payloads.TryRemove(key, out _);
         }
     }
@@ -158,7 +232,7 @@ internal static class StatementFilterCensus
     /// block and the error flag; throws when the server answered a protocol error, so a test fails loudly instead of
     /// reading an empty answer as a clean one.</summary>
     public static async Task<(string Text, bool IsError)> CallRealToolAsync(
-        TestServer server, string toolName, JsonObject arguments, string path = "/")
+        TestServer server, string toolName, JsonObject arguments, string path = "/", string? bearerToken = null)
     {
         string body = new JsonObject
         {
@@ -168,7 +242,7 @@ internal static class StatementFilterCensus
             ["params"] = new JsonObject { ["name"] = toolName, ["arguments"] = arguments },
         }.ToJsonString();
 
-        JsonElement root = (await RpcAsync(server, path, body)).RootElement;
+        JsonElement root = (await RpcAsync(server, path, body, bearerToken)).RootElement;
         if (root.TryGetProperty("error", out var error))
         {
             throw new InvalidOperationException("The server answered a protocol error: " + error.GetRawText());
@@ -181,27 +255,35 @@ internal static class StatementFilterCensus
     }
 
     /// <summary>The names <c>tools/list</c> advertises on <paramref name="path"/>.</summary>
-    public static async Task<IReadOnlyList<string>> ListToolNamesAsync(TestServer server, string path = "/")
+    public static async Task<IReadOnlyList<string>> ListToolNamesAsync(TestServer server, string path = "/", string? bearerToken = null)
     {
-        using var doc = await RpcAsync(server, path, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+        using var doc = await RpcAsync(server, path, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", bearerToken);
         return doc.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray()
             .Select(t => t.GetProperty("name").GetString()!).ToList();
     }
 
-    private static async Task<JsonDocument> RpcAsync(TestServer server, string path, string requestBody)
-    {
-        var ctx = await server.SendAsync(c =>
+    private static Task<HttpContext> SendAsync(TestServer server, string path, string requestBody, string? bearerToken) =>
+        server.SendAsync(c =>
         {
             c.Request.Method = "POST";
             c.Request.Path = path;
             c.Request.Headers.Host = "localhost";
             c.Request.Headers.Accept = "application/json, text/event-stream";
+            if (bearerToken is not null)
+            {
+                c.Request.Headers.Authorization = "Bearer " + bearerToken;
+            }
+
             c.Request.ContentType = "application/json";
             var bytes = Encoding.UTF8.GetBytes(requestBody);
             c.Request.Body = new System.IO.MemoryStream(bytes);
             c.Request.ContentLength = bytes.Length;
             c.Connection.RemoteIpAddress = IPAddress.Loopback;
         });
+
+    private static async Task<JsonDocument> RpcAsync(TestServer server, string path, string requestBody, string? bearerToken = null)
+    {
+        var ctx = await SendAsync(server, path, requestBody, bearerToken);
 
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
         string raw = await reader.ReadToEndAsync();
@@ -253,5 +335,145 @@ internal static class StatementFilterCensus
         Assert.Contains(
             XDocument.Parse(filteredPlan).Descendants(),
             e => (string?)e.Attribute("ParameterCompiledValue") == "N'param-canary-ssf'");
+    }
+
+    // ── the keyed mcp.dataDetail census (#5632, R3) ──
+
+    /// <summary>A string literal the census plants: unquoted, because a quote is escaped in JSON and XML.</summary>
+    public const string LiteralCanary = "zq-lit-5632";
+
+    /// <summary>A NUMERIC literal the census plants: its digits.</summary>
+    public const string NumericCanary = "86753091";
+
+    /// <summary>A login the census plants.</summary>
+    public const string LoginCanary = "zq_login_5632";
+
+    /// <summary>A client host name the census plants.</summary>
+    public const string HostCanary = "zq-host-5632";
+
+    /// <summary>A statement the statement filter keeps, holding both literal canaries: what <c>maskLiterals</c> must
+    /// mask and <c>metadataOnly</c> must withhold.</summary>
+    public const string MaskStatement =
+        "SELECT zq_census_col FROM dbo.t WHERE c = N'" + LiteralCanary + "' AND n = " + NumericCanary;
+
+    /// <summary>The literal canaries: the two above plus the literals the statement-filter harness already plants in
+    /// statements it keeps (a plan's <c>ParameterCompiledValue</c> and a plan warning's predicate).</summary>
+    public static readonly string[] LiteralCanaries = { LiteralCanary, NumericCanary, "param-canary-ssf", "kept-predicate-ssf" };
+
+    /// <summary>Every canary the census looks for.</summary>
+    public static readonly string[] AllCanaries = LiteralCanaries.Concat(new[] { LoginCanary, HostCanary }).ToArray();
+
+    /// <summary>
+    /// The keyed census of one read (#5632, R3): <paramref name="raw"/> (the read's answer, the control) goes through
+    /// the host's registered filters under <c>maskLiterals</c> and under <c>metadataOnly</c>, and any field of the
+    /// answer that still carries a planted canary fails the test with the tool and the field named: a JSON key, an
+    /// alert context label's value, or an XML element or attribute inside a value. A literal canary may survive
+    /// neither level; a login or host canary may not survive <c>metadataOnly</c>. A field that fails belongs in
+    /// <see cref="McpDataDetailKeys"/> (as statement, parameter value, login or host). Returns the canaries the raw
+    /// answer held, so a class can prove its plants reached the output.
+    /// </summary>
+    public static async Task<IReadOnlySet<string>> AssertKeyedMaskingAsync(TestServer server, string tool, string raw)
+    {
+        var planted = AllCanaries.Where(c => raw.Contains(c, StringComparison.Ordinal)).ToHashSet(StringComparer.Ordinal);
+        if (planted.Count == 0) return planted;
+
+        foreach (var mode in new[] { McpDataDetail.MaskLiterals, McpDataDetail.MetadataOnly })
+        {
+            var (filtered, _) = await FilterThroughHostAsync(server, raw, dataDetail: mode);
+            var watched = mode == McpDataDetail.MetadataOnly
+                ? planted.ToArray()
+                : planted.Where(c => LiteralCanaries.Contains(c, StringComparer.Ordinal)).ToArray();
+            var leaks = new List<string>();
+            FindLeaks(filtered, "(answer)", watched, leaks);
+            Assert.True(leaks.Count == 0,
+                $"{tool} under mcp.dataDetail={mode}: {string.Join("; ", leaks)}. "
+                + "List each field in McpDataDetailKeys (statement, parameter value, login or host).");
+        }
+
+        return planted;
+    }
+
+    /// <summary>The control for a class: the union of what its reads' raw answers held covers every canary it
+    /// planted.</summary>
+    public static void AssertPlanted(IEnumerable<string> found, params string[] expected)
+    {
+        var have = found.ToHashSet(StringComparer.Ordinal);
+        foreach (string canary in expected)
+        {
+            Assert.True(have.Contains(canary), $"No raw answer held the canary {canary}: the plant did not reach a tool.");
+        }
+    }
+
+    private static void FindLeaks(string text, string path, string[] canaries, List<string> leaks)
+    {
+        string? hit = canaries.FirstOrDefault(c => text.Contains(c, StringComparison.Ordinal));
+        if (hit is null) return;
+
+        string trimmed = text.TrimStart();
+        if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
+        {
+            JsonNode? node = null;
+            try { node = JsonNode.Parse(text); } catch (JsonException) { }
+            if (node is not null)
+            {
+                FindLeaks(node, path, canaries, leaks);
+                return;
+            }
+        }
+
+        if (trimmed.StartsWith('<'))
+        {
+            XDocument? doc = null;
+            try { doc = XDocument.Parse(text); } catch (System.Xml.XmlException) { }
+            if (doc?.Root is { } root)
+            {
+                foreach (var element in root.DescendantsAndSelf())
+                {
+                    foreach (var attribute in element.Attributes())
+                    {
+                        string? a = canaries.FirstOrDefault(c => attribute.Value.Contains(c, StringComparison.Ordinal));
+                        if (a is not null) leaks.Add($"{path} <{element.Name.LocalName} {attribute.Name.LocalName}=> carries '{a}'");
+                    }
+
+                    foreach (var textNode in element.Nodes().OfType<XText>())
+                    {
+                        string? t = canaries.FirstOrDefault(c => textNode.Value.Contains(c, StringComparison.Ordinal));
+                        if (t is not null) leaks.Add($"{path} <{element.Name.LocalName}> text carries '{t}'");
+                    }
+                }
+
+                return;
+            }
+        }
+
+        leaks.Add($"key '{path}' carries '{hit}'");
+    }
+
+    private static void FindLeaks(JsonNode node, string path, string[] canaries, List<string> leaks)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                // An alert context field ({"label": ..., "value": ...}) is keyed by its label, as the masker reads it.
+                string? label = obj["label"] is JsonValue lv && lv.TryGetValue(out string? l) ? l : null;
+                foreach (var (key, child) in obj)
+                {
+                    if (child is null) continue;
+                    string childPath = label is not null && key == "value" ? $"label '{label}'" : key;
+                    FindLeaks(child, childPath, canaries, leaks);
+                }
+
+                break;
+            case JsonArray array:
+                foreach (var child in array)
+                {
+                    if (child is not null) FindLeaks(child, path, canaries, leaks);
+                }
+
+                break;
+            case JsonValue value:
+                FindLeaks(value.TryGetValue(out string? sv) ? sv : value.ToJsonString(), path, canaries, leaks);
+                break;
+        }
     }
 }
