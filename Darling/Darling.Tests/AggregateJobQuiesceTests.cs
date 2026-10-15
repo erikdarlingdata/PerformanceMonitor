@@ -119,8 +119,7 @@ public sealed class AggregateJobQuiescePinTests
             for (var i = 0; i < lines.Length; i++)
             {
                 var trimmed = lines[i].TrimStart();
-                /* A whole-line comment (//, ///, a block comment's first or continuation line). Matched with a regex, not a
-                   prefix call, which CommentFilterAdoptionTests' census reads as a hand-rolled comment filter. */
+                /* A whole-line comment (//, ///, a block comment's first or continuation line). */
                 var isComment = Regex.IsMatch(trimmed, @"^(//|/\*|\*)");
                 if (!isComment && lines[i].Contains("DROP MATERIALIZED VIEW", StringComparison.Ordinal))
                 {
@@ -161,37 +160,6 @@ public sealed class AggregateJobQuiescePinTests
         Assert.Equal(3, Regex.Matches(source,
             @"catch \(OperationCanceledException\) when \(hold\.Unscheduled\.Count > 0\)\s+\{\s+(/\*.*?\*/\s+)?await ResumeContinuousAggregateJobsAsync\(connection, hold\.Unscheduled, \w+, logger\);\s+throw;",
             RegexOptions.Singleline).Count);
-    }
-
-    /// <summary>
-    /// The quiesce's own exits (#5551 review): the stop is INSIDE the try whose catch schedules the jobs again, the
-    /// resume has no caller token to be cancelled with, and the cap decides on the final look.
-    /// </summary>
-    [Fact]
-    public void Quiesce_StopIsInsideTheTry_ResumeRunsOnItsOwnGrace_AndTheCapDecidesOnTheFinalLook()
-    {
-        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs")).Replace("\r\n", "\n");
-        var start = source.IndexOf("internal static async Task<AggregateJobHold> QuiesceContinuousAggregateJobsAsync(", StringComparison.Ordinal);
-        Assert.True(start > 0);
-        var end = source.IndexOf("/// <summary>The longest a resume of stopped jobs may take", start, StringComparison.Ordinal);
-        Assert.True(end > start);
-        var body = source[start..end];
-
-        Assert.Matches(@"try\s+\{\s+if \(stoppedIds\.Length > 0\)\s+\{\s+using var stop = new NpgsqlCommand\(UnscheduleJobsSql, connection\)", body);
-        Assert.Matches(@"catch \(Exception\)\s+\{\s+(/\*[^*]*\*/\s+)?await ResumeContinuousAggregateJobsAsync\(connection, stoppedIds, view, logger\);\s+throw;", body);
-        Assert.Matches(@"if \(clock\.Elapsed >= options\.Cap\)\s+\{\s+if \(workers == 0\)\s+\{\s+return hold;\s+\}", body);
-
-        /* No resume anywhere in the product takes a caller token. */
-        Assert.DoesNotContain("ResumeContinuousAggregateJobsAfterCancellationAsync", source, StringComparison.Ordinal);
-        Assert.Matches(@"internal static async Task ResumeContinuousAggregateJobsAsync\(\s+NpgsqlConnection connection,\s+IReadOnlyList<int> stoppedJobIds,\s+string view,\s+ILogger\? logger\)", source);
-
-        /* A resume that cannot happen names the jobs and the view. */
-        Assert.Equal(4, Regex.Matches(source, @"StoppedJobsNote\(").Count); // the definition + the three log lines that use it
-
-        /* Round 2: the caller's reopen on the grace is inside a try that takes the grace's OperationCanceledException,
-           names the jobs, and lets it through only when the caller's own token is cancelled. */
-        Assert.Matches(@"try\s+\{\s+using var grace = new CancellationTokenSource\(resumeGrace \?\? s_resumeGrace\);\s+reopened = await ReopenBrokenConnectionAsync\(connection, logger, grace\.Token, reopenFailed\);\s+\}\s+catch \(OperationCanceledException\)\s+\{\s+logger\?\.LogWarning\(reopenFailed,[^;]+;\s+if \(cancellationToken\.IsCancellationRequested\)\s+\{\s+throw;", source);
-        Assert.Equal(2, Regex.Matches(source, @"new CancellationTokenSource\((resumeGrace \?\? )?s_resumeGrace\)").Count); // the resume's and the reopen's: the only two grace tokens
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

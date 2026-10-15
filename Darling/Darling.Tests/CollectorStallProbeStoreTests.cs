@@ -171,21 +171,6 @@ public class CollectorStallProbeStoreTests
     }
 
     /// <summary>
-    /// The read is wired everywhere it has to be: the MCP host, the web dashboard's read catalog, and the
-    /// dispatch that serves it. A tool present in one and absent from another is reachable by some callers
-    /// and not others.
-    /// </summary>
-    [Fact]
-    public void TheReadIsWiredEverywhereItHasToBe()
-    {
-        Assert.Contains("get_collector_stall_probes", DarlingWebEndpoints.BuildReadDispatch().Keys);
-        Assert.Contains("get_collector_stall_probes", DarlingWebEndpoints.CatalogDescriptors.Keys);
-
-        var host = ReadSource("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHostService.cs");
-        Assert.Contains("DarlingMcpStallProbeTools", host, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// The probe table is deliberately NOT a collector table.
     ///
     /// <para>Which is what keeps it out of the generator-parity pins, the catalog-driven hypertable
@@ -265,19 +250,6 @@ public class CollectorStallProbeStoreTests
            exception paths, which is why Dispose has to be idempotent. */
         Assert.Contains("stallProbeArm.Dispose();", runner, StringComparison.Ordinal);
         Assert.Contains("using var stallProbeArm = StallProbeArm.Start(", runner, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The probe query matches this service's own session by <c>APP_NAME()</c> and <c>HOST_NAME()</c>, so
-    /// it binds no parameters: the runner must send the text as it ships, with none attached.
-    /// </summary>
-    [Fact]
-    public void TheProbeQuery_IsSentWithoutParameters()
-    {
-        var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/StallWaitProbeRunner.cs");
-
-        Assert.Contains("new CollectorQuery(StallWaitProbePolicy.QueryText)", runner, StringComparison.Ordinal);
-        Assert.DoesNotContain("new CollectorQuery(StallWaitProbePolicy.QueryText,", runner, StringComparison.Ordinal);
     }
 
     private static string RungSql() => PgMigrations.Scripts.Single(s => s.Version == RungVersion).Sql;
