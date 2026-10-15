@@ -575,6 +575,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {mcp};";
 
             Assert.Equal("false|true|true|true|true", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
 
+            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);

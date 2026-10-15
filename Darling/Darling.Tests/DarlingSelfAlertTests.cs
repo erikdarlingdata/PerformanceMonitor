@@ -6526,6 +6526,32 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonClearedMetric, resolved.MetricName);
     }
 
+    private static QueryStoreComposeStamp.HourFailure ComposeFailure(int failures, bool inBackoff) =>
+        new(new DateTime(2026, 10, 7, 15, 0, 0), failures, "57014", "canceling statement due to statement timeout", 240,
+            new DateTime(2026, 10, 15, 14, 5, 0), new DateTime(2026, 10, 15, 16, 5, 0), new DateTime(2026, 10, 16, 16, 5, 0), inBackoff);
+
+    /// <summary>#5867: an hour in daily backoff fires one WARNING naming the hour, its count and reason; an hour still retried every
+    /// tick does not; and once no hour is in backoff the alert resolves.</summary>
+    [Fact]
+    public async Task ComposeHoursStuck_FiresForAnHourInBackoff_NotForOneStillRetried_AndResolvesWhenNoneIsLeft()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyComposeHoursStuckAsync(new[] { ComposeFailure(1, inBackoff: false) }, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyComposeHoursStuckAsync(new[] { ComposeFailure(2, inBackoff: true), ComposeFailure(1, inBackoff: false) with { Hour = new DateTime(2026, 10, 15, 9, 0, 0) } }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.ComposeHoursStuckMetric, fired.MetricName);
+        Assert.Contains("1 hour(s) of the Query Store compose rollup", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("2026-10-07 15:00 UTC: 2 failure(s), last reason 57014: canceling statement due to statement timeout", fired.DetailText, StringComparison.Ordinal);
+
+        await e.ApplyComposeHoursStuckAsync(Array.Empty<QueryStoreComposeStamp.HourFailure>(), Ct);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.ComposeHoursStuckClearedMetric, resolved.MetricName);
+    }
+
     [Fact]
     public async Task RawPurgeOverHorizon_RunFailed_NamesTheSqlState()
     {

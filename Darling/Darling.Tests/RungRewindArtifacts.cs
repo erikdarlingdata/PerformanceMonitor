@@ -199,10 +199,10 @@ ALTER TABLE IF EXISTS config.config_alert_log
     }
 
     /// <summary>
-    /// V189 (#5857): <c>size_estimated</c> on <c>collect.store_metrics</c> (the probe's newest sentinel). Safe on a store
-    /// that never had it. A store below V189 sizes every row exactly, as before.
+    /// V190 (#5857): <c>size_estimated</c> on <c>collect.store_metrics</c> (the probe's newest sentinel). Safe on a store
+    /// that never had it. A store below V190 sizes every row exactly, as before.
     /// </summary>
-    internal static async Task DropV189SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    internal static async Task DropV190SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(@"
 ALTER TABLE IF EXISTS collect.store_metrics
@@ -224,6 +224,16 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts
     DROP COLUMN IF EXISTS muted,
     DROP COLUMN IF EXISTS detail_text,
     DROP COLUMN IF EXISTS context_json;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c> (the probe's newest sentinel), the compose builder's
+    /// failure record. Safe on a store that never had it. Nothing before V189 reads it.
+    /// </summary>
+    internal static async Task DropV189SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.query_store_compose_stamp_failures;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

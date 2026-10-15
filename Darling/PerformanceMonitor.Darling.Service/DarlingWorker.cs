@@ -12837,6 +12837,39 @@ AND   j.hypertable_name = '{relation}'", connection))
         {
             _logger.LogWarning("Query Store compose rollup could not run; the next hourly tick retries: {Message}", ex.Message);
         }
+
+        /* #5867: the hours whose build now waits a day between attempts raise the Compose Rollup Hours Stuck self-alert, from its own
+           read after the tick. */
+        if (_selfAlerts is not null)
+        {
+            await EvaluateComposeHoursStuckAsync(stoppingToken);
+        }
+    }
+
+    /// <summary>
+    /// #5867: reads the Query Store compose builder's failure record and hands it to
+    /// <see cref="DarlingSelfAlertEvaluator.EvaluateComposeHoursStuckAsync"/>. A failed read sends no report, so the standing alert
+    /// is held, never resolved on uncertainty, and the next hourly compose tick reads again. Exempt from #3013's swallowed-read
+    /// counter rather than counted (unlike #5654's): counting it would also add a read to the fleet-scoped inventory that both SKUs'
+    /// get_collection_health descriptions carry.
+    /// </summary>
+    private async Task EvaluateComposeHoursStuckAsync(CancellationToken cancellationToken)
+    {
+        IReadOnlyList<QueryStoreComposeStamp.HourFailure> failures;
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            failures = await QueryStoreComposeStamp.ReadFailuresAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Query Store compose rollup: the failure record could not be read for the self-alert; the standing alert is held this tick: {Message}",
+                ex.Message);
+            return;
+        }
+
+        await _selfAlerts!.EvaluateComposeHoursStuckAsync(failures, cancellationToken);
     }
 
     /// <summary>

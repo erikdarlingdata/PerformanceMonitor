@@ -1614,16 +1614,150 @@ INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_
         Assert.Equal(6, d1.TotalBytes);
         Assert.Null(d1.SizeEstimated);
 
-        /* Window growth runs from the first day's exact row to the last day's exact row (70), not to the last day's
-           estimate (which would read 40: the estimate sits below the exact size by the compressed chunks' relations). */
+        /* Window growth never subtracts across forms (#5857 round 1): it ends on the NEWEST row (the estimate of 03-03 12:00, 1040)
+           and starts from the first day's newest row of the SAME form (the estimate of 03-01 23:00, 900), so 140, not the 40 an
+           exact start would give. Both ends are estimates, so the pair is like for like. */
         var deltas = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeWindowDeltas(daily);
-        Assert.Equal(70, deltas[(StoreSelfMetrics.HypertableObjectKind, "h1")].GrowthBytes);
+        Assert.Equal(140, deltas[(StoreSelfMetrics.HypertableObjectKind, "h1")].GrowthBytes);
+        Assert.False(deltas[(StoreSelfMetrics.HypertableObjectKind, "h1")].GrowthMixedForms);
 
         var latest = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
         var latestH1 = Assert.Single(latest, r => r.ObjectName == "h1");
         Assert.Equal(1040, latestH1.TotalBytes);
         Assert.True(latestH1.SizeEstimated);
         Assert.Null(Assert.Single(latest, r => r.ObjectName == "d1").SizeEstimated);
+    }
+
+    /// <summary>
+    /// A growth never subtracts an estimate from an exact size (#5857 round 1). The window ends on the newest row; its start
+    /// is the first day's newest row of the SAME form, and when that day has no row of the end's form the start is the
+    /// day's newest row of any form and the growth says so (<c>GrowthMixedForms</c>). A kind with no flag (NULL) counts as
+    /// exact on both ends, so its growth is unchanged.
+    /// </summary>
+    [Fact]
+    public async Task WindowGrowth_SubtractsLikeFromLike_AndSaysWhenItCouldNot_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5857 growth test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* like: both days hold both forms; the window ends on the 03-02 estimate, so it starts from the 03-01 estimate (90), not
+           the 03-01 exact row (a subtraction across forms would read 20).
+           mixed: the first day holds only an exact row, the last day ends on an estimate: no like start exists.
+           flat: no flag at all (a dimension row), the plain newest-to-newest difference. */
+        await ExecAsync(connection, $@"
+INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) VALUES
+    ('2026-03-01 02:00', 'like',  '{StoreSelfMetrics.HypertableObjectKind}', 100, false),
+    ('2026-03-01 20:00', 'like',  '{StoreSelfMetrics.HypertableObjectKind}',  90, true),
+    ('2026-03-02 02:00', 'like',  '{StoreSelfMetrics.HypertableObjectKind}', 130, false),
+    ('2026-03-02 20:00', 'like',  '{StoreSelfMetrics.HypertableObjectKind}', 120, true),
+    ('2026-03-01 02:00', 'mixed', '{StoreSelfMetrics.HypertableObjectKind}', 100, false),
+    ('2026-03-02 02:00', 'mixed', '{StoreSelfMetrics.HypertableObjectKind}', 130, false),
+    ('2026-03-02 20:00', 'mixed', '{StoreSelfMetrics.HypertableObjectKind}', 120, true),
+    ('2026-03-01 02:00', 'flat',  '{StoreSelfMetrics.DimensionObjectKind}', 5, NULL),
+    ('2026-03-02 02:00', 'flat',  '{StoreSelfMetrics.DimensionObjectKind}', 9, NULL)", ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var daily = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetDailyAsync(dataSource, new DateTime(2026, 2, 28), ct);
+        var deltas = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeWindowDeltas(daily);
+
+        var like = deltas[(StoreSelfMetrics.HypertableObjectKind, "like")];
+        Assert.Equal(30, like.GrowthBytes);
+        Assert.False(like.GrowthMixedForms);
+
+        var mixed = deltas[(StoreSelfMetrics.HypertableObjectKind, "mixed")];
+        Assert.Equal(20, mixed.GrowthBytes);
+        Assert.True(mixed.GrowthMixedForms);
+
+        var flat = deltas[(StoreSelfMetrics.DimensionObjectKind, "flat")];
+        Assert.Equal(4, flat.GrowthBytes);
+        Assert.False(flat.GrowthMixedForms);
+    }
+
+    /// <summary>
+    /// The inventory attributes <c>pg_database_size</c> from the newest EXACTLY sized sweep, never from the hourly estimate
+    /// rows (#5857 round 1). Here the newest sweep sized the hypertable from the catalog and read it far low; the older sweep
+    /// sized it exactly and reconciles with its store row. The residual is the exact sweep's, and <c>sized_at</c> names it.
+    /// </summary>
+    [Fact]
+    public async Task Inventory_AttributesFromTheNewestExactSweep_NotFromEstimateRows_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5857 inventory test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var exactAt = DateTime.UtcNow.AddHours(-30);
+        var estimateAt = DateTime.UtcNow.AddHours(-2);
+        const long gib = 1024L * 1024 * 1024;
+        await using (var insert = new NpgsqlCommand($@"
+INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) VALUES
+    ($1, 'store', '{StoreSelfMetrics.StoreObjectKind}',          {10 * gib}, NULL),
+    ($1, 'h1',    '{StoreSelfMetrics.HypertableObjectKind}',     {6 * gib},  false),
+    ($1, 'dim1',  '{StoreSelfMetrics.DimensionObjectKind}',      {3 * gib},  NULL),
+    ($1, 'other', '{StoreSelfMetrics.OtherObjectKind}',          {1 * gib - 1024},  NULL),
+    ($1, 'system', '{StoreSelfMetrics.SystemObjectKind}',          1024,  NULL),
+    ($2, 'store', '{StoreSelfMetrics.StoreObjectKind}',          {10 * gib}, NULL),
+    ($2, 'h1',    '{StoreSelfMetrics.HypertableObjectKind}',     {1 * gib},  true),
+    ($2, 'dim1',  '{StoreSelfMetrics.DimensionObjectKind}',      {3 * gib},  NULL),
+    ($2, 'other', '{StoreSelfMetrics.OtherObjectKind}',          {1 * gib - 1024},  NULL),
+    ($2, 'system', '{StoreSelfMetrics.SystemObjectKind}',          1024,  NULL)", connection))
+        {
+            insert.Parameters.AddWithValue(DateTime.SpecifyKind(exactAt, DateTimeKind.Unspecified));
+            insert.Parameters.AddWithValue(DateTime.SpecifyKind(estimateAt, DateTimeKind.Unspecified));
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        using var document = System.Text.Json.JsonDocument.Parse(
+            await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource));
+        var inventory = document.RootElement.GetProperty("inventory");
+        Assert.Equal(0, inventory.GetProperty("residual_bytes").GetInt64());
+        Assert.True(inventory.GetProperty("reconciled").GetBoolean());
+        Assert.Equal(exactAt, inventory.GetProperty("sized_at").GetDateTime(), TimeSpan.FromSeconds(1));
+    }
+
+    /// <summary>A store with no exactly sized sweep (every sweep carries an estimate row) returns the inventory block empty,
+    /// with one status word, and not a residual finding (#5857 round 1).</summary>
+    [Fact]
+    public async Task Inventory_IsEmptyWithAStatus_WhenNoSweepWasSizedExactly_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5857 inventory test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var insert = new NpgsqlCommand($@"
+INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) VALUES
+    ($1, 'store', '{StoreSelfMetrics.StoreObjectKind}',       10000000000, NULL),
+    ($1, 'h1',    '{StoreSelfMetrics.HypertableObjectKind}', 1000, true)", connection))
+        {
+            insert.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-2), DateTimeKind.Unspecified));
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        using var document = System.Text.Json.JsonDocument.Parse(
+            await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpStoreMetricsTools.GetStoreMetrics(dataSource));
+        var inventory = document.RootElement.GetProperty("inventory");
+        Assert.Equal("empty", inventory.GetProperty("status").GetString());
+        Assert.False(inventory.TryGetProperty("residual_bytes", out _));
     }
 
     private sealed record SizeRow(long? TotalBytes, long? CompressedBefore, long? CompressedAfter, int? ChunkCount, bool? SizeEstimated);

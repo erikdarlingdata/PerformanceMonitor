@@ -923,8 +923,10 @@ public sealed class AlertReadFailureSurfaceTests
            DarlingWorker. 16th exempt since #4750: EvaluateNotificationChannelsAsync's wrapper catch — the
            webhook channels' failure counts are read from the webhook service's memory, so there is no store
            read for the condition to swallow. 19th exempt since #5654: EvaluateExternalAlertsAsync's wrapper
-           catch - the delivery self-alert's report is a parameter, with the count read counted in DarlingWorker. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 19),
+           catch - the delivery self-alert's report is a parameter, with the count read counted in DarlingWorker. 20th exempt since
+           #5867: EvaluateComposeHoursStuckAsync's wrapper catch - the compose rollup self-alert's failure record is a parameter,
+           with the read exempt in DarlingWorker (it holds the alert on a failed read). */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 20),
     };
 
     /// <summary>
@@ -962,6 +964,9 @@ public sealed class AlertReadFailureSurfaceTests
            a swallowed read would leave the standing alert unjudged, and the worker holds it (sends no report) rather than
            resolving it. */
         "EvaluateExternalAlertsAsync",
+        /* #5867: the compose rollup self-alert's one store read, the compose builder's failure record. EXEMPT: a failed read
+           sends no report, so the worker holds the standing alert rather than resolving it, and the next hourly tick reads again. */
+        "EvaluateComposeHoursStuckAsync",
         /* #3354: the mute-rule reload. Not an alert pass — a control-plane read — but its swallowed
            failure decides what the engine suppresses on every following sweep, so it belongs to this
            population. It is also the member whose scope this list was designed to admit: an alerting read
@@ -975,8 +980,10 @@ public sealed class AlertReadFailureSurfaceTests
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
     private const int WorkerCountedSites = 12;
     /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it.
-       14th: the collection log hourly rollup's catch there (#5810), a maintenance write no alert is judged on. */
-    private const int WorkerExemptSites = 14;
+       14th: the collection log hourly rollup's catch there (#5810), a maintenance write no alert is judged on.
+       15th: EvaluateComposeHoursStuckAsync's catch (#5867), the compose builder's failure record read for its self-alert, which
+       holds the standing alert on a failed read. */
+    private const int WorkerExemptSites = 15;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1055,6 +1062,8 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Raw-purge-over-horizon self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Compose-rollup-hours-stuck self-alert failed"] = "handed its evidence as parameters; the read is isolated in DarlingWorker.EvaluateComposeHoursStuckAsync",
+        ["Query Store compose rollup: the failure record could not be read for the self-alert"] = "an unreadable failure record sends no report, so the alert's standing state is held as it was, and the next hourly compose tick reads it again",
         ["Notification-channel self-alert failed"] = "reads the webhook channels' failure counts from the webhook service's memory and performs no store read at all - there is no read for this condition to be the swallowing of",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
         ["Fleet gate self-alert failed"] = "handed its evidence (the worker's in-memory gate counts) as a parameter and performs no store read at all",
@@ -1269,8 +1278,10 @@ public sealed class AlertReadFailureSurfaceTests
            its evidence as a parameter. 37th: the deadlock text repair pass, the second stage beside the re-mask pass (the same
            maintenance rewrite, marker-gated, resumed next hour). 38th since #5654: the external-alert delivery self-alert's
            wrapper catch, handed its report as a parameter. 39th since #5810: the collection log hourly rollup's catch, a
-           maintenance write no alert is judged on, redone by the next pass. */
-        Assert.Equal(39, totalExempt);
+           maintenance write no alert is judged on, redone by the next pass. 40th since #5867: the Compose Rollup Hours Stuck
+           self-alert's wrapper catch, handed its failure record as a parameter. 41st since #5867: the worker's read of that
+           record, which holds the standing alert on a failure. */
+        Assert.Equal(41, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

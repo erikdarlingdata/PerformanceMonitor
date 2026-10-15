@@ -91,7 +91,38 @@ public static class QueryStoreComposeStamp
 
     private const int CommandTimeoutSeconds = BuildStatementTimeoutSeconds + 30;
 
-    private static readonly string StatementTimeoutSql = $"SET LOCAL statement_timeout = '{BuildStatementTimeoutSeconds}s'";
+    /// <summary>The store schema version of the rung that creates <see cref="FailuresTable"/> (V189, #5867). The number is the next
+    /// free rung when this was written; it is renumbered at merge if another rung took it first.</summary>
+    public const int FailuresRungVersion = 189;
+
+    /// <summary>The failure record of each hour whose last build threw (#5867): one row per hour, removed when the hour builds.</summary>
+    public const string FailuresTable = "collect.query_store_compose_stamp_failures";
+
+    /// <summary>
+    /// The consecutive failures after which an hour is retried once a day instead of every tick (#5867). Three, because the failures a
+    /// retry cures (a deadlock, a lock or serialization failure, a dropped connection, a restart of the store) clear within a tick or
+    /// two, and at the service's hourly tick three failures in a row are three hours of the same error: past that, an hourly retry
+    /// only repeats it, and spends the build's timeout every hour.
+    /// </summary>
+    public const int FailuresBeforeBackoff = 3;
+
+    /// <summary>How long an hour in backoff waits between attempts (#5867): one attempt, and one WARN, a day.</summary>
+    public static readonly TimeSpan BackoffInterval = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The <c>statement_timeout</c> of the attempt that follows a statement timeout (#5867): four times <see cref="BuildStatementTimeoutSeconds"/>,
+    /// 240 s. The normal timeout is sized for the normal hour (about 2.6 s cold); an hour that runs past 60 s is over 20 times that,
+    /// and four times the timeout gives it room up to about 90 times the normal hour while staying well under the tick's
+    /// <see cref="MaxTickDuration"/> of 10 minutes, so even this attempt, which the tick runs after the other hours, leaves most of the
+    /// budget. A build that times out under it too backs off at once: the next tick's attempt would be the same build under the same timeout.
+    /// </summary>
+    public const int ExtendedBuildStatementTimeoutSeconds = BuildStatementTimeoutSeconds * 4;
+
+    /// <summary>PostgreSQL's SQLSTATE for a statement cancelled by <c>statement_timeout</c> (<c>query_canceled</c>).</summary>
+    public const string StatementTimeoutSqlState = "57014";
+
+    private static string StatementTimeoutSql(int seconds) =>
+        "SET LOCAL statement_timeout = '" + seconds.ToString(System.Globalization.CultureInfo.InvariantCulture) + "s'";
 
     /// <summary>The alias the compiler gives the fact relation in a partial's text (<c>ComposeCompiler.FactAlias</c>). The
     /// map's <see cref="PartialColumn.FactExpression"/> is written over it, verbatim the text <c>TryBuildPartialValueExpr</c>
@@ -283,6 +314,29 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
 """;
 
     /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
+    /// <summary>
+    /// V189 (#5867): the failure record of the hours whose build threw. One row per hour, written by <see cref="RecordFailureSql"/>
+    /// after the failed build rolled back, and deleted by the build that succeeds (in its own transaction) or by the cleanup once the
+    /// hour falls below the floor. <c>retry_at</c> is on the store's clock, as the plan's "now" is; the plan skips an hour
+    /// until it is due. <c>last_timeout_seconds</c> is the <c>statement_timeout</c> the failed attempt ran under. Naive UTC.
+    /// </summary>
+    public const string FailuresCreateSql = """
+/* V189 (#5867): one row per Query Store compose hour whose last build failed: how many times in a row, the last error, and when
+   the builder tries it again. The builder deletes the row when the hour builds. Naive UTC throughout. */
+CREATE TABLE IF NOT EXISTS collect.query_store_compose_stamp_failures
+(
+    hour timestamp NOT NULL,
+    failures integer NOT NULL,
+    last_sqlstate text,
+    last_reason text NOT NULL,
+    last_timeout_seconds integer NOT NULL,
+    first_failed_at timestamp NOT NULL,
+    last_failed_at timestamp NOT NULL,
+    retry_at timestamp NOT NULL,
+    CONSTRAINT pk_query_store_compose_stamp_failures PRIMARY KEY (hour)
+);
+""";
+
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
 
@@ -470,6 +524,11 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     /// per blocked, so hours that cannot build do not take the build slots of the hours that can: an old, never-built hour still builds
     /// while a writer pins the newest ones (#5582 review round 2). The blocked rows are only counted, for the log; the per-build check stays,
     /// because a writer can start between the plan and the build.</para>
+    ///
+    /// <para>An hour with a failure record (<see cref="FailuresTable"/>, #5867) is planned only once its <c>retry_at</c> is due by
+    /// the same clock, so an hour in backoff is not planned at all between its daily attempts. The fourth column is its consecutive
+    /// failures (0 for none), which <see cref="ChooseBuilds"/> uses to run it after the other hours; the fifth is true when its last
+    /// failure was a statement timeout (its SQLSTATE is $4, <see cref="StatementTimeoutSqlState"/>), so its next attempt runs under <see cref="ExtendedBuildStatementTimeoutSeconds"/>.</para>
     /// </summary>
     public const string PlanSql = @"
 WITH bounds AS
@@ -479,6 +538,10 @@ WITH bounds AS
     JOIN collect.servers AS sv ON sv.server_id = c.server_id
     WHERE sv.is_enabled
     HAVING min(c.filled_since) IS NOT NULL
+),
+clock AS
+(
+    SELECT coalesce($3::timestamp, now() AT TIME ZONE 'UTC') AS at
 ),
 cutoff AS
 (
@@ -501,17 +564,71 @@ missing AS
     SELECT g AS hour, false AS stale, (g + interval '2 hours' > cutoff.since) AS blocked
     FROM bounds
     CROSS JOIN cutoff
-    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', coalesce($3::timestamp, now() AT TIME ZONE 'UTC') - interval '3 hours'), interval '1 hour') AS g
+    CROSS JOIN clock
+    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '3 hours'), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
-SELECT p.hour, p.stale, p.blocked
+SELECT p.hour, p.stale, p.blocked, p.failures, p.extended
 FROM
 (
-    SELECT u.hour, u.stale, u.blocked, row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC) AS rn
+    SELECT u.hour, u.stale, u.blocked, coalesce(f.failures, 0) AS failures,
+           coalesce(f.last_sqlstate = $4::text, false) AS extended,
+           row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC) AS rn
     FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
+    LEFT JOIN collect.query_store_compose_stamp_failures AS f ON f.hour = u.hour
+    CROSS JOIN clock
+    WHERE f.hour IS NULL
+       OR f.retry_at <= clock.at
 ) AS p
 WHERE p.rn <= $2
 ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
+
+    /// <summary>
+    /// Records a failed build of an hour (#5867) and returns its consecutive failures, its next attempt, and whether that is a backoff:
+    /// $1 the hour, $2 the SQLSTATE (NULL when the error had none), $3 the error message, $4 the <c>statement_timeout</c> the attempt ran
+    /// under, $5 the store clock a test passes (NULL in the service: the store's own, as <see cref="PlanSql"/>'s), $6
+    /// <see cref="FailuresBeforeBackoff"/>, $7 <see cref="ExtendedBuildStatementTimeoutSeconds"/>, $8 <see cref="BackoffInterval"/>, $9 <see cref="StatementTimeoutSqlState"/>. The
+    /// next attempt is the next tick (<c>retry_at</c> = now) until the hour has failed <see cref="FailuresBeforeBackoff"/> times in
+    /// a row, or until a build under the extended timeout has timed out too; from then on it is one attempt a day. Runs after the
+    /// build's transaction rolled back.
+    /// </summary>
+    public const string RecordFailureSql = @"
+INSERT INTO collect.query_store_compose_stamp_failures AS f
+    (hour, failures, last_sqlstate, last_reason, last_timeout_seconds, first_failed_at, last_failed_at, retry_at)
+SELECT $1, 1, $2::text, $3::text, $4::integer, c.at, c.at,
+       c.at + CASE WHEN 1 >= $6::integer OR ($2::text = $9::text AND $4::integer >= $7::integer) THEN $8::interval ELSE interval '0' END
+FROM (SELECT coalesce($5::timestamp, now() AT TIME ZONE 'UTC') AS at) AS c
+ON CONFLICT (hour) DO UPDATE
+SET failures = f.failures + 1,
+    last_sqlstate = EXCLUDED.last_sqlstate,
+    last_reason = EXCLUDED.last_reason,
+    last_timeout_seconds = EXCLUDED.last_timeout_seconds,
+    last_failed_at = EXCLUDED.last_failed_at,
+    retry_at = EXCLUDED.last_failed_at
+        + CASE WHEN f.failures + 1 >= $6::integer OR (EXCLUDED.last_sqlstate = $9::text AND EXCLUDED.last_timeout_seconds >= $7::integer)
+               THEN $8::interval ELSE interval '0' END
+RETURNING f.failures, f.retry_at, f.retry_at > f.last_failed_at AS backed_off;";
+
+    /// <summary>A successful build clears the hour's failure record (#5867): $1 the hour. In the build's own transaction.</summary>
+    public const string ClearFailureSql = @"
+DELETE FROM collect.query_store_compose_stamp_failures
+WHERE hour = $1;";
+
+    /// <summary>Removes the failure records below the floor (#5867): $1 the floor. An hour the rollup no longer holds has nothing to retry.</summary>
+    public const string GcFailuresSql = @"
+DELETE FROM collect.query_store_compose_stamp_failures
+WHERE hour < $1;";
+
+    /// <summary>
+    /// Every hour with a failure record (#5867), newest first: what <c>get_store_metrics</c> lists and the self-alert reads. An hour is
+    /// in backoff when its next attempt is later than its last failure (it has failed <see cref="FailuresBeforeBackoff"/> times in a row,
+    /// or timed out under the extended timeout); the others are retried next tick.
+    /// </summary>
+    public const string ReadFailuresSql = @"
+SELECT f.hour, f.failures, f.last_sqlstate, f.last_reason, f.last_timeout_seconds, f.first_failed_at, f.last_failed_at, f.retry_at,
+       f.retry_at > f.last_failed_at AS in_backoff
+FROM collect.query_store_compose_stamp_failures AS f
+ORDER BY f.hour DESC;";
 
     /// <summary>
     /// The first step of the cleanup: removes the hours below the floor from the hours table and returns them: $1 the floor.
@@ -533,11 +650,21 @@ WHERE hour < $1;";
     /// <summary>Removes one expired hour of rollup rows: $1 the hour.</summary>
     public const string GcRollupSql = DeleteHourSql;
 
-    /// <summary>One planned build.</summary>
-    public readonly record struct Build(DateTime Hour, bool Stale);
+    /// <summary>One planned build: <paramref name="Failures"/> is the hour's consecutive failed builds (#5867, 0 for none), and
+    /// <paramref name="Extended"/> is true when the last one was a statement timeout, so this attempt runs under
+    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/>.</summary>
+    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false);
+
+    /// <summary>One hour's failure record (<see cref="ReadFailuresSql"/>, #5867). Times are naive UTC on the store's clock.</summary>
+    public readonly record struct HourFailure(
+        DateTime Hour, int Failures, string? LastSqlState, string LastReason, int LastTimeoutSeconds,
+        DateTime FirstFailedAt, DateTime LastFailedAt, DateTime NextAttemptAt, bool InBackoff);
+
+    /// <summary>What <see cref="RecordFailureAsync"/> wrote: the consecutive failures, the next attempt, and whether that is a backoff.</summary>
+    public readonly record struct FailureOutcome(int Failures, DateTime NextAttemptAt, bool BackedOff);
 
     /// <summary>What one tick did.</summary>
-    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0)
+    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0, int BackedOff = 0)
     {
         public int Built => BuiltStale + BuiltMissing;
     }
@@ -568,6 +695,10 @@ WHERE hour < $1;";
     /// tick's builds, so a storm of late writes (a backfill, a pending replay) that keeps marking built hours stale cannot starve the
     /// never-built backlog (a new store's first ~190 hours); with none waiting, stale hours may take every build. The reserved
     /// half goes to the never-built hours and no further (#5582 review round 1).
+    ///
+    /// <para>The hours that have failed before (<see cref="Build.Failures"/> above 0, #5867) run after the others, in the same order among
+    /// themselves: such a build may run up to its timeout again (<see cref="ExtendedBuildStatementTimeoutSeconds"/> after a timeout), and
+    /// the tick's wall-clock budget (<see cref="MaxTickDuration"/>) goes first to the hours that build.</para>
     /// </summary>
     public static IReadOnlyList<Build> ChooseBuilds(IReadOnlyList<Build> candidates, int max)
     {
@@ -578,7 +709,8 @@ WHERE hour < $1;";
         var staleCap = missing.Count > 0 ? max / 2 : max;
         var chosen = stale.Take(staleCap).ToList();
         chosen.AddRange(missing.Take(Math.Max(0, max - chosen.Count)));
-        return chosen;
+        /* OrderBy is stable: the order above holds within each group. */
+        return chosen.OrderBy(b => b.Failures > 0).ToList();
     }
 
     /// <summary>One plan: the hours to build, and how many hours the plan held back because an open writer of the wide table would defer them.</summary>
@@ -602,6 +734,7 @@ WHERE hour < $1;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = FloorHour(nowUtc, retentionDays) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxBuildsPerTick });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -611,7 +744,7 @@ WHERE hour < $1;";
                 continue;
             }
 
-            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1)));
+            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4)));
         }
 
         return new Plan(ChooseBuilds(builds, MaxBuildsPerTick), heldBack);
@@ -733,6 +866,12 @@ WHERE hour < $1;";
             await built.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        await using (var failures = new NpgsqlCommand(GcFailuresSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            failures.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+            await failures.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         foreach (var hour in expired)
         {
             await using var rollup = new NpgsqlCommand(GcRollupSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
@@ -748,27 +887,44 @@ WHERE hour < $1;";
     /// Builds one hour in one transaction (the five steps in the type's summary). Returns the wide rows read, or null when the hour
     /// was DEFERRED because a writing transaction that could hold an unmarked row of it is still open (<see cref="OpenWriterSql"/>);
     /// a deferred hour changes nothing and is planned again next tick. An hour with no wide rows still gets its row in the hours table.
+    /// <paramref name="statementTimeoutSeconds"/> is the transaction's <c>statement_timeout</c>: <see cref="BuildStatementTimeoutSeconds"/>,
+    /// or <see cref="ExtendedBuildStatementTimeoutSeconds"/> for the attempt after a timeout (#5867). A build that commits clears the
+    /// hour's failure record in the same transaction.
     /// </summary>
     public static async Task<long?> BuildHourAsync(
-        NpgsqlConnection connection, DateTime hour, DateTime nowUtc, CancellationToken cancellationToken, Func<Task>? beforeCommit = null)
+        NpgsqlConnection connection, DateTime hour, DateTime nowUtc, CancellationToken cancellationToken, Func<Task>? beforeCommit = null,
+        int statementTimeoutSeconds = BuildStatementTimeoutSeconds, Action<NpgsqlCommand>? commandCreated = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
+        ArgumentOutOfRangeException.ThrowIfLessThan(statementTimeoutSeconds, 1);
 
         var hourValue = Unspecified(hour);
+        /* The client waits 30 s past the server's timeout, so the server's cancel (57014, which the failure record keys on) arrives first. */
+        var commandTimeout = Math.Max(CommandTimeoutSeconds, statementTimeoutSeconds + 30);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using (var timeout = new NpgsqlCommand(StatementTimeoutSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        /* The attempt's client timeout is one value for every command in it (#5871): the server grants each statement the whole
+           statement_timeout, so a command left at the short client timeout would be cancelled client-side first, as a timeout
+           that carries no 57014. commandCreated is a test seam that sees each command as it is made. */
+        NpgsqlCommand NewCommand(string sql)
+        {
+            var created = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = commandTimeout };
+            commandCreated?.Invoke(created);
+            return created;
+        }
+
+        await using (var timeout = NewCommand(StatementTimeoutSql(statementTimeoutSeconds)))
         {
             await timeout.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var advisory = new NpgsqlCommand(HourLockSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var advisory = NewCommand(HourLockSql))
         {
             advisory.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = HourNumber(hourValue) });
             await advisory.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var writers = new NpgsqlCommand(OpenWriterSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var writers = NewCommand(OpenWriterSql))
         {
             writers.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             /* One row (the oldest such writer) when an hour would defer, none when no writer of the wide table could hold an unmarked row. */
@@ -781,7 +937,7 @@ WHERE hour < $1;";
 
         var servers = new List<int>();
         var lateSeqs = new List<long>();
-        await using (var readPairs = new NpgsqlCommand(ReadPairsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var readPairs = NewCommand(ReadPairsSql))
         {
             readPairs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await using var reader = await readPairs.ExecuteReaderAsync(cancellationToken);
@@ -792,26 +948,26 @@ WHERE hour < $1;";
             }
         }
 
-        await using (var delete = new NpgsqlCommand(DeleteHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var delete = NewCommand(DeleteHourSql))
         {
             delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var insert = new NpgsqlCommand(BuildHourInsertSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var insert = NewCommand(BuildHourInsertSql))
         {
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         long sourceRows;
-        await using (var count = new NpgsqlCommand(SourceRowsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var count = NewCommand(SourceRowsSql))
         {
             count.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             sourceRows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
         }
 
-        await using (var built = new NpgsqlCommand(UpsertBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var built = NewCommand(UpsertBuiltSql))
         {
             built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
@@ -820,11 +976,17 @@ WHERE hour < $1;";
             await built.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var hours = new NpgsqlCommand(UpsertHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var hours = NewCommand(UpsertHourSql))
         {
             hours.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             hours.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
             await hours.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var clear = NewCommand(ClearFailureSql))
+        {
+            clear.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await clear.ExecuteNonQueryAsync(cancellationToken);
         }
 
         /* Test seam: runs with the build's row locks still held and nothing committed (a late write that bumps a pair the build has
@@ -838,9 +1000,82 @@ WHERE hour < $1;";
         return sourceRows;
     }
 
+    /// <summary>Records a failed build (<see cref="RecordFailureSql"/>, #5867) on <paramref name="connection"/>, outside any transaction.</summary>
+    public static async Task<FailureOutcome> RecordFailureAsync(
+        NpgsqlConnection connection, DateTime hour, string? sqlState, string reason, int timeoutSeconds, DateTime? storeNow, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var command = new NpgsqlCommand(RecordFailureSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(hour) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)sqlState ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reason ?? string.Empty });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = timeoutSeconds });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = FailuresBeforeBackoff });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ExtendedBuildStatementTimeoutSeconds });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = BackoffInterval });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new FailureOutcome(reader.GetInt32(0), reader.GetDateTime(1), reader.GetBoolean(2));
+    }
+
+    /// <summary>Every hour with a failure record (<see cref="ReadFailuresSql"/>, #5867), newest first. Empty on a store below
+    /// <see cref="FailuresRungVersion"/> (the table is absent there).</summary>
+    public static async Task<IReadOnlyList<HourFailure>> ReadFailuresAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var rows = new List<HourFailure>();
+        await using (var probe = new NpgsqlCommand("SELECT to_regclass('" + FailuresTable + "') IS NOT NULL;", connection) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return rows;
+            }
+        }
+
+        await using var command = new NpgsqlCommand(ReadFailuresSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new HourFailure(
+                reader.GetDateTime(0), reader.GetInt32(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetInt32(4),
+                reader.GetDateTime(5), reader.GetDateTime(6), reader.GetDateTime(7), reader.GetBoolean(8)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The WARN for a failed build (#5867). Before the backoff: one line per attempt, saying the hour is retried next tick (and under the
+    /// extended timeout after a statement timeout). In backoff, the build runs once a day, so this is one line a day, naming the
+    /// consecutive failures, the last reason and the next attempt.
+    /// </summary>
+    private static void LogFailure(ILogger logger, Exception ex, Build item, string? sqlState, FailureOutcome? outcome)
+    {
+        if (outcome is { BackedOff: true } backoff)
+        {
+            logger.LogWarning(ex,
+                "Query Store compose rollup: building hour {Hour:yyyy-MM-dd HH}:00 (stale {Stale}) has failed {Failures} time(s) in a row; it is retried once a day, next at {Next:yyyy-MM-dd HH:mm} UTC, and get_store_metrics lists it: {Message}",
+                item.Hour, item.Stale, backoff.Failures, backoff.NextAttemptAt, ex.Message);
+            return;
+        }
+
+        var extendedNext = string.Equals(sqlState, StatementTimeoutSqlState, StringComparison.Ordinal);
+        logger.LogWarning(ex,
+            "Query Store compose rollup: building hour {Hour:yyyy-MM-dd HH}:00 (stale {Stale}) failed ({Failures} time(s) in a row) and is retried next tick{Timeout}: {Message}",
+            item.Hour, item.Stale, outcome?.Failures ?? item.Failures + 1,
+            extendedNext ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $" under a {ExtendedBuildStatementTimeoutSeconds} s statement timeout") : string.Empty,
+            ex.Message);
+    }
+
     /// <summary>
     /// One maintenance tick: remove the expired hours, plan, then build each hour in its own transaction. A build that fails is
-    /// logged (naming the hour) and the loop goes on; the next tick plans it again. Once <see cref="MaxTickDuration"/> has passed
+    /// logged (naming the hour), recorded (<see cref="RecordFailureSql"/>, #5867) and the loop goes on: the next tick retries it, under
+    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/> after a statement timeout, until it has failed <see cref="FailuresBeforeBackoff"/>
+    /// times in a row (or timed out under the extended timeout), and once a day after that. Once <see cref="MaxTickDuration"/> has passed
     /// no further build starts, and the planned hours left are reported as deferred.
     /// </summary>
     public static Task<TickResult> RunTickAsync(
@@ -860,7 +1095,7 @@ WHERE hour < $1;";
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(elapsed);
 
-        int builtStale = 0, builtMissing = 0, failed = 0, started = 0, deferredForWriters = 0;
+        int builtStale = 0, builtMissing = 0, failed = 0, started = 0, deferredForWriters = 0, backedOff = 0;
         var watch = options?.Watch ?? DeferralWatch.Shared;
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -876,9 +1111,10 @@ WHERE hour < $1;";
             }
 
             started++;
+            var timeoutSeconds = item.Extended ? ExtendedBuildStatementTimeoutSeconds : BuildStatementTimeoutSeconds;
             try
             {
-                if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken) is null)
+                if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds) is null)
                 {
                     deferredForWriters++;
                     continue;
@@ -896,8 +1132,23 @@ WHERE hour < $1;";
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 failed++;
-                logger.LogWarning(ex, "Query Store compose rollup: building hour {Hour:yyyy-MM-dd HH}:00 (stale {Stale}) failed and is retried next tick: {Message}",
-                    item.Hour, item.Stale, ex.Message);
+                var sqlState = (ex as PostgresException)?.SqlState;
+                FailureOutcome? outcome = null;
+                try
+                {
+                    outcome = await RecordFailureAsync(connection, item.Hour, sqlState, ex.Message, timeoutSeconds, options?.StoreNow, cancellationToken);
+                }
+                catch (Exception recordEx) when (recordEx is not OperationCanceledException)
+                {
+                    /* A broken connection fails the record too; the hour has no new record and is planned again next tick, as before #5867. */
+                    logger.LogDebug("Query Store compose rollup: recording the failure of hour {Hour:yyyy-MM-dd HH}:00 failed: {Message}", item.Hour, recordEx.Message);
+                }
+
+                LogFailure(logger, ex, item, sqlState, outcome);
+                if (outcome is { BackedOff: true })
+                {
+                    backedOff++;
+                }
             }
         }
 
@@ -934,7 +1185,7 @@ WHERE hour < $1;";
         }
 
         var deferred = plan.Count - started + deferredForWriters;
-        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack);
+        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff);
         logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), {ElapsedMs} ms",
             result.Built, builtStale, builtMissing, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
         return result;

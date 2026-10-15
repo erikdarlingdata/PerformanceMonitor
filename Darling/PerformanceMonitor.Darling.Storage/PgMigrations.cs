@@ -1368,7 +1368,7 @@ ALTER TABLE config.investigation_request_alerts
     ADD COLUMN IF NOT EXISTS context_json text;";
 
     /// <summary>
-    /// V189 (#5857): <c>collect.store_metrics.size_estimated</c>. The hourly store self-metrics sweep sizes hypertables
+    /// V190 (#5857): <c>collect.store_metrics.size_estimated</c>. The hourly store self-metrics sweep sizes hypertables
     /// and continuous aggregates from the compression catalog (a compressed chunk contributes the bytes TimescaleDB
     /// recorded when it compressed the chunk, not a file-system read), because the exact sizes make a file call per chunk and
     /// their cost grew with the chunk count. One sweep a day (the first without an exact row in the last 23 hours) writes
@@ -1379,7 +1379,7 @@ ALTER TABLE config.investigation_request_alerts
     /// does nothing. No GRANT: the table's grants are table-level. <b>No Lite twin:</b> Lite sizes its own DuckDB file,
     /// not hypertables.</para>
     /// </summary>
-    private const string V189Sql = @"
+    private const string V190Sql = @"
 ALTER TABLE collect.store_metrics
     ADD COLUMN IF NOT EXISTS size_estimated boolean;";
 
@@ -1683,8 +1683,19 @@ $rung$;";
         new Migration(186, "collection-log-hourly", V186Sql),
         new Migration(187, "alert-resolution-delivery", V187Sql),
         new Migration(188, "investigation-alert-facts", V188Sql),
-        new Migration(189, "store-metrics-size-estimated", V189Sql),
+        new Migration(189, "query-store-compose-failures", V189Sql),
+        new Migration(190, "store-metrics-size-estimated", V190Sql),
     };
+
+    /// <summary>
+    /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row
+    /// per hour whose last build threw, with its consecutive failures, last error and next attempt, so a build that cannot finish backs
+    /// off to one attempt a day instead of running every tick, and <c>get_store_metrics</c> and the self-alert can show it
+    /// (<see cref="QueryStoreComposeStamp.FailuresCreateSql"/>). A plain empty table, no GRANT (the <c>collect</c> schema's blanket
+    /// SELECT covers it). <b>No Lite twin:</b> Lite has no PostgreSQL store. A const, so the list above reads it whatever the
+    /// order of the static initializers.
+    /// </summary>
+    private const string V189Sql = QueryStoreComposeStamp.FailuresCreateSql;
 
     /// <summary>
     /// V114 — the statistics ESTIMATE columns on <c>collect.pg_index_bloat</c>, and the retirement of the

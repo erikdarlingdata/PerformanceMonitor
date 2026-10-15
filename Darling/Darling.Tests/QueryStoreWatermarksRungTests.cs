@@ -97,7 +97,7 @@ public sealed class QueryStoreWatermarksRungTests
         /* V179's (#5640) and V180's (#5654) sentinels are appended after this one, so this rung is no longer the top. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, and V187's (#5825) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, V187's (#5825) and V188's (#5821) next, and V189's (#5867) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
@@ -120,12 +120,13 @@ public sealed class QueryStoreWatermarksRungTests
            absent too this rung is the answer; with this sentinel absent as well, one rung back. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-        all[Array.FindIndex(parameters, p => p.Name == "hasStoreMetricsSizeEstimated")] = false; /* V189 (#5857) absent: the cases below are stores below it. */
+        all[Array.FindIndex(parameters, p => p.Name == "hasStoreMetricsSizeEstimated")] = false; /* V190 (#5857) absent: the cases below are stores below it. */
+        all[Array.FindIndex(parameters, p => p.Name == "hasComposeStampFailures")] = false; /* V189 (#5867) absent: the cases below are stores below it. */
         all[Array.FindIndex(parameters, p => p.Name == "hasInvestigationAlertFacts")] = false; /* V188 (#5821) absent: the cases below are stores below it. */
         all[Array.FindIndex(parameters, p => p.Name == "hasAlertResolutionDelivery")] = false; /* V187 (#5825) absent: the cases below are stores below it. */
 
         /* With V182's sentinel (#5506) absent too the answer is V181's. */
-        /* With V186's (#5810) and V185's (#5812) sentinels absent the answer is V184's (#5632); with V184's absent too, V183's. */
+        /* With V189's (#5867), V188's (#5821), V187's (#5825), V186's (#5810) and V185's (#5812) sentinels absent the answer is V184's (#5632); with V184's absent too, V183's. */
         var withoutV185 = (object[])all.Clone();
         withoutV185[ProbeOrdinal + 8] = false;
         withoutV185[ProbeOrdinal + 7] = false;
@@ -183,6 +184,7 @@ public sealed class QueryStoreWatermarksRungTests
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
 
+            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
