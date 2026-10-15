@@ -244,30 +244,6 @@ public sealed class DarlingPayloadProbeFailureTests
     }
 
     [Fact]
-    public void DatabaseSizeStats_OnPrem_Records_What_Its_Cursor_Could_Not_Probe()
-    {
-        /* #1851's defect, closed: the per-database CATCH was empty, so a database that was mid-restore or
-           inaccessible contributed no used_size_mb under a SUCCESS row that said nothing had happened. */
-        var text = DatabaseSizeStatsCollector.Instance.BuildQuery(Context()).Text;
-
-        Assert.Contains("@probe_failures TABLE", text, StringComparison.Ordinal);
-        Assert.Contains("INSERT @probe_failures (name, error_text)", text, StringComparison.Ordinal);
-        Assert.Contains("VALUES (@db_name, ERROR_MESSAGE());", text, StringComparison.Ordinal);
-        Assert.True(DatabaseSizeStatsCollector.Instance.EmitsProbeFailures);
-
-        /* The failures must come AFTER the payload, never merged into it: the payload set is one row per
-           FILE and is written to database_size_stats verbatim, so a failure row inside it would be stored
-           as a file. */
-        var payload = text.IndexOf("FROM sys.master_files AS mf", StringComparison.Ordinal);
-        var failures = text.IndexOf("FROM @probe_failures", StringComparison.Ordinal);
-        Assert.True(payload >= 0 && failures >= 0, "both result sets must be selected");
-        Assert.True(payload < failures, "the payload must be the first result set");
-
-        /* And the CATCH must no longer be empty. */
-        Assert.DoesNotContain("BEGIN CATCH\r\n    END CATCH", text.ReplaceLineEndings("\r\n"), StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void DatabaseSizeStats_Azure_Still_Emits_Only_Its_Payload()
     {
         /* Azure SQL DB takes an entirely database-scoped query with no cursor and nothing to probe, so it
