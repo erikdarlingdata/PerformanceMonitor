@@ -81,7 +81,7 @@ public sealed class InvestigationBriefComposerTests
             profiles ?? new[] { new InvestigationProfileText("server", "Production OLTP. Never restart during business hours.") });
 
     private static JsonObject Brief(InvestigationBriefSources sources, McpDataDetail mode = McpDataDetail.Full) =>
-        JsonNode.Parse(InvestigationBriefComposer.Compose(sources, mode, Now))!.AsObject();
+        JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, mode, Now))!.AsObject();
 
     /* ---- format numbers (plan section 7) ---- */
 
@@ -131,7 +131,7 @@ public sealed class InvestigationBriefComposerTests
     [Fact]
     public void Findings_RemediationIsVerdictAndBlockers_NeverAScript()
     {
-        var json = InvestigationBriefComposer.Compose(Sources(), McpDataDetail.Full, Now);
+        var json = InvestigationBriefComposer.Compose(Sources(), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
         var finding = JsonNode.Parse(json)!["findings"]![0]!;
         Assert.Equal("abc123", (string?)finding["story_path_hash"]);
         Assert.Equal(0.81, (double)finding["severity"]!);
@@ -172,13 +172,13 @@ public sealed class InvestigationBriefComposerTests
     {
         foreach (var family in InvestigationFamily.All)
         {
-            Assert.True(InvestigationBriefComposer.SqlServerFamilyCalls.ContainsKey(family), family);
-            Assert.True(InvestigationBriefComposer.PostgresFamilyCalls.ContainsKey(family), family);
+            Assert.True(DarlingInvestigationBriefTools.SqlServerFamilyCalls.ContainsKey(family), family);
+            Assert.True(DarlingInvestigationBriefTools.PostgresFamilyCalls.ContainsKey(family), family);
         }
 
-        foreach (var tool in InvestigationBriefComposer.SqlServerFamilyCalls.Values.SelectMany(t => t))
+        foreach (var tool in DarlingInvestigationBriefTools.SqlServerFamilyCalls.Values.SelectMany(t => t))
             Assert.Contains(tool, ToolRecommendations.AllToolNames);
-        foreach (var tool in InvestigationBriefComposer.PostgresFamilyCalls.Values.SelectMany(t => t))
+        foreach (var tool in DarlingInvestigationBriefTools.PostgresFamilyCalls.Values.SelectMany(t => t))
             Assert.Contains(tool, PgTargetToolRecommendations.AllToolNames);
     }
 
@@ -216,7 +216,7 @@ public sealed class InvestigationBriefComposerTests
             if (fetch is not null) Assert.Contains(fetch, registered);
         }
 
-        foreach (var tool in InvestigationBriefComposer.SqlServerFamilyCalls.Values.Concat(InvestigationBriefComposer.PostgresFamilyCalls.Values).SelectMany(t => t))
+        foreach (var tool in DarlingInvestigationBriefTools.SqlServerFamilyCalls.Values.Concat(DarlingInvestigationBriefTools.PostgresFamilyCalls.Values).SelectMany(t => t))
             Assert.Contains(tool, registered);
     }
 
@@ -228,7 +228,7 @@ public sealed class InvestigationBriefComposerTests
         var bigQuery = "SELECT " + new string('x', 5_000);
         var alerts = Enumerable.Range(0, 40).Select(i => Alert(Now.AddMinutes(-i), bigQuery)).ToList();
         var reports = Enumerable.Range(0, 60).Select(i => Report(i * 60, new string('r', 900))).ToList();
-        var json = InvestigationBriefComposer.Compose(Sources(alerts: alerts, reports: reports), McpDataDetail.Full, Now);
+        var json = InvestigationBriefComposer.Compose(Sources(alerts: alerts, reports: reports), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
 
         Assert.True(json.Length <= InvestigationBriefComposer.TotalCharCap, json.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
         var brief = JsonNode.Parse(json)!.AsObject();
@@ -261,7 +261,7 @@ public sealed class InvestigationBriefComposerTests
         var head = new string('a', keepAt - emojiStartBeforeCut);
         var text = head + Emoji + new string('z', 500);
         var json = InvestigationBriefComposer.Compose(
-            Sources(notes: new[] { new InvestigationBriefNote(LoginCanary, "dba-lead", Now.AddDays(30), text) }), McpDataDetail.Full, Now);
+            Sources(notes: new[] { new InvestigationBriefNote(LoginCanary, "dba-lead", Now.AddDays(30), text) }), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
 
         var brief = JsonNode.Parse(json)!.AsObject();
         var cut = (string)brief["notes"]![0]!["text"]!;
@@ -276,7 +276,7 @@ public sealed class InvestigationBriefComposerTests
     [Fact]
     public void Full_ChangesNothing()
     {
-        var json = InvestigationBriefComposer.Compose(Sources(), McpDataDetail.Full, Now);
+        var json = InvestigationBriefComposer.Compose(Sources(), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
         Assert.Contains(LiteralCanary, json, StringComparison.Ordinal);
         Assert.Contains(LoginCanary, json, StringComparison.Ordinal);
         Assert.Contains(HostCanary, json, StringComparison.Ordinal);
@@ -286,7 +286,7 @@ public sealed class InvestigationBriefComposerTests
     [Fact]
     public void MaskLiterals_ReplacesLiterals_KeepsLoginsAndHosts()
     {
-        var json = InvestigationBriefComposer.Compose(Sources(), McpDataDetail.MaskLiterals, Now);
+        var json = InvestigationBriefComposer.Compose(Sources(), DarlingInvestigationBriefTools.Tools, McpDataDetail.MaskLiterals, Now);
         var brief = JsonNode.Parse(json)!.AsObject();
         Assert.Equal("maskLiterals", (string?)brief["data_detail"]);
         Assert.DoesNotContain(LiteralCanary, json, StringComparison.Ordinal);
@@ -299,7 +299,7 @@ public sealed class InvestigationBriefComposerTests
     [Fact]
     public void MetadataOnly_WithholdsStatements_MasksLoginsAndHosts_KeepsNames()
     {
-        var json = InvestigationBriefComposer.Compose(Sources(), McpDataDetail.MetadataOnly, Now);
+        var json = InvestigationBriefComposer.Compose(Sources(), DarlingInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, Now);
         var brief = JsonNode.Parse(json)!.AsObject();
         Assert.Equal("metadataOnly", (string?)brief["data_detail"]);
         Assert.DoesNotContain(LiteralCanary, json, StringComparison.Ordinal);
@@ -326,7 +326,7 @@ public sealed class InvestigationBriefComposerTests
                 new InvestigationBriefRemediationTarget("SalesDb", 42, 7, false, new[] { "parameter_sensitivity_cofired" }, "2 plans in 24 hours"),
             }),
             Array.Empty<InvestigationNextCall>());
-        var json = InvestigationBriefComposer.Compose(Sources(findings: new[] { finding }), mode, Now);
+        var json = InvestigationBriefComposer.Compose(Sources(findings: new[] { finding }), DarlingInvestigationBriefTools.Tools, mode, Now);
         var brief = JsonNode.Parse(json)!.AsObject();
 
         var f = brief["findings"]![0]!;
@@ -373,7 +373,7 @@ public sealed class InvestigationBriefComposerTests
                 }),
             });
         var sources = Sources(alerts: new[] { Alert(Now.AddMinutes(-20)), other });
-        var json = InvestigationBriefComposer.Compose(sources, McpDataDetail.MetadataOnly, Now);
+        var json = InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, Now);
         var brief = JsonNode.Parse(json)!.AsObject();
 
         Assert.DoesNotContain(LoginCanary, json, StringComparison.Ordinal);
@@ -394,12 +394,12 @@ public sealed class InvestigationBriefComposerTests
     public async Task ComposeAsync_UsesTheConfiguredLevel_AndAnswersNullForAnUnknownRequest()
     {
         var setting = new McpDataDetailSetting(McpDataDetail.MetadataOnly);
-        var composer = new InvestigationBriefComposer(new FakeReader(Sources()), setting, () => Now);
+        var composer = new InvestigationBriefComposer(new FakeReader(Sources()), setting, DarlingInvestigationBriefTools.Tools, () => Now);
         var json = await composer.ComposeAsync(Guid.NewGuid());
         Assert.NotNull(json);
         Assert.Equal("metadataOnly", (string?)JsonNode.Parse(json!)!["data_detail"]);
 
-        var none = new InvestigationBriefComposer(new FakeReader(null), setting, () => Now);
+        var none = new InvestigationBriefComposer(new FakeReader(null), setting, DarlingInvestigationBriefTools.Tools, () => Now);
         Assert.Null(await none.ComposeAsync(Guid.NewGuid()));
     }
 

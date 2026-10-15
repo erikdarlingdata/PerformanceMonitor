@@ -59,7 +59,7 @@ public sealed class InvestigationToolsLiveTests
         await RunAsync(async (store, dataSource, connection, ct) =>
         {
             var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
-            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full));
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
 
             var answer = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct));
 
@@ -79,7 +79,7 @@ public sealed class InvestigationToolsLiveTests
         await RunAsync(async (store, dataSource, connection, ct) =>
         {
             var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
-            var composer = new InvestigationBriefComposer(new FailingReader(), new McpDataDetailSetting(McpDataDetail.Full));
+            var composer = new InvestigationBriefComposer(new FailingReader(), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
 
             for (var attempt = 0; attempt < 2; attempt++)
             {
@@ -101,7 +101,7 @@ public sealed class InvestigationToolsLiveTests
         await RunAsync(async (store, dataSource, connection, ct) =>
         {
             var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
-            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full));
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
 
             var answers = await Task.WhenAll(
                 Task.Run(() => DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct), ct),
@@ -124,7 +124,7 @@ public sealed class InvestigationToolsLiveTests
         {
             var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
             var id = openedId.ToString();
-            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full));
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
             var lapse = $"UPDATE config.investigation_requests SET lease_until = now() - interval '1 minute' WHERE request_id = '{id}'";
 
             var first = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct));
@@ -167,7 +167,7 @@ public sealed class InvestigationToolsLiveTests
         {
             var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
             await store.OpenOrJoinAsync(Alert("resources"), ct);
-            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full));
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
             await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct);
             /* A lapsed lease reads open without a write: the row versions and the journal must not move. */
             await ExecAsync(connection,
@@ -201,7 +201,7 @@ public sealed class InvestigationToolsLiveTests
         {
             var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
             var id = openedId.ToString();
-            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full));
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
             var claim = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct));
 
             var answer = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claim.GetProperty("claim_id").GetString()!, 1,

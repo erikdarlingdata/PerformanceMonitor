@@ -150,13 +150,13 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
 
             /* R3: the brief composed from this store. Under full the literals are there (the control); under maskLiterals and
                metadataOnly no section, the earlier report's included, still carries one. */
-            string? full = await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.Full), () => Now)
+            string? full = await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools, () => Now)
                 .ComposeAsync(requestId, ct);
             Assert.Contains(StatementFilterCensus.LiteralCanary, full, StringComparison.Ordinal);
             Assert.Contains(StatementFilterCensus.NumericCanary, full, StringComparison.Ordinal);
             foreach (var mode in new[] { McpDataDetail.MaskLiterals, McpDataDetail.MetadataOnly })
             {
-                string? brief = await new InvestigationBriefComposer(reader, new McpDataDetailSetting(mode), () => Now)
+                string? brief = await new InvestigationBriefComposer(reader, new McpDataDetailSetting(mode), DarlingInvestigationBriefTools.Tools, () => Now)
                     .ComposeAsync(requestId, ct);
                 Assert.NotNull(brief);
                 Assert.DoesNotContain(StatementFilterCensus.LiteralCanary, brief, StringComparison.Ordinal);
@@ -188,7 +188,7 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
             Assert.Empty(sources.Profiles);
 
             Assert.Null(await reader.ReadAsync(Guid.NewGuid(), ct));
-            Assert.NotNull(await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.MetadataOnly), () => Now)
+            Assert.NotNull(await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.MetadataOnly), DarlingInvestigationBriefTools.Tools, () => Now)
                 .ComposeAsync(requestId, ct));
         });
     }

@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace PerformanceMonitor.Darling.Service.Investigations;
+namespace PerformanceMonitor.Common;
 
 /// <summary>The request a brief is about (#5632 Phase A). Every time is UTC.</summary>
 public sealed record InvestigationBriefRequest(

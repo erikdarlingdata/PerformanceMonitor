@@ -5,18 +5,8 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
-using PerformanceMonitor.Common;
-using PerformanceMonitor.Darling.Service.Mcp;
-using PerformanceMonitor.Notifications;
 
-namespace PerformanceMonitor.Darling.Service.Investigations;
-
-/// <summary>Reads the sources of one brief from the store; null when no request has that id.</summary>
-public interface IInvestigationBriefSourceReader
-{
-    /// <summary>The sources for <paramref name="requestId"/>, each list in priority order; null when the request does not exist.</summary>
-    Task<InvestigationBriefSources?> ReadAsync(Guid requestId, CancellationToken cancellationToken = default);
-}
+namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// Composes a Level 1 investigation brief (#5632 Phase A, plan sections 5 and 7, ruling R3): the request, its alerts with
@@ -69,43 +59,21 @@ public sealed class InvestigationBriefComposer
         ("recent_changes", 2_000, "get_mute_rules"),
     };
 
-    /// <summary>The first calls per family on a SQL Server target. Every name is in <see cref="ToolRecommendations.AllToolNames"/>.</summary>
-    internal static readonly IReadOnlyDictionary<string, string[]> SqlServerFamilyCalls = new Dictionary<string, string[]>(StringComparer.Ordinal)
-    {
-        [InvestigationFamily.Blocking] = new[] { "get_blocking", "get_blocking_trend", "get_deadlocks" },
-        [InvestigationFamily.QueryPerformance] = new[] { "get_active_queries", "get_top_queries_by_cpu", "get_query_store_top" },
-        [InvestigationFamily.Resources] = new[] { "get_cpu_utilization", "get_memory_stats", "get_wait_stats", "get_file_io_stats" },
-        [InvestigationFamily.Availability] = new[] { "get_ag_health", "get_wait_stats" },
-        [InvestigationFamily.Jobs] = new[] { "get_running_jobs" },
-        [InvestigationFamily.SelfMonitor] = new[] { "get_wait_stats" },
-        [InvestigationFamily.Other] = new[] { "get_wait_stats", "get_active_queries" },
-    };
-
-    /// <summary>The first calls per family on a PostgreSQL target. Every name is in <see cref="PgTargetToolRecommendations.AllToolNames"/>.</summary>
-    internal static readonly IReadOnlyDictionary<string, string[]> PostgresFamilyCalls = new Dictionary<string, string[]>(StringComparer.Ordinal)
-    {
-        [InvestigationFamily.Blocking] = new[] { "get_pg_blocking", "get_pg_lock_stats" },
-        [InvestigationFamily.QueryPerformance] = new[] { "get_pg_top_queries", "get_pg_query_duration_trend" },
-        [InvestigationFamily.Resources] = new[] { "get_pg_cpu_utilization", "get_pg_wait_stats", "get_pg_io_stats" },
-        [InvestigationFamily.Availability] = new[] { "get_pg_replication_stats", "get_pg_replication_slots" },
-        [InvestigationFamily.Jobs] = new[] { "get_pg_wait_stats" },
-        [InvestigationFamily.SelfMonitor] = new[] { "get_pg_wait_stats" },
-        [InvestigationFamily.Other] = new[] { "get_pg_wait_stats", "get_pg_top_queries" },
-    };
-
-    /// <summary>The only tools a brief may name in <c>next_calls</c>: the analysis recommendation tables, both engines.</summary>
-    internal static IReadOnlyCollection<string> NameableTools { get; } =
-        new HashSet<string>(ToolRecommendations.AllToolNames.Concat(PgTargetToolRecommendations.AllToolNames), StringComparer.Ordinal);
-
     private readonly IInvestigationBriefSourceReader _reader;
     private readonly McpDataDetailSetting _dataDetail;
+    private readonly InvestigationBriefTools _tools;
     private readonly Func<DateTime> _utcNow;
 
-    /// <summary>A composer over <paramref name="reader"/>, masking at <paramref name="dataDetail"/>'s level as it is when composing.</summary>
-    public InvestigationBriefComposer(IInvestigationBriefSourceReader reader, McpDataDetailSetting dataDetail, Func<DateTime>? utcNow = null)
+    /// <summary>
+    /// A composer over <paramref name="reader"/>, masking at <paramref name="dataDetail"/>'s level as it is when composing,
+    /// naming only <paramref name="tools"/>' tools in <c>next_calls</c>.
+    /// </summary>
+    public InvestigationBriefComposer(
+        IInvestigationBriefSourceReader reader, McpDataDetailSetting dataDetail, InvestigationBriefTools tools, Func<DateTime>? utcNow = null)
     {
         _reader = reader ?? throw new ArgumentNullException(nameof(reader));
         _dataDetail = dataDetail ?? throw new ArgumentNullException(nameof(dataDetail));
+        _tools = tools ?? throw new ArgumentNullException(nameof(tools));
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
@@ -119,13 +87,17 @@ public sealed class InvestigationBriefComposer
     public async Task<string?> ComposeAsync(Guid requestId, CancellationToken cancellationToken = default)
     {
         var sources = await _reader.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
-        return sources is null ? null : Compose(sources, _dataDetail.Mode, _utcNow());
+        return sources is null ? null : Compose(sources, _tools, _dataDetail.Mode, _utcNow());
     }
 
-    /// <summary>Composes the brief for <paramref name="sources"/> at <paramref name="mode"/>. Pure: no store, no clock.</summary>
-    public static string Compose(InvestigationBriefSources sources, McpDataDetail mode, DateTime composedAtUtc)
+    /// <summary>
+    /// Composes the brief for <paramref name="sources"/> at <paramref name="mode"/>, naming only <paramref name="tools"/>' tools.
+    /// Pure: no store, no clock.
+    /// </summary>
+    public static string Compose(InvestigationBriefSources sources, InvestigationBriefTools tools, McpDataDetail mode, DateTime composedAtUtc)
     {
         ArgumentNullException.ThrowIfNull(sources);
+        ArgumentNullException.ThrowIfNull(tools);
         var request = sources.Request;
         var cut = new CutCounter();
         // One masker for the whole brief: one login#n and host#n numbering across every alert, note and field.
@@ -135,7 +107,7 @@ public sealed class InvestigationBriefComposer
         {
             ["alerts"] = sources.Alerts.Select(a => AlertNode(a, masker, cut)).ToList(),
             ["findings"] = sources.Findings.Select(f => FindingNode(f, masker, cut)).ToList(),
-            ["next_calls"] = NextCalls(request, sources.Findings).Select(c => NextCallNode(c, cut)).ToList(),
+            ["next_calls"] = NextCalls(request, sources.Findings, tools).Select(c => NextCallNode(c, cut)).ToList(),
             ["notes"] = sources.Notes.Select(n => NoteNode(n, masker, cut)).ToList(),
             ["environment_profile"] = sources.Profiles.Select(p => Masked(new JsonObject
             {
@@ -231,17 +203,19 @@ public sealed class InvestigationBriefComposer
 
     /// <summary>
     /// The calls to make next: the family's first calls for the server's engine, then each finding's own <c>next_tools</c>,
-    /// each tool once, and only tools in <see cref="NameableTools"/>. Every call carries the server name.
+    /// each tool once, and only tools in <see cref="InvestigationBriefTools.NameableTools"/>. Every call carries the server name.
     /// </summary>
-    internal static IReadOnlyList<InvestigationNextCall> NextCalls(InvestigationBriefRequest request, IReadOnlyList<InvestigationBriefFinding> findings)
+    internal static IReadOnlyList<InvestigationNextCall> NextCalls(
+        InvestigationBriefRequest request, IReadOnlyList<InvestigationBriefFinding> findings, InvestigationBriefTools tools)
     {
-        var table = request.IsPostgres ? PostgresFamilyCalls : SqlServerFamilyCalls;
+        var table = tools.FamilyCalls(request.IsPostgres);
+        var nameable = tools.NameableTools;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var calls = new List<InvestigationNextCall>();
 
         void Add(string tool, IReadOnlyDictionary<string, string>? arguments, string why)
         {
-            if (!NameableTools.Contains(tool) || !seen.Add(tool)) return;
+            if (!nameable.Contains(tool) || !seen.Add(tool)) return;
             var merged = new Dictionary<string, string>(StringComparer.Ordinal) { ["server_name"] = request.ServerName };
             if (arguments is not null)
             {

@@ -79,7 +79,7 @@ public sealed class InvestigationContractLiveTests
 
             /* The canaries are in the brief's source: composed at full, the brief holds them. */
             string fullBrief = (await new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(h.Source),
-                new McpDataDetailSetting(McpDataDetail.Full)).ComposeAsync(Guid.Parse(requestId), ct))!;
+                new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools).ComposeAsync(Guid.Parse(requestId), ct))!;
             Assert.Contains(LiteralCanary, fullBrief, StringComparison.Ordinal);
             Assert.Contains(NumberCanary, fullBrief, StringComparison.Ordinal);
 

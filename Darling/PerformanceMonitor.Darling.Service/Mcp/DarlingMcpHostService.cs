@@ -1166,7 +1166,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger));
         services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
-            sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full)));
+            sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
+            DarlingInvestigationBriefTools.Tools));
 
         /* #5822: wait_for_investigation_requests waits on the signal the worker's dispatcher fires when a request opens, a
            service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
