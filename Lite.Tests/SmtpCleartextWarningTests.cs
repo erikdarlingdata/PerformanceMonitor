@@ -42,7 +42,7 @@ public sealed class SmtpCleartextWarningTests
     }
 
     [Theory]
-    [InlineData("Lite/Windows/SettingsWindow.xaml.cs", "SaveButton_Click", "ConfirmCleartextSmtp(\"Save\"")]
+    [InlineData("Lite/Windows/SettingsWindow.xaml.cs", "SaveCoreAsync", "ConfirmCleartextSmtp(\"Save\"")] // #5846: SaveButton_Click awaits SaveCoreAsync
     [InlineData("Lite/Windows/SettingsWindow.xaml.cs", "TestEmailButton_Click", "ConfirmCleartextSmtp(\"Send\"")]
     [InlineData("Lite/Windows/SettingsWindow.xaml.cs", "ValidateSmtpButton_Click", "CleartextSmtpWarning(")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/SettingsWindow.xaml.cs", "SaveButton_Click", "ConfirmCleartextSmtp(\"Save\"")]
@@ -69,6 +69,11 @@ public sealed class SmtpCleartextWarningTests
     private static string MethodBody(string source, string name)
     {
         var declaration = source.IndexOf(name + "(object sender", System.StringComparison.Ordinal);
+        if (declaration < 0)
+        {
+            /* #5846: Lite's Save button now awaits SaveCoreAsync, which takes no sender. */
+            declaration = source.IndexOf("Task " + name + "()", System.StringComparison.Ordinal);
+        }
         Assert.True(declaration >= 0, $"{name} was not found");
 
         var open = source.IndexOf('{', declaration);

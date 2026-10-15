@@ -75,6 +75,88 @@ public partial class SettingsWindow : Window
         LoadAlertSettings();
         LoadSmtpSettings();
         LoadWebhookSettings();
+        SelectTabByName(App.SettingsWindowTab);
+    }
+
+    // ── Tabs (#5846) ──
+
+    /// <summary>The tab that holds <paramref name="element"/>, or null for the window-wide parts (the title, Save and
+    /// Close). Walks the LOGICAL tree: a tab that is not selected keeps its content as a logical child, while that
+    /// content is out of the visual tree.</summary>
+    internal static TabItem? TabOf(DependencyObject? element)
+    {
+        for (var node = element; node is not null; node = LogicalTreeHelper.GetParent(node))
+        {
+            if (node is TabItem tab)
+            {
+                return tab;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>The invalid values the Save in progress found, across every writer that checks one. Each writer's
+    /// own dialog still names its problem; when Save is done, the first of these tabs (left to right) is opened.</summary>
+    private SettingsValidationErrors _saveErrors = new();
+
+    /// <summary>Records an invalid value for this Save and opens its tab, so the dialog that follows is about a field
+    /// the operator can see.</summary>
+    private void NoteInvalid(string message, DependencyObject source)
+    {
+        _saveErrors.Add(message, source);
+        if (TabOf(source) is { } tab)
+        {
+            SettingsTabs.SelectedItem = tab;
+        }
+    }
+
+    /// <summary>Opens the first tab, in tab order, that holds a control with an invalid value, and returns it (null
+    /// when no error sits on a tab). Tab order, not the order Save checked the fields in, so the operator starts from
+    /// the left.</summary>
+    internal TabItem? SelectFirstTabWithError(SettingsValidationErrors errors)
+    {
+        var first = errors.Sources
+            .Select(TabOf)
+            .OfType<TabItem>()
+            .OrderBy(tab => SettingsTabs.Items.IndexOf(tab))
+            .FirstOrDefault();
+        if (first is not null)
+        {
+            SettingsTabs.SelectedItem = first;
+        }
+        return first;
+    }
+
+    /// <summary>Each message prefixed with the name of the tab its field is on.</summary>
+    private static IEnumerable<string> DescribeErrors(SettingsValidationErrors errors) =>
+        errors.Messages.Zip(errors.Sources, (message, source) =>
+            TabOf(source) is { } tab ? $"{tab.Header}: {message}" : message);
+
+    private void SelectTabByName(string? name)
+    {
+        var tab = SettingsTabs.Items.OfType<TabItem>().FirstOrDefault(t => t.Name == name);
+        if (tab is not null)
+        {
+            SettingsTabs.SelectedItem = tab;
+        }
+    }
+
+    /// <summary>Writes one settings.json key for the remembered tab. A seam so a test can keep the write off the
+    /// real settings file; the app writes it the way the overview sort is kept (<see cref="App.WriteSetting"/>).</summary>
+    internal Action<string> PersistSelectedTab { get; set; } =
+        name => App.WriteSetting("settings window tab", root => root["settings_window_tab"] = name);
+
+    /// <summary>Keeps the open tab (#5846) so the window reopens on it. Runs on close, and writes only on a change.</summary>
+    internal void RememberSelectedTab()
+    {
+        var current = (SettingsTabs.SelectedItem as TabItem)?.Name ?? "";
+        if (App.SettingsWindowTab == current)
+        {
+            return;
+        }
+        App.SettingsWindowTab = current;
+        /* A failed write only means the window opens on another tab next time; WriteSetting logs why. */
+        PersistSelectedTab(current);
     }
 
     private void LoadServerScheduleSummary()
@@ -277,6 +359,21 @@ public partial class SettingsWindow : Window
     /// </summary>
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
+        _saveErrors = new SettingsValidationErrors();
+        try
+        {
+            await SaveCoreAsync();
+        }
+        finally
+        {
+            /* #5846: each writer's dialog opened its own field's tab; once they are all answered, land on the
+               leftmost tab with a problem, the way the operator reads the tab strip. */
+            SelectFirstTabWithError(_saveErrors);
+        }
+    }
+
+    private async Task SaveCoreAsync()
+    {
         _credentialFailures.Clear();
         _webhookValueHeld = false;
 
@@ -436,6 +533,7 @@ public partial class SettingsWindow : Window
         if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var gb)
             || !DuckDbMemoryLimitSetting.IsInRange(gb, physical))
         {
+            NoteInvalid("DuckDB memory limit", DuckDbMemoryLimitBox);
             MessageBox.Show(
                 $"The DuckDB memory limit must be {DuckDbMemoryLimitSetting.RangeText(physical)}. "
                 + $"\"{DuckDbMemoryLimitBox.Text}\" was not saved; the other settings were.",
@@ -466,6 +564,7 @@ public partial class SettingsWindow : Window
             {
                 if (newPort < 1024 || newPort > IPEndPoint.MaxPort)
                 {
+                    NoteInvalid("MCP port", McpPortTextBox);
                     MessageBox.Show(
                         $"MCP port must be between 1024 and {IPEndPoint.MaxPort}.\nPorts 0–1023 are well-known privileged ports reserved by the operating system.",
                         "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -477,6 +576,7 @@ public partial class SettingsWindow : Window
                 bool canBind = await PortUtilityService.CanBindTcpPortAsync(newPort, IPAddress.Loopback);
                 if (!canBind)
                 {
+                    NoteInvalid("MCP port", McpPortTextBox);
                     MessageBox.Show(
                         $"Port {newPort} is already in use. Choose a different port for the MCP server.",
                         "Port Conflict", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -498,6 +598,7 @@ public partial class SettingsWindow : Window
 
             if (!portValid)
             {
+                NoteInvalid("MCP port", McpPortTextBox);
                 MessageBox.Show(
                     "MCP port failed validation - must be a valid TCP port number.\nOther MCP settings were saved.",
                     "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -797,7 +898,33 @@ public partial class SettingsWindow : Window
     /// </summary>
     private bool SaveAlertSettings(JsonNode root)
     {
-        var validationErrors = new List<string>();
+        var validationErrors = new SettingsValidationErrors();
+        ApplyAlertSettings(root, validationErrors);
+
+        if (validationErrors.Count > 0)
+        {
+            foreach (var (message, source) in validationErrors.Messages.Zip(validationErrors.Sources))
+            {
+                _saveErrors.Add(message, source);
+            }
+            /* #5846: the field may sit on a tab that is not showing. Open the first tab holding one, and name each
+               message's tab, so the warning never points at a page the operator cannot see. */
+            SelectFirstTabWithError(validationErrors);
+            MessageBox.Show(
+                "Some alert settings have invalid values and were not changed:\n\n" +
+                string.Join("\n", DescribeErrors(validationErrors)),
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Applies the alert and analysis controls to <see cref="App"/> and <paramref name="root"/>, adding each
+    /// value it refuses to <paramref name="validationErrors"/> with the control it came from (a refused value keeps
+    /// its stored one).</summary>
+    internal void ApplyAlertSettings(JsonNode root, SettingsValidationErrors validationErrors)
+    {
         App.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         App.AlertsEnabled = AlertsEnabledCheckBox.IsChecked == true;
         App.NotifyConnectionChanges = NotifyConnectionCheckBox.IsChecked == true;
@@ -842,7 +969,7 @@ public partial class SettingsWindow : Window
         }
         else
         {
-            validationErrors.AddRange(queueErrors);
+            validationErrors.AddRange(queueErrors, AlertRunnableQueueWarningBox);
         }
         /* #5640: the Client Timeouts pair, the same both-or-neither check (ClientTimeoutsBarsInput), whatever the switch says. */
         App.AlertClientTimeoutsEnabled = AlertClientTimeoutsCheckBox.IsChecked == true;
@@ -856,7 +983,7 @@ public partial class SettingsWindow : Window
         }
         else
         {
-            validationErrors.AddRange(timeoutErrors);
+            validationErrors.AddRange(timeoutErrors, AlertClientTimeoutsWarningBox);
         }
         App.AlertLongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
@@ -909,16 +1036,16 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
             App.AlertCooldownMinutes = alertCooldown;
         else
-            validationErrors.Add("Tray notification cooldown must be between 1 and 120 minutes.");
+            validationErrors.Add("Tray notification cooldown must be between 1 and 120 minutes.", AlertCooldownBox);
         if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown >= 1 && emailCooldown <= 120)
             App.EmailCooldownMinutes = emailCooldown;
         else
-            validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.");
+            validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.", EmailCooldownBox);
         App.AlertDeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? AlertNotificationMode.PerEvent : AlertNotificationMode.Summary;
         if (int.TryParse(AlertPerEventMaxBox.Text, out var perEventMax) && perEventMax >= 1 && perEventMax <= 100)
             App.AlertPerEventMaxPerCycle = perEventMax;
         else
-            validationErrors.Add("Per-event max-per-cycle must be between 1 and 100.");
+            validationErrors.Add("Per-event max-per-cycle must be between 1 and 100.", AlertPerEventMaxBox);
         App.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
         App.LogAlertDismissals = LogAlertDismissalsCheckBox.IsChecked == true;
         App.AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true;
@@ -927,19 +1054,19 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AnalysisIntervalBox.Text, out var analysisInterval) && analysisInterval >= 5 && analysisInterval <= 360)
             App.AnalysisIntervalMinutes = analysisInterval;
         else
-            validationErrors.Add("Analysis interval must be between 5 and 360 minutes.");
+            validationErrors.Add("Analysis interval must be between 5 and 360 minutes.", AnalysisIntervalBox);
         if (double.TryParse(AnalysisNotifySeverityBox.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var analysisSeverity)
             && analysisSeverity >= 0.0 && analysisSeverity <= 2.0)
             App.AnalysisNotifySeverity = analysisSeverity;
         else
-            validationErrors.Add("Analysis notify severity must be between 0.0 and 2.0.");
+            validationErrors.Add("Analysis notify severity must be between 0.0 and 2.0.", AnalysisNotifySeverityBox);
         /* Same range App.LoadAlertSettings clamps this key to on read, so the value the box accepts and the
            value the next launch honors can never disagree -- Lite's settings adapter passes the static
            straight through to AnalysisNotificationService without a second clamp. */
         if (int.TryParse(AnalysisNotifyCooldownBox.Text, out var analysisCooldown) && analysisCooldown >= 30 && analysisCooldown <= 10080)
             App.AnalysisNotifyCooldownMinutes = analysisCooldown;
         else
-            validationErrors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
+            validationErrors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.", AnalysisNotifyCooldownBox);
         /* #3712: the checkbox IS the route — no third state, so no validation arm. */
         App.AnalysisUncorroboratedRoute = AnalysisUncorroboratedDigestCheckBox.IsChecked == true
             ? FindingRoute.Digest
@@ -1020,17 +1147,6 @@ public partial class SettingsWindow : Window
         root["analysis_notify_cooldown_minutes"] = App.AnalysisNotifyCooldownMinutes;
         /* #3712: persisted as its wire spelling ('digest' / 'page'), the one App.LoadAlertSettings parses back. */
         root["analysis_uncorroborated_route"] = App.AnalysisUncorroboratedRoute.ToWireText();
-
-        if (validationErrors.Count > 0)
-        {
-            MessageBox.Show(
-                "Some alert settings have invalid values and were not changed:\n\n" +
-                string.Join("\n", validationErrors),
-                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return false;
-        }
-
-        return true;
     }
 
     private void AlertsEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -1513,6 +1629,7 @@ public partial class SettingsWindow : Window
 
             if (configError != null)
             {
+                NoteInvalid(configError, GenericWebhookHeadersBox);
                 MessageBox.Show(
                     $"The generic webhook is enabled but its configuration is not valid, so it will not deliver alerts:\n\n{configError}",
                     "Generic Webhook", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -1757,6 +1874,8 @@ public partial class SettingsWindow : Window
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
+        RememberSelectedTab();
+
         if (!_saved)
             ThemeManager.Apply(_originalTheme);
         base.OnClosing(e);
