@@ -13,10 +13,12 @@ using System.Data;
 using System.Data.Common;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
@@ -121,7 +123,42 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         Assert.Equal(watermark, reads.Single(r => r.Database == Alpha).Cutoff);
     }
 
-    private sealed record Fixture(RemoteCollectorService Service, ServerConnection Server, int ServerId, DuckDbInitializer DuckDb);
+    /// <summary>
+    /// #5813 review, Darling's twin: the run stores the timed-out database under its plain name, and get_collection_health
+    /// adds the words from its budget-sized cost. The run here is cut at the test's 1 s budget, so its row is moved to the
+    /// production budget's 30,000 ms (the one fact the renderer reads) before the tool reads it.
+    /// </summary>
+    [Fact]
+    public async Task CollectionHealth_SaysTheTimedOutDatabaseTimedOut_WhileTheStoredNameStaysPlain()
+    {
+        var fixture = await BuildFixtureAsync();
+        await SeedAsync(fixture, Alpha);
+        Serve(fixture, slow: Alpha, Alpha, Zeta);
+
+        await fixture.Service.RunCollectorAsync(fixture.Server, QueryStoreCollector.Instance.Name, CancellationToken.None);
+        Assert.Equal(Alpha, (await NewestLogRowAsync(fixture)).SlowestItem);
+
+        using (var connection = fixture.DuckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE collection_log SET slowest_item_ms = 30000, duration_ms = 31000 "
+                + "WHERE server_id = $1 AND collector_name = 'query_store'";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = fixture.ServerId });
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+
+        var json = await McpHealthTools.GetCollectionHealth(
+            new LocalDataService(fixture.DuckDb), fixture.Servers, fixture.Server.DisplayName, full_detail: true);
+        using var document = JsonDocument.Parse(json);
+        var queryStore = document.RootElement.GetProperty("collectors").EnumerateArray()
+            .Single(r => r.GetProperty("collector").GetString() == QueryStoreCollector.Instance.Name);
+        var fanout = queryStore.GetProperty("fanout");
+        Assert.Equal(Alpha + QueryStoreReadBudget.TimedOutMarker, fanout.GetProperty("slowest").GetString());
+        Assert.Equal(30_000, fanout.GetProperty("slowest_ms").GetInt32());
+    }
+
+    private sealed record Fixture(RemoteCollectorService Service, ServerConnection Server, int ServerId, DuckDbInitializer DuckDb, ServerManager Servers);
 
     /// <summary>
     /// Lists <paramref name="databases"/>; each read records the database and the runtime-stats cutoff it was asked
@@ -212,7 +249,7 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         {
             QueryStoreReadBudgetSpan = Budget,
         };
-        return new Fixture(service, server, RemoteCollectorService.GetServerId(server), duckDb);
+        return new Fixture(service, server, RemoteCollectorService.GetServerId(server), duckDb, serverManager);
     }
 
     /// <summary>The runtime-stats read that never answers: its first row waits until its token is cancelled.</summary>
