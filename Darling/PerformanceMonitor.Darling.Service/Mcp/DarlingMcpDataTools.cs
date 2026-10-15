@@ -2895,9 +2895,10 @@ public sealed class DarlingMcpDataTools
                 truncation_note = notice.TruncationNote,
                 /* #5735, twin of Lite's #5731: a collector RUN is a row a collector wrote. The log page also shows the loop's own
                    collection_cycle/SKIPPED rows (CollectionCycleRow: a late cycle's skipped slots; filterable with status = SKIPPED),
-                   which are not runs, so they are counted in skipped_cycle_rows and not here. The returned-time span fields below
+                   which are not runs, so they are counted in skipped_cycle_rows and not here. #5824: nor is the analysis pass's
+                   analysis_pass row, which the page shows and neither count holds. The returned-time span fields below
                    describe the PAGE, cycle rows included. */
-                run_count = rows.Count(r => r.CollectorName != CollectionCycleRow.CollectorName),
+                run_count = rows.Count(r => CollectionCycleRow.IsCollectorRun(r.CollectorName)),
                 skipped_cycle_rows = rows.Count(r => r.CollectorName == CollectionCycleRow.CollectorName),
                 /* Observed by the over-fetch above, not inferred from the row count. */
                 truncated,
@@ -3099,8 +3100,8 @@ public sealed class DarlingMcpDataTools
                    shape does not have to infer it from a null/absent field. */
                 scope = "fleet",
                 hours_back,
-                /* #5735: collector runs only; the collection_cycle/SKIPPED rows the page also shows are counted apart. The returned-time span fields describe the page, cycle rows included. */
-                run_count = rows.Count(r => r.Entry.CollectorName != CollectionCycleRow.CollectorName),
+                /* #5735: collector runs only; the collection_cycle/SKIPPED rows the page also shows are counted apart. #5824: the analysis_pass rows are in neither count. The returned-time span fields describe the page, cycle rows included. */
+                run_count = rows.Count(r => CollectionCycleRow.IsCollectorRun(r.Entry.CollectorName)),
                 skipped_cycle_rows = rows.Count(r => r.Entry.CollectorName == CollectionCycleRow.CollectorName),
                 truncated,
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */

@@ -11433,11 +11433,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         /* #5824: the scheduled pass is recorded as one collection_log row (AnalysisPassRow), the only record of how long it
            held this server's fleet slot. The analyze_now command maps the outcome to its result instead and writes none. */
         DarlingAnalysisService? passService = null;
+        Task? passTask = null;
         var started = Stopwatch.GetTimestamp();
         var result = await RunAnalysisPassAsync(
             runtime.ServerId, runtime.StorageName, server.Config.DisplayName,
             planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken,
-            AnalysisSeparatelyMonitoredDatabases(runtime), service => passService = service);
+            AnalysisSeparatelyMonitoredDatabases(runtime), (service, task) => (passService, passTask) = (service, task));
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
         if (stoppingToken.IsCancellationRequested)
@@ -11445,8 +11446,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             return;
         }
 
-        /* A pass the sweep gave up on may still be running, so its read time is not read off the service then. */
-        var planRegressionMs = result.Status == AnalysisPassStatus.TimedOut ? null : passService?.LastPlanRegressionReadMs;
+        var planRegressionMs = PlanRegressionReadOfFinishedPass(passTask, () => passService?.LastPlanRegressionReadMs);
         var (status, detail) = DescribeAnalysisPass(
             result.Status, result.FindingCount, result.Message, elapsedMs, planRegressionMs, insideFleetSlot: true);
         await DarlingObservability.LogAnalysisPassAsync(
@@ -11491,6 +11491,16 @@ AND   j.hypertable_name = '{relation}'", connection))
         return (word, detail);
     }
 
+    /// <summary>
+    /// #5824: the PLAN_REGRESSION read time of a pass, read only once the pass's task has finished, because the service stamps
+    /// it in <c>AnalyzeAsync</c>'s <c>finally</c>. Keyed on the task, not on the status word: a pass that ran past its budget,
+    /// unwound and came back (status TimedOut, <c>EndedEarlyAs</c> Timeout) has finished and keeps its real figure; a pass the
+    /// sweep stopped waiting for may still be running, so its figure is null rather than whatever the pass has stamped so
+    /// far. A pass that never started (no task) is null too.
+    /// </summary>
+    internal static long? PlanRegressionReadOfFinishedPass(Task? passTask, Func<long?> read) =>
+        passTask is not null && passTask.IsCompleted ? read() : null;
+
     /// <summary>Terminal states of one analysis pass — surfaced to the analyze_now command result.</summary>
     internal enum AnalysisPassStatus { Ran, Skipped, TimedOut, InsufficientData, Error }
 
@@ -11517,7 +11527,7 @@ AND   j.hypertable_name = '{relation}'", connection))
         Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook,
         CancellationToken stoppingToken,
         IReadOnlyList<string>? separatelyMonitoredDatabases = null,
-        Action<DarlingAnalysisService>? onServiceCreated = null)
+        Action<DarlingAnalysisService, Task>? onPassStarted = null)
     {
         if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
         {
@@ -11534,7 +11544,6 @@ AND   j.hypertable_name = '{relation}'", connection))
             {
                 SeparatelyMonitoredDatabases = separatelyMonitoredDatabases
             };
-            onServiceCreated?.Invoke(analysisService);
 
             /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
                Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout
@@ -11574,6 +11583,9 @@ AND   j.hypertable_name = '{relation}'", connection))
                ContinueWith nor the call above throws, so there is no window in which the pass exists
                with nothing committed to cleaning up after it. */
             passStarted = true;
+            /* #5824: the scheduled caller reads the pass's PLAN_REGRESSION time off the service, and only once this task has
+               finished (PlanRegressionReadOfFinishedPass). */
+            onPassStarted?.Invoke(analysisService, analyzeTask);
 
             /* Wait the budget PLUS the unwind grace, so a pass that honours its cancellation is seen
                finishing here rather than racing this sweep's own timer. Losing that race now carries

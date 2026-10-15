@@ -294,7 +294,9 @@ internal static class DarlingCycleSkip
     /// <summary>
     /// The per-collector part of the message. Three names, largest first, while the counts set them apart. #5824: a tie is
     /// not a signal, so when every collector lost the same count the text says so instead of naming three in alphabetical
-    /// order, and when the third and fourth tie the list is given by count.
+    /// order, and when the third and fourth tie the list is given by count. The map holds the collectors that LOST a slot, not
+    /// every due one (<see cref="SkipCreditFloor"/> can leave a due collector's slots out), so the tie wording names only
+    /// those.
     /// </summary>
     internal static string TopText(IReadOnlyDictionary<string, long> perCollector)
     {
@@ -303,7 +305,7 @@ internal static class DarlingCycleSkip
             .ToList();
         if (ranked.Count > 1 && ranked[0].Value == ranked[^1].Value)
         {
-            return string.Create(CultureInfo.InvariantCulture, $"every due collector, {ranked[0].Value} slot(s) each");
+            return string.Create(CultureInfo.InvariantCulture, $"every collector that lost a slot, {ranked[0].Value} slot(s) each");
         }
 
         if (ranked.Count > 3 && ranked[2].Value == ranked[3].Value)

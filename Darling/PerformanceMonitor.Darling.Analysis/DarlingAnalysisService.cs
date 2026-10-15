@@ -208,7 +208,8 @@ public sealed class DarlingAnalysisService
     public int LastCollectionFamilyCount { get; private set; }
 
     /// <summary>#5824: the last pass's PLAN_REGRESSION read time in milliseconds (<see cref="AnalysisContext.PlanRegressionReadMs"/>);
-    /// null when the read did not run on that pass.</summary>
+    /// null when the read did not run on that pass. Set when the pass finishes, so it is meaningful only once the pass's task has
+    /// completed.</summary>
     public long? LastPlanRegressionReadMs { get; private set; }
 
     /// <summary>
@@ -770,7 +771,9 @@ public sealed class DarlingAnalysisService
         }
         finally
         {
-            /* #5824: read here, not after collection, so a pass that timed out or failed still reports the read time. */
+            /* #5824: stamped here, not after collection, so a pass that ran past its budget or failed, and then finished,
+               still reports the read time. The worker reads it only once this pass's task has completed
+               (DarlingWorker.PlanRegressionReadOfFinishedPass): a pass the sweep stopped waiting for has not reached this line. */
             LastPlanRegressionReadMs = context.PlanRegressionReadMs;
             IsAnalyzing = false;
         }

@@ -25,6 +25,13 @@ public static class CollectionCycleRow
     /// (<see cref="AnalysisPassRow"/>): <c>collector_name NOT IN ('collection_cycle', 'analysis_pass')</c>. A row's
     /// collector_name is NOT NULL.</summary>
     public const string NotCycleRowSql = "collector_name NOT IN ('" + CollectorName + "', '" + AnalysisPassRow.CollectorName + "')";
+
+    /// <summary>#5824: <see cref="NotCycleRowSql"/>'s twin for a count made in C# over a page already read (the
+    /// <c>run_count</c> of <c>get_collection_log</c>): true for a row a collector wrote, false for the skipped-slots row and
+    /// the analysis pass's row. The census grades SQL text and cannot see a C# count, so every such count goes through
+    /// this one predicate rather than its own comparison.</summary>
+    public static bool IsCollectorRun(string collectorName) =>
+        collectorName != CollectorName && collectorName != AnalysisPassRow.CollectorName;
 }
 
 /// <summary>
