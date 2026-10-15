@@ -65,8 +65,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// which is also correct for incident-free self-alerts. The service passes a resolver over its live server set.
     /// </param>
     /// <param name="investigationDispatcher">
-    /// #5632 Phase A: called after each history row is written, so an alert whose route sends it to an agent opens or joins
-    /// an investigation request. Optional: null (the default, and every test that predates it) dispatches nothing.
+    /// #5632 Phase A: called once per history row, so an alert whose route sends it to an agent opens or joins an
+    /// investigation request; since #5821 before the channels post, so the generic webhook can carry the request. Optional: null (the default, and every test that predates it) dispatches nothing.
     /// </param>
     public DarlingAlertDeliverer(
         DarlingAlertSettings settings,
@@ -220,6 +220,17 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
            once, whichever way the engine built the text; the context JSON below carries the typed field. */
         detailText = AlertDetailText.WithSampleAge(detailText, context);
 
+        /* #5632 Phase A: the row's time is stamped once, here, so the investigation link names this exact row.
+           #5821: the request is opened or joined BEFORE the channels post, so the generic webhook's {{investigation_json}}
+           can carry it; per row (a Per-event split comes through here once per incident). A muted alert, a report, a
+           recovery or an alert with no agent route opens nothing and waits on no store call; the dispatcher never throws. */
+        var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+        var investigationJson = _investigations is null
+            ? null
+            : await _investigations.OpenForWebhookAsync(
+                outcome.ServerKey, outcome.ServerName, outcome.MetricName, outcome.Muted, alertTimeUtc, context,
+                cancellationToken: cancellationToken);
+
         /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below.
            outcome.DisplayName (a custom rule's human name, or null for built-ins) renders in the
            subject/body/webhook titles in place of the "Custom:<id>" metric name; the metric name stays the
@@ -228,7 +239,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         var result = await _core.TrySendAsync(
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,
             outcome.ServerKey, context, attemptChannels: !outcome.Muted, detailText: detailText,
-            displayName: outcome.DisplayName, deliveryMode: deliveryMode, cancellationToken: cancellationToken);
+            displayName: outcome.DisplayName, deliveryMode: deliveryMode, cancellationToken: cancellationToken,
+            investigationJson: investigationJson);
 
         /* trayChannelPresent: false — this is the HEADLESS service. It has no tray icon and no toast
            code, so the taxonomy's "tray" fallback (which is Lite's, and truthful there) would assert a UI
@@ -258,7 +270,6 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
         string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
-        /* #5632 Phase A: the row's time is stamped here, so the investigation link row below names this exact row. */
         var record = new AlertHistoryRecord(
             outcome.ServerKey, outcome.ServerName, outcome.MetricName,
             currentValue, outcome.ThresholdValue,
@@ -266,15 +277,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             delivery,
             outcome.Muted, detailText, contextJson)
         {
-            AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+            AlertTimeUtc = alertTimeUtc,
         };
         await _historyStore.RecordAlertAsync(record);
-        /* #5632 Phase A: after the row, per row (a Per-event split comes through here once per incident). A muted row, a
-           report, a recovery or an alert with no agent route dispatches nothing; the dispatcher never throws. */
-        if (_investigations is not null)
-        {
-            await _investigations.DispatchAsync(record, context, cancellationToken: cancellationToken);
-        }
 
         return delivery;
     }

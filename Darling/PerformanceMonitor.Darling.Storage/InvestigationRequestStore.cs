@@ -824,6 +824,36 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     }
 
     /// <summary>
+    /// One request by id with its stored brief (#5821, the generic webhook's <c>{{investigation_json}}</c>), the state
+    /// computed as <see cref="ListAsync"/> computes it; null when no request has that id. The request half of
+    /// <see cref="ReadReportsAsync"/>, without its reports and journal. Writes nothing.
+    /// </summary>
+    public async Task<(InvestigationRequestRow Row, string? Brief)?> ReadRequestAsync(Guid requestId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, ReportsRequestsSql,
+            P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
+            new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, P(DateTime.MinValue), P(1));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return (ReportsRequestRow(reader), reader.IsDBNull(16) ? null : reader.GetString(16));
+    }
+
+    private static InvestigationRequestRow ReportsRequestRow(NpgsqlDataReader reader) => new(
+        reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
+        reader.GetString(5), reader.GetFieldValue<DateTime>(6), reader.GetFieldValue<DateTime>(7), reader.GetInt32(8),
+        reader.GetString(9), reader.GetFieldValue<DateTime>(10), reader.GetFieldValue<DateTime>(11),
+        reader.IsDBNull(12) ? null : reader.GetString(12),
+        reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
+        reader.GetInt32(14),
+        reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15));
+
+    /// <summary>
     /// Reads requests with their reports and journal (#5632 Phase A, <c>get_investigation_reports</c>): one request by id
     /// (then its stored brief too), or the requests opened since <paramref name="sinceUtc"/>, optionally on one server. The
     /// state is computed as <see cref="ListAsync"/> computes it. Writes nothing.
@@ -843,14 +873,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                requests.Add(new InvestigationRequestRow(
-                    reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
-                    reader.GetString(5), reader.GetFieldValue<DateTime>(6), reader.GetFieldValue<DateTime>(7), reader.GetInt32(8),
-                    reader.GetString(9), reader.GetFieldValue<DateTime>(10), reader.GetFieldValue<DateTime>(11),
-                    reader.IsDBNull(12) ? null : reader.GetString(12),
-                    reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
-                    reader.GetInt32(14),
-                    reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15)));
+                requests.Add(ReportsRequestRow(reader));
                 if (requestId is not null && !reader.IsDBNull(16))
                 {
                     brief = reader.GetString(16);

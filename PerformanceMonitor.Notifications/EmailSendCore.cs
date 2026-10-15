@@ -105,6 +105,10 @@ public sealed class EmailSendCore
     /// not a failed delivery, and the deliverer's shutdown path writes no history row for it. It is the only
     /// exception this method throws. Optional so every caller that has no token to give compiles unchanged.
     /// </param>
+    /// <param name="investigationJson">
+    /// #5821: the investigation request this alert opened or joined, already composed and masked, for the generic
+    /// webhook's <c>{{investigation_json}}</c> token. Null (Lite, and every alert that opened none) renders it empty.
+    /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
         string serverName,
@@ -116,6 +120,7 @@ public sealed class EmailSendCore
         string? detailText = null,
         string? displayName = null,
         AlertNotificationMode? deliveryMode = null,
+        string? investigationJson = null,
         CancellationToken cancellationToken = default)
     {
         var emailOutcome = AlertChannelOutcome.NotAttempted;
@@ -297,7 +302,7 @@ public sealed class EmailSendCore
         {
             webhook = await _webhookAlertService.TrySendWebhookAlertsAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName,
-                deliveryMode, cancellationToken);
+                deliveryMode, investigationJson, cancellationToken);
         }
 
         /* #3598: the two paths resolve the same pure function over the same inputs, so whichever one ran is

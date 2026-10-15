@@ -196,6 +196,10 @@ public class WebhookAlertService
     /// merely times out is different: it ends as that channel's recorded <see cref="AlertChannelOutcome.Failed"/>.
     /// Optional so every caller that has no token to give compiles unchanged.
     /// </param>
+    /// <param name="investigationJson">
+    /// #5821: the generic channel's <c>{{investigation_json}}</c> value, composed and masked by the caller; null renders
+    /// the token empty. No other channel reads it.
+    /// </param>
     public async Task<WebhookFanoutResult> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
@@ -206,6 +210,7 @@ public class WebhookAlertService
         string? detailText = null,
         string? displayName = null,
         AlertNotificationMode? deliveryMode = null,
+        string? investigationJson = null,
         CancellationToken cancellationToken = default)
     {
         /* Answered before the cooldown and the budget, not after. A channel that does not exist cannot be
@@ -386,7 +391,7 @@ public class WebhookAlertService
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, cancellationToken));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -2152,6 +2157,7 @@ public class WebhookAlertService
         string? triageUrl,
         string? detailText,
         DateTime nowUtc,
+        string? investigationJson = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -2176,7 +2182,7 @@ public class WebhookAlertService
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: settings.GenericWebhookBodyTemplate, serverId: serverId,
-                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc);
+                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc, investigationJson: investigationJson);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -2313,6 +2319,14 @@ public class WebhookAlertService
     /// needs the prose on its own — mapped into a ticket body field, say — rather than mixed with the
     /// flattened structure.
     /// </para>
+    /// <para>
+    /// #5821: <c>{{investigation_json}}</c> is the investigation request the alert opened or joined (Darling only), as one
+    /// JSON object the caller has already composed and masked at <c>mcp.dataDetail</c>. It is the one token whose
+    /// rendering follows where the template puts it: unquoted (<c>"investigation": {{investigation_json}}</c>) it is the
+    /// raw object, and inside a string literal (<c>"investigation": "{{investigation_json}}"</c>) it is that object's text,
+    /// JSON-escaped, so both templates post well-formed JSON. With no request (no agent route, a muted alert, a report,
+    /// a recovery, a route at its limit, Lite) it is the empty string: <c>""</c> bare, nothing inside quotes.
+    /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
         string metricName,
@@ -2326,7 +2340,8 @@ public class WebhookAlertService
         string serverId = "",
         string? triageUrl = null,
         string? detailText = null,
-        DateTime? nowUtc = null)
+        DateTime? nowUtc = null,
+        string? investigationJson = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -2376,7 +2391,49 @@ public class WebhookAlertService
            literal text of another token (e.g. a server name "{{timestamp}}") is left verbatim rather than
            re-expanded — which chained .Replace() calls would do, letting one field pull another's contents
            into itself. An unknown "{{foo}}" isn't in the alternation, so it stays literal (today's behavior). */
-        return s_genericPlaceholders.Replace(template, m => values[m.Groups[1].Value]);
+        return s_genericPlaceholders.Replace(template, m =>
+            m.Groups[1].Value == InvestigationToken
+                ? InvestigationValue(investigationJson, InsideJsonString(template, m.Index))
+                : values[m.Groups[1].Value]);
+    }
+
+    private const string InvestigationToken = "investigation_json";
+
+    /// <summary>
+    /// <c>{{investigation_json}}</c>'s text at its place in the template (#5821): inside a string literal the object's
+    /// JSON-escaped text (nothing when there is no request); bare, the raw object (<c>""</c> when there is none).
+    /// </summary>
+    private static string InvestigationValue(string? investigationJson, bool insideString)
+    {
+        if (string.IsNullOrWhiteSpace(investigationJson))
+        {
+            return insideString ? "" : "\"\"";
+        }
+
+        return insideString ? EscapeForJson(investigationJson) : investigationJson;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="index"/> in the operator's template falls inside a JSON string literal: counts the
+    /// unescaped double quotes before it. Read on the raw template, whose tokens hold no quotes.
+    /// </summary>
+    internal static bool InsideJsonString(string template, int index)
+    {
+        var inside = false;
+        for (var i = 0; i < index; i++)
+        {
+            var c = template[i];
+            if (inside && c == '\\')
+            {
+                i++;
+            }
+            else if (c == '"')
+            {
+                inside = !inside;
+            }
+        }
+
+        return inside;
     }
 
     /// <summary>
@@ -2393,7 +2450,7 @@ public class WebhookAlertService
     {
         "metric", "server", "value", "threshold", "severity",
         "context_json", "incidents_json", "dedup_key", "resource_name", "database", "triage_url",
-        "context", "timestamp", "detail"
+        "context", "timestamp", "detail", InvestigationToken
     };
 
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =

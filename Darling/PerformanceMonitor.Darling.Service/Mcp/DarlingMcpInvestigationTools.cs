@@ -681,7 +681,7 @@ public sealed class DarlingMcpInvestigationTools
         return answer.ToJsonString(McpHelpers.JsonOptions);
     }
 
-    private static object RequestPayload(InvestigationRequestRow r) => new
+    internal static object RequestPayload(InvestigationRequestRow r) => new
     {
         request_id = r.RequestId,
         route_id = r.RouteId,
