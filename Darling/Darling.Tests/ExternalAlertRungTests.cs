@@ -135,7 +135,7 @@ public sealed class ExternalAlertRungTests
            absent too: a rung back. */
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
-        allPresent[ProbeOrdinal + 6] = false; /* V187 (#5825) absent: the cases below are stores below it. */
+        allPresent[Array.FindIndex(parameters, p => p.Name == "hasAlertResolutionDelivery")] = false; /* V187 (#5825) absent: the cases below are stores below it. */
 
         var withoutV185 = (object[])allPresent.Clone();
         withoutV185[ProbeOrdinal + 6] = false;

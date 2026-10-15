@@ -120,7 +120,7 @@ public sealed class QueryStoreWatermarksRungTests
            absent too this rung is the answer; with this sentinel absent as well, one rung back. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-        all[ProbeOrdinal + 8] = false; /* V187 (#5825) absent: the cases below are stores below it. */
+        all[Array.FindIndex(parameters, p => p.Name == "hasAlertResolutionDelivery")] = false; /* V187 (#5825) absent: the cases below are stores below it. */
 
         /* With V182's sentinel (#5506) absent too the answer is V181's. */
         /* With V186's (#5810) and V185's (#5812) sentinels absent the answer is V184's (#5632); with V184's absent too, V183's. */
