@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -34,8 +35,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// change that leaves only the newest hours on the wide table passes the hours the wide table will still be read for.</para>
 ///
 /// <para>#5811 adds the raw route's twin: a <c>query_stats</c> or <c>procedure_stats</c> panel read raw for its whole window is estimated
-/// from the collection log (<see cref="RawCollectorRowsSql"/>) through the same <see cref="Estimate"/> and reader, and refused by
-/// <see cref="RawRefusal"/> over the per-collector limit.</para>
+/// from the collection log (<see cref="RawCollectorRowsSql"/>) as a <see cref="RawEstimate"/> of the rows the window itself holds, and
+/// refused by <see cref="RawRefusal"/> over the per-collector limit.</para>
 /// </summary>
 internal static class QueryStoreWideReadGuard
 {
@@ -94,7 +95,7 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            return await ReadEstimateAsync(connection, PerServerRowsSql, serverScope, null, cancellationToken);
+            return await ReadEstimateAsync(connection, PerServerRowsSql, serverScope, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -106,32 +107,56 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
     /// <summary>
     /// #5811: the raw-route twin of <see cref="PerServerRowsSql"/>. The raw collector tables have no daily summary, so each server's daily
     /// rows come from the collection log: the rows its collector ($2) stored over the day that ends at its newest log row for that
-    /// collector, which is the rows per collection times the collections in a day. Read through
+    /// collector (its anchor), which is the rows per collection times the collections in a day. A server counts only for the part of the
+    /// counted range ($3 to $4) its collection covers, so a server that stopped collecting adds no rows the read will never touch:
+    /// <code>rows = daily_rows * days(LEAST($4, anchor) - GREATEST($3, now - RawRetentionInterval))</code>, and a server whose
+    /// covered part is empty (its anchor is at or before the range's start, or older than raw retention) adds nothing and is not
+    /// counted. Raw rows older than <see cref="TimescaleSupport.RawRetentionInterval"/> are gone even while the collection log
+    /// (<c>CollectionHealthRetentionInterval</c>) still holds their log rows. Read through
     /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>: one short range per server. A server with no
     /// log row for the collector adds nothing, so the guard fails open exactly as the Query Store estimate does. No <c>is_enabled</c>
     /// predicate, for the reason <see cref="PerServerRowsSql"/> gives: the raw read takes a disabled server's retained rows too.
+    /// Returns the rows over the range, the daily rows of the servers that cover any of it, and how many servers those are.
     /// </summary>
     internal const string RawCollectorRowsSql = @"
-SELECT COALESCE(SUM(b.daily_rows), 0)::bigint, COUNT(*)::integer
+SELECT COALESCE(CEIL(SUM(b.daily_rows * c.covered_days)), 0)::bigint,
+       COALESCE(SUM(b.daily_rows), 0)::bigint,
+       COUNT(*)::integer
 FROM collect.servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT n.collection_time AS anchor
+    FROM collect.collection_log AS n
+    WHERE n.server_id = s.server_id
+      AND n.collector_name = $2
+    ORDER BY n.collection_time DESC
+    LIMIT 1
+) AS a
 CROSS JOIN LATERAL
 (
     SELECT SUM(l.rows_collected)::bigint AS daily_rows
     FROM collect.collection_log AS l
     WHERE l.server_id = s.server_id
       AND l.collector_name = $2
-      AND l.collection_time >
-      (
-          SELECT n.collection_time - interval '1 day'
-          FROM collect.collection_log AS n
-          WHERE n.server_id = s.server_id
-            AND n.collector_name = $2
-          ORDER BY n.collection_time DESC
-          LIMIT 1
-      )
+      AND l.collection_time > a.anchor - interval '1 day'
 ) AS b
+CROSS JOIN LATERAL
+(
+    SELECT EXTRACT(EPOCH FROM
+               LEAST($4::timestamp, a.anchor)
+               - GREATEST($3::timestamp, (now() AT TIME ZONE 'UTC') - interval '" + TimescaleSupport.RawRetentionInterval + @"')
+           ) / 86400.0 AS covered_days
+) AS c
 WHERE b.daily_rows IS NOT NULL
+  AND c.covered_days > 0
   AND ($1::text[] IS NULL OR s.server_name = ANY($1));";
+
+    /// <summary>
+    /// The raw-route estimate (#5811): <paramref name="Rows"/> the counted range holds for the servers in scope, each counted only for
+    /// the part of the range its collection covers (<see cref="RawCollectorRowsSql"/>); <paramref name="DailyRows"/> a day of those
+    /// servers at their newest rate; <paramref name="Servers"/> how many cover any of the range.
+    /// </summary>
+    internal readonly record struct RawEstimate(long Rows, long DailyRows, int Servers);
 
     /// <summary>The savepoint the raw estimate takes when it reads inside the hourly-edges snapshot's transaction (#5811).</summary>
     private const string RawEstimateSavepointSql = "SAVEPOINT compose_raw_read_guard";
@@ -158,30 +183,38 @@ WHERE b.daily_rows IS NOT NULL
     /// under a savepoint, so the run never asks the pool for a second connection and a fault leaves the transaction usable; otherwise it
     /// opens its own. Null on any fault other than cancellation: a lookup that cannot answer never refuses a panel.
     /// </summary>
-    internal static async Task<Estimate?> EstimateRawAsync(
+    internal static async Task<RawEstimate?> EstimateRawAsync(
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
-        ILogger? logger, CancellationToken cancellationToken)
+        DateTime countedStart, DateTime countedEnd, ILogger? logger, CancellationToken cancellationToken)
     {
-        if (snapshotConnection is not null)
-        {
-            await ExecuteAsync(snapshotConnection, RawEstimateSavepointSql, cancellationToken);
-        }
-
+        /* The savepoint is inside the try: a snapshot connection the store dropped since the snapshot's last statement (a restart, a
+           failover, a pooler reset, idle_in_transaction_session_timeout) fails here, and that is a lookup that cannot answer, not a
+           failed panel. */
         try
         {
             if (snapshotConnection is not null)
             {
-                return await ReadEstimateAsync(snapshotConnection, RawCollectorRowsSql, serverScope, collector, cancellationToken);
+                await ExecuteAsync(snapshotConnection, RawEstimateSavepointSql, cancellationToken);
+                return await ReadRawEstimateAsync(snapshotConnection, serverScope, collector, countedStart, countedEnd, cancellationToken);
             }
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            return await ReadEstimateAsync(connection, RawCollectorRowsSql, serverScope, collector, cancellationToken);
+            return await ReadRawEstimateAsync(connection, serverScope, collector, countedStart, countedEnd, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             if (snapshotConnection is not null)
             {
-                await ExecuteAsync(snapshotConnection, RawEstimateRollbackSql, cancellationToken);
+                /* A rollback that fails too (the connection is gone, or the savepoint never ran) must not replace the fault: the guard
+                   still gives no verdict, and the panel statement meets the broken connection itself, where the run reports it. */
+                try
+                {
+                    await ExecuteAsync(snapshotConnection, RawEstimateRollbackSql, cancellationToken);
+                }
+                catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
+                {
+                    logger?.LogDebug(rollbackEx, "The #5811 raw-route estimate's savepoint could not be rolled back.");
+                }
             }
 
             logger?.LogDebug(ex, "The #5811 raw-route read estimate could not be read; the panel runs without it.");
@@ -194,14 +227,14 @@ WHERE b.daily_rows IS NOT NULL
     /// estimate is under <paramref name="limit"/> (or there is none). It states the estimate, the limit and the longest window that fits
     /// for these servers, so a refusal reported from the field can be checked against the collection log.
     /// </summary>
-    internal static string? RawRefusal(Estimate? estimate, string collector, DateTime countedStart, DateTime countedEnd, long limit)
+    internal static string? RawRefusal(RawEstimate? estimate, string collector, DateTime countedStart, DateTime countedEnd, long limit)
     {
         if (estimate is not { } found || found.Servers == 0)
         {
             return null;
         }
 
-        var rows = found.RowsOver(countedStart, countedEnd);
+        var rows = found.Rows;
         if (rows <= limit)
         {
             return null;
@@ -221,23 +254,15 @@ WHERE b.daily_rows IS NOT NULL
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
         DateTime countedStart, DateTime countedEnd, ILogger? logger, CancellationToken cancellationToken) =>
         RawRefusal(
-            await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, logger, cancellationToken),
+            await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, countedStart, countedEnd, logger, cancellationToken),
             collector, countedStart, countedEnd, RawLimitFor(collector));
 
-    /// <summary>The one reader both estimates share: $1 the scoped names (or NULL), and $2 the collector when the text has one.</summary>
+    /// <summary>The Query Store estimate's reader: $1 the scoped names (or NULL).</summary>
     private static async Task<Estimate?> ReadEstimateAsync(
-        NpgsqlConnection connection, string sql, IReadOnlyList<string>? serverScope, string? collector, CancellationToken cancellationToken)
+        NpgsqlConnection connection, string sql, IReadOnlyList<string>? serverScope, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
-            Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
-        });
-        if (collector is not null)
-        {
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = collector });
-        }
+        command.Parameters.Add(ScopeParameter(serverScope));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -247,6 +272,32 @@ WHERE b.daily_rows IS NOT NULL
 
         return new Estimate(reader.GetInt64(0), reader.GetInt32(1));
     }
+
+    /// <summary>The raw estimate's reader (#5811): $1 the scoped names (or NULL), $2 the collector, $3 and $4 the counted range.</summary>
+    private static async Task<RawEstimate?> ReadRawEstimateAsync(
+        NpgsqlConnection connection, IReadOnlyList<string>? serverScope, string collector, DateTime countedStart, DateTime countedEnd,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(RawCollectorRowsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.Add(ScopeParameter(serverScope));
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = collector });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(countedStart, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(countedEnd, DateTimeKind.Unspecified) });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new RawEstimate(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt32(2));
+    }
+
+    private static NpgsqlParameter ScopeParameter(IReadOnlyList<string>? serverScope) => new()
+    {
+        NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+        Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
+    };
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
     {
