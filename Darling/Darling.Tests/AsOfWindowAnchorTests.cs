@@ -286,11 +286,13 @@ public sealed class AsOfWindowAnchorTests
            in hours over the service's own read-duration telemetry, like get_store_metrics over the store's
            own growth series. get_finops windows over the query-stats rows ending now and takes no anchor
            (its description says so); the FinOps views are cost-oriented live reads. get_slow_reads windows in hours
-           back from now over the service's own slow-read telemetry, like get_read_latency, and takes no anchor. get_store_query_history windows in hours back from now over the store's own statement history and takes no anchor. */
+           back from now over the service's own slow-read telemetry, like get_read_latency, and takes no anchor. get_store_query_history windows in hours back from now over the store's own statement history and takes no anchor. get_investigation_reports (#5632 Phase A)
+           windows in hours back from now over the store's own investigation work queue (requests opened in the
+           window) and takes no anchor; a past instant of a work queue is not a monitored-server question. */
         var excluded = new[]
         {
             "get_pvs_stats", "get_fleet_overview", "get_store_metrics", "get_read_latency",
-            "get_finops", "get_slow_reads", "get_store_query_history",
+            "get_finops", "get_slow_reads", "get_store_query_history", "get_investigation_reports",
         };
 
         var unanchored = DarlingWebEndpoints.BuildReadDispatch().Keys

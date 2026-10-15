@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -40,12 +40,13 @@ public sealed class ReadCallerRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
-    public void TheRungIsRegistered_OnceAtTheTopOfTheLadder()
+    public void TheRungIsRegistered_OnceBelowTheTopOfTheLadder()
     {
         Assert.Equal("read-caller", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(RungVersion, PgMigrations.Scripts[^1].Version);
+        /* V184 (#5632) took the top of the ladder; this rung stays registered just below it. */
+        Assert.Equal(RungVersion, PgMigrations.Scripts[^2].Version);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 
@@ -62,24 +63,29 @@ public sealed class ReadCallerRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheSentinel_AtTheLastOrdinal_AndAFullyMigratedStoreMapsToThisTopRung()
+    public void TheProbeCarriesTheSentinel_BelowV184s_AndAStoreStoppedHereMapsToThisRung()
     {
         Assert.Contains("to_regclass('collect.read_latency') AND attname = 'distinct_callers'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasReadCaller", parameters[^1].Name);
-        Assert.Equal("hasReadLatencyCapacityFields", parameters[^2].Name);
+        /* V184's sentinel (#5632) is the last parameter; this one is just below it. */
+        Assert.Equal("hasInvestigations", parameters[^1].Name);
+        Assert.Equal("hasReadCaller", parameters[^2].Name);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[^3].Name);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({parameters.Length - 1})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({parameters.Length})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({parameters.Length - 2})", viewer, StringComparison.Ordinal);
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
+        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        var behind = (object[])all.Clone();
-        behind[^1] = false;
+        var atThisRung = (object[])all.Clone();
+        atThisRung[^1] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
+
+        var behind = (object[])atThisRung.Clone();
+        behind[^2] = false;
         Assert.Equal(182, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasReadCaller)", StringComparison.Ordinal);
@@ -103,6 +109,7 @@ public sealed class ReadCallerRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V182 shape and the ladder back to 182. */
+        await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
         await ExecAsync(connection, @"
 DELETE FROM darling_schema_version WHERE version >= 183;
@@ -113,7 +120,8 @@ INSERT INTO collect.slow_reads (read_time, surface, route, outcome, total_ms, ar
 VALUES ('2026-10-01 05:10', 'mcp', 'get_wait_stats', 'timeout', 60000, '{}', false, '[]', 0, false);", ct);
         Assert.Equal(182, await ProbedVersionAsync(connection, ct));
 
-        Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+        /* V183 and the V184 rung above it (#5632) both apply. */
+        Assert.Equal(2, await PgMigrations.MigrateAsync(connection, ct));
         await AssertMigratedAsync(connection, ct);
 
         await ExecAsync(connection, Rung.Sql, ct);
@@ -122,7 +130,7 @@ VALUES ('2026-10-01 05:10', 'mcp', 'get_wait_stats', 'timeout', 60000, '{}', fal
 
     private static async Task AssertMigratedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        Assert.Equal(RungVersion, await ProbedVersionAsync(connection, ct));
+        Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
         Assert.Equal("2|2|9", await ScalarAsync(connection, @"
 SELECT count(*) || '|' || count(*) FILTER (WHERE distinct_callers = 0) || '|' || sum(run_count) FROM collect.read_latency", ct));
         Assert.Equal("1|1", await ScalarAsync(connection, @"

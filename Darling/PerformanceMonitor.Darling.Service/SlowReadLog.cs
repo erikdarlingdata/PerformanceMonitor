@@ -185,6 +185,15 @@ WHERE slow_read_id IN
     {
         var (argumentsJson, argumentsTruncated, windowStart, windowEnd) = NormaliseArguments(arguments, scope.ServerId, scope.StartedUtc);
 
+        /* #5814: the window the read ran with, when the tool noted one, wins over the window lifted from the arguments. A
+           caller that left hours_back out, and a route whose window is fixed in code, sent no window to lift, yet the read
+           was bounded; only a read that noted nothing falls back to what the arguments name. */
+        if (scope.WindowStartUtc is { } notedStart && scope.WindowEndUtc is { } notedEnd)
+        {
+            windowStart = Unspecified(notedStart);
+            windowEnd = Unspecified(notedEnd);
+        }
+
         var timings = scope.Snapshot().OrderBy(t => t.Ordinal).Take(MaxStatementsStored).ToList();
         var statementsTruncated = scope.StatementTotal > timings.Count;
         var statements = new JsonArray();

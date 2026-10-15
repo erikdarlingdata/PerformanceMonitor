@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -25,6 +26,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 public partial class NotificationRouteEditDialog : Window
 {
     private const string ExactMetricChoice = "Exact metric name…";
+    private const string AgentInheritChoice = "Inherit";
+    private const string AgentOffChoice = "Off";
+    private const string AgentInvestigateChoice = "Investigate";
 
     /// <summary>The "Every metric (*)" entry of the Matches list. It is in the list only while a server or a tag is chosen
     /// (the V181 CHECK refuses a fleet-wide <c>*</c>); its Tag is the stored match text.</summary>
@@ -53,6 +57,12 @@ public partial class NotificationRouteEditDialog : Window
         }
 
         FamilyCombo.Items.Add(new ComboBoxItem { Content = ExactMetricChoice, Tag = null });
+
+        /* #5632: the agent channel, Inherit / Off / Investigate, and its four numbers. */
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInheritChoice, Tag = null });
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentOffChoice, Tag = NotificationRoute.AgentLevelOff });
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInvestigateChoice, Tag = NotificationRoute.AgentLevelInvestigate });
+        ShowAgent(existing ?? new NotificationRouteRow());
 
         var scopeOptions = ViewerNotificationRouteScope.ScopeOptions(scopeInputs);
         var picked = existing is null ? scopeOptions[0] : ViewerNotificationRouteScope.OptionFor(existing, scopeOptions);
@@ -173,7 +183,8 @@ public partial class NotificationRouteEditDialog : Window
         Route.SmtpRecipients = SmtpRecipientsBox.Text.Trim();
         Route.Enabled = EnabledCheckBox.IsChecked == true;
 
-        var error = ViewerDataService.ValidateNotificationRoute(Route);
+        var error = ReadAgent();
+        error ??= ViewerDataService.ValidateNotificationRoute(Route);
         if (error is not null)
         {
             ValidationText.Text = error;
@@ -203,4 +214,62 @@ public partial class NotificationRouteEditDialog : Window
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
+
+    /// <summary>Puts a route's agent channel on screen (#5632): the level's choice, and its four numbers.</summary>
+    private void ShowAgent(NotificationRouteRow row)
+    {
+        AgentLevelCombo.SelectedItem = AgentLevelCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, row.AgentLevel));
+        AgentMaxPerHourBox.Text = row.AgentMaxPerHour.ToString(CultureInfo.InvariantCulture);
+        AgentMaxPerDayBox.Text = row.AgentMaxPerDay.ToString(CultureInfo.InvariantCulture);
+        AgentLeaseMinutesBox.Text = row.AgentLeaseMinutes.ToString(CultureInfo.InvariantCulture);
+        AgentExpiryMinutesBox.Text = row.AgentExpiryMinutes.ToString(CultureInfo.InvariantCulture);
+        UpdateAgentLimitsEnabled();
+    }
+
+    /// <summary>The selected agent level: null for Inherit.</summary>
+    private int? SelectedAgentLevel() => (AgentLevelCombo.SelectedItem as ComboBoxItem)?.Tag as int?;
+
+    /// <summary>The limits apply only to a route that investigates, so they are editable only then.</summary>
+    private void UpdateAgentLimitsEnabled()
+    {
+        var investigates = SelectedAgentLevel() == NotificationRoute.AgentLevelInvestigate;
+        AgentMaxPerHourBox.IsEnabled = investigates;
+        AgentMaxPerDayBox.IsEnabled = investigates;
+        AgentLeaseMinutesBox.IsEnabled = investigates;
+        AgentExpiryMinutesBox.IsEnabled = investigates;
+    }
+
+    private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAgentLimitsEnabled();
+
+    /// <summary>Reads the agent channel off the screen into <see cref="Route"/> (#5632), or says which number is not a
+    /// whole number. The bounds are <see cref="ViewerDataService.ValidateNotificationRoute"/>'s.</summary>
+    private string? ReadAgent()
+    {
+        Route.AgentLevel = SelectedAgentLevel();
+        if (!TryReadNumber(AgentMaxPerHourBox, "Requests per hour", out var perHour, out var error)
+            || !TryReadNumber(AgentMaxPerDayBox, "Requests per day", out var perDay, out error)
+            || !TryReadNumber(AgentLeaseMinutesBox, "Lease minutes", out var lease, out error)
+            || !TryReadNumber(AgentExpiryMinutesBox, "Expiry minutes", out var expiry, out error))
+        {
+            return error;
+        }
+
+        Route.AgentMaxPerHour = perHour;
+        Route.AgentMaxPerDay = perDay;
+        Route.AgentLeaseMinutes = lease;
+        Route.AgentExpiryMinutes = expiry;
+        return null;
+    }
+
+    private static bool TryReadNumber(TextBox box, string name, out int value, out string? error)
+    {
+        if (int.TryParse(box.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out value))
+        {
+            error = null;
+            return true;
+        }
+
+        error = name + " must be a whole number.";
+        return false;
+    }
 }

@@ -53,6 +53,8 @@
                     <DataGridTextColumn Header="Kind" Binding="{Binding MatchKindDisplay}" Width="100"/>
                     <DataGridTextColumn Header="Scope" Binding="{Binding ScopeDisplay}" Width="160"/>
                     <DataGridTextColumn Header="Channels set" Binding="{Binding ChannelsDisplay}" Width="*"/>
+                    <!-- #5632: the agent channel, Inherit / Off / Investigate with its hourly and daily limits. -->
+                    <DataGridTextColumn Header="Agent" Binding="{Binding AgentDisplay}" Width="150"/>
                     <DataGridTextColumn Header="Email to" Binding="{Binding SmtpRecipients}" Width="160"/>
                     <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="170"/>
                     <DataGridTextColumn Header="Modified" Binding="{Binding ModifiedDisplay}" Width="130" SortMemberPath="ModifiedAtUtc"/>

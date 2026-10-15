@@ -62,6 +62,6 @@ public sealed class WebFileIoAndPvsWindowPageTests
         Assert.Contains("trend_hours_back: TREND_HOURS", Pvs);
         var helpers = ReadRepoFile("PerformanceMonitor.Common", "Mcp", "McpHelpers.cs");
         Assert.Contains("public const int MaxHoursBack = 168;", helpers);
-        Assert.Contains("McpHelpers.ValidateHoursBack(trend_hours_back)", ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPvsTools.cs"));
+        Assert.Contains("DarlingReadWindow.ValidateHoursBack(trend_hours_back)", ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPvsTools.cs"));
     }
 }

@@ -412,12 +412,13 @@ public sealed class McpToolLatencyFilter
     /// the tool method declares, read from <paramref name="types"/> (which <c>McpSchemaCompat.WithGeminiCompatibleTools</c>
     /// fills from the method as it creates each tool), never from the served input schema: that schema has every
     /// <c>default</c> keyword stripped for Gemini, so a band read from it would be <c>none</c> for the commonest call, the
-    /// one that leaves <c>hours_back</c> out. Internal so a test can pin it against a really registered tool.</summary>
+    /// one that leaves <c>hours_back</c> out. A tool whose window is fixed in code takes its <see cref="ReadWindowBand.FixedHours"/>
+    /// band (#5814). Internal so a test can pin it against a really registered tool.</summary>
     internal static string WindowBandOf(string? toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments, McpToolParameterTypes? types) =>
-        ReadWindowBand.OfToolCall(arguments, key =>
+        ReadWindowBand.OrFixed(ReadWindowBand.OfToolCall(arguments, key =>
             types is not null && !string.IsNullOrEmpty(toolName) && types.TryGetDefault(toolName, key, out var value)
                 ? ReadWindowBand.DefaultText(value)
-                : null);
+                : null), toolName);
 
     /// <summary>The caller of the call (#5793): the client info the request's server holds (sent per request from protocol
     /// 2026-07-28; the stateless host has none for an older client's tool call), else the first product token of the HTTP
