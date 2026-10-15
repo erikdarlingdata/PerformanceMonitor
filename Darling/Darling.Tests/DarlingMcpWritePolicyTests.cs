@@ -35,7 +35,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingMcpWritePolicyTests
 {
-    private const string Token = "write-gate-token-value";
+    internal const string Token = "write-gate-token-value";
 
     private static readonly DarlingMcpWritePolicy.Effective WritesOnly = new(Writes: true, ServerAdmin: false);
     private static readonly DarlingMcpWritePolicy.Effective Everything = new(Writes: true, ServerAdmin: true);
@@ -46,7 +46,7 @@ public sealed class DarlingMcpWritePolicyTests
 
     private static readonly McpConfig NoWrites = new();
     private static readonly McpConfig WritesConfig = new() { AllowWrites = true };
-    private static readonly McpConfig EverythingConfig = new() { AllowWrites = true, AllowServerAdmin = true };
+    internal static readonly McpConfig EverythingConfig = new() { AllowWrites = true, AllowServerAdmin = true };
 
     private static McpServerPrimitiveCollection<McpServerTool> ServedTools()
     {
@@ -441,7 +441,7 @@ public sealed class DarlingMcpWritePolicyTests
     /// decides from the settings and the token, <c>ConfigureMcpServices</c>, then <c>ConfigurePipeline</c> with
     /// <see cref="DarlingMcpHostService.RequireTokenWhenLoopbackOnly"/>: the start path calls the same members,
     /// so no value here is computed a second way.</summary>
-    private static async Task<TestServer> BuildServer(
+    internal static async Task<TestServer> BuildServer(
         McpConfig mcp, string bearerToken, string postgresConnection = "Host=localhost;Database=postgres;Username=darling")
     {
         var builder = DarlingMcpHostService.CreateHostBuilder();
@@ -455,6 +455,12 @@ public sealed class DarlingMcpWritePolicyTests
             postgres, planFetcher: null, logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
             baselineCache: new PerformanceMonitor.Darling.Analysis.BaselineCache()));
         builder.Services.AddSingleton<ILogger>(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        /* #5878: pin the output format. Without a registered IGcfOutputFormat the host's filter follows the process-wide
+           DARLING_OUTPUT_FORMAT variable on every call, and the classes in the DarlingOutputFormatEnv collection set it to
+           "gcf" while this class runs beside them in the same process: add_servers' answer came back as GCF and the
+           JSON parse threw. These cases read the answer as JSON, so the host says so. */
+        builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(false));
 
         var writes = DarlingMcpWritePolicy.ResolveForStart(mcp, bearerToken, out _);
         DarlingMcpHostService.ConfigureMcpServices(
@@ -524,7 +530,7 @@ public sealed class DarlingMcpWritePolicyTests
         return (ctx.Response.StatusCode, body);
     }
 
-    private static async Task<(int StatusCode, string Body)> ToolsCallAsync(TestServer server, string tool, string argumentsJson, string? bearer, string path = "/")
+    internal static async Task<(int StatusCode, string Body)> ToolsCallAsync(TestServer server, string tool, string argumentsJson, string? bearer, string path = "/")
     {
         var ctx = await server.SendAsync(c =>
         {
