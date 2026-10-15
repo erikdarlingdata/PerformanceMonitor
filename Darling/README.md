@@ -761,6 +761,10 @@ A bring-your-own store needs one step after the service upgrades the store to V1
 
 Destinations are bearer secrets, so the `viewer` and `mcp` roles never read them: the table's generated `configured_channels` column says *which* channels a route sets, and the MCP surface can disable or delete a route (`set_notification_route_enabled` / `delete_notification_route`) but never author or re-point one. Routes hot-reload through the same `config_version` beacon as the parent row (the V131 trigger), so a change lands on the next firing with no restart.
 
+##### Send resolutions (#5825)
+
+A resolution is the message that an alert has cleared: the condition that fired it is no longer there. Each channel (Slack, Teams, the generic webhook and email) has a **Send resolutions** box in the Viewer's Settings > Notifications, off by default. When it is on, a resolution goes only to the destinations of that channel that the alert's fire reached; an alert whose fire was not sent gets no resolution. A route can override the channel setting for its own destinations: in the route dialog, **Send resolutions** is `Use channel setting` (the default), `Always` or `Never`. PagerDuty is not one of the four: its incidents close through **Auto-resolve the incident when the alert's condition clears**. Over MCP, `get_alert_settings` reports the four settings as `delivery.send_resolutions`, `update_alert_settings` changes them, and `get_notification_routes` reports each route's `send_resolutions` (null means the channel decides). A bring-your-own store needs `tools/provision-roles.sql` run again after the service upgrades the store to V186, so the `viewer` and `mcp` roles can read the new columns.
+
 ##### Hand an alert to your own agent (#5632)
 
 Darling ships no agent. It can hand an alert to one you run yourself, and that agent can only read and report.

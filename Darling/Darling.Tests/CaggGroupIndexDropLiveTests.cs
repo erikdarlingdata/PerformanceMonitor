@@ -318,6 +318,12 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 186)
+        {
+            /* V186 (#5825) - the alert log's resolution columns are the probe's newest sentinel. */
+            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
+        }
+
         if (simulatedVersion < 185)
         {
             /* V185 (#5812) - the plan regression partial-day watermark column is the probe's newest sentinel. */

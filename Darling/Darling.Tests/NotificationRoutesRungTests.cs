@@ -47,8 +47,8 @@ public sealed class NotificationRoutesRungTests
 
     private static readonly string[] DestinationColumns = { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "smtp_recipients" };
 
-    /* The agent channel's five columns (V184, #5632), last in every reader. */
-    private static readonly string[] AgentColumns = { "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes" };
+    /* The agent channel's five columns (V184, #5632) and the resolution override (V186, #5825), last in every reader. */
+    private static readonly string[] AgentColumns = { "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions" };
 
     private static PgMigrations.Migration V131 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
@@ -465,6 +465,7 @@ public sealed class NotificationRoutesLivePostgresTests
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentMaxPerDay });
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentLeaseMinutes });
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentExpiryMinutes });
+                insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 

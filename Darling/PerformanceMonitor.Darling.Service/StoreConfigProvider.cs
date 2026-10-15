@@ -1747,7 +1747,8 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
 SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address,
        smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy,
        generic_url, generic_headers, generic_body_template, generic_proxy,
-       pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve
+       pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
+       slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions
 FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1765,6 +1766,8 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             From = reader.GetString(5),
             To = reader.GetString(6),
             EmailCooldownMinutes = reader.GetInt32(7),
+            /* V186 (#5825): appended after V166's column, like it. */
+            SendResolutions = reader.GetBoolean(23),
         };
         var webhooks = new WebhooksConfig
         {
@@ -1781,6 +1784,9 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             PagerDutyProxy = reader.GetString(18),
             /* V166: appended last — the only addition that cannot re-map an existing column's ordinal. */
             PagerDutyAutoResolve = reader.GetBoolean(19),
+            SlackSendResolutions = reader.GetBoolean(20),
+            TeamsSendResolutions = reader.GetBoolean(21),
+            GenericSendResolutions = reader.GetBoolean(22),
         };
         return (smtp, webhooks);
     }
@@ -2074,7 +2080,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// (V184, #5632) follow them: the level <see cref="NotificationRouter.ResolveAgent"/> reads, and the route's limits.</summary>
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
-        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes "
+        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>The registry's server ids: every server a route's scope can name (#5750). The desired-state table, whose
@@ -2185,6 +2191,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     AgentMaxPerDay = reader.GetInt32(12),
                     AgentLeaseMinutes = reader.GetInt32(13),
                     AgentExpiryMinutes = reader.GetInt32(14),
+                    /* V186 (#5825): null follows the channel's setting. */
+                    SendResolutions = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
                 });
             }
         }

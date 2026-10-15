@@ -1385,6 +1385,7 @@ public partial class SettingsWindow : Window
         SmtpFromBox.Text = r.SmtpFromAddress;
         SmtpRecipientsBox.Text = r.SmtpRecipients;
         EmailCooldownBox.Text = r.EmailCooldownMinutes.ToString(CultureInfo.InvariantCulture);
+        EmailSendResolutionsCheckBox.IsChecked = r.EmailSendResolutions;
 
         /* A saved password is never put back in the box, sealed or in the older format: the box stays blank and says the
            password is saved (#5366). A blank box keeps it; a changed host, port, SSL flag or user name asks for it again. */
@@ -1398,10 +1399,12 @@ public partial class SettingsWindow : Window
         TeamsWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.TeamsUrl);
         TeamsStatusText.Text = ViewerWebhookSealing.IsSaved(r.TeamsUrl) ? ViewerWebhookSealing.KeepHint : "";
         TeamsProxyAddressBox.Text = r.TeamsProxy;
+        TeamsSendResolutionsCheckBox.IsChecked = r.TeamsSendResolutions;
         SlackWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.SlackUrl);
         SlackWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.SlackUrl);
         SlackStatusText.Text = ViewerWebhookSealing.IsSaved(r.SlackUrl) ? ViewerWebhookSealing.KeepHint : "";
         SlackProxyAddressBox.Text = r.SlackProxy;
+        SlackSendResolutionsCheckBox.IsChecked = r.SlackSendResolutions;
 
         GenericWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.GenericUrl);
         GenericWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.GenericUrl);
@@ -1415,6 +1418,7 @@ public partial class SettingsWindow : Window
             ? WebhookAlertService.DefaultGenericBodyTemplate
             : r.GenericBodyTemplate;
         GenericWebhookProxyAddressBox.Text = r.GenericProxy;
+        GenericSendResolutionsCheckBox.IsChecked = r.GenericSendResolutions;
 
         PagerDutyWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.PagerDutyRoutingKey);
         PagerDutyRoutingKeyBox.Text = ViewerWebhookSealing.ShownText(r.PagerDutyRoutingKey);
@@ -1453,6 +1457,7 @@ public partial class SettingsWindow : Window
             row.SmtpUsername = string.IsNullOrWhiteSpace(username) ? null : username;
             row.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
             row.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+            row.EmailSendResolutions = EmailSendResolutionsCheckBox.IsChecked == true;
             ResolveSmtpPassword(row, errors);
         }
 
@@ -1460,12 +1465,14 @@ public partial class SettingsWindow : Window
         {
             row.TeamsUrl = ViewerWebhookSealing.CarryKept(TeamsWebhookUrlBox.Text, _loadedNotification?.TeamsUrl);
             row.TeamsProxy = TeamsProxyAddressBox.Text?.Trim() ?? "";
+            row.TeamsSendResolutions = TeamsSendResolutionsCheckBox.IsChecked == true;
         }
 
         if (SlackWebhookEnabledCheckBox.IsChecked == true)
         {
             row.SlackUrl = ViewerWebhookSealing.CarryKept(SlackWebhookUrlBox.Text, _loadedNotification?.SlackUrl);
             row.SlackProxy = SlackProxyAddressBox.Text?.Trim() ?? "";
+            row.SlackSendResolutions = SlackSendResolutionsCheckBox.IsChecked == true;
         }
 
         if (GenericWebhookEnabledCheckBox.IsChecked == true)
@@ -1484,6 +1491,7 @@ public partial class SettingsWindow : Window
                 ? ""
                 : GenericWebhookBodyBox.Text?.Trim() ?? "";
             row.GenericProxy = GenericWebhookProxyAddressBox.Text?.Trim() ?? "";
+            row.GenericSendResolutions = GenericSendResolutionsCheckBox.IsChecked == true;
 
             /* A malformed headers JSON / body template would let the service accept the channel and then
                drop every alert with only a log line to show for it — block the Save instead (#1506). */
@@ -1632,6 +1640,7 @@ public partial class SettingsWindow : Window
         SmtpPasswordBox.IsEnabled = enabled;
         SmtpFromBox.IsEnabled = enabled;
         SmtpRecipientsBox.IsEnabled = enabled;
+        EmailSendResolutionsCheckBox.IsEnabled = enabled;
         TestEmailButton.IsEnabled = enabled;
         ValidateSmtpButton.IsEnabled = enabled;
     }
@@ -1750,6 +1759,7 @@ public partial class SettingsWindow : Window
         var enabled = TeamsWebhookEnabledCheckBox.IsChecked == true;
         TeamsWebhookUrlBox.IsEnabled = enabled;
         TeamsProxyAddressBox.IsEnabled = enabled;
+        TeamsSendResolutionsCheckBox.IsEnabled = enabled;
         TestTeamsButton.IsEnabled = enabled;
     }
 
@@ -1758,6 +1768,7 @@ public partial class SettingsWindow : Window
         var enabled = SlackWebhookEnabledCheckBox.IsChecked == true;
         SlackWebhookUrlBox.IsEnabled = enabled;
         SlackProxyAddressBox.IsEnabled = enabled;
+        SlackSendResolutionsCheckBox.IsEnabled = enabled;
         TestSlackButton.IsEnabled = enabled;
     }
 
@@ -1770,6 +1781,7 @@ public partial class SettingsWindow : Window
         GenericWebhookHeadersBox.IsEnabled = enabled;
         GenericWebhookBodyBox.IsEnabled = enabled;
         GenericWebhookProxyAddressBox.IsEnabled = enabled;
+        GenericSendResolutionsCheckBox.IsEnabled = enabled;
         TestGenericButton.IsEnabled = enabled;
     }
 

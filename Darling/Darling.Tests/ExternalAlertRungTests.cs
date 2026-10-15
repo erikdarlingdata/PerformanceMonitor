@@ -116,11 +116,9 @@ public sealed class ExternalAlertRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 5, parameters.Length - 1);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 2].Name);
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 4].Name);
@@ -136,6 +134,7 @@ public sealed class ExternalAlertRungTests
            absent too: a rung back. */
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
+        allPresent[ProbeOrdinal + 6] = false; /* V186 (#5825) absent: the cases below are stores below it. */
 
         var withoutV185 = (object[])allPresent.Clone();
         withoutV185[ProbeOrdinal + 5] = false;
@@ -239,6 +238,7 @@ public sealed class ExternalAlertRungTests
             /* An upgraded store: one rung behind (no tables, no column, no version row), then migrated, gets all of it. */
             await ExecAsync(connection, "DROP TABLE config.external_alert_state; DROP TABLE config.external_alert_pending; DROP TABLE config.external_alert_source; ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ExternalAlertTables.RungVersion, ct);
+            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);

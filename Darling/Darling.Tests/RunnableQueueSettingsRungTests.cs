@@ -96,20 +96,17 @@ public sealed class RunnableQueueSettingsRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^1].Name);
         Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 7].Name);
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 6].Name);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 5].Name);
         Assert.Equal("hasNotificationRouteScope", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
-        Assert.Equal(ProbeOrdinal + 8, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
         /* Every sentinel present answers this build's version (V180's). With the later sentinels absent this rung is the answer, 177; with

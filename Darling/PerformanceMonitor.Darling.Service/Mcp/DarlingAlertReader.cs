@@ -543,15 +543,23 @@ WHERE id = 1";
     /// columns the carve GRANTS is the shape that survives. <c>McpConfigReadAvoidsSecretColumnsTests</c>
     /// pins that this SELECT names no carved column.</para></summary>
     public const string DeliveryCooldownSelectSql = @"
-SELECT email_cooldown_minutes
+SELECT email_cooldown_minutes,
+       slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions
 FROM config_notification
 WHERE id = 1";
+
+    /// <summary>The four per-channel "send resolutions" flags (V186, #5825), as get_alert_settings reports them under
+    /// <c>delivery.send_resolutions</c>. Non-secret columns of the same row, granted to the read roles.</summary>
+    public sealed record SendResolutionsRead(bool Slack, bool Teams, bool Webhook, bool Email);
+
+    /// <summary>The delivery half of the alert configuration: the delivery cooldown and the resolution flags.</summary>
+    public sealed record DeliveryRead(int CooldownMinutes, SendResolutionsRead SendResolutions);
 
     /// <summary>Reads the delivery cooldown, or null when the store has no notification row. Null is a
     /// distinct answer rather than the shipped 15: the service seeds this row and
     /// <c>config_alert_settings</c> in ONE pass, so "settings present, notification absent" is not a state
     /// the product produces, and reporting a number nobody wrote would claim a reading never taken.</summary>
-    private static async Task<int?> ReadDeliveryCooldownAsync(
+    private static async Task<DeliveryRead?> ReadDeliveryAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
     {
         await using var command = new NpgsqlCommand(DeliveryCooldownSelectSql, connection) { Transaction = transaction };
@@ -562,13 +570,15 @@ WHERE id = 1";
             return null;
         }
 
-        return reader.GetInt32(0);
+        return new DeliveryRead(
+            reader.GetInt32(0),
+            new SendResolutionsRead(reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4)));
     }
 
     /// <summary>Both halves of the alert configuration, read in ONE snapshot: the settings row and the
     /// delivery cooldown that lives on the other table. Either may be null when the store has not seeded
     /// that singleton yet.</summary>
-    public sealed record AlertConfigurationRead(AlertSettingsReadRow? Settings, int? DeliveryCooldownMinutes);
+    public sealed record AlertConfigurationRead(AlertSettingsReadRow? Settings, DeliveryRead? Delivery);
 
     /// <summary>
     /// The alert configuration across BOTH config tables, under one snapshot.
@@ -596,8 +606,8 @@ WHERE id = 1";
             System.Data.IsolationLevel.RepeatableRead, cancellationToken);
 
         var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
-        var deliveryCooldownMinutes = await ReadDeliveryCooldownAsync(connection, transaction, cancellationToken);
+        var delivery = await ReadDeliveryAsync(connection, transaction, cancellationToken);
 
-        return new AlertConfigurationRead(settings, deliveryCooldownMinutes);
+        return new AlertConfigurationRead(settings, delivery);
     }
 }

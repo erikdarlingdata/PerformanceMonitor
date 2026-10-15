@@ -132,7 +132,6 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
@@ -148,7 +147,6 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 8].Name);
         Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 9].Name);
         Assert.Equal("hasPlanRegressionPartialDays", parameters[ProbeOrdinal + 10].Name);
-        Assert.Equal(ProbeOrdinal + 10, parameters.Length - 1);
 
         /* Every sentinel present maps to exactly this build's version. With the later sentinels absent this rung is the
            answer; with this one absent too, one rung back. */

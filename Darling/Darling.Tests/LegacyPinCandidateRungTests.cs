@@ -149,11 +149,9 @@ public sealed class LegacyPinCandidateRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 16})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 17})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 18})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 19})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 18, parameters.Length - 1);
         Assert.Equal("hasLegacyPinCandidates", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasPagerDutyAutoResolve", parameters[ProbeOrdinal - 1].Name);
 

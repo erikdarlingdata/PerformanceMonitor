@@ -151,8 +151,9 @@ public sealed class McpConfigReadAvoidsSecretColumnsTests
             .Where(c => c.Length > 0)
             .ToArray();
 
-        Assert.Equal(new[] { "email_cooldown_minutes" }, selected);
-        Assert.Contains("email_cooldown_minutes", acl.NonSecretColumns);
+        /* #5825 (V186): the four per-channel resolution flags are read beside the cooldown; each is on the non-secret carve. */
+        Assert.Equal(new[] { "email_cooldown_minutes", "slack_send_resolutions", "teams_send_resolutions", "generic_send_resolutions", "email_send_resolutions" }, selected);
+        Assert.All(selected, column => Assert.Contains(column, acl.NonSecretColumns));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

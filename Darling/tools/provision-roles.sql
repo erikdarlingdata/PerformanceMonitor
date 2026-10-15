@@ -590,6 +590,21 @@ $v184$;
       END IF;
    END IF;
 END $$;
+-- V186 (#5825): the four per-channel "send resolutions" flags and a route's override of them. Non-secret
+-- (behaviour toggles, like pagerduty_auto_resolve), so they are granted. Guarded on the column, so a store below
+-- V186 still commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.config_notification'::regclass
+                AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
+      EXECUTE $v186$
+GRANT SELECT (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+    ON config.config_notification TO viewer;
+GRANT SELECT (send_resolutions) ON config.config_notification_routes TO viewer;
+$v186$;
+   END IF;
+END $$;
 
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
@@ -631,6 +646,21 @@ GRANT SELECT (agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_mi
     ON config.config_notification_routes TO mcp;
 $v184$;
       END IF;
+   END IF;
+END $$;
+-- V186 (#5825): the four per-channel "send resolutions" flags and a route's override of them. Non-secret
+-- (behaviour toggles, like pagerduty_auto_resolve), so they are granted. Guarded on the column, so a store below
+-- V186 still commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.config_notification'::regclass
+                AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
+      EXECUTE $v186$
+GRANT SELECT (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+    ON config.config_notification TO mcp;
+GRANT SELECT (send_resolutions) ON config.config_notification_routes TO mcp;
+$v186$;
    END IF;
 END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
@@ -1102,6 +1132,16 @@ GRANT INSERT ON collect.analysis_findings TO mcp;
 GRANT INSERT ON config.analysis_muted TO mcp;
 GRANT UPDATE ON config.config_alert_settings TO mcp;
 GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO mcp;
+-- #5825 (V186): update_alert_settings writes delivery.send_resolutions, the four per-channel resolution flags.
+-- Guarded on the column, so a store below V186 still commits the rest.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.config_notification'::regclass
+                AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
+      EXECUTE 'GRANT UPDATE (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions) ON config.config_notification TO mcp';
+   END IF;
+END $$;
 GRANT UPDATE (enabled, modified_at), DELETE ON config.config_notification_routes TO mcp;
 GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;
 REVOKE UPDATE ON config.config_monitored_servers FROM mcp;

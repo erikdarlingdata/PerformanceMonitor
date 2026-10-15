@@ -70,7 +70,6 @@ public sealed class ReadCallerRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         /* V185's sentinel (#5812) is the last parameter and V184's (#5632) the one before it; this one is just below them. */
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^1].Name);
         Assert.Equal("hasInvestigations", parameters[^2].Name);
         Assert.Equal("hasReadCaller", parameters[^3].Name);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[^4].Name);
@@ -111,6 +110,7 @@ public sealed class ReadCallerRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V182 shape and the ladder back to 182. */
+        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);

@@ -66,7 +66,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
     public void TheRungsAreRegistered_DenseAndTheTop_AndShareOneBuilder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-        Assert.Equal(new[] { 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185 }, versions.OrderBy(v => v).TakeLast(15).ToArray());
+        Assert.Equal(new[] { 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186 }, versions.OrderBy(v => v).TakeLast(16).ToArray());
         Assert.Equal("query-store-interval-wide-partitioned", WideRung.Name);
         Assert.Equal("query-store-interval-latest-partitioned", LatestRung.Name);
         /* No longer the top rung: the Query Store compose rollup rung (V173, #5582), the service version rung (V174, #5655), the plan regression rowcount rung (V175, #5631), the external alert rung (V180, #5654), the read latency capacity rung (V182, #5506) the read caller rung (V183, #5793), the investigation rung (V184, #5632) and the plan regression partial-day rung (V185, #5812) landed above it. */
@@ -112,7 +112,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
             Assert.Equal(RowsPerTable, latestBefore);
             Assert.Equal("r", await TextAsync(connection, "SELECT relkind::text FROM pg_class WHERE oid = 'collect." + Wide + "'::regclass", ct));
 
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
 
             foreach (var table in new[] { Wide, Latest })
             {
@@ -219,7 +219,7 @@ FROM generate_series(1, 50) AS g", ct);
                 await migrator.OpenAsync(ct);
                 migrator.Notice += (_, e) => notices.Add(e.Notice.MessageText);
                 await ExecAsync(migrator, "SET client_min_messages = debug1", ct);
-                Assert.Equal(15, await PgMigrations.MigrateAsync(migrator, ct));
+                Assert.Equal(16, await PgMigrations.MigrateAsync(migrator, ct));
                 await FlushStatsAsync(migrator, ct);
             }
 
@@ -255,7 +255,7 @@ FROM generate_series(1, 50) AS g", ct);
         try
         {
             await using var connection = await ArrangeV170StoreAsync(scratch, ct);
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
             var before = await CatalogSnapshotAsync(connection, ct);
             Assert.Contains("p:query_store_interval_wide", before, StringComparison.Ordinal);
 
@@ -306,7 +306,7 @@ FROM generate_series(1, 50) AS g", ct);
             Assert.Equal(1, await CountAsync(connection, "pg_trigger WHERE tgrelid = 'collect.query_store_interval_latest'::regclass AND NOT tgisinternal", ct));
             var triggerBefore = await TextAsync(connection, "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'collect.query_store_interval_latest'::regclass AND NOT tgisinternal", ct);
 
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
 
             /* The INVALID btree is gone from both the legacy table and the parent; the missing BRIN was not built. */
             Assert.Null(await ScalarAsync(connection, "SELECT to_regclass('collect.ix_query_store_interval_wide_server_first_exec')::text", ct));
@@ -358,7 +358,7 @@ FROM generate_series(1, 50) AS g", ct);
             var filesBefore = await TextAsync(connection, "SELECT string_agg(relfilenode::text, ',' ORDER BY relname) FROM pg_class WHERE relname IN " + names, ct);
             Assert.Equal(4, filesBefore.Split(',').Length);
 
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
 
             foreach (var index in new[] { "ix_query_store_interval_wide_server_first_exec", "ix_query_store_interval_wide_collection_time_brin" })
             {
@@ -403,7 +403,7 @@ FROM generate_series(1, 50) AS g", ct);
                 legacyShape[table] = await ColumnShapeAsync(connection, "collect." + table, ct);
             }
 
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
 
             foreach (var table in new[] { Wide, Latest })
             {
@@ -449,7 +449,7 @@ FROM generate_series(1, 50) AS g", ct);
             Assert.Equal(RowsPerTable, await CountAsync(connection, "collect." + Wide, ct));
             await ExecAsync(connection, "RESET ROLE", ct);
 
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
 
             await ExecAsync(connection, "SET ROLE " + role, ct);
             foreach (var table in new[] { Wide, Latest })
@@ -498,7 +498,7 @@ FROM generate_series(1, 50) AS g", ct);
         try
         {
             await using var connection = await ArrangeV170StoreAsync(scratch, ct);
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
             Assert.True(await IndexIsValidAsync(connection, "ux_" + Wide, ct));
             Assert.True(await IndexIsValidAsync(connection, "ux_" + Latest, ct));
 
@@ -574,7 +574,7 @@ FROM generate_series(1, 50) AS g", ct);
         try
         {
             await using var connection = await ArrangeV170StoreAsync(scratch, ct);
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
             await ExecAsync(connection, "TRUNCATE collect.plan_regression_daily_built", ct);
 
             const string insert = @"
@@ -608,7 +608,7 @@ SELECT -5571901, 'trg', 900000, 1, NULL, 900000, {0}, {0}, 'ph', 'qh', 1, 1, 1, 
         {
             await using var connection = await ArrangeV170StoreAsync(scratch, ct);
             Assert.Equal(170, await ProbedVersionAsync(connection, ct));
-            Assert.Equal(15, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(16, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
             bodySucceeded = true;
         }
@@ -659,6 +659,7 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
         }
 
         /* V185 (#5812), V184 (#5632), V183 (#5793), V182 (#5506) and V181 (#5750): the plan regression watermark column, the investigation tables, the read caller columns, the read latency capacity columns and the route scope columns are above V170 too (V185's is the probe's newest sentinel). */
+        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);

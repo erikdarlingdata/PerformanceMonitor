@@ -82,6 +82,10 @@ public sealed class PgNotificationRouteStore
         /// <summary>How long an unclaimed request stays open, in minutes (#5632).</summary>
         public int AgentExpiryMinutes { get; init; } = NotificationRoute.DefaultAgentExpiryMinutes;
 
+        /// <summary>Whether the route's destinations get an alert's resolution (#5825): null follows each channel's setting,
+        /// true or false overrides it.</summary>
+        public bool? SendResolutions { get; init; }
+
         /// <summary>True when the route is scoped but its scope could not be read just now (the tag tables failed, for a tag-scoped route):
         /// it matches nothing until a read succeeds, and is not orphaned, since the tag may still exist. The loader's rule
         /// (<see cref="StoreConfigProvider.ExpandRoutes"/>), so the tool never shows such a route as an ordinary active one (#5750).</summary>
@@ -93,7 +97,7 @@ public sealed class PgNotificationRouteStore
     /// the one a superuser-run test never notices.</summary>
     public const string SelectSummariesSql = @"
 SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id,
-       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes
+       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions
 FROM config_notification_routes
 ORDER BY route_id";
 
@@ -142,6 +146,7 @@ UPDATE config_notification_routes
                 AgentMaxPerDay = reader.GetInt32(10),
                 AgentLeaseMinutes = reader.GetInt32(11),
                 AgentExpiryMinutes = reader.GetInt32(12),
+                SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
             });
         }
 

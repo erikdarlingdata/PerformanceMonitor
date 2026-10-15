@@ -1009,7 +1009,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     {
         var build = typeof(DarlingMcpAlertTools).GetMethod(
             "BuildAlertSettingsPayload", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var payload = build.Invoke(null, new object[] { row, deliveryCooldownMinutes })!;
+        var delivery = new Reader.DeliveryRead(deliveryCooldownMinutes, new Reader.SendResolutionsRead(false, false, false, false));
+        var payload = build.Invoke(null, new object[] { row, delivery })!;
         var json = JsonSerializer.Serialize(payload, payload.GetType(), McpHelpers.JsonOptions);
         return (JsonObject)JsonNode.Parse(json)!;
     }
