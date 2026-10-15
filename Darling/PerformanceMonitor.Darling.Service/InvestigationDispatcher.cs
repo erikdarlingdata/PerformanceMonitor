@@ -62,25 +62,28 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>The long-poll's wake-up (#5822).</b> When the store answers <see cref="InvestigationOpenOutcome.Opened"/>, and only
 /// then (a join is not a new request, and a limit opens nothing), the dispatcher fires <see cref="InvestigationOpenSignal.Opened"/>
-/// for the route, which wakes every <c>wait_for_investigation_requests</c> call waiting on it. The signal carries nothing: the
+/// for the route (the core calls it through the <c>opened</c> delegate it is given), which wakes every <c>wait_for_investigation_requests</c> call waiting on it. The signal carries nothing: the
 /// woken call reads the committed request from the store. With nobody waiting it costs a lock and an empty loop.</para>
 ///
 /// <para><b>Never throws.</b> A failure, a cancellation included, is logged and the delivery that called it goes on: the
 /// deliverer's and the finding sender's catch turn a throw into a null delivery, which would misreport a page that was sent.
 /// Its store connections carry a 5-second <c>lock_timeout</c> (<see cref="WithLockTimeout"/>), so a held lock costs an alert
 /// pass at most that long per statement; a slow store is bounded by the command timeout instead.</para>
+///
+/// <para><b>Shared core (#5820).</b> The open-or-join, the muted and family rules, the agent route, the dedup keys and the open
+/// signal live in <see cref="InvestigationDispatchCore"/> in <c>PerformanceMonitor.Notifications</c>, so Lite runs the same
+/// rules. This wrapper adds what is Darling's: the PostgreSQL store, the lock timeout, the process's open signal, and the
+/// generic webhook's token with its read-back.</para>
 /// </summary>
 public sealed class InvestigationDispatcher
 {
     /// <summary>The <c>lock_timeout</c> on the dispatcher's store connections, in milliseconds.</summary>
     public const int LockTimeoutMilliseconds = 5000;
 
-    private readonly Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>> _openOrJoin;
+    private readonly InvestigationDispatchCore _core;
     private readonly Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? _readRequest;
     private readonly McpDataDetail _dataDetail;
-    private readonly IAlertSettings _settings;
     private readonly ILogger _logger;
-    private readonly InvestigationOpenSignal? _openSignal;
 
     /// <param name="store">The store, over a data source built from <see cref="WithLockTimeout"/>.</param>
     /// <param name="settings">The live alert settings: the route list and the PagerDuty auto-resolve flag are read per call.</param>
@@ -106,12 +109,10 @@ public sealed class InvestigationDispatcher
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
         InvestigationOpenSignal? openSignal = null)
     {
-        _openOrJoin = openOrJoin ?? throw new ArgumentNullException(nameof(openOrJoin));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _core = new InvestigationDispatchCore(openOrJoin, settings, logger, openSignal is null ? null : openSignal.Opened);
         _readRequest = readRequest;
         _dataDetail = dataDetail;
-        _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _openSignal = openSignal;
     }
 
     /// <summary>
@@ -135,34 +136,18 @@ public sealed class InvestigationDispatcher
     /// an engine alert has none and passes null.
     /// </summary>
     /// <returns>What the store did, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
-    public async Task<InvestigationOpenOutcome?> DispatchAsync(
-        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default)
-    {
-        if (record is null)
-        {
-            return null;
-        }
-
-        var result = await OpenOrJoinAsync(
-            record.ServerId, record.ServerName, record.MetricName, record.Muted,
-            record.AlertTimeUtc ?? AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
-            context, storyPathHash,
-            Facts(record.CurrentValueText, record.NumericCurrentValue, record.ThresholdValueText, record.NumericThresholdValue,
-                record.Muted, record.DetailText, record.ContextJson),
-            cancellationToken);
-        return result?.Outcome;
-    }
+    public Task<InvestigationOpenOutcome?> DispatchAsync(
+        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default) =>
+        _core.DispatchAsync(record, context, storyPathHash, cancellationToken);
 
     /// <summary>
-    /// #5821: the values an alert's history row stores, for its link rows: the two numbers resolved from the numeric value or
-    /// its display text exactly as the history store resolves them (<see cref="AlertValueParser.ResolveStoredValue"/>).
+    /// #5821: the values an alert's history row stores, for its link rows (<see cref="InvestigationDispatchCore.Facts"/>).
     /// </summary>
     public static InvestigationAlertFacts Facts(
         string currentValueText, double? numericCurrentValue, string thresholdValueText, double? numericThresholdValue,
         bool muted, string? detailText, string? contextJson) =>
-        new(AlertValueParser.ResolveStoredValue(numericCurrentValue, currentValueText),
-            AlertValueParser.ResolveStoredValue(numericThresholdValue, thresholdValueText),
-            muted, detailText, contextJson);
+        InvestigationDispatchCore.Facts(
+            currentValueText, numericCurrentValue, thresholdValueText, numericThresholdValue, muted, detailText, contextJson);
 
     /// <summary>
     /// #5821: opens or joins the request for an alert that is about to be sent and recorded, and returns the generic webhook's
@@ -178,7 +163,7 @@ public sealed class InvestigationDispatcher
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
         string? storyPathHash = null, InvestigationAlertFacts? facts = null, CancellationToken cancellationToken = default)
     {
-        var result = await OpenOrJoinAsync(
+        var result = await _core.OpenOrJoinAsync(
             serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts, cancellationToken);
         if (result is not { RequestId: Guid requestId } || result.Outcome == InvestigationOpenOutcome.LimitReached)
         {
@@ -189,7 +174,7 @@ public sealed class InvestigationDispatcher
         try
         {
             (InvestigationRequestRow Row, string? Brief)? read = null;
-            if (_readRequest is not null && GenericPostCarriesToken(serverId, metricName))
+            if (_readRequest is not null && _core.GenericPostCarriesToken(serverId, metricName))
             {
                 try
                 {
@@ -214,115 +199,5 @@ public sealed class InvestigationDispatcher
                 requestId, ex.Message);
             return InvestigationWebhookToken.Render(requestId, opened, null, null, _dataDetail);
         }
-    }
-
-    /// <summary>
-    /// #5821: whether the generic webhook this alert posts to has <c>{{investigation_json}}</c> in its body template, resolved
-    /// through the same router the send uses. Only then is the request read back: the token is in no shipped template.
-    /// </summary>
-    private bool GenericPostCarriesToken(string serverId, string metricName) =>
-        WebhookAlertService.TemplateCarriesInvestigationToken(_settings.GenericWebhookBodyTemplate)
-        && NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId))
-            .Generic.Destination is not null;
-
-    private async Task<InvestigationOpenResult?> OpenOrJoinAsync(
-        string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
-        string? storyPathHash, InvestigationAlertFacts? facts, CancellationToken cancellationToken)
-    {
-        if (muted)
-        {
-            return null;
-        }
-
-        try
-        {
-            var family = InvestigationFamily.Of(metricName);
-            if (family is null)
-            {
-                return null;
-            }
-
-            var routeServerId = NotificationRouter.ParseServerId(serverId);
-            var route = NotificationRouter.ResolveAgent(metricName, _settings.NotificationRoutes, routeServerId);
-            if (route is null)
-            {
-                return null;
-            }
-
-            var alert = new InvestigationAlert(
-                route.RouteId,
-                AlertHistoryServerIdentity.StorageId(serverId),
-                serverName,
-                family,
-                metricName,
-                alertTimeUtc,
-                DedupKeys(serverId, serverName, metricName, context, _settings),
-                storyPathHash,
-                route.AgentMaxPerHour,
-                route.AgentMaxPerDay,
-                route.AgentLeaseMinutes,
-                route.AgentExpiryMinutes,
-                facts);
-
-            var result = await _openOrJoin(alert, cancellationToken);
-            switch (result.Outcome)
-            {
-                case InvestigationOpenOutcome.Opened:
-                    _logger.LogInformation(
-                        "Investigation request {RequestId} opened for {Metric} on {Server} (family {Family}, route {RouteId})",
-                        result.RequestId, metricName, serverName, family, route.RouteId);
-                    _openSignal?.Opened(route.RouteId);
-                    break;
-                case InvestigationOpenOutcome.LimitReached:
-                    _logger.LogWarning(
-                        "Investigation not opened for {Metric} on {Server}: route {RouteId} reached its limit ({PerHour} an hour, {PerDay} a day)",
-                        metricName, serverName, route.RouteId, route.AgentMaxPerHour, route.AgentMaxPerDay);
-                    break;
-                default:
-                    _logger.LogDebug(
-                        "Alert {Metric} on {Server} joined investigation request {RequestId}",
-                        metricName, serverName, result.RequestId);
-                    break;
-            }
-
-            return result;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                "Investigation dispatch failed for {Metric} on {Server}; the alert's delivery and record go on: {Message}",
-                metricName, serverName, ex.Message);
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// The PagerDuty-style dedup key the send path derives for this row, then every incident's own key: the store records a
-    /// link row per distinct key, so the request names each incident of the alert and not only the first.
-    /// </summary>
-    internal static IReadOnlyList<string> DedupKeys(AlertHistoryRecord record, AlertContext? context, IAlertSettings settings) =>
-        DedupKeys(record.ServerId, record.ServerName, record.MetricName, context, settings);
-
-    private static List<string> DedupKeys(
-        string serverId, string serverName, string metricName, AlertContext? context, IAlertSettings settings)
-    {
-        var keyServer = string.IsNullOrEmpty(serverId) ? serverName : serverId;
-        var keys = new List<string>
-        {
-            WebhookAlertService.DerivePagerDutyDedupKeyForSend(keyServer, metricName, context, settings),
-        };
-
-        if (context?.Incidents is { Count: > 0 } incidents)
-        {
-            foreach (var incident in incidents)
-            {
-                if (!string.IsNullOrEmpty(incident.DedupKey) && !keys.Contains(incident.DedupKey))
-                {
-                    keys.Add(incident.DedupKey);
-                }
-            }
-        }
-
-        return keys;
     }
 }

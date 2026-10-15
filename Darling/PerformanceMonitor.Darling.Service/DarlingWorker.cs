@@ -6514,7 +6514,7 @@ LIMIT 1";
 
     /// <summary>
     /// #5632 Phase A (ruling R4): every <see cref="s_investigationSweepInterval"/>, <see cref="InvestigationRequestStore.SweepAsync"/>
-    /// expires lapsed leases and old requests. It honors the service pause as the external alert loop does, and a failed
+    /// expires lapsed leases and old requests, through the shared <see cref="InvestigationDispatchCore.SweepOnceAsync"/> (#5820). It honors the service pause as the external alert loop does, and a failed
     /// pass is logged and tried again next tick.
     /// </summary>
     private async Task RunInvestigationSweepLoopAsync(InvestigationRequestStore store, CancellationToken stoppingToken)
@@ -6525,13 +6525,7 @@ LIMIT 1";
             {
                 try
                 {
-                    var swept = await store.SweepAsync(stoppingToken);
-                    if (swept.LeasesLapsed > 0 || swept.Expired > 0)
-                    {
-                        _logger.LogInformation(
-                            "Investigation sweep: {Lapsed} lapsed lease(s) journaled, {Expired} request(s) expired",
-                            swept.LeasesLapsed, swept.Expired);
-                    }
+                    await InvestigationDispatchCore.SweepOnceAsync(store, _logger, stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
