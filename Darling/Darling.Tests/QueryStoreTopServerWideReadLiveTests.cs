@@ -107,18 +107,29 @@ public sealed class QueryStoreTopServerWideReadLiveTests
         var nodes = Flatten(plan).ToList();
         var wideNodes = nodes.Where(n => Str(n, "Relation Name")?.StartsWith("query_store_interval_wide", StringComparison.Ordinal) == true).ToList();
         Assert.NotEmpty(wideNodes);
+        /* A null name would match every plan node without an "Index Name" (the root among them), so the index must
+           exist before the plan is searched for it. */
+        Assert.True(serverIndex is not null,
+            "no index on collect.query_store_interval_wide_legacy whose definition ends in (server_id, first_execution_time)");
         Assert.Contains(nodes, n => Str(n, "Index Name") == serverIndex);
         Assert.DoesNotContain(wideNodes, n => Str(n, "Node Type") == "Seq Scan");
         var touched = wideNodes.Sum(n => (Num(n, "Actual Rows") + Num(n, "Rows Removed by Filter") + Num(n, "Rows Removed by Index Recheck")) * Math.Max(1, Num(n, "Actual Loops")));
         Assert.Equal(busyRowsInWindow, (long)Math.Round(wideNodes.Sum(n => Num(n, "Actual Rows") * Math.Max(1, Num(n, "Actual Loops")))));
         Assert.True(touched <= busyRowsInRange, $"the read touched {touched} wide rows; the busy server holds {busyRowsInRange} in the first_execution_time range, and no other server's row may be read");
 
-        /* The page's sorted candidates feed the text lateral lazily: it pulls only the rows it needs to fill the page,
-           far fewer than the final candidate limit. */
+        /* The page's sorted candidates feed the text lateral lazily: it pulls only the rows it needs to fill the page.
+           The seed fixes that count exactly. Each database's plans 8, 16, ..., 56 are WAITFOR shells (Plans / 8 of them),
+           and every shell outranks every other candidate: the cheapest, plan 56, costs 10 executions x 50,056 ms per
+           interval, the dearest other one, plan 59, 13 x 59 ms. So the sort emits all the shells, which the self-exclusion
+           drops, then exactly Top more rows, and the LIMIT stops it there. Ties among the shells or among the other
+           candidates reorder rows inside those two blocks, never the count. The old shape looked up all FinalCandidates. */
+        var shells = Databases * (Plans / 8);
+        var expectedLookups = shells + Top;
+        Assert.True(expectedLookups < TopFill.FinalCandidates(Top), $"the seed must leave the page full before the final limit ({expectedLookups} lookups, limit {TopFill.FinalCandidates(Top)})");
         var candidateSort = nodes.Single(n => Str(n, "Node Type") == "Sort"
             && n.TryGetProperty("Sort Key", out var keys) && keys.EnumerateArray().Any(k => k.GetString()!.Contains("k.database_name", StringComparison.Ordinal)));
-        var pulled = Num(candidateSort, "Actual Rows");
-        Assert.InRange(pulled, Top, TopFill.FinalCandidates(Top) - 1);
+        Assert.Equal(1.0, Num(candidateSort, "Actual Loops"));
+        Assert.Equal(expectedLookups, (int)Num(candidateSort, "Actual Rows"));
     }
 
     private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
