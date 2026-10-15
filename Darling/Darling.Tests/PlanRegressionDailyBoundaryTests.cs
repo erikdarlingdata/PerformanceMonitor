@@ -108,8 +108,8 @@ public sealed class PlanRegressionDailyBoundaryTests
         Assert.Contains("BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead", fact, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION READ ONLY", fact, StringComparison.Ordinal);
         /* #5812 bound 2: the work memory is raised for this transaction only (SET LOCAL), inside the snapshot. */
-        Assert.Contains("new NpgsqlCommand(PlanRegressionDailyWorkMemSql, connection, snapshot)", fact, StringComparison.Ordinal);
-        Assert.StartsWith("SET LOCAL work_mem = ", PgFactCollector.PlanRegressionDailyWorkMemSql, StringComparison.Ordinal);
+        Assert.Contains("new NpgsqlCommand(PlanRegressionWorkMemSql, connection, snapshot)", fact, StringComparison.Ordinal);
+        Assert.StartsWith("SET LOCAL work_mem = ", PgFactCollector.PlanRegressionWorkMemSql, StringComparison.Ordinal);
         Assert.Contains("connection, snapshot, context.ServerId, windowFloor", fact, StringComparison.Ordinal);
         Assert.Contains("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)", fact, StringComparison.Ordinal);
 
@@ -130,14 +130,14 @@ public sealed class PlanRegressionDailyBoundaryTests
     public void TheWatermarkFloor_WithNothingBuilt_IsADayBelowTheWindow()
     {
         /* #5812: the first unbuilt day is the window's own first day, and a row of it may have begun the day before (R1's
-           one-day lookback), so the floor is one day below the window floor, as before V184. */
+           one-day lookback), so the floor is one day below the window floor, as before V185. */
         Assert.Equal(At(1).AddDays(-1), Floor(1));
     }
 
     [Fact]
     public void TheWatermarkFloor_OverContiguousWholeDays_IsADayBelowTheFirstUnbuiltDay()
     {
-        /* Days 1-4 whole (NULL through, a pre-V184 build, reads as the next midnight): day 5 is the first unbuilt day, so
+        /* Days 1-4 whole (NULL through, a pre-V185 build, reads as the next midnight): day 5 is the first unbuilt day, so
            the floor is day 4's start, not day 5's (that would drop day 5's rows that began on day 4) nor day 3's. */
         Assert.Equal(At(4), Floor(1, Whole(1), Whole(2), Whole(3), Whole(4)));
 

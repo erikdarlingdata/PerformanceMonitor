@@ -243,8 +243,43 @@ public static class AlertFamily
         /* ExternalAlertDrain.MetricNameFor (#5654): "External:" + source + ":" + key. */
         (ExternalMetricPrefix, External),
         /* FindingMessageFormatter.MetricName: "Analysis: {category} [{hash}]". */
-        ("Analysis: ", Performance),
+        (AnalysisMetricPrefix, Performance),
     };
+
+    /// <summary>The prefix of an analysis finding's metric name, <c>Analysis: {category} [{hash8}]</c>
+    /// (<c>FindingMessageFormatter.MetricName</c>).</summary>
+    public const string AnalysisMetricPrefix = "Analysis: ";
+
+    /// <summary>
+    /// The finding category out of an analysis metric name of the shape <c>Analysis: {category} [{hash8}]</c> (#5632).
+    /// False for any other name, including a name that has the prefix but no bracketed hash suffix, so a digest
+    /// title or a route's own <c>Analysis: {category}</c> match is never read as a finding.
+    /// </summary>
+    public static bool TryGetAnalysisCategory(string? metricName, out string category)
+    {
+        category = string.Empty;
+        if (metricName is null
+            || !metricName.StartsWith(AnalysisMetricPrefix, StringComparison.Ordinal)
+            || !metricName.EndsWith(']'))
+        {
+            return false;
+        }
+
+        var bracket = metricName.LastIndexOf(" [", StringComparison.Ordinal);
+        if (bracket < AnalysisMetricPrefix.Length)
+        {
+            return false;
+        }
+
+        var found = metricName[AnalysisMetricPrefix.Length..bracket].Trim();
+        if (found.Length == 0)
+        {
+            return false;
+        }
+
+        category = found;
+        return true;
+    }
 
     /// <summary>Whether <paramref name="name"/> spells a family (case-insensitively, trimmed) — the test a
     /// route's <c>metric_match</c> is read through to decide whether it is a family route or an exact one.</summary>

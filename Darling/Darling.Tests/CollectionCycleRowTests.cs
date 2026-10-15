@@ -604,17 +604,27 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
     /// and does not count it as a collector run. The server has one collector run and one cycle row: <c>run_count</c> 1,
     /// <c>skipped_cycle_rows</c> 1, the cycle row still in <c>runs</c>. The fleet form counts the same way across the two
     /// servers: one run, three cycle rows.
+    /// <para>#5824: the body adds a second collector run and an analysis pass's row (<see cref="AnalysisPassRow"/>) to the
+    /// server, so its page holds two collector runs, one cycle row and one analysis_pass row: <c>run_count</c> 2 in both forms.
+    /// <c>run_count</c> is a C# count over the page, which <c>CollectionCycleReaderCensusTests</c> cannot reach (it grades SQL
+    /// text), so this is the pin that <see cref="CollectionCycleRow.IsCollectorRun"/> holds at both readers; on the old
+    /// comparison (<c>!= CollectionCycleRow.CollectorName</c>) both forms count 3.</para>
     /// </summary>
     [Fact]
-    public Task Group8_CollectionLog_ShowsTheCycleRow_ButCountsItApartFromTheRuns() => RunReaderAsync(async (f, _, ct) =>
+    public Task Group8_CollectionLog_ShowsTheCycleRow_ButCountsItApartFromTheRuns() => RunReaderAsync(async (f, connection, ct) =>
     {
+        await InsertAsync(connection, ct, ReaderServerOld, "cycle-reader-old", "memory_stats", "SUCCESS", MinutesAgo(20), 5);
+        await InsertAsync(connection, ct, ReaderServerOld, "cycle-reader-old", AnalysisPassRow.CollectorName, AnalysisPassRow.Analyzed, MinutesAgo(15), 0);
+
         using (var one = System.Text.Json.JsonDocument.Parse(
             await DarlingMcpDataTools.GetCollectionLog(f.Postgres, "cycle-reader-old", 24, 200)))
         {
             var root = one.RootElement;
-            Assert.Equal(1, root.GetProperty("run_count").GetInt32());
+            Assert.Equal(2, root.GetProperty("run_count").GetInt32());
             Assert.Equal(1, root.GetProperty("skipped_cycle_rows").GetInt32());
-            Assert.Equal(2, root.GetProperty("runs").GetArrayLength());
+            Assert.Equal(4, root.GetProperty("runs").GetArrayLength());
+            Assert.Contains(root.GetProperty("runs").EnumerateArray(),
+                r => r.GetProperty("collector").GetString() == AnalysisPassRow.CollectorName);
             Assert.Contains(root.GetProperty("runs").EnumerateArray(),
                 r => r.GetProperty("collector").GetString() == CollectionCycleRow.CollectorName
                   && r.GetProperty("status").GetString() == CollectionCycleRow.Status);
@@ -624,9 +634,9 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
             await DarlingMcpDataTools.GetCollectionLog(f.Postgres, "*", 24, 200));
         var fleetRoot = fleet.RootElement;
         Assert.Equal("fleet", fleetRoot.GetProperty("scope").GetString());
-        Assert.Equal(1, fleetRoot.GetProperty("run_count").GetInt32());
+        Assert.Equal(2, fleetRoot.GetProperty("run_count").GetInt32());
         Assert.Equal(3, fleetRoot.GetProperty("skipped_cycle_rows").GetInt32());
-        Assert.Equal(4, fleetRoot.GetProperty("runs").GetArrayLength());
+        Assert.Equal(6, fleetRoot.GetProperty("runs").GetArrayLength());
     });
 }
 

@@ -91,7 +91,8 @@ public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
 INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+            /* #5632: a caller that stamped the row's time (AlertHistoryRecord.AlertTimeUtc) gets that instant, as Darling's store does. */
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.AlertTimeUtc ?? DateTime.UtcNow });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.ServerName });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.MetricName });

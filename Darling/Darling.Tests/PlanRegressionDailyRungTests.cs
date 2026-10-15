@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -281,17 +281,17 @@ public sealed class PlanRegressionDailyRungTests
     }
 
     /// <summary>
-    /// #5812: V184 adds both partial-day columns, and the trigger's bound is <see cref="PlanRegressionDaily.LateTriggerLagHours"/>,
+    /// #5812: V185 adds both partial-day columns, and the trigger's bound is <see cref="PlanRegressionDaily.LateTriggerLagHours"/>,
     /// which the builder's watermark lag stays at least one hour above. Were the watermark at or above the trigger's bound, a
     /// write below the watermark could land without marking its day, and its row would be in neither half of the read.
     /// </summary>
     [Fact]
-    public void V184_AddsBothPartialDayColumns_AndItsTriggerBoundIsTheNamedLag_OneHourUnderTheWatermarksLag()
+    public void V185_AddsBothPartialDayColumns_AndItsTriggerBoundIsTheNamedLag_OneHourUnderTheWatermarksLag()
     {
-        var v184 = PgMigrations.Scripts.Single(m => m.Version == 184);
-        Assert.Equal("plan-regression-partial-days", v184.Name);
-        Assert.Contains("ADD COLUMN IF NOT EXISTS built_through timestamp,\n    ADD COLUMN IF NOT EXISTS partial_seq bigint;", v184.Sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-        Assert.Contains($"WHEN (NEW.first_execution_time < date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PlanRegressionDaily.LateTriggerLagHours} hour'", v184.Sql, StringComparison.Ordinal);
+        var v185 = PgMigrations.Scripts.Single(m => m.Version == 185);
+        Assert.Equal("plan-regression-partial-days", v185.Name);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS built_through timestamp,\n    ADD COLUMN IF NOT EXISTS partial_seq bigint;", v185.Sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains($"WHEN (NEW.first_execution_time < date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PlanRegressionDaily.LateTriggerLagHours} hour'", v185.Sql, StringComparison.Ordinal);
         Assert.Equal(1, PlanRegressionDaily.LateTriggerLagHours);
         Assert.Equal(2, PlanRegressionDaily.PartialWatermarkLagHours);
         Assert.True(PlanRegressionDaily.PartialWatermarkLagHours >= PlanRegressionDaily.LateTriggerLagHours + 1,
@@ -304,7 +304,7 @@ public sealed class PlanRegressionDailyRungTests
     /// build after a partial one reads whole, and a partial build reads as not built to V183's predicate.
     /// </summary>
     [Fact]
-    public void TheStampAndTheBuiltDaysRead_KeepAPartialBuildInvisibleToPreV184Code()
+    public void TheStampAndTheBuiltDaysRead_KeepAPartialBuildInvisibleToPreV185Code()
     {
         var mark = PlanRegressionDaily.MarkBuiltSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("SET built_seq = CASE WHEN $6::timestamp >= ($2::date + 1)::timestamp THEN $3::bigint END,", mark, StringComparison.Ordinal);
@@ -377,20 +377,21 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5812) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) is next and V185's (#5812) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 14})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 15})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 16})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 17})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 17})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 18})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
 
-        /* A newer rung's sentinel (V184's, #5812) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 16, parameters.Length - 1);
+        /* A newer rung's sentinel (V185's, #5812) is the last argument. */
+        Assert.Equal(ProbeOrdinal + 17, parameters.Length - 1);
         Assert.Equal("hasPlanRegressionDaily", parameters[ProbeOrdinal].Name);
 
         /* Every sentinel true is a fully-migrated store, which maps to exactly this build's version. */

@@ -308,99 +308,113 @@ public sealed partial class ViewerDataService
         ),
         page AS (
         SELECT
-            r.database_name,
-            r.query_id,
-            r.plan_id,
-            r.query_hash,
-            t.query_text,
-            r.module_name,
-            r.total_executions,
-            r.avg_duration_ms,
-            r.avg_cpu_time_ms,
-            r.avg_logical_reads,
-            r.avg_logical_writes,
-            r.avg_physical_reads,
-            r.avg_rowcount,
-            r.min_dop,
-            r.max_dop,
-            r.last_execution_time,
-            r.query_plan_hash,
-            r.is_forced_plan,
-            r.plan_forcing_type,
-            r.execution_type_desc,
-            r.first_execution_time,
-            r.avg_clr_time_ms,
-            r.avg_tempdb_space_used,
-            r.avg_log_bytes_used,
-            r.plan_type,
-            r.force_failure_count,
-            r.last_force_failure_reason,
-            r.compatibility_level,
-            r.min_duration_ms,
-            r.max_duration_ms,
-            r.min_cpu_time_ms,
-            r.max_cpu_time_ms,
-            r.min_logical_reads,
-            r.max_logical_reads,
-            r.min_logical_writes,
-            r.max_logical_writes,
-            r.min_physical_reads,
-            r.max_physical_reads,
-            r.min_clr_time_ms,
-            r.max_clr_time_ms,
-            r.min_rowcount,
-            r.max_rowcount,
-            r.min_log_bytes_used,
-            r.max_log_bytes_used,
-            r.min_tempdb_space_used,
-            r.max_tempdb_space_used,
-            r.avg_memory_mb,
-            r.min_memory_mb,
-            r.max_memory_mb,
-            r.avg_num_physical_io_reads,
-            r.min_num_physical_io_reads,
-            r.max_num_physical_io_reads,
-            r.replica_role,
-            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
-        FROM ranked AS r
-        /* #2150: resolve the text ONCE, inside the lateral, so everything downstream still reads a single
-           t.query_text — the projection above and the WAITFOR self-exclusion below both get the resolved
-           value without either having to know where it came from.
-           First arm: collect.query_store_text, one row per (server, database, query_id), which is where the
-           collector lands text once the separate fetch is on. Second arm: the newest inline query_text on
-           the fact row, which is where text lived BEFORE the cutover — it stays because dropping it would
-           blank the text on all existing history. */
-        LEFT JOIN LATERAL (
-            SELECT COALESCE(
-                       (
-                           SELECT x.query_sql_text
-                           FROM query_store_text AS x
-                           WHERE x.server_id = $1
-                           AND   x.database_name = r.database_name
-                           AND   x.query_id = r.query_id
-                       ),
-                       (
-                           SELECT s.query_text
-                           FROM query_store_stats AS s
-                           WHERE s.server_id = $1
-                           AND   s.query_id = r.query_id
-                           AND   s.database_name = r.database_name
-                           /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
-                              above were read with). Without it a query with no inline text anywhere walked every
-                              retained chunk of query_store_stats on the time index looking for one. A query whose
-                              only inline text is older than the window now shows none, as a query with no text
-                              at all already did. Twins the other copy of this tail; keep them matching. */
-                           AND   s.collection_time >= $2
-                           AND   ($3::timestamp IS NULL OR s.collection_time <= $3)
-                           AND   s.query_text IS NOT NULL
-                           ORDER BY s.collection_time DESC, s.collection_id DESC
-                           LIMIT 1
-                       )
-                   ) AS query_text
-        ) AS t ON TRUE
-        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+            p.database_name,
+            p.query_id,
+            p.plan_id,
+            p.query_hash,
+            p.query_text,
+            p.module_name,
+            p.total_executions,
+            p.avg_duration_ms,
+            p.avg_cpu_time_ms,
+            p.avg_logical_reads,
+            p.avg_logical_writes,
+            p.avg_physical_reads,
+            p.avg_rowcount,
+            p.min_dop,
+            p.max_dop,
+            p.last_execution_time,
+            p.query_plan_hash,
+            p.is_forced_plan,
+            p.plan_forcing_type,
+            p.execution_type_desc,
+            p.first_execution_time,
+            p.avg_clr_time_ms,
+            p.avg_tempdb_space_used,
+            p.avg_log_bytes_used,
+            p.plan_type,
+            p.force_failure_count,
+            p.last_force_failure_reason,
+            p.compatibility_level,
+            p.min_duration_ms,
+            p.max_duration_ms,
+            p.min_cpu_time_ms,
+            p.max_cpu_time_ms,
+            p.min_logical_reads,
+            p.max_logical_reads,
+            p.min_logical_writes,
+            p.max_logical_writes,
+            p.min_physical_reads,
+            p.max_physical_reads,
+            p.min_clr_time_ms,
+            p.max_clr_time_ms,
+            p.min_rowcount,
+            p.max_rowcount,
+            p.min_log_bytes_used,
+            p.max_log_bytes_used,
+            p.min_tempdb_space_used,
+            p.max_tempdb_space_used,
+            p.avg_memory_mb,
+            p.min_memory_mb,
+            p.max_memory_mb,
+            p.avg_num_physical_io_reads,
+            p.min_num_physical_io_reads,
+            p.max_num_physical_io_reads,
+            p.replica_role,
+            ROW_NUMBER() OVER (ORDER BY p.sort_cost DESC, p.database_name, p.query_id, p.plan_id, p.query_hash, p.execution_type_desc, p.replica_role) AS page_ord
+        FROM (
+            /* #5815: the candidates are sorted BEFORE the text lateral and the page keeps that order, so the
+               LIMIT $4 below stops the lateral at the row that fills the page, and one run at the fill's final
+               candidate limit (TopFill.FinalCandidates) looks up no more text than the first round did. The
+               order is page_ord's own, so the rows, their order and page_ord are unchanged. sort_cost is the
+               page_ord sort expression, projected so the outer ORDER BY matches the inner sort and the planner
+               adds no second sort above the lateral. Twins the MCP reader's QueryStoreTopTail; keep them matching. */
+            SELECT r.*, t.query_text
+            FROM (
+                SELECT k.*, k.total_executions * k.avg_duration_ms AS sort_cost
+                FROM ranked AS k
+                ORDER BY k.total_executions * k.avg_duration_ms DESC, k.database_name, k.query_id, k.plan_id, k.query_hash, k.execution_type_desc, k.replica_role
+            ) AS r
+            /* #2150: resolve the text ONCE, inside the lateral, so everything downstream still reads a single
+               t.query_text — the projection above and the WAITFOR self-exclusion below both get the resolved
+               value without either having to know where it came from.
+               First arm: collect.query_store_text, one row per (server, database, query_id), which is where the
+               collector lands text once the separate fetch is on. Second arm: the newest inline query_text on
+               the fact row, which is where text lived BEFORE the cutover — it stays because dropping it would
+               blank the text on all existing history. */
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(
+                           (
+                               SELECT x.query_sql_text
+                               FROM query_store_text AS x
+                               WHERE x.server_id = $1
+                               AND   x.database_name = r.database_name
+                               AND   x.query_id = r.query_id
+                           ),
+                           (
+                               SELECT s.query_text
+                               FROM query_store_stats AS s
+                               WHERE s.server_id = $1
+                               AND   s.query_id = r.query_id
+                               AND   s.database_name = r.database_name
+                               /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
+                                  above were read with). Without it a query with no inline text anywhere walked every
+                                  retained chunk of query_store_stats on the time index looking for one. A query whose
+                                  only inline text is older than the window now shows none, as a query with no text
+                                  at all already did. Twins the other copy of this tail; keep them matching. */
+                               AND   s.collection_time >= $2
+                               AND   ($3::timestamp IS NULL OR s.collection_time <= $3)
+                               AND   s.query_text IS NOT NULL
+                               ORDER BY s.collection_time DESC, s.collection_id DESC
+                               LIMIT 1
+                           )
+                       ) AS query_text
+            ) AS t ON TRUE
+            WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+            ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
+            LIMIT $4
+        ) AS p
         ORDER BY page_ord
-        LIMIT $4
         )
         /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
            ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
@@ -467,19 +481,20 @@ public sealed partial class ViewerDataService
             }
         }
 
-        /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
-           while more candidates exist, under its bound. */
-        var rows = await TopFill.RunAsync(top, async candidates =>
+        /* #5313: the WAITFOR trim can leave the page short, so the candidate limit ($6) runs past top. #5815: one run
+           at TopFill's final limit, not up to three rounds that each re-read the window; the tail looks up text only
+           until the page is full, so the answer is the rounds' own (TopFill.FinalCandidates). */
+        List<ViewerQueryStoreRow> rows;
+        await using (var command = _dataSource.CreateCommand(QueryStoreTopSql))
         {
-            await using var command = _dataSource.CreateCommand(QueryStoreTopSql);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             AddServerWindowParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = candidates });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = TopFill.FinalCandidates(top) });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
-        });
+            (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+        }
 
         return (rows, null);
     }
@@ -517,10 +532,11 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
-            /* #5313: the same fill rounds as the raw read, on this transaction's snapshot ($6 is the candidate limit). */
-            var rows = await TopFill.RunAsync(top, async candidates =>
+            /* #5313: the same candidate limit as the raw read, on this transaction's snapshot ($6). #5815: one run at
+               TopFill's final limit; each fill round used to re-read the server's window from the wide table. */
+            List<ViewerQueryStoreRow> rows;
+            await using (var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
-                await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
                 command.Parameters.Add(new Npgsql.NpgsqlParameter
@@ -530,10 +546,10 @@ public sealed partial class ViewerDataService
                 });
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
                 command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = candidates });
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = TopFill.FinalCandidates(top) });
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
-            });
+                (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+            }
 
             return (rows, plan);
         }

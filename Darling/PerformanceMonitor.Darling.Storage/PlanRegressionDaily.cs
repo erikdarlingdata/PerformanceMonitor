@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>Whole and partial builds (#5812).</b> A whole build covers every row of its day and is valid while
 /// <c>built_seq = late_seq</c>. A partial build covers the day's rows whose <c>first_execution_time</c> is below
 /// <c>built_through</c> and is valid while <c>partial_seq = late_seq</c>; it leaves <c>built_seq</c> NULL, so code from
-/// before V184, which reads only <c>built_seq = late_seq</c>, reads a partial day live and never loses its newest rows. A
+/// before V185, which reads only <c>built_seq = late_seq</c>, reads a partial day live and never loses its newest rows. A
 /// late row (the trigger) moves <c>late_seq</c>, which invalidates either kind until the day is built again.</para>
 /// </summary>
 public static class PlanRegressionDaily
@@ -58,13 +58,13 @@ public static class PlanRegressionDaily
 
     /// <summary>The open days (newer than <see cref="ClosedDayLagDays"/>) are built too, as partial days (#5812): a build covers
     /// the rows whose <c>first_execution_time</c> is below its watermark, <c>built_through</c>, which is this many hours before
-    /// the current hour by the store's clock. It sits one hour under the bound of V184's trigger (one hour before the current
+    /// the current hour by the store's clock. It sits one hour under the bound of V185's trigger (one hour before the current
     /// hour), so a write whose transaction began up to an hour before a build still marks the day it changes, and the
     /// interval that has just ended, which the collector still writes, stays above the watermark and in the live half.</summary>
     public const int PartialWatermarkLagHours = 2;
 
-    /// <summary>The late-row trigger's upper bound, in hours before the current hour by the store's clock (V184): a write whose
-    /// <c>first_execution_time</c> is below it marks its day and the next. V184's SQL interpolates this constant, and
+    /// <summary>The late-row trigger's upper bound, in hours before the current hour by the store's clock (V185): a write whose
+    /// <c>first_execution_time</c> is below it marks its day and the next. V185's SQL interpolates this constant, and
     /// <see cref="PartialWatermarkLagHours"/> must stay at least one hour more (a pinned pair, #5812): with the watermark at or
     /// above the trigger's bound, a write below the watermark could land without marking its day, and its row would then be
     /// in neither the totals nor the live half.</summary>
@@ -129,7 +129,8 @@ SELECT count(*)::bigint FROM built;";
     /// <summary>The most builds of the plan's first queue (days never built, or whose <c>late_seq</c> moved) one tick runs. The
     /// first fill of a store is 15 builds per server (T-14 through today), so a store with many servers takes several ticks;
     /// until it is done a read takes the days not yet built live. The second queue, partial days that advance, is capped
-    /// separately at one build per server (see <see cref="PlanSql"/>), so the open days never use up this one (#5812).</summary>
+    /// separately, its total at the number of builder servers (see <see cref="PlanSql"/>), so the open days never use up this
+    /// one (#5812).</summary>
     public const int MaxBuildsPerTick = 120;
 
     /// <summary>The wall-clock budget of one tick: no new build starts once this much time has passed since the tick
@@ -167,7 +168,7 @@ AND   day = $2::date;";
     /// <summary>Stamps a finished build. $1 server_id, $2 day, $3 the <c>late_seq</c> read before the build, $4 built_at, $5 the
     /// rows inserted (<c>source_rows</c>), $6 the watermark the build covered. A whole build (its watermark at the next
     /// midnight) stamps <c>built_seq</c> and clears <c>partial_seq</c> and <c>built_through</c>; a partial one stamps
-    /// <c>partial_seq</c> and <c>built_through</c> and clears <c>built_seq</c> (#5812), so code from before V184, which takes
+    /// <c>partial_seq</c> and <c>built_through</c> and clears <c>built_seq</c> (#5812), so code from before V185, which takes
     /// a day as built whenever <c>built_seq = late_seq</c>, reads a partial day live instead of as a whole day.</summary>
     public const string MarkBuiltSql = @"
 UPDATE collect.plan_regression_daily_built
@@ -199,7 +200,7 @@ SELECT pg_try_advisory_xact_lock(hashtextextended('plan_regression_daily:' || $1
     /// after the one <c>filled_since</c> falls in, because that day may be only partly covered. The fact runs this first, in
     /// the same REPEATABLE READ transaction as the daily read, so both see one snapshot of the built days and of the totals;
     /// an empty or failed answer sends the read to the exact-bound statement unchanged. The second column is the day's
-    /// watermark (#5812): NULL for a whole build, whatever <c>built_through</c> holds (a builder from before V184 stamps
+    /// watermark (#5812): NULL for a whole build, whatever <c>built_through</c> holds (a builder from before V185 stamps
     /// <c>built_seq</c> and leaves <c>built_through</c> as it was), and <c>built_through</c> for a valid partial build.
     /// </summary>
     public const string BuiltDaysSql = @"
@@ -239,14 +240,22 @@ ORDER BY b.day;";
     /// through <see cref="NewestBuiltDayAhead"/> ahead.
     ///
     /// <para><b>Queue 1, the days with no valid build</b> (never built, or their <c>late_seq</c> moved since the stamp), any day
-    /// of the series, newest day first, then by server, at most $2. A store that is behind after a migration or an outage gets
-    /// back the days nearest the window's open end first. Tomorrow is in it only when a row dated tomorrow starts below the
-    /// watermark: its empty stamp is <see cref="StampTomorrowSql"/>'s, which is not a build.</para>
+    /// of the series, at most $2, the day that has waited longest first: a day never built (no <c>built_at</c>) first, then
+    /// the oldest build, then the newest day, then by server. A store that is behind after a migration or an outage has no
+    /// build for those days, so it gets back the days nearest the window's open end first. The oldest build comes before the
+    /// newest day so that no set of servers can hold the queue: on a server whose trigger fires on every apply (day-long
+    /// Query Store intervals, a slow monitored clock, a catch-up), today is stale again after each build, and with the
+    /// newest day first about 120 such servers would keep a late-marked closed day out of the cap for good, and every day
+    /// after it would read live (#5812 review round 2, L5). Its old build now passes theirs, which are rebuilt every tick.
+    /// Tomorrow is in it only when a row dated tomorrow starts below the watermark: its empty stamp is
+    /// <see cref="StampTomorrowSql"/>'s, which is not a build.</para>
     ///
     /// <para><b>Queue 2, the valid partial days whose watermark can advance</b> and that have rows to add: a row of the day
     /// whose first execution is in [<c>built_through</c>, the watermark a build would stamp now). An idle server's partial day
     /// is advanced by <see cref="AdvanceIdleSql"/> instead, without a build. Oldest build first (<c>built_at</c>), which is
-    /// the round-robin, at most one per server: the open days never use up queue 1's cap, and a fleet larger than the cap
+    /// the round-robin, capped at the number of builder servers (not one per server: around midnight one server can have
+    /// yesterday, today and tomorrow here, and the oldest-build order brings any it skipped first next tick). The open days
+    /// never use up queue 1's cap, and a fleet larger than the cap
     /// still gets every server's today advanced each tick, under <see cref="MaxTickDuration"/>.</para>
     /// </summary>
     public static readonly string PlanSql = $@"
@@ -272,7 +281,7 @@ days AS
 ),
 due AS
 (
-    SELECT x.server_id, x.day, 1 AS queue, row_number() OVER (ORDER BY x.day DESC, x.server_id) AS slot
+    SELECT x.server_id, x.day, 1 AS queue, row_number() OVER (ORDER BY x.built_at ASC NULLS FIRST, x.day DESC, x.server_id) AS slot
     FROM days AS x
     WHERE NOT x.is_whole
     AND   NOT x.is_partial
@@ -400,7 +409,7 @@ WHERE server_id = $1::integer
 AND   day = $2::date;";
 
     /// <summary>One valid built day as the read sees it (#5812): its totals cover the day's rows whose
-    /// <c>first_execution_time</c> is below <paramref name="Through"/>. NULL (a build made before V184) is the whole day.</summary>
+    /// <c>first_execution_time</c> is below <paramref name="Through"/>. NULL (a build made before V185) is the whole day.</summary>
     public readonly record struct BuiltDay(DateOnly Day, DateTime? Through)
     {
         /// <summary>The watermark with NULL read as the whole day: the next midnight, above every first execution of a row
@@ -420,7 +429,7 @@ AND   day = $2::date;";
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
     /// <summary>The builds due at <paramref name="nowUtc"/>: <see cref="PlanSql"/>'s first queue (at most
-    /// <see cref="MaxBuildsPerTick"/>), then its second (at most one per server).</summary>
+    /// <see cref="MaxBuildsPerTick"/>), then its second (at most the number of builder servers).</summary>
     public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
         NpgsqlConnection connection, DateTime nowUtc, CancellationToken cancellationToken)
     {

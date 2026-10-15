@@ -207,6 +207,11 @@ public sealed class DarlingAnalysisService
     /// by the collector from its own type (#3691). 0 when the pass never reached collection.</summary>
     public int LastCollectionFamilyCount { get; private set; }
 
+    /// <summary>#5824: the last pass's PLAN_REGRESSION read time in milliseconds (<see cref="AnalysisContext.PlanRegressionReadMs"/>);
+    /// null when the read did not run on that pass. Set when the pass finishes, so it is meaningful only once the pass's task has
+    /// completed.</summary>
+    public long? LastPlanRegressionReadMs { get; private set; }
+
     /// <summary>
     /// How many facts the last pass handed to the scorer — the collector's plus the anomaly detector's
     /// (#3691) — and how many of those came out with a non-zero severity. Both null when the pass never
@@ -414,6 +419,7 @@ public sealed class DarlingAnalysisService
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
+        LastPlanRegressionReadMs = null;
         LastFactCount = null;
         LastFactsScored = null;
         EndedEarlyAs = null;
@@ -773,6 +779,10 @@ public sealed class DarlingAnalysisService
         }
         finally
         {
+            /* #5824: stamped here, not after collection, so a pass that ran past its budget or failed, and then finished,
+               still reports the read time. The worker reads it only once this pass's task has completed
+               (DarlingWorker.PlanRegressionReadOfFinishedPass): a pass the sweep stopped waiting for has not reached this line. */
+            LastPlanRegressionReadMs = context.PlanRegressionReadMs;
             IsAnalyzing = false;
         }
     }

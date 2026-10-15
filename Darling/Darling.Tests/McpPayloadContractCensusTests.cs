@@ -1042,6 +1042,7 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string File, string Tool)[] InlineLimitRefusals =
     [
         ("DarlingMcpFinOpsInventoryTools.cs", "get_finops_inventory"),
+        ("DarlingMcpInvestigationTools.cs", "list_investigation_requests"),
     ];
 
     private static readonly Regex InlineLimitRefusal = new(

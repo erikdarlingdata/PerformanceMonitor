@@ -34,6 +34,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add Notification Route" FontSize="18" FontWeight="Bold"
@@ -101,14 +102,47 @@
                      ToolTip="Comma-separated. Redirects email only: the SMTP host, from-address and credentials come from the Notifications section, so email is delivered only where those are set."/>
         </Grid>
 
-        <CheckBox Grid.Row="11" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
+        <!-- #5632: the agent channel. Not a destination: it says whether a matching alert also opens an investigation
+             request for your own agent, and within which limits. -->
+        <Grid Grid.Row="11" Margin="0,4,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="170"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Agent investigation" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="AgentLevelCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
+                      SelectionChanged="AgentLevelCombo_SelectionChanged"
+                      ToolTip="Investigate: a matching alert also opens an investigation request your own agent can take over MCP. Off: no request, and no broader route is asked. Inherit: a broader route decides."/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Requests per hour / day" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="AgentMaxPerHourBox" Width="60" ToolTip="New requests this route opens in an hour, 1 to 60. Alerts that join an open request do not count."/>
+                <TextBlock Text="/" VerticalAlignment="Center" Margin="6,0,6,0"/>
+                <TextBox x:Name="AgentMaxPerDayBox" Width="60" ToolTip="New requests this route opens in a day, 1 to 500."/>
+            </StackPanel>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Lease / expiry (minutes)" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="AgentLeaseMinutesBox" Width="60" ToolTip="How long an agent's claim lasts before the request opens again, 5 to 120 minutes."/>
+                <TextBlock Text="/" VerticalAlignment="Center" Margin="6,0,6,0"/>
+                <TextBox x:Name="AgentExpiryMinutesBox" Width="60" ToolTip="How long a request nobody claims stays open, 15 to 1440 minutes."/>
+            </StackPanel>
+        </Grid>
+
+        <CheckBox Grid.Row="12" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
                   ToolTip="A disabled route is skipped as if it did not exist; the alerts it matched fall to the next level."/>
 
         <!-- The validation message, inline (#5750): the dialog stays open on a refusal and says why here. -->
-        <TextBlock Grid.Row="12" x:Name="ValidationText" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap"
+        <TextBlock Grid.Row="13" x:Name="ValidationText" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap"
                    HorizontalAlignment="Left" Margin="0,0,0,8" Visibility="Collapsed"/>
 
-        <StackPanel Grid.Row="13" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
+        <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
             <!-- No IsDefault: a multi-field form, where Enter-to-submit is a surprise (#1828/#1859). -->
             <Button Content="Save" Width="90" Height="28" Margin="0,0,8,0" Click="Save_Click"/>
             <Button Content="Cancel" Width="90" Height="28" IsCancel="True" Click="Cancel_Click"/>

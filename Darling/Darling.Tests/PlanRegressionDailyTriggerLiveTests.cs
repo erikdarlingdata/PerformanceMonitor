@@ -68,7 +68,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         var now = DateTime.UtcNow;
 
         /* Steady: intervals that started within the last 40 minutes, and re-collections of them (the ON CONFLICT update arm
-           the writer takes every pass). Since V184 (#5812) the WHEN clause's bound is one hour before the current hour, and a
+           the writer takes every pass). Since V185 (#5812) the WHEN clause's bound is one hour before the current hour, and a
            first within the last 40 minutes is at or after it at any minute of the hour, even across the next hour boundary.
            The WHEN clause is false for every one, so the function body never runs. */
         for (var pass = 0; pass < 3; pass++)
@@ -307,7 +307,7 @@ SET search_path = decoy, pg_catalog;", ct);
            and the whole body must run on one side of its UTC midnight. If the database clock is within the margin of the next
            midnight, wait for it to pass first, then read the clock (#5496). */
         var now = await SettledDatabaseUtcNowAsync(() => ReadDatabaseUtcNowAsync(connection, ct), d => Task.Delay(d, ct), MidnightMargin);
-        /* V184's (#5812) recent edge moves with the hour, so the body must also run inside one UTC hour. */
+        /* V185's (#5812) recent edge moves with the hour, so the body must also run inside one UTC hour. */
         var hourWait = WaitPastTheHour(now, MidnightMargin);
         if (hourWait > TimeSpan.Zero)
         {
@@ -343,7 +343,7 @@ SET search_path = decoy, pg_catalog;", ct);
         await UpsertAsync(connection, ServerA, new[] { now.AddDays(-15) }, 1, 1, ct);
         Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));
 
-        /* The recent edge (V184, #5812): one hour before the current hour. A first at or after it is an interval still running
+        /* The recent edge (V185, #5812): one hour before the current hour. A first at or after it is an interval still running
            or the one that just ended, never late. One second before it is late, and marks its day and the next: the open days
            are built as partial days up to a watermark under this bound, so a write below it can change a built day. */
         var bound = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(-1);
@@ -640,7 +640,7 @@ WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time,
 
     /// <summary>
     /// How long to wait before a reading of <paramref name="clockUtc"/> has the rest of its UTC hour ahead of it: zero when the
-    /// next hour is at least <paramref name="margin"/> off, otherwise the time to just past it. V184's (#5812) recent edge is
+    /// next hour is at least <paramref name="margin"/> off, otherwise the time to just past it. V185's (#5812) recent edge is
     /// hour-aligned.
     /// </summary>
     internal static TimeSpan WaitPastTheHour(DateTime clockUtc, TimeSpan margin)

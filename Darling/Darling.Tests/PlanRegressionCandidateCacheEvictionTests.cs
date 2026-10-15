@@ -174,10 +174,10 @@ public sealed class PlanRegressionCandidateCacheEvictionTests
     [Fact]
     public void EveryPlanRegressionRead_RunsUnderTheOneWorkMemSetting()
     {
-        Assert.Equal("SET LOCAL work_mem = '64MB'", PgFactCollector.PlanRegressionDailyWorkMemSql);
+        Assert.Equal("SET LOCAL work_mem = '64MB'", PgFactCollector.PlanRegressionWorkMemSql);
 
         var fact = FactSource();
-        Assert.Equal(1, Count(fact, "new NpgsqlCommand(PlanRegressionDailyWorkMemSql"));
+        Assert.Equal(1, Count(fact, "new NpgsqlCommand(PlanRegressionWorkMemSql"));
         Assert.DoesNotContain("work_mem =", fact, StringComparison.Ordinal);
         Assert.Equal(2, Count(fact, "await BoundTheReadAsync();"));
 

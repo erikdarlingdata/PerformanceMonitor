@@ -492,9 +492,10 @@ WITH plan_agg AS
     private const string PlanRegressionDailyPrefix = @"
 WITH plan_agg AS
 (
-    -- #5448: closed days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other day
-    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half: its day
-    -- (last_execution_time::date) is in the built set or it is not.
+    -- #5448: built days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other row
+    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half by its day
+    -- (last_execution_time::date): a day not built is all live, and a built day keeps only its rows at or above its
+    -- watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next midnight).
     SELECT
         database_name,
         query_id,
@@ -559,7 +560,7 @@ WITH plan_agg AS
     /// and fits only through that multiplier, so 64MB keeps the headroom. A hash or sort takes memory only as it grows, so
     /// a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every bound on one plant).
     /// </summary>
-    internal const string PlanRegressionDailyWorkMemSql = "SET LOCAL work_mem = '64MB'";
+    internal const string PlanRegressionWorkMemSql = "SET LOCAL work_mem = '64MB'";
 
     /// <summary>
     /// M: the start of the day the comparison window's exact edge (<paramref name="rawWindowStart"/>) falls in (#5448).
@@ -573,6 +574,10 @@ WITH plan_agg AS
     /// interval spans at most a day, so its first execution is at or above the floor. With every day from the window's
     /// start built up to some last one, the floor sits one day below the day after it, so a read still sees whatever
     /// comes after the built days (a skewed server's future-dated rows).
+    ///
+    /// <para>This is the whole-day case of <see cref="PlanRegressionLiveFloorWithWatermarks"/> (#5812): every day in
+    /// <paramref name="builtDays"/> is taken as built whole, with no watermark. The read itself calls the watermark form,
+    /// because a built day can be partial; only tests call this one.</para>
     /// </summary>
     internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays) =>
         PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays.Select(d => new PlanRegressionDaily.BuiltDay(d, null)).ToList());
@@ -761,13 +766,18 @@ ORDER BY c.regression_factor DESC";
         context.PlanRegressionReadsIntervalTable = null;
         context.PlanRegressionWindowStart = null;
 
+        /* #5824: how long this read took, stamped in the finally whatever the outcome, so the scheduled pass's analysis_pass
+           row in collection_log can say what the store's most expensive analysis read cost on this pass. */
+        context.PlanRegressionReadMs = null;
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+
         /* #5448: the built-days read and the daily read share this transaction (see PlanRegressionDailySql). */
         NpgsqlTransaction? snapshot = null;
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            /* #5812 (bound 2, M2): every PLAN_REGRESSION read runs read-only with PlanRegressionDailyWorkMemSql, set here only,
+            /* #5812 (bound 2, M2): every PLAN_REGRESSION read runs read-only with PlanRegressionWorkMemSql, set here only,
                on whichever transaction holds it (the daily read's snapshot or the exact-bound read's own). */
             async Task BoundTheReadAsync()
             {
@@ -776,7 +786,7 @@ ORDER BY c.regression_factor DESC";
                     await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
                 }
 
-                await using (var workMem = new NpgsqlCommand(PlanRegressionDailyWorkMemSql, connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                await using (var workMem = new NpgsqlCommand(PlanRegressionWorkMemSql, connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
                 {
                     await workMem.ExecuteNonQueryAsync(context.CancellationToken);
                 }
@@ -1103,6 +1113,8 @@ ORDER BY c.regression_factor DESC";
             {
                 await snapshot.DisposeAsync();
             }
+
+            context.PlanRegressionReadMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(readStarted).TotalMilliseconds;
         }
     }
 

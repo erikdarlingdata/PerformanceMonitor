@@ -26,6 +26,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
@@ -586,6 +587,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                     DarlingMcpWritePolicy.ServerAdminSetting);
             }
 
+            /* #5632 Phase A, ruling R2: the investigation tools (claim_investigation_request, submit_investigation_report)
+               write only investigation state and need the same token gate as the writes, but never WITH the writes: one
+               token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
+               why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
+               front of every request cover them as they cover the writes, since they are only served with a token. */
+            LogInvestigationsGate(_logger, config.Mcp, writes, writeTokenProblem);
+
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck
                and the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
@@ -811,6 +819,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                     declaredPeers.ThisStoreCovers.Length > 0 ? $"; this store covers {declaredPeers.ThisStoreCovers}" : "");
             }
 
+            /* #5632: mcp.dataDetail, read once per start (file-only, restart-only). McpDataDetailFilter reads the level
+               from this singleton on every call; an unrecognized value runs as metadataOnly, the strictest level, and
+               says so once here. */
+            builder.Services.AddSingleton(new McpDataDetailSetting(ResolveDataDetail(config.Mcp.DataDetail, _logger)));
+
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
                 builder.Services, declaredPeers, _readLatency, _logger, _slowReads, writes,
@@ -918,6 +931,41 @@ public sealed class DarlingMcpHostService : BackgroundService
         });
         PinForwardedHeadersOff(builder.Services);
         return builder;
+    }
+
+    /// <summary>
+    /// The start's log lines for the investigation tools (#5632 Phase A, ruling R2), one decision for the start and the
+    /// tests. Both <c>mcp.allowInvestigations</c> and <c>mcp.allowWrites</c> on: exactly one Critical line,
+    /// <see cref="DarlingMcpWritePolicy.InvestigationConflictLine"/>, and the tools stay off. Investigations on with no
+    /// usable token: a Critical line naming the token. Served: one Warning that every request must present the token.
+    /// Investigations off: nothing.
+    /// </summary>
+    internal static void LogInvestigationsGate(
+        ILogger logger, McpConfig mcp, DarlingMcpWritePolicy.Effective served, string? tokenProblem)
+    {
+        if (DarlingMcpWritePolicy.InvestigationsConflict(mcp))
+        {
+            logger.LogCritical(DarlingMcpWritePolicy.InvestigationConflictLine);
+        }
+        else if (mcp.AllowInvestigations)
+        {
+            if (!served.Investigations)
+            {
+                logger.LogCritical(
+                    "{Setting} is on but no usable bearer token is available{Problem}: the investigation tools stay off. Set " +
+                    "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters.",
+                    DarlingMcpWritePolicy.InvestigationsSetting,
+                    tokenProblem is null ? "" : " (the token " + tokenProblem + ")",
+                    DarlingHostBinding.MinimumTokenLength);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "MCP investigation tools are ON ({Setting}): claim_investigation_request and submit_investigation_report " +
+                    "write investigation state; every MCP request, loopback included, must present the bearer token.",
+                    DarlingMcpWritePolicy.InvestigationsSetting);
+            }
+        }
     }
 
     /// <summary>
@@ -1109,6 +1157,16 @@ public sealed class DarlingMcpHostService : BackgroundService
         /* #5506 part 3: get_read_latency reads the live admission counts as a DI service parameter. Registered always (a
            private, idle instance when the host has none), so the SDK never serves the parameter as a client argument. */
         services.AddSingleton<ReadAdmission>(readAdmission ?? new ReadAdmission());
+
+        /* #5632 Phase A: claim_investigation_request composes the brief at claim time through this composer, a service
+           parameter, so it must be registered wherever the tools are. The reader reads the store the host registered;
+           the composer masks at the host's mcp.dataDetail level (none registered: full, as the host filter passes
+           through). Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<IInvestigationBriefSourceReader>(sp =>
+            new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger));
+        services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
+            sp.GetRequiredService<IInvestigationBriefSourceReader>(),
+            sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full)));
 
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
@@ -1390,6 +1448,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                wait-type siblings ride along on the existing blocking / memory-grant / core data-read
                classes above. */
             .WithGeminiCompatibleTools<DarlingMcpAlertTools>()
+            /* #5632 Phase A: the Level 1 investigation tools. The two reads are ordinary reads; claim and submit are
+               served only under DarlingMcpWritePolicy's investigations arm (a token, mcp.allowWrites off). */
+            .WithGeminiCompatibleTools<DarlingMcpInvestigationTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
             .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
             /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central
@@ -1513,12 +1574,40 @@ public sealed class DarlingMcpHostService : BackgroundService
                post-hoc trim-to-budget filter here (it would make a tool's own truncated/*_returned
                fields wrong, cut calls that explicitly asked for more rows, and drop the newest rows
                of anything sorted oldest-first) in favor of sizing each tool's own defaults to fit —
-               see McpResponseBudget.DefaultBytes, which stays as the one shared size target. */
+               see McpResponseBudget.DefaultBytes, which stays as the one shared size target.
+
+               The mcp.dataDetail filter (#5632, McpDataDetailFilter) sits just outside the statement filter, so it
+               reads the statement filter's output as plain JSON before GCF re-encodes it, and masks every tool answer
+               at the level the host registered (a McpDataDetailSetting singleton; none, or full, passes through). */
             .WithRequestFilters(filters => filters
                 .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
                 .AddCallToolFilter(toolLatency.AsFilter())
                 .AddCallToolFilter(GcfCallToolFilter.Instance)
+                .AddCallToolFilter(McpDataDetailFilter.Instance)
                 .AddCallToolFilter(SensitiveStatementOutputFilter.Instance));
+    }
+
+    /// <summary>
+    /// The <c>mcp.dataDetail</c> level this listener serves (#5632). An unrecognized value runs as
+    /// <see cref="McpDataDetail.MetadataOnly"/> and logs one Warning naming it; a recognized level other than the default
+    /// logs one Information line, so the operator can see from the log which level is in force.
+    /// </summary>
+    internal static McpDataDetail ResolveDataDetail(string? configured, ILogger logger)
+    {
+        if (!McpDataDetailModes.TryParse(configured, out McpDataDetail mode))
+        {
+            logger.LogWarning(
+                "{Setting} value '{Value}' is not one of full, maskLiterals or metadataOnly; the MCP tools serve metadataOnly, the strictest level, until it is corrected.",
+                McpDataDetailModes.Setting, configured);
+        }
+        else if (mode != McpDataDetail.Full)
+        {
+            logger.LogInformation(
+                "{Setting} is {Level}: every MCP tool answer is masked at that level.",
+                McpDataDetailModes.Setting, McpDataDetailModes.Word(mode));
+        }
+
+        return mode;
     }
 
     /// <summary>

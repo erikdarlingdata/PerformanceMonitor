@@ -202,10 +202,10 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         var days = (await PartitionNamesAsync(connection, Wide, ct)).Where(n => n.Contains("_p2026", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();
         Assert.Equal(new[] { Wide.DayPartition(laterS), Wide.DayPartition(laterS.AddDays(1)) }, days);
 
-        /* The legacy table stays until S is at or below the cutoff (nine days after S), and its row is still there. */
-        await QueryStoreIntervalPartitions.RunMaintenanceAsync(connection, Wide, new DateTime(2026, 10, 22, 12, 0, 0, DateTimeKind.Utc), logger, ct);
+        /* The legacy table stays until S is at or below the cutoff (ten days after S under the 10-day horizon, #5809), and its row is still there. */
+        await QueryStoreIntervalPartitions.RunMaintenanceAsync(connection, Wide, new DateTime(2026, 10, 23, 12, 0, 0, DateTimeKind.Utc), logger, ct);
         Assert.True(await ExistsAsync(connection, Wide.Legacy, ct));
-        await QueryStoreIntervalPartitions.RunMaintenanceAsync(connection, Wide, new DateTime(2026, 10, 23, 0, 0, 0, DateTimeKind.Utc), logger, ct);
+        await QueryStoreIntervalPartitions.RunMaintenanceAsync(connection, Wide, new DateTime(2026, 10, 24, 0, 0, 0, DateTimeKind.Utc), logger, ct);
         Assert.False(await ExistsAsync(connection, Wide.Legacy, ct));
     }
 
@@ -439,15 +439,15 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         var logger = new ListLogger();
         QueryStoreIntervalPartitions.ResetFarFutureMaxWarnings();
 
-        /* The normal S is 10-10 and the wide horizon is nine days: a row at 10-19 00:00 would put S at 10-20, one day past the limit. */
-        var far = new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified);
+        /* The normal S is 10-10 and the wide horizon is ten days (#5809): a row at 10-20 00:00 would put S at 10-21, one day past the limit. */
+        var far = new DateTime(2026, 10, 20, 0, 0, 0, DateTimeKind.Unspecified);
         await InsertAsync(connection, Wide, far, 1, ct);
 
         var arm = await QueryStoreIntervalPartitions.ArmAsync(connection, Wide, Now, logger, ct);
         Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.NotReady, arm.Outcome);
         Assert.False((await StateAsync(connection, ct)).CheckPresent);
         Assert.Equal(1, FarMaxWarnings(logger));
-        Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("2026-10-19T00:00:00", StringComparison.Ordinal)), logger.Dump());
+        Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("2026-10-20T00:00:00", StringComparison.Ordinal)), logger.Dump());
 
         /* Every hourly pass reads the maximum again and still does not arm, and says nothing more while the maximum is the same. */
         for (var hour = 1; hour <= 3; hour++)
@@ -460,16 +460,16 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         Assert.Equal(1, FarMaxWarnings(logger));
 
         /* A different maximum is a new fact: it is warned about once. */
-        await InsertAsync(connection, Wide, new DateTime(2026, 10, 20, 5, 0, 0, DateTimeKind.Unspecified), 2, ct);
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 21, 5, 0, 0, DateTimeKind.Unspecified), 2, ct);
         await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, OnlyWide, Now.AddHours(4), logger, ct);
         Assert.Equal(2, FarMaxWarnings(logger));
-        Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("2026-10-20T05:00:00", StringComparison.Ordinal)), logger.Dump());
+        Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("2026-10-21T05:00:00", StringComparison.Ordinal)), logger.Dump());
         await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, OnlyWide, Now.AddHours(5), logger, ct);
         Assert.Equal(2, FarMaxWarnings(logger));
         Assert.False((await StateAsync(connection, ct)).CheckPresent);
 
         /* The row is deleted: the first pass after that arms, with no restart. */
-        await ExecAsync(connection, $"DELETE FROM {Wide.Parent} WHERE first_execution_time >= timestamp '2026-10-19 00:00:00'", ct);
+        await ExecAsync(connection, $"DELETE FROM {Wide.Parent} WHERE first_execution_time >= timestamp '2026-10-20 00:00:00'", ct);
         var armed = await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, OnlyWide, Now.AddHours(6), logger, ct);
         Assert.Equal(0, armed.Failed);
         var state = await StateAsync(connection, ct);
@@ -496,7 +496,7 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         var logger = new ListLogger();
         QueryStoreIntervalPartitions.ResetFarFutureMaxWarnings();
 
-        await InsertAsync(connection, Wide, new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified), 1, ct);
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 20, 0, 0, 0, DateTimeKind.Unspecified), 1, ct);
 
         var waiters = 0;
         var stop = false;
@@ -618,11 +618,11 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         var logger = new ListLogger();
         QueryStoreIntervalPartitions.ResetFarFutureMaxWarnings();
 
-        /* 10-18 23:59:59.999999 puts S at 10-19, exactly the normal S plus nine days. */
-        await InsertAsync(connection, Wide, new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified).AddTicks(-10), 1, ct);
+        /* 10-19 23:59:59.999999 puts S at 10-20, exactly the normal S plus ten days (#5809). */
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 20, 0, 0, 0, DateTimeKind.Unspecified).AddTicks(-10), 1, ct);
 
         Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, (await QueryStoreIntervalPartitions.ArmAsync(connection, Wide, Now, logger, ct)).Outcome);
-        Assert.Equal(new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified), (await StateAsync(connection, ct)).CheckBound);
+        Assert.Equal(new DateTime(2026, 10, 20, 0, 0, 0, DateTimeKind.Unspecified), (await StateAsync(connection, ct)).CheckBound);
         Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, (await QueryStoreIntervalPartitions.ValidateAsync(connection, Wide, Now, logger, ct)).Outcome);
         Assert.Equal(0, FarMaxWarnings(logger));
     }

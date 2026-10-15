@@ -20,10 +20,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>Why the table needs it.</b> Nothing serves <c>collection_time</c> on this table: its only
 /// secondary index leads with <c>first_execution_time</c>. A Custom Views Query Store panel over 12 hours or
 /// more reads the table on <c>collection_time</c> and Parallel-Seq-Scans all of it. On a large production
-/// monitoring store (28 GB, 3.1 of 9 days held) a 24-hour fleet panel read 3.18M blocks, 98.8 s cold. With
+/// monitoring store (28 GB, 3.1 of the then 9-day horizon held) a 24-hour fleet panel read 3.18M blocks, 98.8 s cold. With
 /// the index, on the same store at <c>random_page_cost</c> 1.1, a warm Parallel Bitmap Heap Scan read 24 h in
 /// 4.3 s (1.14M blocks), 12 h in 1.6 s, 6 h in 0.8 s and 48 h in 9.2 s. Those figures are from a store still
-/// inside its first retention cycle. Once the 9-day purge runs, the freed early pages are reused by new
+/// inside its first retention cycle. Once the 10-day purge runs (9 days before #5809), the freed early pages are reused by new
 /// rows, so BRIN ranges widen: windows ending now should stay selective, while historical windows lose
 /// selectivity and the plan may flip back to a Seq Scan for part of the cycle. Results stay exact and
 /// nothing is slower than without the index. If that matters, the remedy is a periodic
@@ -47,7 +47,7 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>Why not a migration rung.</b> Migrations run in one transaction and block startup, and
 /// <c>CREATE INDEX CONCURRENTLY</c> cannot run inside a transaction (25001). A plain in-rung build would hold
-/// a lock that blocks the writer for the whole heap read: 108 s at 25 GB, minutes at a full 9 days. A
+/// a lock that blocks the writer for the whole heap read: 108 s at 25 GB, minutes at a full 10 days. A
 /// background <c>CONCURRENTLY</c> build blocked no writes when measured. An applied rung also never
 /// changes, so the ensure is idempotent and runs on every start instead: a fresh store builds an empty
 /// table's index instantly and no table-creation change is needed.</para>

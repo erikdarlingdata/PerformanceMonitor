@@ -269,7 +269,8 @@ public sealed class PlanRegressionDailyBuilderLiveTests
             Assert.Equal(new DateOnly(2026, 3, 6), plan.Where(b => b.ServerId == 4).Min(b => b.Day));
             Assert.Equal(new DateOnly(2026, 3, 20), plan.Where(b => b.ServerId == 4).Max(b => b.Day));
 
-            /* Newest day first, then server (#5812: a store that is behind rebuilds the days nearest today first). */
+            /* None of these days was ever built, so the order is newest day first, then server (#5812: a store that is behind
+               rebuilds the days nearest today first). */
             Assert.Equal(plan.OrderByDescending(b => b.Day).ThenBy(b => b.ServerId).ToList(), plan.ToList());
         });
     }
@@ -328,6 +329,57 @@ UPDATE collect.plan_regression_daily_built SET late_seq = 1 WHERE server_id = 15
             Assert.Equal(new PlanRegressionDaily.Build(150, new DateOnly(2026, 3, 12)), plan[1]);
             Assert.Single(plan, b => b.Day == new DateOnly(2026, 3, 21));
             Assert.Equal(Servers + 2, plan.Count);
+        });
+    }
+
+    /// <summary>
+    /// #5812 (review round 2, L5): queue 1 takes the day that has waited longest first, so servers whose today goes stale on
+    /// every apply cannot hold a late-marked closed day out of the cap. 130 servers have today late-marked, built at 10:00
+    /// to 10:59; server 131 has a closed day (03-12) late-marked, last built at 11:00. Tick 1 (12:00) fills its 120 slots with
+    /// the older todays. Those 120 are then built and late-marked again, as their trigger does on every apply. Tick 2 (13:00)
+    /// has the closed day in its first 120. Under the old order (newest day first) the 130 todays held all 120 slots on both
+    /// ticks and the closed day never got in.
+    /// </summary>
+    [Fact]
+    public async Task ThePlan_PutsALateClosedDayInTheCap_WithinTwoTicks_When130ServersHaveTodayLateEveryTick()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            const int Busy = 130;
+            const int Quiet = Busy + 1;
+            await ExecAsync(connection, $@"
+INSERT INTO collect.servers (server_id, server_name, is_enabled)
+SELECT s, 'srv' || s, TRUE FROM generate_series(1, {Quiet}) AS s;
+INSERT INTO collect.query_store_interval_latest_coverage (server_id, filled_since, applied_through)
+SELECT s, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-03-01 00:00:00' FROM generate_series(1, {Quiet}) AS s;
+INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, built_at, source_rows)
+SELECT s, g::date, 0, 0, g + interval '1 day 30 minutes', 0
+FROM generate_series(1, {Quiet}) AS s
+CROSS JOIN generate_series(TIMESTAMP '{DateText(FirstDay)}', TIMESTAMP '2026-03-19', interval '1 day') AS g;
+INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, partial_seq, built_at, source_rows, built_through)
+SELECT s, DATE '2026-03-20', 1, NULL, 0, TIMESTAMP '2026-03-20 10:00:00' + (s % 60) * interval '1 minute', 0, TIMESTAMP '2026-03-20 08:00:00'
+FROM generate_series(1, {Busy}) AS s;
+INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, partial_seq, built_at, source_rows, built_through)
+VALUES ({Quiet}, DATE '2026-03-20', 0, NULL, 0, TIMESTAMP '2026-03-20 10:00:00', 0, TIMESTAMP '2026-03-20 10:00:00');
+UPDATE collect.plan_regression_daily_built SET late_seq = 1, built_at = TIMESTAMP '2026-03-20 11:00:00' WHERE server_id = {Quiet} AND day = DATE '2026-03-12';
+ANALYZE collect.plan_regression_daily_built;", ct);
+
+            var closed = new PlanRegressionDaily.Build(Quiet, new DateOnly(2026, 3, 12));
+            var tick1 = (await PlanRegressionDaily.PlanBuildsAsync(connection, Now, ct)).Take(PlanRegressionDaily.MaxBuildsPerTick).ToList();
+            Assert.All(tick1, b => Assert.Equal(new DateOnly(2026, 3, 20), b.Day));
+            Assert.DoesNotContain(closed, tick1);
+
+            /* Tick 1's builds stamp the 120 at 12:00, and the next apply late-marks each of them again. */
+            foreach (var build in tick1)
+            {
+                await ExecAsync(connection,
+                    $"UPDATE collect.plan_regression_daily_built SET partial_seq = late_seq, late_seq = late_seq + 1, built_at = TIMESTAMP '2026-03-20 12:00:00' WHERE server_id = {build.ServerId} AND day = DATE '2026-03-20'", ct);
+            }
+
+            var tick2 = (await PlanRegressionDaily.PlanBuildsAsync(connection, Now.AddHours(1), ct)).Take(PlanRegressionDaily.MaxBuildsPerTick).ToList();
+            Assert.Contains(closed, tick2);
+            /* The ten todays tick 1 left out, then the closed day: every build older than the 120 just made. */
+            Assert.Equal(Busy - PlanRegressionDaily.MaxBuildsPerTick, tick2.IndexOf(closed));
         });
     }
 
@@ -621,13 +673,13 @@ AND   query ~ '^DELETE FROM collect\.plan_regression_daily(\s|$)';", connection)
         Assert.Contains("collect.query_store_interval_latest_pending", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("d.day >= s.filled_since::date + 1", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         /* #5812: T - 14 through T + 1, in two queues: days with no valid build (whole: built_seq = late_seq; partial:
-           partial_seq = late_seq), newest first, capped by $2; then partial days with rows to add, oldest build first, one per server. */
+           partial_seq = late_seq), capped by $2; then partial days with rows to add, oldest build first, capped at the number of
+           servers. Queue 1's order is pinned by behavior, not by its text (ThePlan_PutsALateClosedDayInTheCap_WithinTwoTicks_...). */
         Assert.Contains("COALESCE(b.built_seq = b.late_seq, false) AS is_whole", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(b.partial_seq = b.late_seq AND b.built_through IS NOT NULL, false) AS is_partial", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("- 14)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("+ 1)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("LEAST((d.day + 1)::timestamp, date_trunc('hour', $1::timestamp) - interval '2 hours') AS through_now", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
-        Assert.Contains("row_number() OVER (ORDER BY x.day DESC, x.server_id) AS slot", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("row_number() OVER (ORDER BY x.built_at, x.server_id, x.day) AS slot", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("WHERE due.slot <= CASE WHEN due.queue = 1 THEN $2::integer ELSE (SELECT count(*) FROM s) END", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY due.queue, due.slot;", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);

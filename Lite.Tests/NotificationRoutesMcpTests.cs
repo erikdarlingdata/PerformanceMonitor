@@ -306,11 +306,21 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         var lite = doc.RootElement.GetProperty("routes").EnumerateArray().First().EnumerateObject().Select(p => p.Name).ToList();
 
         /* Darling has ONE route projection: get_notification_routes lists it and set_notification_route_enabled returns it. */
-        var darling = DarlingRouteFields("internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new");
+        /* #5632: the projection's body sits on the overload that takes the route list's agent use; the one-argument form
+           delegates to it (DarlingRoutePayloadTests pins that), so this is still the one body. */
+        var darling = DarlingRouteFields("internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r, IReadOnlyDictionary<int, (int LastHour, int LastDay)>? agentUse) => new");
         Assert.NotEmpty(darling);
-        Assert.Equal(darling.OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
+        /* #5632: the agent channel is Darling's alone (Lite has no investigation requests), so its five settings and the
+           route's two request counts are the one named exception; every one of them must still be in Darling's projection. */
+        var darlingOnly = new[]
+        {
+            "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes",
+            "agent_requests_last_hour", "agent_requests_last_day",
+        };
+        Assert.All(darlingOnly, f => Assert.Contains(f, darling));
+        Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
         var source = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs");
-        Assert.Contains("routes = routes.Select(RoutePayload)", source, StringComparison.Ordinal);
+        Assert.Contains("routes = routes.Select(r => RoutePayload(r, agentUse))", source, StringComparison.Ordinal);
         Assert.DoesNotContain("routes.Select(r => new", source, StringComparison.Ordinal);
     }
 
@@ -345,6 +355,9 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         var body = Regex.Replace(source[start..end], @"/\*.*?\*/", "", RegexOptions.Singleline);
         var darling = Regex.Matches(body, @"(?m)^ {16}([a-z_]+)\s*=").Select(m => m.Groups[1].Value).ToList();
 
-        Assert.Equal(darling.OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
+        /* #5632: agent_use_read says whether the routes' investigation request counts were read; Lite has no agent channel,
+           so it is the one Darling-only top-level field, and it must still be there. */
+        Assert.Contains("agent_use_read", darling);
+        Assert.Equal(darling.Where(n => n != "agent_use_read").OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
     }
 }

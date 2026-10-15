@@ -67,6 +67,21 @@ public sealed class PgNotificationRouteStore
         /// <summary>True when the scoped server or tag no longer exists: the route stays as written and matches nothing (#5750).</summary>
         public bool Orphaned { get; init; }
 
+        /// <summary>The agent channel (V184, #5632): null inherits, 0 off (and stops the lookup), 1 investigate.</summary>
+        public int? AgentLevel { get; init; }
+
+        /// <summary>The route's hourly request limit (#5632).</summary>
+        public int AgentMaxPerHour { get; init; } = NotificationRoute.DefaultAgentMaxPerHour;
+
+        /// <summary>The route's daily request limit (#5632).</summary>
+        public int AgentMaxPerDay { get; init; } = NotificationRoute.DefaultAgentMaxPerDay;
+
+        /// <summary>The claim lease, in minutes (#5632).</summary>
+        public int AgentLeaseMinutes { get; init; } = NotificationRoute.DefaultAgentLeaseMinutes;
+
+        /// <summary>How long an unclaimed request stays open, in minutes (#5632).</summary>
+        public int AgentExpiryMinutes { get; init; } = NotificationRoute.DefaultAgentExpiryMinutes;
+
         /// <summary>True when the route is scoped but its scope could not be read just now (the tag tables failed, for a tag-scoped route):
         /// it matches nothing until a read succeeds, and is not orphaned, since the tag may still exist. The loader's rule
         /// (<see cref="StoreConfigProvider.ExpandRoutes"/>), so the tool never shows such a route as an ordinary active one (#5750).</summary>
@@ -77,7 +92,8 @@ public sealed class PgNotificationRouteStore
     /// in the <c>mcp</c>/<c>viewer</c> carve's non-secret list — the read that would 42501 in production is
     /// the one a superuser-run test never notices.</summary>
     public const string SelectSummariesSql = @"
-SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id
+SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id,
+       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes
 FROM config_notification_routes
 ORDER BY route_id";
 
@@ -119,7 +135,14 @@ UPDATE config_notification_routes
                 reader.GetBoolean(4),
                 DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc),
                 reader.IsDBNull(6) ? null : reader.GetInt32(6),
-                reader.IsDBNull(7) ? null : reader.GetInt32(7)));
+                reader.IsDBNull(7) ? null : reader.GetInt32(7))
+            {
+                AgentLevel = reader.IsDBNull(8) ? null : reader.GetInt16(8),
+                AgentMaxPerHour = reader.GetInt32(9),
+                AgentMaxPerDay = reader.GetInt32(10),
+                AgentLeaseMinutes = reader.GetInt32(11),
+                AgentExpiryMinutes = reader.GetInt32(12),
+            });
         }
 
         return routes.Exists(r => r.ScopeServerId.HasValue || r.ScopeTagId.HasValue)

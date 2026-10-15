@@ -278,6 +278,29 @@ ON CONFLICT (server_id) DO UPDATE SET
             new FanoutCost(report.SlotsSkipped, report.SlowestItem, report.SlowestItemMs),
             null, null, null, null, logger, cancellationToken);
 
+    /// <summary>
+    /// #5824: records one scheduled analysis pass as a <c>collection_log</c> row, through the same insert every collector row
+    /// uses: <c>collector_name</c> is <see cref="AnalysisPassRow.CollectorName"/>, <c>status</c> one of
+    /// <see cref="AnalysisPassRow"/>'s words (never <c>SUCCESS</c>), <c>rows_collected</c> the findings count, <c>duration_ms</c>
+    /// the pass's whole length, and <c>error_message</c> the detail line. The pass reads only the store, so the SQL-target time
+    /// is 0 and the storage time is the whole pass, as for the retention run. Failure-isolated like the other observability
+    /// writes.
+    /// </summary>
+    internal static Task<bool> LogAnalysisPassAsync(
+        NpgsqlDataSource postgres,
+        ServerRuntime server,
+        string status,
+        int findingCount,
+        long elapsedMs,
+        string detail,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        var ms = (int)Math.Clamp(elapsedMs, 0, int.MaxValue);
+        return WriteCollectionLogRowAsync(postgres, server, AnalysisPassRow.CollectorName, DateTime.UtcNow, status,
+            findingCount, ms, 0, ms, detail, null, null, null, null, null, logger, cancellationToken);
+    }
+
     /// <summary>The one binding of <see cref="InsertCollectionLogSql"/>: collector rows and #5735's skipped-slots row
     /// share it, so a parameter added to the insert is bound once. Returns false when the write failed (Debug-logged).</summary>
     private static async Task<bool> WriteCollectionLogRowAsync(

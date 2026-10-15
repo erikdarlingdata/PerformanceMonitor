@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// days of daily totals (<c>DARLING_NOSPILL_RIG_PLANS</c> plans a day, two per query; today built through 10:00) and one open
 /// hour of interval rows after today's watermark, and runs the read under <c>EXPLAIN (ANALYZE, FORMAT JSON)</c> at the
 /// server's own <c>work_mem</c>, at each weighed bound, and inside a transaction that runs the collector's
-/// <see cref="PgFactCollector.PlanRegressionDailyWorkMemSql"/>. It fails if that last run has a Sort that reports
+/// <see cref="PgFactCollector.PlanRegressionWorkMemSql"/>. It fails if that last run has a Sort that reports
 /// <c>Sort Space Type: Disk</c>, a Hash of more than one batch, or a HashAggregate of more than one batch or any disk use. It prints the rows, the execution time and every sort and hash node.
 /// Plant it once on a dev rig; it is not a CI test.
 /// </summary>
@@ -36,7 +36,7 @@ public sealed class PlanRegressionDailyNoSpillRig
 {
     private const int ServerA = -5812501;
 
-    /// <summary>The bounds weighed against <see cref="PgFactCollector.PlanRegressionDailyWorkMemSql"/> (64MB): the smaller one,
+    /// <summary>The bounds weighed against <see cref="PgFactCollector.PlanRegressionWorkMemSql"/> (64MB): the smaller one,
     /// and the 128MB it replaced; measured and printed, never asserted.</summary>
     private static readonly string[] WeighedWorkMem = ["32MB", "128MB"];
 
@@ -109,7 +109,7 @@ FROM generate_series(1, @p) AS n", ("s", ServerA), ("w", watermark), ("p", plans
 
         /* Before: the server's own work_mem, outside any transaction. Then each smaller bound that was weighed against the
            collector's, printed only, so the choice can be measured again on one plant. After: inside a transaction that runs
-           the read's own SET LOCAL (PlanRegressionDailyWorkMemSql), as the collector does. One plant, every run. */
+           the read's own SET LOCAL (PlanRegressionWorkMemSql), as the collector does. One plant, every run. */
         var before = await ExplainAsync(connection, null, window, built, plans, ct);
         foreach (var weighed in WeighedWorkMem)
         {
@@ -121,7 +121,7 @@ FROM generate_series(1, @p) AS n", ("s", ServerA), ("w", watermark), ("p", plans
 
         await using (var snapshot = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct))
         {
-            await ExecAsync(connection, PgFactCollector.PlanRegressionDailyWorkMemSql);
+            await ExecAsync(connection, PgFactCollector.PlanRegressionWorkMemSql);
             var after = await ExplainAsync(connection, snapshot, window, built, plans, ct);
             await snapshot.RollbackAsync(ct);
             Assert.True(after.Spills.Count == 0, "the read spilled with the collector's work_mem: " + string.Join("; ", after.Spills) + " (before: " + before.Line + ")");
@@ -133,7 +133,7 @@ FROM generate_series(1, @p) AS n", ("s", ServerA), ("w", watermark), ("p", plans
     /// no day is built, after a failed built-days read, and in its raw twin for a server without coverage) on the same planted
     /// size as <see cref="Measure"/>, but as interval rows: fifteen days of <c>DARLING_NOSPILL_RIG_PLANS</c> plans a day, one
     /// interval each, plus the open hour, and no built day. It runs at the server's own <c>work_mem</c> outside any
-    /// transaction (before M2), then inside a transaction that runs <see cref="PgFactCollector.PlanRegressionDailyWorkMemSql"/>,
+    /// transaction (before M2), then inside a transaction that runs <see cref="PgFactCollector.PlanRegressionWorkMemSql"/>,
     /// as the collector now does. It prints the temp blocks and the spilling nodes of each and fails if the second spills.
     /// </summary>
     [Fact]
@@ -164,7 +164,7 @@ FROM generate_series(1, @p) AS n", ("s", ServerA), ("w", watermark), ("p", plans
         object[] parameters = [ServerA, window, bound, bound];
         var before = await ExplainSqlAsync(connection, null, "fallback (table read)", PgFactCollector.PlanRegressionTableSql, parameters, ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
-        await ExecAsync(connection, PgFactCollector.PlanRegressionDailyWorkMemSql);
+        await ExecAsync(connection, PgFactCollector.PlanRegressionWorkMemSql);
         var after = await ExplainSqlAsync(connection, transaction, "fallback (table read)", PgFactCollector.PlanRegressionTableSql, parameters, ct);
         await transaction.RollbackAsync(ct);
         Assert.True(after.Spills.Count == 0, "the fallback read spilled with the collector's work_mem: " + after.Line + " (before: " + before.Line + ")");
@@ -259,7 +259,7 @@ FROM generate_series(@f::timestamp, @t::timestamp, interval '1 day') AS d (d)",
             for (var run = 1; run <= 3; run++)
             {
                 await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
-                await ExecAsync(connection, PgFactCollector.PlanRegressionDailyWorkMemSql);
+                await ExecAsync(connection, PgFactCollector.PlanRegressionWorkMemSql);
                 await ExplainSqlAsync(connection, transaction, $"{label}, run {run}", sql, parameters, ct);
                 await transaction.RollbackAsync(ct);
             }

@@ -2070,9 +2070,11 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// against it the way <c>NotificationColumns</c> is pinned against <see cref="ReadNotificationAsync"/>.
     /// Ordered by <c>route_id</c> so "first matching route wins" in the resolver is a statement about the
     /// table rather than about row order. The scope columns (V181, #5750) come last: they are stored as written and
-    /// expanded to a server set by <see cref="ReadNotificationRoutesAsync"/>, never by SQL.</summary>
+    /// expanded to a server set by <see cref="ReadNotificationRoutesAsync"/>, never by SQL. The agent channel's five columns
+    /// (V184, #5632) follow them: the level <see cref="NotificationRouter.ResolveAgent"/> reads, and the route's limits.</summary>
     public const string NotificationRoutesSelectSql =
-        "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id "
+        "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
+        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>The registry's server ids: every server a route's scope can name (#5750). The desired-state table, whose
@@ -2178,6 +2180,11 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                 {
                     ScopeServerId = reader.IsDBNull(8) ? null : reader.GetInt32(8),
                     ScopeTagId = reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                    AgentLevel = reader.IsDBNull(10) ? null : reader.GetInt16(10),
+                    AgentMaxPerHour = reader.GetInt32(11),
+                    AgentMaxPerDay = reader.GetInt32(12),
+                    AgentLeaseMinutes = reader.GetInt32(13),
+                    AgentExpiryMinutes = reader.GetInt32(14),
                 });
             }
         }

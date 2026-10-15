@@ -461,7 +461,7 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
     }
 
     /// <summary>
-    /// #5812 M1: a partial build is invisible to code from before V184. A partial day fails V183's validity predicate
+    /// #5812 M1: a partial build is invisible to code from before V185. A partial day fails V184's validity predicate
     /// (<c>built_seq = late_seq</c>), so a V183 reader reads it live. A V183 builder's whole build after it (the old stamp,
     /// which sets <c>built_seq</c> and leaves <c>partial_seq</c> and <c>built_through</c> as they were) reads as whole, and the
     /// daily read counts no row twice: it equals the interval-table read.
@@ -470,7 +470,7 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
     public async Task APartialDay_IsUnbuiltToTheV183Predicate_AndAV183WholeBuildAfterItReadsWhole_WithNoDoubleCount()
     {
         var baseCs = BaseConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 pre-V184 test.");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 pre-V185 test.");
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);

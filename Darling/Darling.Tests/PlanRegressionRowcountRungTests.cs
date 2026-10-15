@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -126,12 +126,13 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5812) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) is next and V185's (#5812) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
@@ -145,8 +146,9 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Equal("hasNotificationRouteScope", parameters[ProbeOrdinal + 6].Name);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 7].Name);
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 8].Name);
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[ProbeOrdinal + 9].Name);
-        Assert.Equal(ProbeOrdinal + 9, parameters.Length - 1);
+        Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 9].Name);
+        Assert.Equal("hasPlanRegressionPartialDays", parameters[ProbeOrdinal + 10].Name);
+        Assert.Equal(ProbeOrdinal + 10, parameters.Length - 1);
 
         /* Every sentinel present maps to exactly this build's version. With the later sentinels absent this rung is the
            answer; with this one absent too, one rung back. */
@@ -167,8 +169,9 @@ public sealed class PlanRegressionRowcountRungTests
         withoutLater[ProbeOrdinal + 7] = false;
         /* V183 (#5793) sits above V182 and goes absent too. */
         withoutLater[ProbeOrdinal + 8] = false;
-        /* V184 (#5812) sits above V183 and goes absent too. */
+        /* V184 (#5632) and V185 (#5812) sit above V183 and go absent too. */
         withoutLater[ProbeOrdinal + 9] = false;
+        withoutLater[ProbeOrdinal + 10] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, withoutLater)!);
 
         var behind = (object[])withoutLater.Clone();

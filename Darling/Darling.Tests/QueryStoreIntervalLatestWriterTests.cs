@@ -452,7 +452,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
     /// hour, so this evaluates the trigger's own WHEN, read back from the migrated store, with <c>now()</c> pinned to every
     /// hour of a day at its first and last second. A steady row (<see cref="SteadyFirst"/>) never fires it, also when the
     /// hour rolls over once after the row's clock was read; the late batch's rows always do. A first execution three hours
-    /// back, the shape this test used before V184 moved the bound to the open days, fires it at every hour.
+    /// back, the shape this test used before V185 moved the bound to the open days, fires it at every hour.
     /// </summary>
     [Fact]
     public async Task TheLateBatchTestsRows_HoldAgainstTheShippedTriggerBound_AtEveryHourOfAPinnedClock()
@@ -602,7 +602,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
     /* ---- helpers ----------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The first execution of a steady row (#5812): the start of the current hour. V184's trigger marks a row whose first
+    /// The first execution of a steady row (#5812): the start of the current hour. V185's trigger marks a row whose first
     /// execution is below <see cref="PlanRegressionDaily.LateTriggerLagHours"/> hour before the store's current hour, so
     /// a steady row must sit at or above that bound. The current hour's start does, and still does if the hour rolls
     /// over once while the test runs. The test's own clock is not the store's, which is why it is not <c>now - 1h</c>.
