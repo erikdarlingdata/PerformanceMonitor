@@ -84,7 +84,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Eight <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Seven <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. Four read a <b>stated, measured</b> bound off a named file each.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
@@ -120,13 +120,6 @@ public sealed class CommentFilterAdoptionTests
             + "of which yields a DIGIT, and digits are the only thing a pin here reads. The splice asserts "
             + "the source span equals the captured text, so a numeral wrapped across two /// lines fails "
             + "loudly rather than being partially replaced.",
-
-        ["Darling.Tests/DocCommentHygieneTests.cs"] =
-            "COLLECTS a doc run. DocRuns groups contiguous /// lines into the run that documents one member, "
-            + "and DocCommentBlocks groups the strictly contiguous ones into the one XML fragment a cref is "
-            + "parsed out of (#3083). Both are the subject of that class rather than an approximation of "
-            + "comment-stripping - and its cref rule DOES ask for the walker, for the identifier universe it "
-            + "resolves targets against.",
 
         ["Darling.Tests/RefreshCeilingProvenancePinTests.cs"] =
             "COLLECTS a doc run. DocProseFor walks the contiguous /// run above a named declaration and "
