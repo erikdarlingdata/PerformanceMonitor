@@ -33,8 +33,7 @@ internal readonly record struct CloudIdentity(string? Provider, string? Instance
 /// (ruling 3) — never from <see cref="DarlingStoreHostProfile.GatherStartupProfileAsync"/> or anything
 /// <c>DarlingWorker</c> runs at service start, so a host with no metadata endpoint never pays this probe's cost
 /// on every collection cycle; <c>get_store_host</c>'s own cache (<see cref="Mcp.StoreHostProfileCache"/>) means
-/// one probe per cache fill from there too. <see cref="DarlingCloudIdentityProbeSourcePinTests"/> pins both of
-/// those never-called claims against the actual source.
+/// one probe per cache fill from there too.
 ///
 /// <para><b>Safety (ruling 2).</b> <see cref="CreateHandler"/> builds a handler used for nothing else in the
 /// process: <c>UseProxy = false</c> (a configured proxy must never carry these requests) and
@@ -104,8 +103,7 @@ internal static class DarlingCloudIdentityProbe
     }
 
     /// <summary>This probe's own handler (ruling 2) — never a handler shared with any other outbound call in
-    /// the process. <see cref="DarlingCloudIdentityProbeSourcePinTests"/> pins <c>UseProxy</c> and
-    /// <c>AllowAutoRedirect</c> against the source text. <c>ConnectTimeout</c> bounds a stuck TCP handshake to
+    /// the process. <c>ConnectTimeout</c> bounds a stuck TCP handshake to
     /// the same budget the rest of the probe shares, so a cancelled connect does not keep retrying for its own
     /// default timeout after this handler is disposed. <c>MaxResponseDrainSize = 0</c> means disposing this
     /// handler with a response in flight never reads and discards up to the runtime's 1 MiB default drain.

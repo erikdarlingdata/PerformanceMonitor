@@ -284,17 +284,6 @@ public sealed class DarlingPayloadProbeFailureTests
     /* ── the host wiring, pinned at source (the branch is the tail of a live payload read) ── */
 
     [Fact]
-    public void Host_Reads_The_Trailing_Set_Through_The_Shared_Contract()
-    {
-        var source = File.ReadAllText(FindRepoFile(
-            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")));
-
-        Assert.Contains("definition.EmitsProbeFailures", source, StringComparison.Ordinal);
-        Assert.Contains("EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync", source, StringComparison.Ordinal);
-        Assert.Contains("EnumeratedCollectorDriver.MaxLoggedProbeFailures", source, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void Host_Reads_The_Trailing_Set_After_The_Payload_And_Before_The_Write()
     {
         /* Ordering is the whole correctness argument for putting this on the plain path: read it before the

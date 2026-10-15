@@ -201,7 +201,7 @@ public sealed class CommandPlaneCommandTimeoutTests
     /// <summary>
     /// The same ten sites, judged a SECOND way — through the shared
     /// <see cref="CommandDeadlineScanner"/> that #2938 extracted and the command-timeout pins route
-    /// through — the adopting set is enumerated and asserted in <see cref="CommandDeadlineScannerAdoptionTests"/>.
+    /// through.
     ///
     /// <para><b>Additive rather than a replacement, because the two ask different questions.</b> The
     /// shared scanner answers "does this site set an explicit deadline at all", and it does that better
