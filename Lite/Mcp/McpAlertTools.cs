@@ -428,7 +428,9 @@ public sealed class McpAlertTools
         "server (scope_server_id) or to a tag and every tag under it (scope_tag_id); a route whose server or tag was " +
         "deleted stays, is orphaned = true, and matches nothing. Resolution order per channel: scope first (a route " +
         "for the alert's server, then one for a tag it is under, the deeper tag first, then a fleet-wide route), and " +
-        "inside a scope an enabled route matching the metric EXACTLY, then its FAMILY, then * (scoped routes only), " +
+        "inside a scope an enabled route matching the metric EXACTLY, then an analysis finding's CATEGORY (metric_match " +
+        "'Analysis: <category>', match_kind analysis_category: every finding of that category, whatever its hash), then " +
+        "its FAMILY, then * (scoped routes only), " +
         "then the parent; within a level the lowest route_id with a non-empty column wins. A recovery routes as its " +
         "firing. Routing sits AFTER the cooldown: it changes where a post lands, never whether it is sent. " +
         "Destinations (webhook URLs, the PagerDuty routing key) are bearer secrets kept in Windows Credential Manager " +
@@ -692,7 +694,7 @@ public sealed class McpAlertTools
                     wait_type_pattern = r.WaitTypePattern,
                     job_name_pattern = r.JobNamePattern,
                     client_app_pattern = r.ClientAppPattern,
-                    summary = r.Summary
+                    match_summary = r.Summary
                 }).ToArray(),
                 total_count = rules.Count
             };

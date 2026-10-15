@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -94,6 +95,64 @@ public sealed class PlanForceNoWritePathTests
                     "Phase 1 of #2138 ships no write path; the write path is #2731.");
             }
         }
+    }
+
+    /// <summary>
+    /// #5632 Phase A (review round 2, L6): the agent hand-off docs teach no write. <c>Darling/AGENTS.example.md</c> is meant
+    /// to be pasted into an operator's own agent's instructions, and the README section "Hand an alert to your own agent"
+    /// describes that hand-off, so a write statement named in either one teaches an agent to run it. Both are read as
+    /// text and held to the same <see cref="WriteStatements"/> the service assembly is.
+    /// </summary>
+    [Fact]
+    public void TheAgentHandOffDocs_NameNoForceUnforceOrEvictStatement()
+    {
+        string darling = Path.Combine(RepoRoot(), "Darling");
+        string agents = File.ReadAllText(Path.Combine(darling, "AGENTS.example.md"));
+        string section = MarkdownSection(File.ReadAllText(Path.Combine(darling, "README.md")), "Hand an alert to your own agent");
+
+        foreach (var (name, text) in new[] { ("Darling/AGENTS.example.md", agents), ("Darling/README.md \"Hand an alert to your own agent\"", section) })
+        {
+            foreach (var statement in WriteStatements)
+            {
+                Assert.False(
+                    text.Contains(statement, StringComparison.OrdinalIgnoreCase),
+                    $"{name} names '{statement}'. The agent hand-off docs must not teach an agent a write (#5632, #2731).");
+            }
+        }
+    }
+
+    /// <summary>The body of the markdown section whose heading contains <paramref name="heading"/>: from that heading to
+    /// the next heading of the same or a higher level. Fails when the heading is gone, so a rename cannot empty the
+    /// scan.</summary>
+    private static string MarkdownSection(string markdown, string heading)
+    {
+        var lines = markdown.Split('\n');
+        int start = Array.FindIndex(lines, l => l.TrimStart().StartsWith('#') && l.Contains(heading, StringComparison.Ordinal));
+        Assert.True(start >= 0, $"The README heading \"{heading}\" moved or was renamed; point the guard at it again.");
+
+        int level = lines[start].TrimStart().TakeWhile(ch => ch == '#').Count();
+        var body = new StringBuilder();
+        for (int i = start + 1; i < lines.Length; i++)
+        {
+            string trimmed = lines[i].TrimStart();
+            int next = trimmed.TakeWhile(ch => ch == '#').Count();
+            if (next > 0 && next <= level && trimmed.Length > next && trimmed[next] == ' ') break;
+            body.Append(lines[i]).Append('\n');
+        }
+
+        Assert.True(body.Length > 0, $"The README section \"{heading}\" is empty.");
+        return body.ToString();
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile);
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        return dir ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above " + thisFile);
     }
 
     [Fact]

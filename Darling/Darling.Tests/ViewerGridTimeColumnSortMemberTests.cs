@@ -187,6 +187,14 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "FinOpsTab.xaml", "FinOpsObjectIndexDetailGrid", "CollectionTime", Name(typeof(IndexUsageRow)), "CollectionTimeUtc" },
         { "FinOpsTab.xaml", "FinOpsIndexAnalysisRollupGrid", "CollectionTime", Name(typeof(IndexCleanupRollupRow)), "CollectionTimeUtc" },
         { "FinOpsTab.xaml", "FinOpsIndexAnalysisDetailGrid", "CollectionTime", Name(typeof(IndexCleanupRecommendationRow)), "CollectionTimeUtc" },
+
+        /* #5632: the investigations window's request list, its two detail grids and its notes. */
+        { "InvestigationsWindow.xaml", "RequestsGrid", "OpenedDisplay", Name(typeof(InvestigationRequestViewRow)), "OpenedAtUtc" },
+        { "InvestigationsWindow.xaml", "RequestsGrid", "ExpiresDisplay", Name(typeof(InvestigationRequestViewRow)), "ExpiresAtUtc" },
+        { "InvestigationsWindow.xaml", "AlertsGrid", "TimeDisplay", Name(typeof(InvestigationAlertViewRow)), "AlertTimeUtc" },
+        { "InvestigationsWindow.xaml", "JournalGrid", "TimeDisplay", Name(typeof(InvestigationJournalViewRow)), "EventTimeUtc" },
+        { "InvestigationsWindow.xaml", "NotesGrid", "CreatedDisplay", Name(typeof(InvestigationNoteViewRow)), "CreatedAtUtc" },
+        { "InvestigationsWindow.xaml", "NotesGrid", "ExpiresDisplay", Name(typeof(InvestigationNoteViewRow)), "ExpiresAtUtc" },
     };
 
     /// <summary>

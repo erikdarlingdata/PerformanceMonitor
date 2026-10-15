@@ -27,14 +27,20 @@ public static class NotificationRouteKinds
     /// <summary><c>match_kind</c> for a route that names an <see cref="AlertFamily"/>.</summary>
     public const string FamilyKind = "family";
 
+    /// <summary><c>match_kind</c> for a route that names an analysis finding category, <c>Analysis: {category}</c> (#5632):
+    /// every finding of that category, whatever its hash.</summary>
+    public const string AnalysisCategoryKind = "analysis_category";
+
     /// <summary>Whether <paramref name="metricMatch"/> is the <c>*</c> match (the same rule as <see cref="NotificationRoute.IsWildcard"/>).</summary>
     public static bool IsWildcard(string? metricMatch) =>
         string.Equals(metricMatch?.Trim(), NotificationRoute.WildcardMatch, StringComparison.Ordinal);
 
-    /// <summary>The route's <c>match_kind</c>: <see cref="Wildcard"/>, <see cref="FamilyKind"/> or <see cref="ExactMetric"/>.</summary>
+    /// <summary>The route's <c>match_kind</c>: <see cref="Wildcard"/>, <see cref="FamilyKind"/>, <see cref="AnalysisCategoryKind"/>
+    /// or <see cref="ExactMetric"/>.</summary>
     public static string MatchKind(string? metricMatch) =>
         IsWildcard(metricMatch) ? Wildcard
         : AlertFamily.NormalizeFamily(metricMatch) is not null ? FamilyKind
+        : NotificationRoute.AnalysisCategoryOf(metricMatch) is not null ? AnalysisCategoryKind
         : ExactMetric;
 
     /// <summary>The route's reported <c>family</c>: null for <c>*</c> (it spans every family), the family itself for a family

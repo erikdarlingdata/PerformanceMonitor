@@ -1,0 +1,375 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+
+namespace PerformanceMonitor.Darling.Viewer;
+
+/// <summary>
+/// The Investigations window (#5632 Phase A): the Level 1 requests an agent route opened, with each request's brief,
+/// alerts, report and journal and a Close with a reason; the notes a brief may carry (approve or reject an agent's
+/// proposal, or write one); and the environment profile per fleet, server or tag. Opened from the Settings window beside
+/// Manage Notification Routes. Every write is awaited and the list reloaded from the store, as the routes window does.
+///
+/// <para>Each command checks its input first and says what is missing in the status line, so a command that cannot run
+/// never reaches the store; the checks are the static <c>...Error</c> methods, which the STA tests call through the
+/// window. A read-only seat (<c>postgres.connectAs = "viewer"</c>) sees everything and none of the write controls.</para>
+/// </summary>
+public partial class InvestigationsWindow : Window
+{
+    /// <summary>The status line a read-only seat shows in place of the write controls.</summary>
+    internal const string ReadOnlyMessage =
+        "Read-only connection (postgres.connectAs = \"viewer\"): investigations can be viewed but not closed, and notes and profiles cannot be changed here. Set connectAs to \"admin\" and restart the viewer to change them.";
+
+    private readonly ViewerDataService _dataService;
+    private readonly ObservableCollection<InvestigationRequestViewRow> _requests = new();
+    private readonly ObservableCollection<InvestigationNoteViewRow> _notes = new();
+    private IReadOnlyList<InvestigationProfileViewRow> _profiles = Array.Empty<InvestigationProfileViewRow>();
+    private readonly string _login;
+
+    /// <summary>False on a read-only seat; set once at construction.</summary>
+    public bool IsEditable { get; }
+
+    public InvestigationsWindow(ViewerDataService dataService)
+        : this(dataService, dataService?.IsReadOnly ?? false, Environment.UserName)
+    {
+        Loaded += async (_, _) => await LoadAllAsync();
+    }
+
+    /// <summary>The seam the STA tests use: the seat's role and the login are given, and nothing is read on load.</summary>
+    internal InvestigationsWindow(ViewerDataService dataService, bool readOnly, string login)
+    {
+        InitializeComponent();
+        _dataService = dataService ?? throw new ArgumentNullException(nameof(dataService));
+        _login = login;
+        IsEditable = !readOnly;
+        RequestsGrid.ItemsSource = _requests;
+        NotesGrid.ItemsSource = _notes;
+        SetScopes(null);
+
+        if (readOnly)
+        {
+            CloseRequestPanel.Visibility = Visibility.Collapsed;
+            DecideNotePanel.Visibility = Visibility.Collapsed;
+            WriteNotePanel.Visibility = Visibility.Collapsed;
+            SaveProfilePanel.Visibility = Visibility.Collapsed;
+            ProfileTextBox.IsReadOnly = true;
+            StatusText.Text = ReadOnlyMessage;
+        }
+    }
+
+    /// <summary>One choice of a scope picker: the fleet (both ids null), one server or one tag.</summary>
+    internal sealed record ScopeChoice(string Label, int? ServerId, int? TagId);
+
+    /// <summary>The state filter's value: null for All.</summary>
+    internal string? SelectedStateFilter =>
+        RequestStateFilter.SelectedItem is ComboBoxItem { Content: string text } && text != "All" ? text : null;
+
+    /// <summary>Why Close cannot run, or null when it can.</summary>
+    internal static string? CloseError(InvestigationRequestViewRow? selected, string? reason)
+    {
+        if (selected is null)
+        {
+            return "Select a request to close.";
+        }
+
+        if (!selected.IsClosable)
+        {
+            return "This request is " + selected.State + " already; only an open, claimed or reported request can be closed.";
+        }
+
+        return ViewerDataService.ValidateInvestigationCloseReason(reason);
+    }
+
+    /// <summary>Why Approve or Reject cannot run, or null when it can.</summary>
+    internal static string? DecideError(InvestigationNoteViewRow? selected) =>
+        selected is null ? "Select a note to approve or reject."
+        : !selected.IsPending ? "This note is " + selected.State + " already; only a pending note can be approved or rejected."
+        : null;
+
+    /// <summary>Why Write Note cannot run, or null when it can; <paramref name="days"/> is the parsed lifetime.</summary>
+    internal static string? WriteNoteError(string? noteText, string? daysText, out int days)
+    {
+        if (!int.TryParse(daysText?.Trim(), NumberStyles.None, CultureInfo.CurrentCulture, out days))
+        {
+            days = 0;
+            return string.Create(CultureInfo.InvariantCulture,
+                $"Keep for days must be a whole number from 1 to {ViewerDataService.InvestigationNoteMaxDays}.");
+        }
+
+        return ViewerDataService.ValidateInvestigationNote(noteText, days);
+    }
+
+    /// <summary>Why Save Profile cannot run, or null when it can.</summary>
+    internal static string? SaveProfileError(ScopeChoice? scope, string? profileText) =>
+        scope is null ? "Choose the fleet, a server or a tag."
+        : ViewerDataService.ValidateInvestigationProfile(scope.ServerId, scope.TagId, profileText);
+
+    private async Task LoadAllAsync()
+    {
+        try
+        {
+            SetScopes(await _dataService.GetNotificationRouteScopeInputsAsync());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not read the servers and tags: " + ex.Message);
+        }
+
+        await LoadRequestsAsync();
+        await LoadNotesAsync();
+        await LoadProfilesAsync();
+    }
+
+    private void SetScopes(ViewerRouteScopeInputs? inputs)
+    {
+        var fleet = new ScopeChoice("Fleet (every server)", null, null);
+        var servers = inputs?.Servers.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(s => new ScopeChoice("Server: " + s.Name, s.Id, null)).ToList() ?? new List<ScopeChoice>();
+        var tags = inputs?.Tags.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(t => new ScopeChoice("Tag: " + t.Name, null, t.Id)).ToList() ?? new List<ScopeChoice>();
+        NoteScopeBox.ItemsSource = new[] { fleet }.Concat(servers).ToList();
+        NoteScopeBox.SelectedIndex = 0;
+        ProfileScopeBox.ItemsSource = new[] { fleet }.Concat(servers).Concat(tags).ToList();
+        ProfileScopeBox.SelectedIndex = 0;
+    }
+
+    private async Task LoadRequestsAsync()
+    {
+        try
+        {
+            var selected = (RequestsGrid.SelectedItem as InvestigationRequestViewRow)?.RequestId;
+            var rows = await _dataService.GetInvestigationRequestsAsync(SelectedStateFilter);
+            _requests.Clear();
+            foreach (var row in rows)
+            {
+                _requests.Add(row);
+            }
+
+            RequestsGrid.SelectedItem = _requests.FirstOrDefault(r => r.RequestId == selected);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not read the investigation requests: " + ex.Message);
+        }
+    }
+
+    private async Task LoadNotesAsync()
+    {
+        try
+        {
+            var rows = await _dataService.GetInvestigationNotesAsync(null);
+            _notes.Clear();
+            foreach (var row in rows)
+            {
+                _notes.Add(row);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not read the notes: " + ex.Message);
+        }
+    }
+
+    private async Task LoadProfilesAsync()
+    {
+        try
+        {
+            _profiles = await _dataService.GetInvestigationProfilesAsync();
+            ShowProfileOfScope();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not read the environment profiles: " + ex.Message);
+        }
+    }
+
+    private void ShowProfileOfScope()
+    {
+        var scope = ProfileScopeBox.SelectedItem as ScopeChoice;
+        var profile = scope is null ? null
+            : _profiles.FirstOrDefault(p => p.ScopeServerId == scope.ServerId && p.ScopeTagId == scope.TagId);
+        ProfileTextBox.Text = profile?.ProfileText ?? "";
+        ProfileModifiedText.Text = profile is null ? "No profile yet."
+            : "Saved " + profile.ModifiedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+              + (profile.ModifiedBy is { } by ? " by " + by : "");
+    }
+
+    private async Task ShowDetailAsync(InvestigationRequestViewRow? row)
+    {
+        if (row is null)
+        {
+            DetailHeader.Text = "Select a request to see its brief, alerts, report and journal.";
+            BriefBox.Text = "";
+            ReportBox.Text = "";
+            AlertsGrid.ItemsSource = null;
+            JournalGrid.ItemsSource = null;
+            return;
+        }
+
+        DetailHeader.Text = row.ServerName + ", " + row.Family + ": " + row.State
+            + (row.ClosedReason is { } reason ? " (" + reason + ")" : "");
+        try
+        {
+            var detail = await _dataService.GetInvestigationRequestDetailAsync(row.RequestId);
+            BriefBox.Text = detail.BriefJson ?? "No brief yet: the brief is composed when an agent claims the request.";
+            AlertsGrid.ItemsSource = detail.Alerts;
+            JournalGrid.ItemsSource = detail.Journal;
+            ReportBox.Text = detail.Reports.Count == 0 ? "No report yet." : FormatReport(detail.Reports[0]);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not read the request's detail: " + ex.Message);
+        }
+    }
+
+    /// <summary>The report as the detail pane shows it: verdict, root cause, summary, then the evidence as returned.</summary>
+    internal static string FormatReport(InvestigationReportViewRow report)
+    {
+        var text = new StringBuilder();
+        text.Append("Verdict: ").Append(report.Verdict)
+            .Append(report.RootCauseFound ? " (root cause found)" : " (root cause not found)")
+            .Append(", by ").Append(report.AgentId).Append(" at ")
+            .AppendLine(report.SubmittedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture));
+        text.Append("Root cause: ").AppendLine(report.RootCause);
+        if (!string.IsNullOrWhiteSpace(report.Summary))
+        {
+            text.Append("Summary: ").AppendLine(report.Summary);
+        }
+
+        text.Append("Evidence: ").Append(report.EvidenceJson);
+        return text.ToString();
+    }
+
+    /// <summary>Close: checks the selection and the reason, then closes the request and reloads.</summary>
+    internal async Task CloseRequestCommandAsync()
+    {
+        var selected = RequestsGrid.SelectedItem as InvestigationRequestViewRow;
+        if (CloseError(selected, CloseReasonBox.Text) is { } error)
+        {
+            ShowStatus(error);
+            return;
+        }
+
+        try
+        {
+            var closed = await _dataService.CloseInvestigationRequestAsync(selected!.RequestId, _login, CloseReasonBox.Text);
+            ShowStatus(closed ? "Request closed." : "The request was not closed: it is closed or expired already, or gone.");
+            CloseReasonBox.Text = "";
+            await LoadRequestsAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not close the request: " + ex.Message);
+        }
+    }
+
+    /// <summary>Approve or Reject: checks the selection, then decides the note and reloads.</summary>
+    internal async Task DecideNoteCommandAsync(bool approve)
+    {
+        var selected = NotesGrid.SelectedItem as InvestigationNoteViewRow;
+        if (DecideError(selected) is { } error)
+        {
+            ShowStatus(error);
+            return;
+        }
+
+        try
+        {
+            var decided = await _dataService.DecideInvestigationNoteAsync(selected!.NoteId, approve, _login);
+            ShowStatus(decided ? (approve ? "Note approved." : "Note rejected.") : "The note was not changed: it was decided already, or is gone.");
+            await LoadNotesAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not decide the note: " + ex.Message);
+        }
+    }
+
+    /// <summary>Write Note: checks the text and the lifetime, then writes an approved note and reloads.</summary>
+    internal async Task WriteNoteCommandAsync()
+    {
+        if (WriteNoteError(NoteTextBox.Text, NoteDaysBox.Text, out var days) is { } error)
+        {
+            ShowStatus(error);
+            return;
+        }
+
+        var scope = NoteScopeBox.SelectedItem as ScopeChoice;
+        try
+        {
+            await _dataService.WriteInvestigationNoteAsync(scope?.ServerId, NoteMetricBox.Text, NoteTextBox.Text, _login, days);
+            ShowStatus("Note written.");
+            NoteTextBox.Text = "";
+            await LoadNotesAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not write the note: " + ex.Message);
+        }
+    }
+
+    /// <summary>Save Profile: checks the scope and the text, then saves (or, blank, removes) the scope's profile.</summary>
+    internal async Task SaveProfileCommandAsync()
+    {
+        var scope = ProfileScopeBox.SelectedItem as ScopeChoice;
+        if (SaveProfileError(scope, ProfileTextBox.Text) is { } error)
+        {
+            ShowStatus(error);
+            return;
+        }
+
+        try
+        {
+            await _dataService.SaveInvestigationProfileAsync(scope!.ServerId, scope.TagId, ProfileTextBox.Text, _login);
+            ShowStatus(string.IsNullOrWhiteSpace(ProfileTextBox.Text) ? "Profile removed." : "Profile saved.");
+            await LoadProfilesAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not save the profile: " + ex.Message);
+        }
+    }
+
+    private void ShowStatus(string message) => StatusText.Text = message;
+
+    private async void RequestStateFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (IsLoaded)
+        {
+            await LoadRequestsAsync();
+        }
+    }
+
+    private async void Refresh_Click(object sender, RoutedEventArgs e) => await LoadAllAsync();
+
+    private async void RequestsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+        await ShowDetailAsync(RequestsGrid.SelectedItem as InvestigationRequestViewRow);
+
+    private void ProfileScopeBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => ShowProfileOfScope();
+
+    private async void CloseRequest_Click(object sender, RoutedEventArgs e) => await CloseRequestCommandAsync();
+
+    private async void ApproveNote_Click(object sender, RoutedEventArgs e) => await DecideNoteCommandAsync(approve: true);
+
+    private async void RejectNote_Click(object sender, RoutedEventArgs e) => await DecideNoteCommandAsync(approve: false);
+
+    private async void WriteNote_Click(object sender, RoutedEventArgs e) => await WriteNoteCommandAsync();
+
+    private async void SaveProfile_Click(object sender, RoutedEventArgs e) => await SaveProfileCommandAsync();
+
+    private void CloseWindow_Click(object sender, RoutedEventArgs e) => Close();
+}

@@ -39,7 +39,7 @@ public sealed class DarlingMcpPgTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -149,7 +149,7 @@ public sealed class DarlingMcpPgTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -281,7 +281,7 @@ public sealed class DarlingMcpPgTrendTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 7.4 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_io_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_io_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -544,7 +544,7 @@ public sealed class DarlingMcpPgTrendTools
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 2.3 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_database_trend"), out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_database_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
