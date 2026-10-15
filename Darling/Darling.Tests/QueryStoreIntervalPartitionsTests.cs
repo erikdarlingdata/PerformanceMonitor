@@ -90,17 +90,17 @@ public sealed class QueryStoreIntervalPartitionsTests
     [Fact]
     public void ALegacyMax_MoreThanOneHorizonPastTheNormalS_IsNotArmedOver_ButOneWithinItIs()
     {
-        /* #5571 review round 2 M1. Now = 10-08, normal S = 10-10, the wide horizon is 9 days, so the last S that is armed over is 10-19. */
-        Assert.Equal(9, Wide.HorizonDays);
+        /* #5571 review round 2 M1. Now = 10-08, normal S = 10-10, the wide horizon is 10 days (#5809), so the last S that is armed over is 10-20. */
+        Assert.Equal(10, Wide.HorizonDays);
         var now = new DateTime(2026, 10, 8, 14, 0, 0, DateTimeKind.Utc);
         Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, null, Wide.HorizonDays));
         Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, new DateTime(2026, 10, 8, 13, 0, 0), Wide.HorizonDays));
         Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, new DateTime(2026, 10, 14, 5, 0, 0), Wide.HorizonDays));
 
-        var last = new DateTime(2026, 10, 18, 23, 59, 59, 999, DateTimeKind.Unspecified).AddTicks(9990);   /* 23:59:59.999999 */
-        Assert.Equal(Day(10, 19), QueryStoreIntervalPartitions.ArmBoundFor(now, last));
+        var last = new DateTime(2026, 10, 19, 23, 59, 59, 999, DateTimeKind.Unspecified).AddTicks(9990);   /* 23:59:59.999999 */
+        Assert.Equal(Day(10, 20), QueryStoreIntervalPartitions.ArmBoundFor(now, last));
         Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, last, Wide.HorizonDays));
-        Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, Day(10, 19), Wide.HorizonDays));
+        Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, Day(10, 20), Wide.HorizonDays));
         Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, new DateTime(2027, 10, 8), Wide.HorizonDays));
 
         /* The end of the representable range cannot be armed over either: the CHECK could never validate. */

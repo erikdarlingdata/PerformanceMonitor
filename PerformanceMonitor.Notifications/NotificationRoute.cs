@@ -32,7 +32,8 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 /// <param name="RouteId">The identity key, for the ledger's provenance and the editors' updates.</param>
 /// <param name="MetricMatch">A family name (<see cref="AlertFamily.All"/>, matched case-insensitively) or an
-/// exact metric name. Exact wins over family at resolution.</param>
+/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632). Exact wins
+/// over category, and category over family, at resolution.</param>
 /// <param name="TeamsUrl">Teams incoming-webhook URL, or empty to inherit.</param>
 /// <param name="SlackUrl">Slack incoming-webhook URL, or empty to inherit.</param>
 /// <param name="GenericUrl">The generic JSON-POST endpoint, or empty to inherit. Headers, body template and
@@ -99,6 +100,49 @@ public sealed record NotificationRoute(
     /// malformed). An orphaned route matches nothing; it must never widen to fleet-wide, so there is no
     /// cascade and no set-null behind it.</summary>
     public bool Orphaned { get; init; }
+
+    /// <summary>The agent level that means "off, and stop looking" (#5632): no investigation request, and no less
+    /// specific route is asked.</summary>
+    public const int AgentLevelOff = 0;
+
+    /// <summary>The agent level that opens Level 1 investigation requests (#5632). The only level Phase A stores.</summary>
+    public const int AgentLevelInvestigate = 1;
+
+    /// <summary>Default and bounds of <see cref="AgentMaxPerHour"/> (#5632, ruling R6). The store CHECK holds the same bounds.</summary>
+    public const int DefaultAgentMaxPerHour = 20, MinAgentMaxPerHour = 1, MaxAgentMaxPerHour = 60;
+
+    /// <summary>Default and bounds of <see cref="AgentMaxPerDay"/> (#5632, ruling R6).</summary>
+    public const int DefaultAgentMaxPerDay = 100, MinAgentMaxPerDay = 1, MaxAgentMaxPerDay = 500;
+
+    /// <summary>Default and bounds of <see cref="AgentLeaseMinutes"/> (#5632).</summary>
+    public const int DefaultAgentLeaseMinutes = 15, MinAgentLeaseMinutes = 5, MaxAgentLeaseMinutes = 120;
+
+    /// <summary>Default and bounds of <see cref="AgentExpiryMinutes"/> (#5632).</summary>
+    public const int DefaultAgentExpiryMinutes = 240, MinAgentExpiryMinutes = 15, MaxAgentExpiryMinutes = 1440;
+
+    /// <summary>The agent channel (#5632, store column <c>agent_level</c>): null inherits from a less specific route,
+    /// <see cref="AgentLevelOff"/> turns investigations off for the alerts this route matches and stops the lookup, and
+    /// <see cref="AgentLevelInvestigate"/> opens Level 1 investigation requests. Read by
+    /// <see cref="NotificationRouter.ResolveAgent"/> only: it is not a destination, so it never changes where a page
+    /// goes. An init member like the scope, so every existing construction keeps compiling.</summary>
+    public int? AgentLevel { get; init; }
+
+    /// <summary>The most investigation requests this route opens in an hour (<c>agent_max_per_hour</c>, #5632).
+    /// Alerts that join an open request do not count.</summary>
+    public int AgentMaxPerHour { get; init; } = DefaultAgentMaxPerHour;
+
+    /// <summary>The most investigation requests this route opens in a day (<c>agent_max_per_day</c>, #5632).</summary>
+    public int AgentMaxPerDay { get; init; } = DefaultAgentMaxPerDay;
+
+    /// <summary>How long an agent's claim on a request lasts before the request opens again
+    /// (<c>agent_lease_minutes</c>, #5632).</summary>
+    public int AgentLeaseMinutes { get; init; } = DefaultAgentLeaseMinutes;
+
+    /// <summary>How long a request nobody claims stays open before it expires (<c>agent_expiry_minutes</c>, #5632).</summary>
+    public int AgentExpiryMinutes { get; init; } = DefaultAgentExpiryMinutes;
+
+    /// <summary>Whether this route sets the agent channel at all (#5632): either level, as opposed to inheriting.</summary>
+    public bool HasAgentLevel => AgentLevel.HasValue;
 
     /// <summary>Whether this route carries a stored scope (#5750).</summary>
     public bool IsScoped => ScopeServerId.HasValue || ScopeTagId.HasValue;
@@ -190,6 +234,36 @@ public sealed record NotificationRoute(
         !IsFamilyRoute && !IsWildcard && !string.IsNullOrWhiteSpace(MetricMatch)
         && !MatchesName(metricName)
         && string.Equals(MetricMatch.Trim(), AlertFamily.Canonical(metricName), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The finding category this route names when <see cref="MetricMatch"/> is <c>Analysis: {category}</c>
+    /// with no hash suffix (#5632, ruling R5), else null. Such a route matches every finding of that category,
+    /// <c>Analysis: {category} [{hash8}]</c>, whatever its hash.</summary>
+    public string? AnalysisCategory => AnalysisCategoryOf(MetricMatch);
+
+    /// <summary>The category a <c>metric_match</c> of the shape <c>Analysis: {category}</c> names (#5632), or null:
+    /// the rule behind <see cref="AnalysisCategory"/>, for surfaces that hold only the match text.</summary>
+    public static string? AnalysisCategoryOf(string? metricMatch)
+    {
+        var match = metricMatch?.Trim();
+        if (string.IsNullOrEmpty(match)
+            || !match.StartsWith(AlertFamily.AnalysisMetricPrefix, StringComparison.OrdinalIgnoreCase)
+            || match.Contains('['))
+        {
+            return null;
+        }
+
+        var category = match[AlertFamily.AnalysisMetricPrefix.Length..].Trim();
+        return category.Length == 0 ? null : category;
+    }
+
+    /// <summary>Whether this route matches <paramref name="metricName"/> by its analysis finding CATEGORY (#5632,
+    /// ruling R5): the route is <c>Analysis: queries</c> and the metric is <c>Analysis: queries [1a2b3c4d]</c>. Less
+    /// specific than a route that names the finding's whole metric (hash included), more specific than a family.</summary>
+    public bool MatchesCategory(string metricName) =>
+        AnalysisCategory is { } category
+        && !MatchesName(metricName)
+        && AlertFamily.TryGetAnalysisCategory(metricName, out var found)
+        && string.Equals(category, found, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether this route matches <paramref name="metricName"/> EXACTLY — by its own name or by the
     /// firing it pairs with.</summary>

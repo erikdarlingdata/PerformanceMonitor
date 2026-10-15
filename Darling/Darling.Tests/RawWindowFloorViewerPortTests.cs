@@ -110,7 +110,7 @@ public sealed class RawWindowFloorViewerPortTests
 
             var purge = plan with { StartBound = QueryStoreIntervalWide.WideStartBound.TablePurgeEdge };
             ViewerServerTab.UpdateTruncationBanner(banner, null, RequestedStart, widePlan: purge);
-            Assert.Contains("(interval table keeps 9 days)", banner.Text, StringComparison.Ordinal);
+            Assert.Contains("(interval table keeps 10 days)", banner.Text, StringComparison.Ordinal);
             Assert.DoesNotContain("slicer", banner.Text, StringComparison.Ordinal);
 
             /* The grid shows the full window but raw (the slicer's tier) is cut: the shortfall is named. */
@@ -217,7 +217,7 @@ public sealed class RawWindowFloorViewerPortTests
         Assert.Contains("GetQueryStoreTopQueriesWithReachAsync(", tab, StringComparison.Ordinal);
         Assert.Contains("UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, \"Query Store\"), startUtc, widePlan: widePlan)", tab, StringComparison.Ordinal);
         Assert.Contains("QueryStoreIntervalWide.BannerReason(widePlan!.Value.StartBound)", tab, StringComparison.Ordinal);
-        Assert.DoesNotContain("interval table keeps 9 days", tab, StringComparison.Ordinal);
+        Assert.DoesNotContain("interval table keeps 10 days", tab, StringComparison.Ordinal);
         Assert.Contains(" · slicer since ", tab, StringComparison.Ordinal);
     }
 

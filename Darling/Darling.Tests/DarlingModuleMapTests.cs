@@ -68,7 +68,12 @@ public sealed class DarlingModuleMapTests
         Assert.Contains("sql_handle IS NOT NULL", sql, StringComparison.Ordinal);
         /* accumulate: upsert, and only ever advance — a stale run can't regress a fresher attribution */
         Assert.Contains("ON CONFLICT (server_name, sql_handle) DO UPDATE SET", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE (module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen)", sql, StringComparison.Ordinal);
+        /* #5824: an unchanged row is neither tried (the NOT EXISTS, so no row lock) nor rewritten (IS DISTINCT FROM) */
+        Assert.Contains("IS NOT DISTINCT FROM (n.database_name, n.schema_name, n.object_name, n.collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("IS DISTINCT FROM (EXCLUDED.database_name, EXCLUDED.schema_name, EXCLUDED.object_name, EXCLUDED.last_seen)", sql, StringComparison.Ordinal);
+        /* the #1801 lock order holds over the filtered rows too */
+        Assert.Contains("ORDER BY n.server_name, n.sql_handle", sql, StringComparison.Ordinal);
         /* the watermark moves in the same statement: forward only, and only when the read found a row */
         Assert.Contains("INSERT INTO collect.module_map_state", sql, StringComparison.Ordinal);
         Assert.Contains("refreshed_through = GREATEST(module_map_state.refreshed_through, EXCLUDED.refreshed_through)", sql, StringComparison.Ordinal);
@@ -100,7 +105,7 @@ public sealed class DarlingModuleMapTests
         Assert.Contains("GROUP BY server_name, sql_handle, database_name, schema_name, object_name", sql, StringComparison.Ordinal);
         /* the #1801 lock-order ORDER BY survives */
         Assert.Contains("ORDER BY server_name, sql_handle, collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE (module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen)", sql, StringComparison.Ordinal);
         Assert.Contains("refreshed_through = GREATEST(module_map_state.refreshed_through, EXCLUDED.refreshed_through)", sql, StringComparison.Ordinal);
         Assert.Contains("HAVING max(collection_time) IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("(now() AT TIME ZONE 'UTC')::timestamp", sql, StringComparison.Ordinal);

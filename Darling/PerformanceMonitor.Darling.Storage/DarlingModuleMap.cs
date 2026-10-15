@@ -121,23 +121,53 @@ public static class DarlingModuleMap
     /// <para>The <c>ORDER BY</c> its DISTINCT ON requires also happens to be a deterministic ascending order
     /// on the conflict key, so concurrent refreshes take these row locks in the same relative order and the
     /// unordered-batch-upsert deadlock (#1801) cannot form here. Checked, not assumed -- do not drop or
-    /// reorder it on the belief that it is only about picking the latest row.</para>
+    /// reorder it on the belief that it is only about picking the latest row. The outer <c>ORDER BY</c> on the
+    /// same key keeps that order once the <c>NOT EXISTS</c> filter wraps the DISTINCT ON.</para>
     ///
-    /// <para>The statement returns one row: the number of map rows upserted and the watermark after the
-    /// statement (null when <c>src</c> was empty).</para>
+    /// <para>A row whose values are unchanged is not written (#5824). Each refresh re-reads a slack behind the
+    /// watermark (10 minutes hourly, <see cref="DailyRepairSlack"/> daily), so most handles it reads are already
+    /// in the map with the same names and the same <c>last_seen</c>. The update arm used to rewrite them anyway
+    /// (<c>&gt;=</c> lets an equal <c>last_seen</c> through): a new row version and WAL for every handle in the
+    /// window, about 9 MB per 20,000 unchanged handles on a test store. Two guards stop it. The <c>NOT EXISTS</c>
+    /// drops a handle whose newest row matches the map before the insert tries it, so it takes no row lock either
+    /// (an <c>ON CONFLICT ... WHERE</c> that rejects a row still locks it, and after a checkpoint each locked page
+    /// is a full-page image: 2.6 MB for the same 20,000 handles with only the second guard). The
+    /// <c>IS DISTINCT FROM</c> on the update arm is the second guard, for a row a concurrent refresh wrote between
+    /// the filter's read and the insert. With both, a refresh over unchanged rows wrote about 300 bytes (the
+    /// watermark row). The comparison stays <c>&gt;=</c>, not <c>&gt;</c>: with both guards an equal
+    /// <c>last_seen</c> writes only when a name differs, which keeps the map's contents exactly what the old
+    /// statement left, where a strict <c>&gt;</c> would stop a name change stamped at the same time.</para>
+    ///
+    /// <para>The statement returns one row: the number of map rows written (inserted, or updated because a value
+    /// changed; an unchanged row is not counted) and the watermark after the statement (null when <c>src</c> was
+    /// empty).</para>
     /// </summary>
     private const string UpsertAndAdvanceTail = @"up AS (
     INSERT INTO collect.module_map (server_name, sql_handle, database_name, schema_name, object_name, last_seen)
-    SELECT DISTINCT ON (server_name, sql_handle)
-        server_name, sql_handle, database_name, schema_name, object_name, collection_time
-    FROM src
-    ORDER BY server_name, sql_handle, collection_time DESC
+    SELECT n.server_name, n.sql_handle, n.database_name, n.schema_name, n.object_name, n.collection_time
+    FROM (
+        SELECT DISTINCT ON (server_name, sql_handle)
+            server_name, sql_handle, database_name, schema_name, object_name, collection_time
+        FROM src
+        ORDER BY server_name, sql_handle, collection_time DESC
+    ) AS n
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM collect.module_map AS m
+        WHERE m.server_name = n.server_name
+          AND m.sql_handle = n.sql_handle
+          AND (m.database_name, m.schema_name, m.object_name, m.last_seen)
+              IS NOT DISTINCT FROM (n.database_name, n.schema_name, n.object_name, n.collection_time)
+    )
+    ORDER BY n.server_name, n.sql_handle
     ON CONFLICT (server_name, sql_handle) DO UPDATE SET
         database_name = EXCLUDED.database_name,
         schema_name = EXCLUDED.schema_name,
         object_name = EXCLUDED.object_name,
         last_seen = EXCLUDED.last_seen
-    WHERE module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen
+    WHERE (module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen)
+      AND (module_map.database_name, module_map.schema_name, module_map.object_name, module_map.last_seen)
+          IS DISTINCT FROM (EXCLUDED.database_name, EXCLUDED.schema_name, EXCLUDED.object_name, EXCLUDED.last_seen)
     RETURNING 1
 ),
 st AS (
@@ -254,7 +284,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// <summary>The daily refresh (#5519). Once the map has a watermark and rows it re-reads only the span from
     /// <see cref="DailyRepairSlack"/> behind the watermark (capped at <see cref="MaxLookback"/>), which is the
     /// repair for rows the hourly path missed by committing late; with no watermark, or an empty map, it reads the
-    /// last two days (<see cref="RefreshSql"/>). Returns the number of rows upserted; a failure warns and the
+    /// last two days (<see cref="RefreshSql"/>). Returns the number of map rows written (new or changed); a failure warns and the
     /// existing map keeps serving (never throws). Called from the daily purge, which fires fire-and-track from the
     /// sweep loop (its first pass is right after the collectors start, #5578), never from the start path: this
     /// statement can run for a minute on a large store and must not hold a collector back.</summary>
@@ -303,7 +333,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         {
             using var command = new NpgsqlCommand(RefreshSql, connection) { CommandTimeout = SetupTimeoutSeconds };
             var (rows, _) = await ReadRefreshResultAsync(command, cancellationToken);
-            logger?.LogInformation("module_map: upserted {Rows} sql_handle→module attribution(s) from recent procedure_stats.", rows);
+            logger?.LogInformation("module_map: wrote {Rows} new or changed sql_handle→module attribution(s) from recent procedure_stats (an unchanged one is not rewritten).", rows);
             return rows;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -315,7 +345,8 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
 
     /// <summary>
     /// The hourly incremental refresh: upserts the map from procedure_stats at or after <see cref="SinceFor"/>
-    /// and advances the watermark, in one statement. Returns the number of rows upserted; a failure warns and the
+    /// and advances the watermark, in one statement. Returns the number of map rows written (new or changed; see
+    /// <see cref="UpsertAndAdvanceTail"/>); a failure warns and the
     /// existing map keeps serving (never throws), and the next hour reads from the same watermark, so nothing is
     /// skipped.
     /// </summary>
@@ -366,7 +397,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
             var (rows, watermark) = await ReadRefreshResultAsync(command, cancellationToken);
             logger?.LogInformation(
-                "{Label}: upserted {Rows} sql_handle→module attribution(s) from procedure_stats since {Since:yyyy-MM-dd HH:mm:ss}; watermark now {Watermark}.",
+                "{Label}: wrote {Rows} new or changed sql_handle→module attribution(s) from procedure_stats since {Since:yyyy-MM-dd HH:mm:ss} (an unchanged one is not rewritten); watermark now {Watermark}.",
                 label, rows, since, watermark?.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) ?? "unchanged (nothing read)");
             return rows;
         }

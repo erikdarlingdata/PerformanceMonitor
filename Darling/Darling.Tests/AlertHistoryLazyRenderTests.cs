@@ -125,8 +125,11 @@ public sealed class AlertHistoryLazyRenderTests
         var js = AlertsJs;
         var loadingStripUses = Regex.Matches(js, Regex.Escape("loadingStrip(")).Count;
         /* The first mount in renderAlerts, and (#5241) the one in an opened Analysis row's own expansion while its advice
-           loads; neither is on the poll path. */
-        Assert.Equal(2, loadingStripUses);
+           loads; neither is on the poll path. #5632 Phase A adds two in the Investigations panel: its first fill, only while
+           its box is empty, and a row's journal on its first expand. The alert table's poll path still shows none. */
+        Assert.Equal(4, loadingStripUses);
+        Assert.Contains("mount(body, [loadingStrip()]);", ExtractFunction(js, "function journalCell(r) {"), StringComparison.Ordinal);
+        Assert.Contains("if (!state.box.firstChild) mount(state.box, loadingStrip(", ExtractFunction(js, "async function refreshInvestigations(state) {"), StringComparison.Ordinal);
         Assert.Contains("mount(placeholder, [loadingStrip()]);", ExtractFunction(js, "function detailCell(a) {"), StringComparison.Ordinal);
 
         var refreshAlerts = ExtractFunction(js, "async function refreshAlerts(state) {");

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -210,8 +210,8 @@ public sealed class MigrationDataMovingRungCensusPins
             "CREATE INDEX over the populated collect.query_store_interval_wide table (created V145) (#4608, "
             + "split into its own rung #4615) - V153's twin, same shape and same measurement basis, on the "
             + "table this rung purges/reads instead: the index built in 3.52 s at 9M rows with "
-            + "max_parallel_maintenance_workers = 2. query_store_interval_wide is kept to 9 days, and the "
-            + "field store measured 9.3M rows at that horizon on 2026-09-28 - a full-horizon store (roughly "
+            + "max_parallel_maintenance_workers = 2. query_store_interval_wide was kept to 9 days then (10 "
+            + "since #5809), and the field store measured 9.3M rows at that horizon on 2026-09-28 - a full-horizon store (roughly "
             + "6-7x today's rows, ~65M) projects to roughly 25-30 s with parallel workers, nowhere near the "
             + "280 s MigrationCommandTimeoutSeconds window this rung's own SET LOCAL lock_timeout leaves. "
             + "V145 is new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released version "
@@ -240,6 +240,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "over the stored rows. The table holds one row per hour per surface, route and outcome that was read, kept "
             + "90 days: at most a few hundred thousand narrow rows, so the build takes about a second. The three ADD "
             + "COLUMNs carry constant defaults and rewrite nothing. It does not move the lock-wait floor."),
+        new(
+            184,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_notification_routes (#5632, created V131): the agent CHECK is "
+            + "validated against every stored route, whose five new columns are NULL or their constant defaults at this "
+            + "rung. The routes table holds a handful of operator-written rows, so the scan is instant and touches no data "
+            + "an earlier rung created beyond that table. The six investigation tables are created empty. It does not move "
+            + "the lock-wait floor."),
         new(
             175,
             SetsTheFloor: false,

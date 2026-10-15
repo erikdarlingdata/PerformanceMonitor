@@ -1491,6 +1491,7 @@ export function statusToSev(status) {
     case "HEALTHY":
     case "OK":
     case "SUCCESS":
+    case "ANALYZED":
     case "ONLINE":
       return "Healthy";
     case "STALE":

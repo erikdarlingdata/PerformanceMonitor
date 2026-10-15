@@ -267,7 +267,12 @@ public sealed class McpToolsListBudgetTests
        bytes), each in one sentence that also says it holds no personal data: +182 bytes. Measured on the branch merged with dev
        (98ab5ff98): 198,816 bytes with the two sentences taken out, 198,998 with them. The 198,844 above is not this tree's
        measured base. Constant set to the measured value. */
-    private const int TotalCeilingBytes = 198_998;
+    /* #5632 Phase A (L6): four new tools, list_investigation_requests, claim_investigation_request, submit_investigation_report
+       and get_investigation_reports (20 parameters). As first written the total was 203,261 bytes. The four heads were
+       shortened first (1,411 -> 839 bytes; the rest moved after the marker) and the 20 parameter descriptions cut to the
+       bare range or choice (706 bytes now): 202,044 bytes measured, 1,217 saved. The remaining 3,046 bytes are the four tools' names,
+       input schemas and guide pointers, which no shortening removes. Constant set to the measured value. */
+    private const int TotalCeilingBytes = 202_044;
 
 
 
