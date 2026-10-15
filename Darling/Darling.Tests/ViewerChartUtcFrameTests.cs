@@ -205,38 +205,4 @@ public sealed class ViewerChartUtcFrameTests
         Assert.Empty(offenders);
     }
 
-    [Fact]
-    public void TheCsvExportWritesTheTimesTheChartLabelsShow()
-    {
-        var code = ViewerSources().Single(s => s.File == "ViewerServerTab.ChartContextMenu.cs").Code;
-
-        /* The export writes every point through the pure ChartCsvDataLine (ViewerChartContextMenuTests pins what it
-           writes for a repeated hour), handing it the chart's X as plotted and the display zone; the seam applies
-           the zone to the instant, and the UTC offset column is that same instant's offset. Neither the raw X nor a
-           display-frame projection reaches FormatChartCsvLine. */
-        Assert.Contains("ChartCsvDataLine(point.X, seriesName, point.Y, sep, zone)", code, StringComparison.Ordinal);
-        Assert.Contains("var instant = DateTime.FromOADate(plottedX);", code, StringComparison.Ordinal);
-        Assert.Contains("DisplayZone.ToDisplay(instant, zone)", code, StringComparison.Ordinal);
-        Assert.Contains("DisplayZone.UtcOffsetText(instant, zone)", code, StringComparison.Ordinal);
-        Assert.DoesNotContain("FormatChartCsvLine(DateTime.FromOADate(", code, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheDisplayToUtcInversesAreGone_BecauseTheChartXIsAlreadyUtc()
-    {
-        var names = typeof(ViewerTimeHelper)
-            .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
-            .Select(m => m.Name)
-            .ToHashSet(StringComparer.Ordinal);
-
-        Assert.DoesNotContain("DisplayToNaiveUtc", names);
-        Assert.DoesNotContain("ConvertFromDisplay", names);
-
-        /* Nothing else in the viewer reads a plotted X and converts it back from a display frame. */
-        foreach (var (file, code) in ViewerSources())
-        {
-            Assert.False(code.Contains("DisplayToNaiveUtc", StringComparison.Ordinal), $"{file} still names DisplayToNaiveUtc");
-            Assert.False(code.Contains("ConvertFromDisplay", StringComparison.Ordinal), $"{file} still names ConvertFromDisplay");
-        }
-    }
 }

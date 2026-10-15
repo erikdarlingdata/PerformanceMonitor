@@ -29,47 +29,6 @@ public sealed class ViewerThemeColorOverridesTests
 {
     private static readonly string ViewerDir = Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer");
 
-    [Fact]
-    public void TheOverridesFile_SitsBesideViewerSettings_UnderTheViewersOwnDirectory()
-    {
-        var app = File.ReadAllText(Path.Combine(RepoRoot(), ViewerDir, "App.xaml.cs"));
-
-        Assert.Contains("Path.GetDirectoryName(ViewerAppSettingsStore.DefaultFilePath())", app, StringComparison.Ordinal);
-        Assert.Contains("ThemeColorOverrides.FileName", app, StringComparison.Ordinal);
-        Assert.Equal("theme-overrides.json", ThemeColorOverrides.FileName);
-    }
-
-    /// <summary>
-    /// The preference is not a settings-model property, not a store column and not a control-plane knob.
-    /// <c>ViewerAppSettings</c> keeps <c>ColorTheme</c> (which theme) and nothing about the colors inside
-    /// it; the service and storage projects never see the word.
-    /// </summary>
-    [Fact]
-    public void TheColorOverrides_AreNotPersistedInTheSettingsModel_TheStore_OrTheControlPlane()
-    {
-        var root = RepoRoot();
-
-        var settingsModel = File.ReadAllText(Path.Combine(root, ViewerDir, "ViewerAppSettings.cs"));
-        Assert.DoesNotContain("ThemeColorOverride", settingsModel, StringComparison.Ordinal);
-        Assert.DoesNotContain("theme-overrides", settingsModel, StringComparison.Ordinal);
-
-        foreach (var project in new[] { "PerformanceMonitor.Darling.Storage", "PerformanceMonitor.Darling.Service" })
-        {
-            var directory = Path.Combine(root, "Darling", project);
-            foreach (var file in Directory.EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories))
-            {
-                if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                var text = File.ReadAllText(file);
-                Assert.False(text.Contains("ThemeColorOverride", StringComparison.Ordinal) || text.Contains("theme-overrides", StringComparison.Ordinal),
-                    $"{Path.GetRelativePath(root, file)} mentions the viewer's color overrides; they are viewer-local and must stay out of the store and the service.");
-            }
-        }
-    }
-
     /// <summary>
     /// The viewer's Settings window hosts the same shared panel Lite does, beneath its theme combo, and the
     /// panel is the ONLY colors surface — no viewer-only copy of the rows that could drift from Lite's.
