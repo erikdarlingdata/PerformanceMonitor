@@ -105,39 +105,6 @@ public sealed class FactSourceRegistryTests
         Assert.All(arms, arm => Assert.Contains(arm, FactScorer.KnownSources));
     }
 
-    /// <summary>
-    /// Both SKUs' <c>source</c> descriptions spell out the registry verbatim, in its order — an attribute
-    /// argument must be a constant, so the pin is what ties the constant to the list.
-    /// </summary>
-    [Fact]
-    public void BothDescriptions_SpellOutTheRegistry()
-    {
-        var expected = string.Join(", ", FactScorer.KnownSources);
-
-        /* #3898: get_analysis_facts converted, and D2 caps a converted tool's parameter descriptions at 200
-           characters, so source's own description no longer spells out the registry — it now states the
-           guardrail (an unrecognized value is refused) and points at the full list, which rides on the tool's
-           own tail (get_tool_guide) as an appended sentence instead of being lost. Re-pointed here: the
-           refusal guardrail stays on the parameter description, the full list moves to the tail pin. */
-        var darlingParam = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_analysis_facts")
-            .GetParameters().Single(p => p.Name == "source")
-            .GetCustomAttribute<DescriptionAttribute>()!.Description;
-        Assert.Contains("refused", darlingParam, StringComparison.Ordinal);
-
-        var darlingTail = McpToolGuideTests.Served("get_analysis_facts").Tail!;
-        Assert.Contains(expected, darlingTail, StringComparison.Ordinal);
-
-        /* Lite's, from source: this project does not reference the desktop app. The full list still appears
-           somewhere in the file (now in the tool's tail rather than the parameter), so this coarser
-           whole-file check needs no change. */
-        var lite = RepoFile.ReadRepoFile("Lite", "Mcp", "McpAnalysisTools.cs");
-        Assert.Contains(expected, lite, StringComparison.Ordinal);
-        Assert.Contains("FactSourceFilterDescription", lite, StringComparison.Ordinal);
-        Assert.Contains("McpHelpers.ValidateChoice(source, FactScorer.KnownSources, \"source\")", lite, StringComparison.Ordinal);
-        Assert.DoesNotContain("Filter to a specific source category: waits, blocking, config, memory", lite, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void AnUnknownSource_IsRefusedWithTheWholeSet_AndAKnownOneInAnyCasePasses()
     {

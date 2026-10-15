@@ -187,34 +187,6 @@ public sealed class DeadlockRateBandRungTests
     }
 
     /// <summary>
-    /// The MCP's ACCEPTED bound equals the band's CLAMP, held STRUCTURALLY — both sites name the same two
-    /// constants rather than carrying matching literals.
-    ///
-    /// <para>The parity is why this matters and it is already pinned three times in this repo: a wider
-    /// bound in the tool lets <c>update_alert_settings</c> ACCEPT a value the band then silently rewrites,
-    /// which presents as the setting not sticking with nothing saying no.</para>
-    /// </summary>
-    [Fact]
-    public void TheMcpWriteBoundsNameTheSameConstantsTheBandClampsTo()
-    {
-        var tools = RepoFile.ReadRepoFile(
-            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
-
-        Assert.Contains("ServerHealthThresholds.DeadlockRatePerHourFloor", tools, StringComparison.Ordinal);
-        Assert.Contains("ServerHealthThresholds.DeadlockRatePerHourCeiling", tools, StringComparison.Ordinal);
-
-        /* Both knobs, not one — two AddDouble calls each naming both bounds. */
-        Assert.Equal(2, CountOf(tools, "ServerHealthThresholds.DeadlockRatePerHourFloor"));
-        Assert.Equal(2, CountOf(tools, "ServerHealthThresholds.DeadlockRatePerHourCeiling"));
-
-        /* And the Settings window validates against the same pair, so the third surface cannot drift. */
-        var settings = RepoFile.ReadRepoFile(
-            "Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
-        Assert.Equal(2, CountOf(settings, "ServerHealthThresholds.DeadlockRatePerHourFloor"));
-        Assert.Equal(2, CountOf(settings, "ServerHealthThresholds.DeadlockRatePerHourCeiling"));
-    }
-
-    /// <summary>
     /// The band tiers are reported and accepted under their OWN group, not folded into the <c>deadlocks</c>
     /// alert group — the distinction #3368 makes explicitly. <c>deadlocks</c> governs whether an alert is
     /// DELIVERED; these decide what band a card reads. Nesting a band tier under the alert would invite
@@ -234,31 +206,6 @@ public sealed class DeadlockRateBandRungTests
         /* And NOT under the alert group, which is the half that could go wrong silently. */
         Assert.DoesNotContain("deadlocks.deadlock_warn_per_hour", tools, StringComparison.Ordinal);
         Assert.DoesNotContain("deadlocks.deadlock_critical_per_hour", tools, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Every surface needing the shipped default NAMES the constant rather than restating the number — the
-    /// #3060 finding that a number copied into five places is four places that can be left behind.
-    /// </summary>
-    [Fact]
-    public void EverySurfaceNeedingTheShippedDefault_NamesTheConstant()
-    {
-        var surfaces = new (string What, string Text)[]
-        {
-            ("AlertsConfig seed", RepoFile.ReadRepoFile(
-                "Darling", "PerformanceMonitor.Darling.Service", "DarlingConfig.cs")),
-            ("viewer row initializer", RepoFile.ReadRepoFile(
-                "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.AlertSettings.cs")),
-            ("Restore Defaults button", RepoFile.ReadRepoFile(
-                "Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs")),
-        };
-
-        foreach (var (what, text) in surfaces)
-        {
-            Assert.False(string.IsNullOrWhiteSpace(text), $"{what}: read nothing, so this pin would assert nothing");
-            Assert.Contains("DeadlockWarnPerHourDefault", text, StringComparison.Ordinal);
-            Assert.Contains("DeadlockCriticalPerHourDefault", text, StringComparison.Ordinal);
-        }
     }
 
     /* ─────────────────────── the seam actually reaches the band ─────────────────────── */

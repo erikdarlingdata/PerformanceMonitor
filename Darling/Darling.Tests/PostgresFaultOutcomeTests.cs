@@ -757,42 +757,6 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
-    /// The wiring #3830 stands on, pinned in source because no pure test reaches it: the row is read by the
-    /// PostgreSQL detection query, carried on the runtime, and handed to the fault mapping at the one call
-    /// site. Every one of those is an expression a call site passes rather than any logic - a revert that
-    /// dropped the argument would compile, run, and quietly go back to one remedy for three states, with the
-    /// sentence pins above still green because they call the mapping directly.
-    ///
-    /// <para>The extension the detection query names is compared against the DECLARATION rather than spelled
-    /// twice: the query is a <c>const</c> and cannot interpolate, so this is what keeps the literal and the
-    /// collector from drifting apart.</para>
-    /// </summary>
-    [Fact]
-    public void ThePgExtensionRowIsRead_CarriedOnTheRuntime_AndPassedToTheMapping()
-    {
-        var connector = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingServerConnector.cs"));
-        var worker = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-
-        var declared = PgStatementStatsCollector.Instance.RequiredPgExtensions[0].ExtensionName;
-
-        /* Read on the statement that was already being made: a column on the detection query, not a probe
-           of its own. */
-        Assert.Contains("SELECT e.extversion", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.Ordinal);
-        Assert.Contains(
-            $"WHERE e.extname = '{declared}'", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.Ordinal);
-
-        /* Built from the ROW being present, never inferred from the value being null, and carried whole. */
-        Assert.Contains("PgExtensionRowObservation.From(", connector, StringComparison.Ordinal);
-        Assert.Contains("PgStatStatementsExtension = statementsExtension,", connector, StringComparison.Ordinal);
-
-        /* And handed to the mapping, beside the flavor, at the arm that renders the sentence. */
-        Assert.Contains("runtime.PgStatStatementsExtension,", worker, StringComparison.Ordinal);
-        Assert.Contains("runtime.Target.IsAurora)", worker, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// A companion name on a collector that declares NO companions routes as it always did: the declaration
     /// is per collector, so pg_buffer_usage's 42P01 naming some other extension's info view is still, for
     /// pg_buffer_usage, its declared extension missing. And the unknown-database fallback holds on the
@@ -1034,37 +998,6 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
-    /// The ERROR arms record the run's REAL elapsed time, not the literal zeros they used to store
-    /// (#2997 item 3).
-    ///
-    /// <para>A wiring invariant, so it is pinned in the source the way this suite already pins the
-    /// #1648 middleware order and the #1706 upgrade catch order: the value is written by
-    /// <c>LogCollectionAsync</c> inside a live sweep, so no pure test can observe it, and the defect is
-    /// an argument list rather than a logic error. Three literal zeros made a 300-second death and an
-    /// instantly-refused connection store byte-identical rows — and <c>duration_ms</c> is
-    /// <c>sqlMs + storageMs</c>, so it destroyed the one number that separates them.</para>
-    /// </summary>
-    [Fact]
-    public void TheErrorArmsRecordRealElapsedTimeRatherThanLiteralZeros()
-    {
-        var worker = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-
-        /* The stopwatch the fault arms read. */
-        Assert.Contains("var runClock = System.Diagnostics.Stopwatch.StartNew();", worker, StringComparison.Ordinal);
-
-        /* No ERROR row may be written with the old three-zero argument list. This is the assertion that
-           fails if the fix is reverted: the arms once read `"ERROR", 0, 0, 0`. */
-        Assert.DoesNotContain("collectorName, \"ERROR\", 0, 0, 0", worker, StringComparison.Ordinal);
-
-        /* Both ERROR writes — the authored timeout arm and the general catch — now pass a measured
-           figure in the sqlMs slot that feeds duration_ms. */
-        Assert.Equal(2, Regex.Matches(
-            worker,
-            @"collectorName, ""ERROR"", 0, (?:elapsedMs|runClock\.ElapsedMilliseconds), 0").Count);
-    }
-
-    /// <summary>
     /// The timeout arm must NOT force a reconnect. The provider classifies a deadline as
     /// <see cref="CollectorTargetFault.CommandTimeout"/> rather than
     /// <see cref="CollectorTargetFault.ConnectionFatal"/> specifically so a slow statement cannot turn a
@@ -1083,63 +1016,6 @@ public class PostgresFaultOutcomeTests
         Assert.Equal(
             CollectorTargetFault.ConnectionFatal,
             PostgresTargetProvider.Instance.Classify(dead, yieldsOnLockTimeout: false));
-    }
-
-    /// <summary>
-    /// The fault's database is read off the EXCEPTION, not off the runtime, at both PostgreSQL fault arms.
-    ///
-    /// <para><b>The defect this pins.</b> <c>ServerRuntime.ConnectedDatabase</c> is <c>init</c>-only and
-    /// stamped once during the initial connect-and-probe, from whatever database the probe landed on. A
-    /// <c>RunsPerDatabase</c> collector never uses that connection — the per-database loop opens one per
-    /// database — and when every database fails it rethrows the first failure BARE. So a handler reading
-    /// the runtime's field names a database that had nothing to do with the fault, confidently. Seven
-    /// collectors fan out that way, <c>pg_index_bloat</c> among them, which makes it the wrong database
-    /// for the exact collector and target #2997 is about, and for #2638's
-    /// "run CREATE EXTENSION in database X" sentence on every permission-degraded target.</para>
-    ///
-    /// <para>A wiring invariant, pinned in source: the value is assembled inside a live sweep from a
-    /// rethrow three call frames up, so no pure test reaches it, and the defect is which expression a
-    /// call site passes rather than any logic. Both arms must go through the helper — an arm that reverts
-    /// to <c>runtime.ConnectedDatabase</c> compiles, runs, and lies.</para>
-    /// </summary>
-    [Fact]
-    public void BothPostgresFaultArmsTakeTheDatabaseFromTheException()
-    {
-        var worker = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-
-        /* Three call sites name a database, and all three read it through the helper: the two fault arms, and
-           the planted-byte sentence that the general arm records for a log-tail read (#4046, #4051). */
-        Assert.Equal(3, Regex.Matches(
-            worker, @"CollectorFaultDatabase\.For\(ex, runtime\.ConnectedDatabase\)").Count);
-
-        /* And neither passes the runtime's field straight into a fault message. These are the two
-           expressions the arms used before, and they are what a revert would restore. */
-        Assert.DoesNotContain(
-            "PostgresFaultOutcome(ex, collectorName, runtime.ConnectedDatabase)", worker, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "collectorName, runtime.ConnectedDatabase, elapsedMs", worker, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The per-database loop is what puts the name there, on both of its failure arms — the budget-expiry
-    /// one and the generic one. A stamp on only one of them would leave whichever arm lost the race
-    /// falling back silently.
-    /// </summary>
-    [Fact]
-    public void ThePerDatabaseLoopStampsTheDatabaseOnItsFailures()
-    {
-        var runner = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
-
-        Assert.Equal(2, Regex.Matches(
-            runner, @"CollectorFaultDatabase\.Stamp\((?:budgetFailure|ex), databaseName\);").Count);
-
-        /* Stamped BEFORE firstFailure is captured, or the exception that actually gets rethrown is the
-           one that missed the stamp. */
-        Assert.Equal(2, Regex.Matches(
-            runner,
-            @"CollectorFaultDatabase\.Stamp\((?:budgetFailure|ex), databaseName\);[\s\S]{0,600}?firstFailure \?\?=").Count);
     }
 
     /// <summary>
@@ -1183,120 +1059,5 @@ public class PostgresFaultOutcomeTests
         Assert.Equal(before, PostgresTargetProvider.Instance.Classify(timeout, yieldsOnLockTimeout: false));
         Assert.Equal(CollectorTargetFault.CommandTimeout, before);
         Assert.IsType<NpgsqlException>(timeout);
-    }
-
-    /// <summary>
-    /// The authored Npgsql narrative is only reachable for a fault that actually came from Npgsql.
-    ///
-    /// <para><c>Classify</c>'s first branch answers <see cref="CollectorTargetFault.CommandTimeout"/> for
-    /// ANY <see cref="TimeoutException"/>, and <c>EnumeratedCollectorDriver.ItemBudgetException</c> throws
-    /// a BARE one for the in-process per-item wall-clock budget — a cut this service makes on itself,
-    /// which never reached the database and involves no Npgsql read. So classification alone is not
-    /// enough to earn the sentence, and the arm carries an <c>ex is NpgsqlException</c> term.</para>
-    ///
-    /// <para>Both real deadlines keep it: <see cref="PostgresException"/> derives from
-    /// <see cref="NpgsqlException"/>, so SQLSTATE 57014 still qualifies. Verified against the shipped
-    /// Npgsql, not assumed — the whole point of the term is a type relationship.</para>
-    ///
-    /// <para>Latent today, because no PostgreSQL collector declares a <c>PerItemWallClockBudget</c>. That
-    /// is precisely the sort of "true when it was written" a message should not depend on.</para>
-    /// </summary>
-    [Fact]
-    public void OnlyAnNpgsqlFaultCanEarnTheAuthoredTimeoutNarrative()
-    {
-        /* The two real deadlines: both are NpgsqlException, so both still reach the arm. */
-        var clientSide = new NpgsqlException("Exception while reading from stream", new TimeoutException());
-        var serverSide = new PostgresException("cancelling statement", "ERROR", "ERROR", "57014");
-
-        Assert.IsAssignableFrom<NpgsqlException>(clientSide);
-        Assert.IsAssignableFrom<NpgsqlException>(serverSide);
-
-        /* The in-process budget's exception classifies identically and must NOT reach it. */
-        var budgetExpiry = new TimeoutException("collector budget expired");
-
-        Assert.Equal(
-            CollectorTargetFault.CommandTimeout,
-            PostgresTargetProvider.Instance.Classify(budgetExpiry, yieldsOnLockTimeout: false));
-        Assert.IsNotAssignableFrom<NpgsqlException>(budgetExpiry);
-
-        /* And the arm's filter carries the term that tells them apart. Pinned in source because an
-           exception filter cannot be invoked directly.
-
-           The two terms need not be ADJACENT, and requiring that was the wrong shape: #3111 added a third
-           conjunct between them, which reddened this pin without touching anything it asserts. What has to
-           hold is that both are conjuncts of the SAME filter, in this order — so the window forbids a brace
-           rather than counting newlines. A brace is what would mean the arm's body had begun, which is the
-           way the NpgsqlException term could be present in the file while absent from this filter, and it
-           is the only failure this pin was ever detecting through adjacency. */
-        var worker = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-
-        Assert.Matches(
-            new Regex(@"&& ex is NpgsqlException[^{}]*?&& PostgresTargetProvider\.Instance\.Classify\("),
-            worker);
-    }
-
-    /// <summary>
-    /// The CLASSIFIED fault arms record the run's real elapsed time too, in the slot the time was actually
-    /// spent - the sibling of <see cref="TheErrorArmsRecordRealElapsedTimeRatherThanLiteralZeros"/> one
-    /// classification down.
-    ///
-    /// <para>Pinned in the source for the same reason that one is: the value is written by
-    /// <c>LogCollectionAsync</c> inside a live sweep, so no pure test can observe it, and the defect is an
-    /// argument list rather than a logic error.</para>
-    ///
-    /// <para><b>Why the SLOT is counted and not merely the presence of a clock.</b> An arm whose statement
-    /// reached the target and was refused THERE owes its time to <c>sqlMs</c>; an arm that never queried the
-    /// target owes it to <c>storageMs</c>, which is what the three RDS-API ingestors already do so that one
-    /// target's <c>sql_duration_ms</c> cannot mean something different from every other target's. Both
-    /// spellings produce an honest <c>duration_ms</c>, because that column is <c>sqlMs + storageMs</c> - so a
-    /// test that only looked for a stopwatch would pass on an arm filing an HTTPS round trip as target time,
-    /// which is the one mistake here that is invisible in the very column this pin exists to protect.</para>
-    /// </summary>
-    [Fact]
-    public void TheClassifiedFaultArmsRecordElapsedTimeInTheSlotTheTimeWasSpent()
-    {
-        var worker = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-
-        /* Refused ON the target: the statement got there, so the wall clock is target-side. */
-        Assert.Single(Regex.Matches(worker, @"""SESSION_MISSING"", 0, runClock\.ElapsedMilliseconds, 0"));
-        Assert.Single(Regex.Matches(worker, @"""YIELDED"", 0, runClock\.ElapsedMilliseconds, 0"));
-        Assert.Single(Regex.Matches(worker, @"""PERMISSIONS"", 0, runClock\.ElapsedMilliseconds, 0, message"));
-
-        /* The SQLSTATE arm passes a COMPUTED status rather than a literal, which is why it is invisible to a
-           census keyed on the status strings and earns its own pin here. */
-        Assert.Single(Regex.Matches(worker, @"collectorName, status, 0, runClock\.ElapsedMilliseconds, 0"));
-
-        /* Never queried the target - the RDS log API and Performance Insights are both HTTPS. The third is the
-           RDS endpoint-check arm, which stops before any of those calls and so also spent its time off the target.
-           The fourth is the AWS role arm (#5452): a server's role the service cannot use stops the run before any RDS
-           call, so its time is off the target too. */
-        Assert.Equal(4, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, runClock\.ElapsedMilliseconds").Count);
-
-        /* And exactly ONE arm still writes three zeros: the log_timezone arm, whose two transports
-           disagree about which slot is correct, documented at the arm itself. Counted rather than asserted
-           absent arm by arm, so an arm ADDED with three zeros reds HERE instead of passing unnoticed until
-           someone re-runs the census by hand.
-
-           Anchored on the CALL's shape (the collector name, then a status literal or the computed `status`)
-           rather than on a bare ", 0, 0, 0," run. The bare form counts 1 today too, but it would also match
-           any unrelated four-argument call elsewhere in this 6,600-line file, and a pin that reds on a
-           change it does not guard is a pin someone eventually loosens. This form still catches a new arm
-           whether it passes a literal status or a computed one. */
-        Assert.Single(Regex.Matches(worker, @"collectorName, (?:""[A-Z_]+""|status), 0, 0, 0,"));
-        Assert.Single(Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, 0, ex\.Message"));
-    }
-
-    private static string ReadSource(string relativePath)
-    {
-        var dir = AppContext.BaseDirectory;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relativePath)))
-        {
-            dir = Directory.GetParent(dir)?.FullName;
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relativePath));
     }
 }

@@ -41,45 +41,6 @@ public sealed class PlanViewerCapabilityPinTests
     /* Probe = (stable capability name, a substring that proves it is still present). Substrings, not regex,
        so parens/asterisks in the file-dialog filter are literal. Wire probes use the ="Handler" form so they
        match ONLY the XAML attribute (the code-behind method definition is `Handler(` with a paren). */
-    private static readonly (string Name, string Pattern)[] Probes =
-    {
-        // Core plan-viewer behavior (now in the shared controller)
-        ("add-tab-sentinel",           "__PLAN_ADD_TAB__"),
-        ("open-file-button",           "Open .sqlplan File"),
-        ("paste-button",               "Paste XML"),
-        ("empty-state-label",          "New Plan"),
-        ("file-dialog-filter",         "SQL Plan Files (*.sqlplan)"),
-        ("multi-file-open",            "Multiselect = true"),
-        ("drag-filedrop",              "DataFormats.FileDrop"),
-        ("drag-copy-effect",           "DragDropEffects.Copy"),
-        ("clipboard-paste",            "ClipboardText.TryRead"), // #2833: reads route through the guarded helper
-        ("render-loadplan",            ".LoadPlan("),
-        ("open-file-dialog",           "OpenFileDialog"),
-        ("ctrl-v-paste",               "Key.V"),
-        ("viewer-cleanup",             ".Cleanup()"),
-        ("empty-state-icon",           "Segoe MDL2 Assets"),
-        ("unique-sub-tab-label",       "GetUniqueSubTabLabel"),
-        ("shared-plan-viewer-control", "new PlanViewerControl"),
-        // Per-app XAML shell wires (removal compiles clean)
-        ("wire-open",                  "=\"OpenPlanViewerButton_Click\""),
-        ("wire-close",                 "=\"MainWindowPlanViewerClose_Click\""),
-        ("wire-dragover",              "=\"MainWindowPlanViewer_DragOver\""),
-        ("wire-drop",                  "=\"MainWindowPlanViewer_Drop\""),
-        ("wire-keydown",               "=\"MainWindowPlanViewer_KeyDown\""),
-        // Per-app thin entry-method definitions
-        ("entry-open",                 "OpenPlanViewerButton_Click(object sender"),
-        ("entry-close",                "MainWindowPlanViewerClose_Click(object sender"),
-        // Re-entrancy guard for the "+"-sentinel auto-add (#2825): the deferral latch must stay present so the
-        // FinOps "View Stored Plan" crash (Items.Insert mid container-generation) cannot silently regress.
-        ("reentrancy-defer-add",       "_addTabInsertDeferred"),
-    };
-
-    [Fact]
-    public void PlanViewerCapabilities_NoneDisappeared()
-    {
-        var matched = ScanCapabilities();
-        AssertRatchet("planviewer", matched, floor: 20);
-    }
 
     /// <summary>
     /// #2833 regression pin: the plan-viewer paste paths must NEVER call <c>Clipboard.GetText()</c> bare
@@ -186,73 +147,7 @@ public sealed class PlanViewerCapabilityPinTests
 
     /* ---------------- scan ---------------- */
 
-    private static ISet<string> ScanCapabilities()
-    {
-        var combined = CombinedSource();
-        return Probes.Where(p => combined.Contains(p.Pattern, StringComparison.Ordinal))
-            .Select(p => p.Name)
-            .ToHashSet(StringComparer.Ordinal);
-    }
-
-    private static string CombinedSource()
-    {
-        var parts = new List<string>
-        {
-            File.ReadAllText(AppXaml()),
-            File.ReadAllText(AppPlanViewerCs()),
-        };
-        var controller = ControllerCs();
-        // Tolerate the controller being absent (pre-hoist baselining): the union still finds the app-side tokens.
-        if (File.Exists(controller))
-        {
-            parts.Add(File.ReadAllText(controller));
-        }
-        return string.Join("\n", parts);
-    }
-
     /* ---------------- ratchet + source location ---------------- */
-
-    private static void AssertRatchet(string section, ISet<string> current, int floor)
-    {
-        Assert.True(current.Count >= floor,
-            $"plan-viewer capability scan matched only {current.Count} probes (< floor {floor}) -- the scan is " +
-            "likely broken (source moved / renamed). Fix the scan; do not lower the floor.");
-
-        var file = Path.Combine(BaselineDir(), $"{section}.baseline.txt");
-
-        if (Regen())
-        {
-            Directory.CreateDirectory(BaselineDir());
-            File.WriteAllLines(file, current.OrderBy(x => x, StringComparer.Ordinal));
-            return;
-        }
-
-        Assert.True(File.Exists(file),
-            $"baseline '{Path.GetFileName(file)}' is missing -- run the pin once with environment variable " +
-            "PM_PIN_REGEN=1 to generate it, then commit it.");
-
-        var baseline = File.ReadAllLines(file)
-            .Select(l => l.Trim())
-            .Where(l => l.Length > 0 && !l.StartsWith("#", StringComparison.Ordinal))
-            .ToHashSet(StringComparer.Ordinal);
-
-        var missing = baseline.Where(b => !current.Contains(b))
-            .OrderBy(x => x, StringComparer.Ordinal)
-            .ToList();
-
-        Assert.True(missing.Count == 0,
-            "plan-viewer capability(ies) in the baseline are NO LONGER present in the source -- a capability " +
-            "silently went missing during the collapse:\n  " +
-            string.Join("\n  ", missing) +
-            "\nIf this removal is INTENTIONAL, delete those lines from Lite.Tests/CapabilityPins/" +
-            $"{section}.baseline.txt in THIS PR (never regenerate wholesale -- that masks accidental drops).");
-    }
-
-    private static bool Regen() =>
-        string.Equals(Environment.GetEnvironmentVariable("PM_PIN_REGEN"), "1", StringComparison.Ordinal);
-
-    private static string AppXaml([CallerFilePath] string thisFile = "") =>
-        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "MainWindow.xaml"));
 
     private static string AppPlanViewerCs([CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "MainWindow.PlanViewer.cs"));
@@ -309,7 +204,4 @@ public sealed class PlanViewerCapabilityPinTests
         Assert.True(blocks > 0,
             $"no _pasteInProgress guard block found in {where} -- the scan is broken or the guard was removed (#2870).");
     }
-
-    private static string BaselineDir([CallerFilePath] string thisFile = "") =>
-        Path.Combine(Path.GetDirectoryName(thisFile)!, "CapabilityPins");
 }

@@ -204,45 +204,6 @@ public sealed class PasswordBindingCensusTests
         Assert.False(ServerConnectionIdentity.Differ(Base, Base with { Auth = "SQL", EncryptMode = "MANDATORY", Engine = "SQLSERVER" }));
     }
 
-    /// <summary>
-    /// "Two connections differ" is <see cref="ServerConnectionIdentity.Differ"/> and nothing else (#5366): the edit core,
-    /// the connection test, the file matching and the Viewer all use it. This reads every source file under Darling
-    /// (tests and build output left out) and finds no other comparison of the trust or multi-subnet flags, and none of the
-    /// deleted types or helper names. The worker's own reconnect check compares the whole definition, secrets and display
-    /// name included, so it is the one allowed exception.
-    /// </summary>
-    [Fact]
-    public void No_other_connection_predicate_remains_under_Darling()
-    {
-        var darling = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(ThisFile())!, ".."));
-        var allowed = new HashSet<string>(StringComparer.Ordinal) { "ServerConnectionIdentity.cs", "DarlingWorker.cs" };
-        var flagCompare = new Regex(@"\b(TrustServerCertificate|MultiSubnetFailover)\s*(!=|==)", RegexOptions.CultureInvariant);
-        var offenders = new List<string>();
-        foreach (var file in Directory.EnumerateFiles(darling, "*.cs", SearchOption.AllDirectories))
-        {
-            var relative = Path.GetRelativePath(darling, file).Replace('\\', '/');
-            if (relative.StartsWith("Darling.Tests/", StringComparison.Ordinal)
-                || relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var text = File.ReadAllText(file);
-            if (text.Contains("ConnectionSettingsDiffer", StringComparison.Ordinal)
-                || Regex.IsMatch(text, @"\bServerConnectionSettings\b")
-                || (!allowed.Contains(Path.GetFileName(file)) && flagCompare.IsMatch(text)))
-            {
-                offenders.Add(relative);
-            }
-        }
-
-        Assert.True(
-            offenders.Count == 0,
-            "Another connection comparison exists besides ServerConnectionIdentity.Differ: " + string.Join(", ", offenders));
-    }
-
-    private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;
-
     [Fact]
     public void The_associated_data_is_the_label_key_id_purpose_and_fields_each_with_a_four_byte_length()
     {

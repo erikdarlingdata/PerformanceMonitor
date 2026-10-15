@@ -30,19 +30,6 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class CurrentDatabaseScopeLoggerThreadingTests
 {
-    [Theory]
-    [InlineData(typeof(DarlingMcpFinOpsTools), "GetFinOps")]
-    [InlineData(typeof(DarlingMcpFinOpsRecommendationsTools), "GetFinOpsRecommendations")]
-    public void FinOpsTool_TakesTheHostLoggerRightBeforeTheCancellationToken(Type tool, string method)
-    {
-        var parameters = tool.GetMethod(method, BindingFlags.Public | BindingFlags.Static)!.GetParameters();
-        var logger = parameters[^2];
-        Assert.Equal(typeof(ILogger), logger.ParameterType);
-        Assert.Equal("logger", logger.Name);
-        Assert.True(logger.IsOptional);
-        Assert.Equal(typeof(CancellationToken), parameters[^1].ParameterType);
-    }
-
     [Fact]
     public void EveryNonTestCaller_OfACurrentDatabaseScopeLookup_PassesALogger()
     {

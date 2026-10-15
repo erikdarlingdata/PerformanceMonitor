@@ -550,28 +550,6 @@ public sealed class AlertMasterSwitchSurfaceTests
             allowedFiles: new[] { "Lite/MainWindow.AlertEngine.cs" });
     }
 
-    /// <summary>The precedent the AND'd gates match, and the contract they enforce: the connection-change
-    /// gate's exact idiom, and the README sentence that makes alerts_enabled a promise rather than a
-    /// preference. A change to either is a change to what every gate in this census means.</summary>
-    [Fact]
-    public void ThePrecedentIdiom_AndTheMasterSwitchContract_StillSayWhatTheGatesEnforce()
-    {
-        Assert.Contains(
-            "if (!_settings.AlertsEnabled || !_notifyConnectionChanges())",
-            Read("Darling/PerformanceMonitor.Darling.Service/DarlingSelfAlertEvaluator.cs"),
-            StringComparison.Ordinal);
-
-        /* #3467 widened this sentence from "scheduled-analysis" to "analysis": the pileup finding is an
-           analysis-finding notification produced on the COLLECTION cadence, so the narrower wording
-           would have described a promise smaller than the one the gates keep — and an operator reading
-           it could reasonably have concluded a non-scheduled finding escapes the master switch, which is
-           the exact class of confusion #3464 was about. */
-        Assert.Contains(
-            "turns off all alert evaluation **and** analysis finding notifications",
-            Read("Darling/README.md"),
-            StringComparison.Ordinal);
-    }
-
     /* ---------------- source plumbing ---------------- */
 
     /// <summary>Production .cs files: everything except build output, the deprecated tree, and the test

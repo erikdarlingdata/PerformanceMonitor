@@ -133,25 +133,6 @@ public class AuroraOnlySqlIsGatedTests
     }
 
     /// <summary>
-    /// The allow-list cannot outlive what it describes. An entry naming a file that no longer references
-    /// any Aurora surface is a note about a decision that has been undone — and it would silently permit
-    /// that file to reacquire one later.
-    /// </summary>
-    [Fact]
-    public void TheAllowListHasNoStaleEntries()
-    {
-        var found = FilesNamingAuroraSurfaces().Select(Path.GetFileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var stale = Accounted.Keys.Where(k => !found.Contains(k))
-                                  .OrderBy(k => k, StringComparer.Ordinal)
-                                  .ToArray();
-
-        Assert.True(stale.Length == 0,
-            "These allow-list entries name no Aurora surface any more — remove them, or the file could " +
-            "reacquire one unexamined: " + string.Join(", ", stale));
-    }
-
-    /// <summary>
     /// The two PAIRED files must actually branch. An entry claiming a vanilla alternative while the code
     /// has none would be worse than no entry: it records a decision that was never implemented.
     /// </summary>

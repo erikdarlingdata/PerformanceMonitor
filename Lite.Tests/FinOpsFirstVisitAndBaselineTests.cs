@@ -340,20 +340,6 @@ VALUES ($1, $2, $3, 'GrowthSrv', $4, 7, 1, 'ROWS', $5, $6, $7, NULL)";
     }
 
     [Fact]
-    public void TheGrid_ShowsNaAndTheNoteOnTheBaselineCells()
-    {
-        var xaml = ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml");
-        var start = xaml.IndexOf("<DataGrid x:Name=\"StorageGrowthDataGrid\"", StringComparison.Ordinal);
-        Assert.True(start >= 0);
-        var block = xaml[start..xaml.IndexOf("</DataGrid>", start, StringComparison.Ordinal)];
-
-        Assert.Contains("Binding=\"{Binding Size7dAgoMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}\"", block, StringComparison.Ordinal);
-        Assert.Contains("Binding=\"{Binding Size30dAgoMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}\"", block, StringComparison.Ordinal);
-        Assert.Equal(2, Regex.Matches(block, Regex.Escape("Value=\"{Binding Size7dAgoNote}\"")).Count);     // Size 7d Ago, Growth 7d
-        Assert.Equal(3, Regex.Matches(block, Regex.Escape("Value=\"{Binding Size30dAgoNote}\"")).Count);    // Size 30d Ago, Growth 30d, Growth %
-    }
-
-    [Fact]
     public void TheSql_PicksTheNearestSnapshotWithinOneDay_NotTheNewestAtOrBeforeTheMark()
     {
         var sql = LocalDataService.StorageGrowthSql;

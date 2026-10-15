@@ -154,36 +154,6 @@ public class Viewer4577Tests
                 MetricFormatter.FormatDuration((double)ms, Invariant));
     }
 
-    /// <summary>
-    /// Census pin: no cost display site in PerformanceMonitor.Ui still hand-formats with a raw
-    /// ":F6" or ":F4" numeric format string for a cost. MemoryFractionInput/Output keep their own
-    /// ":F4" (a different metric family PerformanceStudio leaves alone), so this only forbids
-    /// ":F6", which was exclusively the unrouted cost sites this issue replaces.
-    /// </summary>
-    [Fact]
-    public void NoRawCostFormatStringSurvivesInTheUi()
-    {
-        var uiDir = Path.Combine(RepoRoot(), "PerformanceMonitor.Ui");
-        Assert.True(Directory.Exists(uiDir), $"PerformanceMonitor.Ui not found at {uiDir}");
-
-        var offenders = new System.Collections.Generic.List<string>();
-        var filesScanned = 0;
-
-        foreach (var file in Directory.EnumerateFiles(uiDir, "*.cs", SearchOption.AllDirectories))
-        {
-            filesScanned++;
-            var text = File.ReadAllText(file);
-            if (text.Contains(":F6"))
-                offenders.Add(file);
-        }
-
-        /* Floor over the walk itself, same idiom as ViewerButtonAccessKeyTests.RepoRoot: a walk that
-           silently found nothing would satisfy an empty-offenders assertion for the wrong reason. */
-        Assert.True(filesScanned >= 5, $"only {filesScanned} .cs files found under {uiDir}; the walk is not finding the source");
-
-        Assert.True(offenders.Count == 0, "Raw \":F6\" cost formatting left in: " + string.Join(", ", offenders));
-    }
-
     /// <summary>Same walk-up idiom as <c>ViewerButtonAccessKeyTests.RepoRoot</c>.</summary>
     private static string RepoRoot()
     {

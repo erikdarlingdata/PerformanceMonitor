@@ -16,7 +16,7 @@ namespace Lite.Tests;
 
 /// <summary>
 /// <c>llms.txt</c>'s collector counts against the catalog that defines the collectors. This is the guard
-/// <see cref="CrossAppMcpToolInventoryPinTests.LlmsTxtToolCensus_SpansTheTwoCurrentEditions"/> puts on the
+/// <c>CrossAppMcpToolInventoryPinTests.LlmsTxtToolCensus_SpansTheTwoCurrentEditions</c> (deleted in #5833) puts on the
 /// same file's tool range, and the choice #3072 made for <c>Darling/README.md</c>'s counts
 /// (<c>Darling.Tests.ReadmeDerivedCountPinTests</c>): a number in prose is asserted, or it is deleted.
 ///

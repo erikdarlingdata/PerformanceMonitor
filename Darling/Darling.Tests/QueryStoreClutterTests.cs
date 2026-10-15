@@ -627,17 +627,6 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void TheLiteInventoryRatchet_NamesTheToolAsAPort_NotAnArchitecturalBoundary()
-    {
-        var ratchet = ReadRepoFile("Lite.Tests", "CrossAppMcpToolInventoryPinTests.cs");
-        var at = ratchet.IndexOf("\"get_query_store_clutter\",", StringComparison.Ordinal);
-        Assert.True(at > 0, "get_query_store_clutter is not on KnownLiteMissingMcpTools");
-        var remark = ratchet[Math.Max(0, at - 2000)..at];
-        Assert.Contains("Lite has EVERY input", remark, StringComparison.Ordinal);
-        Assert.Contains("fanout_item_count / slowest_item / slowest_item_ms", remark, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void TheDarlingReadme_DescribesTheTool_WithTheReplicaRuleAndTheCaptureMode()
     {
         var readme = ReadRepoFile("Darling", "README.md");

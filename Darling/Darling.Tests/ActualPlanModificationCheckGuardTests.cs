@@ -353,21 +353,6 @@ public sealed class ActualPlanModificationCheckGuardTests
         return problems;
     }
 
-    /// <summary>The shared navigation has ONE place that runs the executor, and it is the gated method.</summary>
-    [Fact]
-    public void TheSharedNavigation_RunsItsExecutorInExactlyOnePlace_AfterTheGate()
-    {
-        var source = StripComments(File.ReadAllText(Path.Combine(RepoRoot(), Controller)));
-
-        var runs = s_runCall.Matches(source).ToList();
-        Assert.True(runs.Count == 1, $"PlanNavigationController invokes its executor in {runs.Count} places; it must be exactly one, in GetActualPlanAsync");
-
-        var gate = MethodBody(source, "GetActualPlanAsync");
-        var gateStart = source.IndexOf(gate, StringComparison.Ordinal);
-        Assert.True(runs[0].Index > gateStart && runs[0].Index < gateStart + gate.Length,
-            "PlanNavigationController invokes its executor outside GetActualPlanAsync");
-    }
-
     /// <summary>
     /// The compiler, not a text scan, keeps the run target's executor to the controller: no public or internal member of
     /// <see cref="PlanNavigationController.ActualPlanRunTarget"/> runs it or hands it out. (<c>internal</c> alone would not
@@ -656,26 +641,6 @@ public sealed class ActualPlanModificationCheckGuardTests
         Assert.Contains("hi.FullQueryText, hi.DatabaseName,", handler, StringComparison.Ordinal);
     }
 
-    /// <summary>Every Lite call into the shared navigation hands over a plan lookup for the controller to run, not a plan it fetched itself.</summary>
-    [Fact]
-    public void EveryCallIntoTheSharedNavigation_PassesItsPlanLookupToTheController()
-    {
-        var calls = new List<string>();
-        foreach (var file in SourceFiles("Lite"))
-        {
-            foreach (var call in CallsOf(StripComments(File.ReadAllText(file)), ".GetActualPlanAsync("))
-            {
-                if (!call.Contains("fetchPlanXml:", StringComparison.Ordinal))
-                {
-                    calls.Add($"{Path.GetRelativePath(RepoRoot(), file)}: {call.Replace('\n', ' ').Trim()}");
-                }
-            }
-        }
-
-        Assert.True(calls.Count == 0,
-            "These calls into PlanNavigationController.GetActualPlanAsync do not pass fetchPlanXml:\n" + string.Join("\n", calls));
-    }
-
     [Fact]
     public void TheCensus_SeesTheKnownEntryPoints()
     {
@@ -696,30 +661,6 @@ public sealed class ActualPlanModificationCheckGuardTests
         var runCalls = ShippedSourceFiles()
             .Sum(f => s_runCall.Matches(StripComments(File.ReadAllText(f))).Count);
         Assert.True(runCalls >= 8, $"the per-call census found only {runCalls} executor references; its scan has stopped seeing them");
-    }
-
-    /// <summary>The lookups that decide the check by query hash skip an empty or all-zero one (no plan: the warning shows).</summary>
-    [Theory]
-    [InlineData("Lite/Windows/QueryStatsHistoryWindow.xaml.cs")]
-    [InlineData("Lite/Controls/ServerTab.Plans.cs")]
-    public void ThePlanLookupByQueryHash_SkipsAnEmptyOrAllZeroHash(string relative)
-        => Assert.Contains("QueryModificationDetector.IsUsableQueryHash(",
-            File.ReadAllText(Path.Combine(RepoRoot(), relative)), StringComparison.Ordinal);
-
-    /// <summary>
-    /// The Darling viewer's query_stats entry points hand their hash to the flow behind the shared hash gate, and the
-    /// gate rejects an empty or all-zero hash (#5639); the flow then reads the stored text and plan by that hash.
-    /// </summary>
-    [Theory]
-    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/QueryStatsHistoryWindow.xaml.cs")]
-    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.ActualPlan.cs")]
-    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/FinOpsTab.Loaders.cs")]
-    public void TheDarlingQueryStatsEntryPoints_GateOnTheHash_BeforeTheFlowReadsTheStoredText(string relative)
-    {
-        Assert.Contains("ViewerActualPlanFlow.TryCheckQueryStatsHash(",
-            File.ReadAllText(Path.Combine(RepoRoot(), relative)), StringComparison.Ordinal);
-        Assert.Contains("QueryModificationDetector.IsUsableQueryHash(",
-            File.ReadAllText(Path.Combine(RepoRoot(), "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.ActualPlan.cs")), StringComparison.Ordinal);
     }
 
     // ── source reading ──

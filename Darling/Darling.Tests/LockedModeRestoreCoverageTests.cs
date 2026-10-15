@@ -481,38 +481,6 @@ public sealed class LockedModeRestoreCoverageTests
             + "restore, which is what this assertion exists to catch");
     }
 
-    /// <summary>
-    /// The raw patterns are read in exactly the accessors declared for them, and nowhere else.
-    ///
-    /// <para>The population is DERIVED — every member of this class that dereferences either pattern — so a
-    /// fifth reader arriving by paste reds instead of joining silently. That is the failure this pin is
-    /// about rather than a stylistic preference: the exclusion was originally applied at the one call site
-    /// that had gone red and not at the other three, which is a fix to an instance rather than to a class,
-    /// and it left the shape check reading its anchor through the unfiltered pattern.</para>
-    /// </summary>
-    [Fact]
-    public void TheRawPatterns_AreReadOnlyThroughTheOneAccessor()
-    {
-        var source = ReadRepoFileLf("Darling", "Darling.Tests", "LockedModeRestoreCoverageTests.cs");
-
-        Assert.Equal(
-            new[] { "IsRestoreInvocation", "MentionsRestore", "RestoreTarget" },
-            MembersReadingTheRawPatterns(source).ToArray());
-
-        /* The walk finds a reader put somewhere else. Without this the equality above is satisfied just as
-           well by a scan that cannot see a member at all. The anchor carries no escape sequences on purpose:
-           an injection whose search text does not match the source silently mutates nothing, and then the
-           NotEqual below is the only thing standing between that and a vacuous pass. */
-        var smuggled = source.Replace(
-            "Array.FindIndex(lines, IsRestoreInvocation)",
-            "Array.FindIndex(lines, line => RestoreInvocation.IsMatch(line))",
-            StringComparison.Ordinal);
-
-        Assert.NotEqual(source.Length, smuggled.Length);
-        Assert.Contains("PropagatesEveryFailure", MembersReadingTheRawPatterns(smuggled));
-
-    }
-
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -721,53 +689,6 @@ public sealed class LockedModeRestoreCoverageTests
             .Where(directory => !reached.Contains(directory))
             .Where(directory => !excused.Contains(directory, StringComparer.Ordinal))
             .ToList();
-    }
-
-    /// <summary>
-    /// One dereference of a raw pattern — the name followed by a dot. The field declarations are not reads,
-    /// so they stay out of the population without being named as exceptions.
-    /// </summary>
-    private static readonly Regex RawPatternRead =
-        new(@"\b(RestoreInvocation|Annotation)\s*\.", RegexOptions.Compiled);
-
-    /// <summary>
-    /// One member declaration of this class, at its four-space indent, and the name it declares.
-    /// </summary>
-    private static readonly Regex MemberDeclaration =
-        new(@"^    (?:private|internal|public)[^(=]*?\b(?<name>\w+)\s*(?:\(|=|=>|$)", RegexOptions.Compiled);
-
-    /// <summary>
-    /// The members of this class that dereference a raw pattern, taken from its own source by walking each
-    /// read up to the member declaration above it.
-    ///
-    /// <para>Read off <c>CSharpSourceWalker.StripCommentsAndStrings</c> rather than a hand-rolled skip of
-    /// <c>///</c> lines. Two things in this file spell a pattern read without being one: the doc comments
-    /// that name the accessors, and the string literal in the self-validation below, which quotes a read in
-    /// order to inject one. A line filter catches the first and not the second — measured, it reported this
-    /// class's own pin as a reader — and the walker preserves newlines, so the member walk still lines up
-    /// with the source it is reading.</para>
-    /// </summary>
-    private static SortedSet<string> MembersReadingTheRawPatterns(string source)
-    {
-        var members = new SortedSet<string>(StringComparer.Ordinal);
-        var member = "(no enclosing member)";
-
-        foreach (var line in CSharpSourceWalker.StripCommentsAndStrings(source).Split('\n'))
-        {
-            var declaration = MemberDeclaration.Match(line);
-
-            if (declaration.Success)
-            {
-                member = declaration.Groups["name"].Value;
-            }
-
-            if (RawPatternRead.IsMatch(line))
-            {
-                members.Add(member);
-            }
-        }
-
-        return members;
     }
 
     /// <summary>

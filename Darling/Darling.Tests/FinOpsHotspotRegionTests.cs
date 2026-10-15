@@ -14,7 +14,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>Source pins for the marked append-only regions in the FinOps web parity (#4843) lists: the MCP
-/// tool registration, the read dispatch, the read catalog and Lite's allow-list of Darling-only tools. Each
+/// tool registration, the read dispatch and the read catalog (#5833 removed Lite's allow-list of Darling-only tools). Each
 /// list carries two regions, set A and set B, so two series of changes append to separate git hunks.</summary>
 [Trait("Reads", "Lite")]
 public sealed class FinOpsHotspotRegionTests
@@ -35,8 +35,6 @@ public sealed class FinOpsHotspotRegionTests
             "BuildReadDispatch(ILogger? logger", "if (TestOnlyExtraDispatchEntry is" },
         { "read catalog", new[] { "Darling", Service, "DarlingWebEndpoints.cs" },
             "CatalogDescriptors =", "/// <summary>" },
-        { "Lite allow-list", new[] { "Lite.Tests", "CrossAppMcpToolInventoryPinTests.cs" },
-            "KnownLiteMissingMcpTools = new", "[Fact]" },
     };
 
     private static string Read(string[] path) => RepoFile.ReadRepoFile(path).ReplaceLineEndings("\n");

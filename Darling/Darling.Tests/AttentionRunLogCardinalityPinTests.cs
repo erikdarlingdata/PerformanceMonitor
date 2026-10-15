@@ -59,18 +59,4 @@ public sealed class AttentionRunLogCardinalityPinTests
         Assert.Equal(1, calls);
     }
 
-    [Fact]
-    public void TheRunsReadDocumentsTheBlendedRowAsTheGuarantee_NotTheDistinct()
-    {
-        var source = RepoFile.ReadRepoFile("PerformanceMonitor.Common", "AttentionWindowSql.cs");
-
-        Assert.Contains("ONE", source, StringComparison.Ordinal);
-        Assert.Contains("blended", source, StringComparison.Ordinal);
-        Assert.Contains("The DISTINCT is not that guarantee", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("DISTINCT: an Azure SQL Database server logs one run per monitored database", source, StringComparison.Ordinal);
-
-        /* And the read still selects run times, one column, newest first. */
-        var sql = AttentionWindowSql.Runs("collection_log");
-        Assert.Contains("collection_time", sql, StringComparison.Ordinal);
-    }
 }

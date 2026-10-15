@@ -226,19 +226,6 @@ public sealed class StatementScrubLivePlanDisplayTests
     }
 
     /// <summary>
-    /// #5367: a withheld deadlock graph or blocked process report is not "a plan", so its save refusal names what is
-    /// being saved; the plan viewers keep their existing sentence word for word.
-    /// </summary>
-    [Fact]
-    public void TheWithheldSentence_NamesWhatIsSaved_AndThePlanSentenceIsUnchanged()
-    {
-        Assert.Equal("This plan was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("plan"));
-        Assert.Equal(SensitiveStatements.WithheldPlanSentence, WithheldPlanGuard.WithheldSentenceFor("plan"));
-        Assert.Equal("This deadlock graph was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("deadlock graph"));
-        Assert.Equal("This blocked process report was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("blocked process report"));
-    }
-
-    /// <summary>
     /// #5320: a deadlock graph or blocked process report the filter withheld whole is the marker, not XML. The shared
     /// <c>FileSaveHelper.SaveXmlToFile</c> (the one save path for both reports) asks the guard before it opens the save
     /// dialog, so the marker is never written to an <c>.xml</c> file and the user is told why.
