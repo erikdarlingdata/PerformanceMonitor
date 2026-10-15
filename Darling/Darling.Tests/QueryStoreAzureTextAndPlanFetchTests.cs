@@ -148,13 +148,17 @@ public sealed class QueryStoreAzureTextAndPlanFetchTests
         Assert.Equal(1, Occurrences(code, "await FetchAndStorePlansAsync("));
         Assert.Equal(1, Occurrences(code, "await FetchAndStoreQueryTextAsync("));
 
-        /* The enumerated site: right after the per-item read, on the per-item connection and budget token. */
-        var readItem = code.IndexOf("await definition.ReadItemAsync(item, itemReader, batch, context, ct);", StringComparison.Ordinal);
-        Assert.True(readItem >= 0, "The enumerated per-item read moved.");
+        /* The enumerated site: right after the per-item read, on the per-item connection and budget token. #5813 put
+           the read (open through drain) under its own budget token inside a try whose catches translate a budget expiry
+           and close the reader on a fault, so the anchor is now the reader's scope statement that closes that block. */
+        var read = code.IndexOf("await definition.ReadItemAsync(item, openedReader, batch, context, readToken);", StringComparison.Ordinal);
+        Assert.True(read >= 0, "The enumerated per-item read moved.");
+        var readItem = code.IndexOf("using var itemReader = openedReader;", read, StringComparison.Ordinal);
+        Assert.True(readItem > read, "The enumerated per-item read no longer keeps its reader's scope.");
         var enumerated = code.IndexOf(SharedFetch, readItem, StringComparison.Ordinal);
         Assert.True(enumerated > readItem, "The enumerated read no longer reaches the shared fetch.");
 
-        /* Nothing but the read's own statement sits between them: the fetch follows the read directly. */
+        /* Nothing but the reader's own statement sits between them: the fetch follows the read directly. */
         Assert.Equal(1, Occurrences(code[readItem..enumerated], ";"));
 
         var statement = code[enumerated..code.IndexOf(';', enumerated)];
@@ -168,12 +172,12 @@ public sealed class QueryStoreAzureTextAndPlanFetchTests
         var code = RunnerCode();
         var method = MethodBody(code, "private async Task FetchQueryStorePlansAndTextAsync<TRow>(");
 
-        Assert.Contains("context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection", method, StringComparison.Ordinal);
-        Assert.Contains("context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection", method, StringComparison.Ordinal);
+        Assert.Contains("context.CapturePlanXml && targetProvider.Engine == CollectorTargetEngine.SqlServer", method, StringComparison.Ordinal);
+        Assert.Contains("context.FetchQueryTextSeparately && targetProvider.Engine == CollectorTargetEngine.SqlServer", method, StringComparison.Ordinal);
 
         /* The databaseName parameter reaches both fetches: it is what names the [db].sys.sp_executesql target. */
-        Assert.Contains("FetchAndStorePlansAsync(planFetchConnection, storeConnection,", method, StringComparison.Ordinal);
-        Assert.Contains("FetchAndStoreQueryTextAsync(textFetchConnection, storeConnection,", method, StringComparison.Ordinal);
+        Assert.Contains("FetchAndStorePlansAsync(targetProvider, targetConnection, storeConnection,", method, StringComparison.Ordinal);
+        Assert.Contains("FetchAndStoreQueryTextAsync(targetProvider, targetConnection, storeConnection,", method, StringComparison.Ordinal);
         Assert.Equal(2, Occurrences(method, "server, databaseName, collectorName, context, commandTimeoutSeconds,"));
 
         /* The #2854 rule the shared method inherited: the parent reading is stamped from a finally, so a fetch
