@@ -52,6 +52,31 @@ public static class TopFill
     public static int FirstCandidates(int top) => Clamp((long)top + FirstExtra);
 
     /// <summary>
+    /// #5815: the candidate limit the last round <see cref="RunAsync{T}"/> could reach for <paramref name="top"/> (every
+    /// round short, the candidates never running out): <see cref="FirstCandidates"/> grown by <see cref="NextCandidates"/>
+    /// until it stops. One run at this limit returns exactly what the rounds return, whenever they stop: the candidates
+    /// are a prefix of one fixed order, and a page is the first <c>top</c> candidates the WAITFOR trim keeps, so a round
+    /// that filled its page, or found fewer candidates than it asked for, has the same page at any larger limit, and the
+    /// rounds never pass this one. A statement whose page looks up text only until the page is full (the Query Store
+    /// read's tail) costs no more at this limit than at the first, so it runs once instead of up to
+    /// <see cref="MaxRounds"/> times.
+    /// </summary>
+    public static int FinalCandidates(int top)
+    {
+        var candidates = FirstCandidates(top);
+        for (var round = 1; ; round++)
+        {
+            var next = NextCandidates(top, round, candidates, returned: 0, candidateCount: candidates);
+            if (next is null)
+            {
+                return candidates;
+            }
+
+            candidates = next.Value;
+        }
+    }
+
+    /// <summary>
     /// The next round's candidate limit, or null when the page is done: it holds <paramref name="top"/> rows,
     /// the last round did not fill its candidate limit (the candidates ran out), the round bound is reached, or
     /// the limit cannot grow any further.

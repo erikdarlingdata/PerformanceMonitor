@@ -2670,68 +2670,83 @@ internal static class DarlingDataReader
 
         """;
 
-    /// <summary>The outer read from <c>SELECT r.database_name</c> down: the text lateral, the WAITFOR self-exclusion,
+    /// <summary>The outer read from <c>page AS (</c> down: the text lateral, the WAITFOR self-exclusion,
     /// the final <c>ORDER BY</c> and <c>LIMIT $4</c>. It reads only <c>ranked</c>'s column list, so
     /// <see cref="QueryStoreTopSuffix"/> (the raw and the interval-table reads) and <see cref="QueryStoreTopDailyTableSql"/>
     /// (the daily-summary read) share this one text and cannot drift apart below <c>ranked</c>.</summary>
     private const string QueryStoreTopTail = """
         page AS (
         SELECT
-            r.database_name,
-            r.query_id,
-            r.plan_id,
-            r.query_hash,
-            r.query_plan_hash,
-            r.execution_type_desc,
-            r.module_name,
-            r.total_executions,
-            r.avg_duration_ms,
-            r.avg_cpu_time_ms,
-            r.avg_logical_reads,
-            r.avg_logical_writes,
-            r.avg_physical_reads,
-            r.avg_rowcount,
-            r.last_execution_time,
-            t.query_text,
-            r.replica_role,
-            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
-        FROM ranked AS r
-        /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
-           both keep reading one t.query_text. First arm is collect.query_store_text (one row per
-           query_id, where the collector lands text once the separate fetch is on); second arm is the
-           newest inline query_text, which is where text lived before the cutover and is what keeps
-           existing history readable. */
-        LEFT JOIN LATERAL (
-            SELECT COALESCE(
-                       (
-                           SELECT x.query_sql_text
-                           FROM query_store_text AS x
-                           WHERE x.server_id = $1
-                           AND   x.database_name = r.database_name
-                           AND   x.query_id = r.query_id
-                       ),
-                       (
-                           SELECT s.query_text
-                           FROM query_store_stats AS s
-                           WHERE s.server_id = $1
-                           AND   s.query_id = r.query_id
-                           AND   s.database_name = r.database_name
-                           /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
-                              above were read with). Without it a query with no inline text anywhere walked every
-                              retained chunk of query_store_stats on the time index looking for one. A query whose
-                              only inline text is older than the window now shows none, as a query with no text
-                              at all already did. Twins the other copy of this tail; keep them matching. */
-                           AND   s.collection_time >= $2
-                           AND   s.collection_time <= $3
-                           AND   s.query_text IS NOT NULL
-                           ORDER BY s.collection_time DESC, s.collection_id DESC
-                           LIMIT 1
-                       )
-                   ) AS query_text
-        ) AS t ON TRUE
-        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+            p.database_name,
+            p.query_id,
+            p.plan_id,
+            p.query_hash,
+            p.query_plan_hash,
+            p.execution_type_desc,
+            p.module_name,
+            p.total_executions,
+            p.avg_duration_ms,
+            p.avg_cpu_time_ms,
+            p.avg_logical_reads,
+            p.avg_logical_writes,
+            p.avg_physical_reads,
+            p.avg_rowcount,
+            p.last_execution_time,
+            p.query_text,
+            p.replica_role,
+            ROW_NUMBER() OVER (ORDER BY p.sort_cost DESC, p.database_name, p.query_id, p.plan_id, p.query_hash, p.execution_type_desc, p.replica_role) AS page_ord
+        FROM (
+            /* #5815: the candidates are sorted BEFORE the text lateral and the page keeps that order, so the
+               LIMIT $4 below stops the lateral at the row that fills the page. The old shape filtered every
+               candidate, sorted, then numbered the rows, which looked up the text of all of them; a single run
+               at the fill's final candidate limit (TopFill.FinalCandidates) would have multiplied that. The order
+               is page_ord's own, so the rows, their order and page_ord are what they were for every candidate
+               limit. sort_cost is the page_ord sort expression, projected so the outer ORDER BY matches the
+               inner sort and the planner adds no second sort above the lateral. */
+            SELECT r.*, t.query_text
+            FROM (
+                SELECT k.*, k.total_executions * k.avg_duration_ms AS sort_cost
+                FROM ranked AS k
+                ORDER BY k.total_executions * k.avg_duration_ms DESC, k.database_name, k.query_id, k.plan_id, k.query_hash, k.execution_type_desc, k.replica_role
+            ) AS r
+            /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
+               both keep reading one t.query_text. First arm is collect.query_store_text (one row per
+               query_id, where the collector lands text once the separate fetch is on); second arm is the
+               newest inline query_text, which is where text lived before the cutover and is what keeps
+               existing history readable. */
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(
+                           (
+                               SELECT x.query_sql_text
+                               FROM query_store_text AS x
+                               WHERE x.server_id = $1
+                               AND   x.database_name = r.database_name
+                               AND   x.query_id = r.query_id
+                           ),
+                           (
+                               SELECT s.query_text
+                               FROM query_store_stats AS s
+                               WHERE s.server_id = $1
+                               AND   s.query_id = r.query_id
+                               AND   s.database_name = r.database_name
+                               /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
+                                  above were read with). Without it a query with no inline text anywhere walked every
+                                  retained chunk of query_store_stats on the time index looking for one. A query whose
+                                  only inline text is older than the window now shows none, as a query with no text
+                                  at all already did. Twins the other copy of this tail; keep them matching. */
+                               AND   s.collection_time >= $2
+                               AND   s.collection_time <= $3
+                               AND   s.query_text IS NOT NULL
+                               ORDER BY s.collection_time DESC, s.collection_id DESC
+                               LIMIT 1
+                           )
+                       ) AS query_text
+            ) AS t ON TRUE
+            WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+            ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
+            LIMIT $4
+        ) AS p
         ORDER BY page_ord
-        LIMIT $4
         )
         /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
            ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
@@ -3022,21 +3037,23 @@ internal static class DarlingDataReader
             }
         }
 
-        /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($8)
-           while more candidates exist, under its bound (page_ord is column 17, candidate_count 18). */
-        var rows = await TopFill.RunAsync(top, async candidates =>
+        /* #5313: the WAITFOR trim can leave the page short, so the candidate limit ($8) runs past top (page_ord is
+           column 17, candidate_count 18). #5815: one run at TopFill's final limit, not up to three rounds that each
+           re-read the window; the tail looks up text only until the page is full, so the answer and the lookups
+           are the rounds' own (TopFill.FinalCandidates). */
+        List<QueryStoreRow> rows;
+        await using (var command = postgres.CreateCommand(QueryStoreTopSql))
         {
-            await using var command = postgres.CreateCommand(QueryStoreTopSql);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             AddWindow(command, serverId, startUtc, endUtc);
             AddInt(command, top);
             AddDatabases(command, databases);
             AddNullableText(command, executionType);
             AddNullableText(command, moduleName);
-            AddInt(command, candidates);
+            AddInt(command, TopFill.FinalCandidates(top));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
-        });
+            (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+        }
 
         ReadScope.NoteSource(ReadScope.SourceRaw);
         ReadScope.NoteRows(rows.Count);
@@ -3122,11 +3139,12 @@ internal static class DarlingDataReader
             }
 
             var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
-            /* #5313: the same fill rounds as the raw read. The candidate limit is bound LAST ($8 on the interval
-               table read, $10 on the daily read, after its two dates). */
-            var rows = await TopFill.RunAsync(top, async candidates =>
+            /* #5313: the same candidate limit as the raw read, bound LAST ($8 on the interval table read, $10 on the
+               daily read, after its two dates). #5815: one run at TopFill's final limit; each fill round used to
+               re-read the server's whole window from the wide table. */
+            List<QueryStoreRow> rows;
+            await using (var command = new NpgsqlCommand(topSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
-                await using var command = new NpgsqlCommand(topSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
                 AddInt(command, serverId);
                 AddTimestamp(command, plan.ReadStart);
                 AddTimestamp(command, endUtc);
@@ -3140,10 +3158,10 @@ internal static class DarlingDataReader
                     command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanEnd, NpgsqlDbType = NpgsqlDbType.Date });
                 }
 
-                AddInt(command, candidates);
+                AddInt(command, TopFill.FinalCandidates(top));
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
-            });
+                (rows, _) = await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+            }
 
             return (rows, plan, dailySpan is var (ds, de) ? de.DayNumber - ds.DayNumber : 0, dailySpan);
         }
