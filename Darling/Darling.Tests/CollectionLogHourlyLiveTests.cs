@@ -22,7 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5810 rollup part 1: V186's <c>collect.collection_log_hourly</c> and the hourly pass that keeps it
-/// (<see cref="CollectionLogHourly.RunPassAsync"/>). The rung applies on an empty store and on a store at V185, rewinds, and
+/// (<see cref="CollectionLogHourly.RollUpAsync"/>). The rung applies on an empty store and on a store at V185, rewinds, and
 /// the viewer probe maps it; a planted hour rolls up to exactly the counts, sums, maxima, instants and histogram its raw rows
 /// give (computed here in C#, not by a second copy of the SQL); a late run is counted by the next pass; the first pass
 /// backfills the window, a gap is caught up, and retention drops the hours that age out.
@@ -159,7 +159,7 @@ public sealed class CollectionLogHourlyLiveTests
             }
 
             await PlantAsync(connection, runs, ct);
-            var upserted = await CollectionLogHourly.RunPassAsync(connection, Now, null, ct);
+            var upserted = await CollectionLogHourly.RollUpAsync(connection, Now, null, ct);
 
             var expected = ExpectedRows(runs);
             Assert.Equal(expected.Count, upserted);
@@ -202,7 +202,7 @@ public sealed class CollectionLogHourlyLiveTests
                 new("alpha", h11.AddMinutes(5), "SUCCESS", 20, 1),
             };
             await PlantAsync(connection, runs, ct);
-            await CollectionLogHourly.RunPassAsync(connection, Now, null, ct);
+            await CollectionLogHourly.RollUpAsync(connection, Now, null, ct);
             Assert.Equal(1, (await ReadHourlyAsync(connection, ct))[("alpha", h11)].TotalRuns);
 
             /* Two runs written late into both rolled hours, after the pass. The next pass, in the same hour, counts both. */
@@ -213,7 +213,7 @@ public sealed class CollectionLogHourlyLiveTests
             };
             await PlantAsync(connection, late, ct);
             runs.AddRange(late);
-            await CollectionLogHourly.RunPassAsync(connection, Now, null, ct);
+            await CollectionLogHourly.RollUpAsync(connection, Now, null, ct);
             var afterLate = await ReadHourlyAsync(connection, ct);
             Assert.Equal(ExpectedRows(runs)[("alpha", h10)], afterLate[("alpha", h10)]);
             Assert.Equal(ExpectedRows(runs)[("alpha", h11)], afterLate[("alpha", h11)]);
@@ -230,7 +230,7 @@ public sealed class CollectionLogHourlyLiveTests
             };
             await PlantAsync(connection, gap, ct);
             runs.AddRange(gap);
-            await CollectionLogHourly.RunPassAsync(connection, Now.AddHours(5), null, ct);
+            await CollectionLogHourly.RollUpAsync(connection, Now.AddHours(5), null, ct);
             var afterGap = await ReadHourlyAsync(connection, ct);
             var expectedAfterGap = ExpectedRows(runs, CurrentHour.AddHours(5));
             Assert.Equal(expectedAfterGap.Keys.OrderBy(k => k), afterGap.Keys.OrderBy(k => k));
@@ -274,13 +274,13 @@ public sealed class CollectionLogHourlyLiveTests
             await PlantAsync(connection, runs, ct);
 
             /* The first pass on an empty table rolls every closed hour of the kept window, and nothing older. */
-            await CollectionLogHourly.RunPassAsync(connection, Now, null, ct);
+            await CollectionLogHourly.RollUpAsync(connection, Now, null, ct);
             Assert.Equal(
                 new[] { oldestKept, oldestKept.AddHours(1), CurrentHour.AddDays(-3), CurrentHour.AddHours(-1) },
                 (await ReadHourlyAsync(connection, ct)).Keys.Select(k => k.Hour).OrderBy(h => h));
 
             /* Two hours on, the two oldest hours are older than the window kept and are deleted; the rest stay. */
-            await CollectionLogHourly.RunPassAsync(connection, Now.AddHours(2), null, ct);
+            await CollectionLogHourly.RollUpAsync(connection, Now.AddHours(2), null, ct);
             Assert.Equal(
                 new[] { CurrentHour.AddDays(-3), CurrentHour.AddHours(-1) },
                 (await ReadHourlyAsync(connection, ct)).Keys.Select(k => k.Hour).OrderBy(h => h));

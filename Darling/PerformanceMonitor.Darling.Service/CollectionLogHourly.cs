@@ -29,7 +29,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// each row carries <c>duration_histogram</c>, a count of timed runs per slot of <see cref="DurationBucketBounds"/>, and the
 /// read reports the upper bound of the slot that holds the 95th percentile.</para>
 ///
-/// <para><b>How it is kept.</b> <see cref="RunPassAsync"/> runs on the store self-metrics sweep, next to
+/// <para><b>How it is kept.</b> <see cref="RollUpAsync"/> runs on the store self-metrics sweep, next to
 /// <c>collector_cost</c>'s flush. One statement upserts every closed hour from the hour after the newest rolled hour to the
 /// current hour, and always the last <see cref="RecomputeHours"/> closed hours, so a run written late into an hour that is
 /// already rolled is counted on the next pass. On an empty table (the first pass after the upgrade) the same statement
@@ -208,7 +208,7 @@ WHERE hour_start < $1::timestamp;";
     /// One pass: the upsert, then the retention DELETE. <paramref name="nowUtc"/> is the service clock in UTC, the clock
     /// <c>collection_time</c> is written in. Returns the number of hour rows upserted.
     /// </summary>
-    public static async Task<int> RunPassAsync(NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken)
+    public static async Task<int> RollUpAsync(NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken)
     {
         var currentHour = new DateTime(nowUtc.Year, nowUtc.Month, nowUtc.Day, nowUtc.Hour, 0, 0, DateTimeKind.Unspecified);
         var oldestKept = currentHour.AddHours(-RetentionHours);

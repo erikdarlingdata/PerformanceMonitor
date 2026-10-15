@@ -11290,7 +11290,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             hourlyBudget.CancelAfter(CollectionLogHourly.PassSliceBudget);
             try
             {
-                await CollectionLogHourly.RunPassAsync(connection, DateTime.UtcNow, _logger, hourlyBudget.Token);
+                await CollectionLogHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, hourlyBudget.Token);
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 || (hourlyBudget.IsCancellationRequested && !budget.IsCancellationRequested))

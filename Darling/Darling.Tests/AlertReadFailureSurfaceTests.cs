@@ -974,8 +974,9 @@ public sealed class AlertReadFailureSurfaceTests
     /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
     private const int WorkerCountedSites = 12;
-    /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it. */
-    private const int WorkerExemptSites = 13;
+    /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it.
+       14th: the collection log hourly rollup's catch there (#5810), a maintenance write no alert is judged on. */
+    private const int WorkerExemptSites = 14;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1267,8 +1268,9 @@ public sealed class AlertReadFailureSurfaceTests
            capture and never an alert. 36th since #5450: the Collection Gap At Start self-alert's catch, handed
            its evidence as a parameter. 37th: the deadlock text repair pass, the second stage beside the re-mask pass (the same
            maintenance rewrite, marker-gated, resumed next hour). 38th since #5654: the external-alert delivery self-alert's
-           wrapper catch, handed its report as a parameter. */
-        Assert.Equal(38, totalExempt);
+           wrapper catch, handed its report as a parameter. 39th since #5810: the collection log hourly rollup's catch, a
+           maintenance write no alert is judged on, redone by the next pass. */
+        Assert.Equal(39, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
