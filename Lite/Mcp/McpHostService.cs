@@ -231,6 +231,8 @@ public sealed class McpHostService : BackgroundService
             var planFetcher = new SqlPlanFetcher(_serverManager);
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
+            /* #5820: the investigation brief's reader and composer, for the claim tool (the composer's own file registers both). */
+            PerformanceMonitorLite.Investigations.LiteInvestigationServices.AddInvestigationBrief(builder.Services, _duckDb);
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
