@@ -125,7 +125,8 @@ SELECT
     latest.total_runs,
     latest.total_failures,
     latest.toast_bytes,
-    latest.toast_live_bytes
+    latest.toast_live_bytes,
+    latest.size_estimated
 FROM objects
 CROSS JOIN LATERAL
 (
@@ -144,7 +145,8 @@ CROSS JOIN LATERAL
         total_runs,
         total_failures,
         toast_bytes,
-        toast_live_bytes
+        toast_live_bytes,
+        size_estimated
     FROM collect.store_metrics
     WHERE object_kind = objects.object_kind
     AND   object_name = objects.object_name
@@ -155,7 +157,11 @@ ORDER BY latest.object_kind, latest.object_name";
 
     /// <summary>The daily series — the LAST sample of each object per day (DISTINCT ON over the day
     /// bucket, newest first within it), so each day contributes one settled point per object rather than
-    /// 24 near-duplicates. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
+    /// 24 near-duplicates. The one exception is a hypertable or aggregate day (#5857): the hourly sweep writes
+    /// those sizes as a catalog estimate and one sweep a day writes them exact (<c>size_estimated</c>), so a
+    /// day's point is its newest EXACT row when it holds one (an estimate only when it holds none), and a growth
+    /// over the series never subtracts an estimate from an exact size. Every other kind's rows have no
+    /// estimate flag (NULL), so for them nothing changes. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
     /// in the bucket, so the day's largest value is discarded unless it happens to be the last one, and
     /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). The last column is
     /// that kept row's own <c>metric_time</c> (#4734), the day's last snapshot time, beside <c>day</c>, the
@@ -177,10 +183,11 @@ SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     total_failures,
     toast_bytes,
     toast_live_bytes,
-    metric_time
+    metric_time,
+    size_estimated
 FROM collect.store_metrics
 WHERE metric_time >= $1
-ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
+ORDER BY object_kind, object_name, date_trunc('day', metric_time), (size_estimated IS TRUE), metric_time DESC";
 
     /// <summary>
     /// Whether <c>timescaledb_information.job_history</c> — the route this tool's description sends a
@@ -1400,7 +1407,8 @@ LIMIT $1";
         long? TotalRuns = null,
         long? TotalFailures = null,
         long? ToastBytes = null,
-        long? ToastLiveBytes = null);
+        long? ToastLiveBytes = null,
+        bool? SizeEstimated = null);
 
     /// <summary>One object's settled point for one day (the day's last sample). Job and TOAST fields as on
     /// <see cref="StoreMetricRow"/>. <c>MetricTime</c> is that last sample's own time (#4734), which <c>Day</c>,
@@ -1421,7 +1429,8 @@ LIMIT $1";
         long? TotalFailures = null,
         long? ToastBytes = null,
         long? ToastLiveBytes = null,
-        DateTime? MetricTime = null);
+        DateTime? MetricTime = null,
+        bool? SizeEstimated = null);
 
     /* ---------------- #3783: TOAST utilisation on the dimension rows ---------------- */
 
@@ -1926,7 +1935,8 @@ SELECT DISTINCT ON (object_kind, object_name)
     total_runs,
     total_failures,
     toast_bytes,
-    toast_live_bytes
+    toast_live_bytes,
+    size_estimated
 FROM collect.store_metrics
 ORDER BY object_kind, object_name, metric_time DESC";
 
@@ -1962,7 +1972,8 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 reader.IsDBNull(11) ? null : reader.GetInt64(11),
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
-                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
+                reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                reader.IsDBNull(15) ? null : reader.GetBoolean(15)));
         }
 
         return rows;
@@ -1995,7 +2006,8 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 reader.IsDBNull(14) ? null : reader.GetInt64(14),
-                reader.GetDateTime(15)));
+                reader.GetDateTime(15),
+                reader.IsDBNull(16) ? null : reader.GetBoolean(16)));
         }
 
         return rows;
