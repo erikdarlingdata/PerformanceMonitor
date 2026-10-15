@@ -282,7 +282,8 @@ public class StoreCopyPhaseTests
         /* And so does the collection_log row this arm writes — exactly one such row. */
         Assert.Single(Regex.Matches(
             worker,
-            @"collectorName, ""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, message, fanout: null"));
+            /* #5813: the fan-out now comes off the exception (an all-failed per-database run carries it). */
+            @"collectorName, ""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout\.For\(ex\)"));
 
         /* Neither reverts to the bare message. These are the two expressions this arm carried before, and
            they are what a revert would restore — a revert that compiles, runs, and reports both phases
