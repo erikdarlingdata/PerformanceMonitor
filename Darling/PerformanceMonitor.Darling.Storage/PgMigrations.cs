@@ -1246,12 +1246,17 @@ ALTER TABLE collect.read_latency
     /// while the interval runs), and because the interval table is partitioned and indexed on it, so the live half of the read
     /// touches only the rows after the watermark.
     ///
-    /// <para><b>The trigger now marks the open days.</b> Its upper bound moves from yesterday's midnight to one hour before the
+    /// <para><b>The trigger now marks the open days.</b> Its upper bound moves from yesterday's midnight to two hours before the
     /// current hour (<see cref="PlanRegressionDaily.LateTriggerLagHours"/>), so a row written with a first execution below that
     /// marks its days (the #5631 validity rule: a moved <c>late_seq</c> invalidates a whole or a partial build). The builder's
-    /// watermark is two hours before the current hour by the store's own clock, one hour under the trigger's, so a write whose transaction began up to an hour
+    /// watermark is three hours before the current hour by the store's own clock, one hour under the trigger's, so a write whose transaction began up to an hour
     /// before a build still marks the day it could change. Steady collection does not fire it: the collector writes the
-    /// intervals still running and the one that just ended, whose first executions are at or after the trigger's bound.</para>
+    /// intervals still running and the one that just ended, whose first executions are at or after the trigger's bound.
+    /// That holds only while the two clocks agree: <c>first_execution_time</c> is the monitored server's clock and
+    /// <c>now()</c> the store's. The bound sits an hour below the start of a 60-minute interval that has just ended, so a store
+    /// clock up to an hour ahead stays quiet; at one hour the margin was zero, and a store a second ahead fired the trigger on
+    /// every steady apply (#5812 review). A bigger skew, or Query Store intervals longer than an hour, fires it on every apply,
+    /// and the open days then read live, as before #5812: slower, never a wrong number.</para>
     /// </summary>
     private static readonly string V185Sql = $@"
 ALTER TABLE collect.plan_regression_daily_built

@@ -324,10 +324,10 @@ FROM generate_series(1, 50) AS g", ct);
             Assert.Equal(1, await CountAsync(connection, "pg_trigger WHERE tgrelid = 'collect.query_store_interval_latest_legacy'::regclass AND tgname = 'trg_plan_regression_daily_late' AND tgparentid <> 0", ct));
             Assert.Equal(1, await CountAsync(connection, "pg_trigger WHERE tgname = 'trg_plan_regression_daily_late'::name AND tgparentid = 0", ct));
             var triggerAfter = await TextAsync(connection, "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'collect.query_store_interval_latest'::regclass AND NOT tgisinternal", ct);
-            /* V185 (#5812) recreates the trigger with one change, its upper bound: one hour before the current hour, not
+            /* V185 (#5812) recreates the trigger with one change, its upper bound: two hours before the current hour, not
                yesterday's midnight. Everything else is the text it had. */
             const string V168Bound = "(date_trunc('day'::text, (now() AT TIME ZONE 'UTC'::text)) - '1 day'::interval)";
-            const string V185Bound = "(date_trunc('hour'::text, (now() AT TIME ZONE 'UTC'::text)) - '01:00:00'::interval)";
+            const string V185Bound = "(date_trunc('hour'::text, (now() AT TIME ZONE 'UTC'::text)) - '02:00:00'::interval)";
             Assert.Contains(V168Bound, triggerBefore, StringComparison.Ordinal);
             Assert.Equal(
                 triggerBefore.Replace(V168Bound, V185Bound, StringComparison.Ordinal).Replace("query_store_interval_latest", "X", StringComparison.Ordinal),

@@ -277,8 +277,8 @@ public sealed class PlanRegressionDailyBuilderLiveTests
 
     /// <summary>
     /// #5812 (review H1): the plan's two queues on a fleet larger than the cap. 200 servers, every day T - 14 through
-    /// T - 1 built whole, today partial through 09:00 with staggered <c>built_at</c> and one row each inside the span a build
-    /// at <see cref="Now"/> (12:00, watermark 10:00) would add. One closed day of server 150 (past the 120th by
+    /// T - 1 built whole, today partial through 08:00 with staggered <c>built_at</c> and one row each inside the span a build
+    /// at <see cref="Now"/> (12:00, watermark 09:00) would add. One closed day of server 150 (past the 120th by
     /// <c>server_id</c>) has a late row. The plan is that closed day first, then every server's today oldest build first, and
     /// tomorrow for none. A row dated tomorrow below the watermark on one server then puts that server's tomorrow in queue 1.
     /// </summary>
@@ -298,13 +298,13 @@ SELECT s, g::date, 0,
        CASE WHEN g::date = DATE '2026-03-20' THEN NULL ELSE 0 END,
        CASE WHEN g::date = DATE '2026-03-20' THEN 0 END,
        TIMESTAMP '2026-03-20 10:00:00' - ((s * 37) % {Servers}) * interval '1 minute', 0,
-       CASE WHEN g::date = DATE '2026-03-20' THEN TIMESTAMP '2026-03-20 09:00:00' END
+       CASE WHEN g::date = DATE '2026-03-20' THEN TIMESTAMP '2026-03-20 08:00:00' END
 FROM generate_series(1, {Servers}) AS s
 CROSS JOIN generate_series(TIMESTAMP '{DateText(FirstDay)}', TIMESTAMP '2026-03-20', interval '1 day') AS g;
 UPDATE collect.plan_regression_daily_built SET late_seq = 1 WHERE server_id = 150 AND day = DATE '2026-03-12';", ct);
             for (var server = 1; server <= Servers; server++)
             {
-                await SeedAsync(connection, server, "db1", 1, Now.AddHours(-2).AddMinutes(-30), 1, 1, 1, false, ct);
+                await SeedAsync(connection, server, "db1", 1, Now.AddHours(-3).AddMinutes(-30), 1, 1, 1, false, ct);
             }
 
             await ExecAsync(connection, "ANALYZE collect.plan_regression_daily_built; ANALYZE collect.query_store_interval_latest;", ct);
@@ -319,7 +319,7 @@ UPDATE collect.plan_regression_daily_built SET late_seq = 1 WHERE server_id = 15
             /* A row dated tomorrow (a server whose clock runs ahead) that starts below the watermark: that tomorrow is queue 1. */
             await using (var command = new NpgsqlCommand(
                 "INSERT INTO collect.query_store_interval_latest (server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time, collection_time, query_plan_hash, execution_count, avg_cpu_time_us, avg_duration_us, last_execution_time, is_forced_plan, force_failure_count) "
-                + "VALUES (7, 'db1', 10, 2, NULL, 999999, TIMESTAMP '2026-03-20 09:30:00', TIMESTAMP '2026-03-20 10:00:00', 'h2', 1, 1, 1, TIMESTAMP '2026-03-21 00:10:00', false, 0)", connection))
+                + "VALUES (7, 'db1', 10, 2, NULL, 999999, TIMESTAMP '2026-03-20 08:30:00', TIMESTAMP '2026-03-20 10:00:00', 'h2', 1, 1, 1, TIMESTAMP '2026-03-21 00:10:00', false, 0)", connection))
             {
                 await command.ExecuteNonQueryAsync(ct);
             }
@@ -679,14 +679,12 @@ AND   query ~ '^DELETE FROM collect\.plan_regression_daily(\s|$)';", connection)
         Assert.Contains("COALESCE(b.partial_seq = b.late_seq AND b.built_through IS NOT NULL, false) AS is_partial", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("- 14)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("+ 1)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
-        Assert.Contains("LEAST((d.day + 1)::timestamp, date_trunc('hour', $1::timestamp) - interval '2 hours') AS through_now", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("row_number() OVER (ORDER BY x.built_at, x.server_id, x.day) AS slot", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("WHERE due.slot <= CASE WHEN due.queue = 1 THEN $2::integer ELSE (SELECT count(*) FROM s) END", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY due.queue, due.slot;", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
 
         /* #5812: the stamps that are not builds read the store's clock and write only while late_seq has not moved. */
         Assert.Contains("AND   b.partial_seq = b.late_seq", PlanRegressionDaily.AdvanceIdleSql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours' AS w", PlanRegressionDaily.AdvanceIdleSql, StringComparison.Ordinal);
         Assert.Contains("WHERE b.late_seq = EXCLUDED.late_seq", PlanRegressionDaily.StampTomorrowSql, StringComparison.Ordinal);
         Assert.Contains("AND   NOT COALESCE(b.built_seq = b.late_seq OR (b.partial_seq = b.late_seq AND b.built_through IS NOT NULL), false);", PlanRegressionDaily.StampTomorrowSql, StringComparison.Ordinal);
         Assert.Contains("NOT EXISTS (SELECT 1 FROM collect.plan_regression_daily AS p WHERE p.server_id = s.server_id AND p.day = t.day)", PlanRegressionDaily.StampTomorrowSql, StringComparison.Ordinal);

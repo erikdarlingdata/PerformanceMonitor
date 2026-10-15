@@ -68,7 +68,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         var now = DateTime.UtcNow;
 
         /* Steady: intervals that started within the last 40 minutes, and re-collections of them (the ON CONFLICT update arm
-           the writer takes every pass). Since V185 (#5812) the WHEN clause's bound is one hour before the current hour, and a
+           the writer takes every pass). Since V185 (#5812) the WHEN clause's bound is two hours before the current hour, and a
            first within the last 40 minutes is at or after it at any minute of the hour, even across the next hour boundary.
            The WHEN clause is false for every one, so the function body never runs. */
         for (var pass = 0; pass < 3; pass++)
@@ -343,10 +343,11 @@ SET search_path = decoy, pg_catalog;", ct);
         await UpsertAsync(connection, ServerA, new[] { now.AddDays(-15) }, 1, 1, ct);
         Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));
 
-        /* The recent edge (V185, #5812): one hour before the current hour. A first at or after it is an interval still running
-           or the one that just ended, never late. One second before it is late, and marks its day and the next: the open days
+        /* The recent edge (V185, #5812): two hours before the current hour. A first at or after it is an interval still running
+           or the one that just ended, with an hour to spare for a store clock ahead of the monitored server's, never late
+           (the old one-hour bound sat exactly on the just-ended interval's start). One second before it is late, and marks its day and the next: the open days
            are built as partial days up to a watermark under this bound, so a write below it can change a built day. */
-        var bound = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(-1);
+        var bound = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(-2);
         await ExecAsync(connection, "TRUNCATE collect.plan_regression_daily_built", ct);
         await UpsertAsync(connection, ServerA, new[] { bound, bound.AddMinutes(30), now }, 1, 1, ct);
         Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));

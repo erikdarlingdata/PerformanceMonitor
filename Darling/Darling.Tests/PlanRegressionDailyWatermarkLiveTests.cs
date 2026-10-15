@@ -152,7 +152,7 @@ AND   plan_id % 10 = 1", ct, ("s", ServerA), ("d", day));
         await CoverageAsync(connection, today.AddDays(-20), ct);
 
         /* The open hour: rows that started in the hour after today's watermark, of queries no build has seen. Planted with
-           the trigger off, before the builds: the watermarks here are fixed hours, not the service's two hours back. */
+           the trigger off, before the builds: the watermarks here are fixed hours, not the service's three hours back. */
         await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
         var openHour = today.AddHours(6);
         await ExecAsync(connection, @"
@@ -322,15 +322,15 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
 
     /// <summary>
     /// #5812 M3: the seam between the builder's watermark, the trigger's bound and the read. A real build of today on the
-    /// store's clock stamps <c>built_through</c> two hours before the current hour. Set an hour back, the idle advance stamps it
+    /// store's clock stamps <c>built_through</c> three hours before the current hour. Set an hour back, the idle advance stamps it
     /// to the watermark again. A row of today that starts 30 minutes below that watermark, written through the real trigger,
     /// moves the day's <c>late_seq</c>, so the stamped day is stale, and the daily read equals the interval-table read. The
-    /// open day is the watermark's own: today from 04:00 UTC, yesterday before 02:00 UTC (the watermark is 22:00 or 23:00 of
-    /// yesterday, a partial day too), and only from 02:00 to 04:00 UTC, when the rows two hours below the watermark would
+    /// open day is the watermark's own: today from 05:00 UTC, yesterday before 03:00 UTC (the watermark is 21:00 to 23:00 of
+    /// yesterday, a partial day too), and only from 03:00 to 05:00 UTC, when the rows two hours below the watermark would
     /// cross midnight, does it skip.
     /// </summary>
     [Fact]
-    public async Task ABuildOnTheStoreClock_StampsTwoHoursBeforeTheHour_AndAWriteBelowAnAdvancedWatermarkMarksTheDay()
+    public async Task ABuildOnTheStoreClock_StampsThreeHoursBeforeTheHour_AndAWriteBelowAnAdvancedWatermarkMarksTheDay()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 seam test.");
@@ -341,13 +341,13 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var now = await SettledStoreNowAsync(connection, ct, skipBeforeFour: false);
+        var now = await SettledStoreNowAsync(connection, ct, skipEarlyHours: false);
         var watermark = Convert.ToDateTime(await TextAsync(connection,
-            "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
+            $"SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PlanRegressionDaily.PartialWatermarkLagHours} hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
         Assert.SkipWhen(watermark.AddHours(-2).Date != watermark.Date,
-            "From 02:00 to 04:00 UTC the rows two hours below the watermark would cross midnight; the #5812 seam test needs them inside the watermark's day.");
+            "From 03:00 to 05:00 UTC the rows two hours below the watermark would cross midnight; the #5812 seam test needs them inside the watermark's day.");
 
-        /* The open day: the watermark's own (today, or yesterday before 02:00 UTC). Every day before it is built whole. */
+        /* The open day: the watermark's own (today, or yesterday before 03:00 UTC). Every day before it is built whole. */
         var today = watermark.Date;
         var todayDay = DateOnly.FromDateTime(today);
         var window = today.AddDays(-14);
@@ -368,7 +368,7 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
         Assert.Equal(2L, await PlanRegressionDaily.BuildDayAsync(connection, ServerA, todayDay, now, ct));
         const string Through = "SELECT to_char(built_through, 'YYYY-MM-DD HH24:MI:SS') FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d";
         Assert.Equal(await TextAsync(connection,
-                "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct),
+                $"SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PlanRegressionDaily.PartialWatermarkLagHours} hours', 'YYYY-MM-DD HH24:MI:SS')", ct),
             await TextAsync(connection, Through, ct, ("s", ServerA), ("d", todayDay)));
 
         /* As if built an hour ago: the idle advance (nothing in the last hour) stamps it to the watermark again. */
@@ -413,11 +413,11 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var now = await SettledStoreNowAsync(connection, ct, skipBeforeFour: false);
+        var now = await SettledStoreNowAsync(connection, ct, skipEarlyHours: false);
         var watermark = Convert.ToDateTime(await TextAsync(connection,
-            "SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
+            $"SELECT to_char(date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PlanRegressionDaily.PartialWatermarkLagHours} hours', 'YYYY-MM-DD HH24:MI:SS')", ct), CultureInfo.InvariantCulture);
         Assert.SkipWhen(watermark.AddHours(-2).Date != watermark.Date,
-            "From 02:00 to 04:00 UTC the rows two hours below the watermark would cross midnight; the #5812 stamp race test needs them inside the watermark's day.");
+            "From 03:00 to 05:00 UTC the rows two hours below the watermark would cross midnight; the #5812 stamp race test needs them inside the watermark's day.");
 
         var open = watermark.Date;
         var openDay = DateOnly.FromDateTime(open);
@@ -524,10 +524,10 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
 
     private const int ServerB = -5812402;
 
-    /// <summary>The store's clock (naive UTC), settled: skips before 04:00 UTC unless <paramref name="skipBeforeFour"/> is
+    /// <summary>The store's clock (naive UTC), settled: skips before 05:00 UTC (the watermark's lag plus two hours) unless <paramref name="skipEarlyHours"/> is
     /// false (today's rows two hours below the watermark would start before midnight) and waits out an hour boundary less
     /// than three minutes off, so the test and the statements read one hour.</summary>
-    private static async Task<DateTime> SettledStoreNowAsync(NpgsqlConnection connection, CancellationToken ct, bool skipBeforeFour = true)
+    private static async Task<DateTime> SettledStoreNowAsync(NpgsqlConnection connection, CancellationToken ct, bool skipEarlyHours = true)
     {
         const string Sql = "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')";
         var now = Convert.ToDateTime(await TextAsync(connection, Sql, ct), CultureInfo.InvariantCulture);
@@ -538,7 +538,8 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
             now = Convert.ToDateTime(await TextAsync(connection, Sql, ct), CultureInfo.InvariantCulture);
         }
 
-        Assert.SkipWhen(skipBeforeFour && now.Hour < 4, "Before 04:00 UTC the rows two hours below today's watermark would start before midnight; the #5812 stamp tests need them inside today.");
+        Assert.SkipWhen(skipEarlyHours && now.Hour < PlanRegressionDaily.PartialWatermarkLagHours + 2,
+            "Early in the UTC day the rows up to two hours below today's watermark would start before midnight; the #5812 stamp tests need them inside today.");
         return now;
     }
 

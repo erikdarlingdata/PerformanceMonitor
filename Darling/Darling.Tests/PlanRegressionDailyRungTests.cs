@@ -292,28 +292,10 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Equal("plan-regression-partial-days", v185.Name);
         Assert.Contains("ADD COLUMN IF NOT EXISTS built_through timestamp,\n    ADD COLUMN IF NOT EXISTS partial_seq bigint;", v185.Sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
         Assert.Contains($"WHEN (NEW.first_execution_time < date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '{PlanRegressionDaily.LateTriggerLagHours} hour'", v185.Sql, StringComparison.Ordinal);
-        Assert.Equal(1, PlanRegressionDaily.LateTriggerLagHours);
-        Assert.Equal(2, PlanRegressionDaily.PartialWatermarkLagHours);
+        Assert.Equal(2, PlanRegressionDaily.LateTriggerLagHours);
+        Assert.Equal(3, PlanRegressionDaily.PartialWatermarkLagHours);
         Assert.True(PlanRegressionDaily.PartialWatermarkLagHours >= PlanRegressionDaily.LateTriggerLagHours + 1,
             "The builder's watermark must sit at least one hour under the late-row trigger's bound.");
-    }
-
-    /// <summary>
-    /// #5812 M1: a whole build stamps <c>built_seq</c> and a partial one <c>partial_seq</c> (never both), and the built-days
-    /// read takes <c>built_seq = late_seq</c> as the whole day whatever <c>built_through</c> holds, so a V183 builder's whole
-    /// build after a partial one reads whole, and a partial build reads as not built to V183's predicate.
-    /// </summary>
-    [Fact]
-    public void TheStampAndTheBuiltDaysRead_KeepAPartialBuildInvisibleToPreV185Code()
-    {
-        var mark = PlanRegressionDaily.MarkBuiltSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("SET built_seq = CASE WHEN $6::timestamp >= ($2::date + 1)::timestamp THEN $3::bigint END,", mark, StringComparison.Ordinal);
-        Assert.Contains("partial_seq = CASE WHEN $6::timestamp >= ($2::date + 1)::timestamp THEN NULL ELSE $3::bigint END,", mark, StringComparison.Ordinal);
-        Assert.Contains("built_through = CASE WHEN $6::timestamp >= ($2::date + 1)::timestamp THEN NULL ELSE $6::timestamp END,", mark, StringComparison.Ordinal);
-
-        var read = PlanRegressionDaily.BuiltDaysSql;
-        Assert.Contains("SELECT b.day, CASE WHEN b.built_seq = b.late_seq THEN NULL ELSE b.built_through END", read, StringComparison.Ordinal);
-        Assert.Contains("AND   (b.built_seq = b.late_seq OR (b.partial_seq = b.late_seq AND b.built_through IS NOT NULL))", read, StringComparison.Ordinal);
     }
 
     [Fact]

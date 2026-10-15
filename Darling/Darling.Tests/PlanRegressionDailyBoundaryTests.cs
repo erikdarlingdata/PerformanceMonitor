@@ -149,7 +149,7 @@ public sealed class PlanRegressionDailyBoundaryTests
     [Fact]
     public void TheWatermarkFloor_WithPartialDays_IsTheLowestPartialWatermark()
     {
-        /* A current store: days 1-12 whole, today (13) and tomorrow (14) built through two hours before the current hour.
+        /* A current store: days 1-12 whole, today (13) and tomorrow (14) built through three hours before the current hour.
            The first unbuilt day is 15, whose lookback (day 14's start) is above today's watermark, so the floor is that
            watermark. No lookback is taken below a partial day's watermark: a row of a built day is live only when its first
            execution is at or above the day's watermark, so the watermark itself bounds every live row of that day. */

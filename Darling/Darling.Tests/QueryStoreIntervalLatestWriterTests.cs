@@ -463,30 +463,8 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
-
-        string definition;
-        await using (var read = new NpgsqlCommand(
-            "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger AS t WHERE t.tgname = 'trg_plan_regression_daily_late'", connection))
-        {
-            definition = (string)(await read.ExecuteScalarAsync(ct))!;
-        }
-
-        var start = definition.IndexOf(" WHEN ", StringComparison.Ordinal);
-        var end = definition.IndexOf(" EXECUTE FUNCTION ", StringComparison.Ordinal);
-        Assert.True(start > 0 && end > start, definition);
-        var when = definition[(start + " WHEN ".Length)..end];
-        Assert.Contains("new.first_execution_time", when, StringComparison.Ordinal);
-        Assert.Contains("now()", when, StringComparison.Ordinal);
-        var predicate = when.Replace("new.first_execution_time", "$1::timestamp", StringComparison.Ordinal)
-            .Replace("now()", "$2::timestamptz", StringComparison.Ordinal);
-
-        async Task<bool> FiresAsync(DateTime first, DateTime clock)
-        {
-            await using var command = new NpgsqlCommand("SELECT " + predicate, connection);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, first);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.TimestampTz, DateTime.SpecifyKind(clock, DateTimeKind.Utc));
-            return (bool)(await command.ExecuteScalarAsync(ct))!;
-        }
+        var predicate = await ShippedTriggerPredicateAsync(connection, ct);
+        Task<bool> FiresAsync(DateTime first, DateTime clock) => TriggerFiresAsync(connection, predicate, first, clock, ct);
 
         var day = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
         for (var hour = 0; hour < 24; hour++)
@@ -499,6 +477,47 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
                 Assert.True(await FiresAsync(clock.Date.AddDays(-5).AddHours(2), clock), $"the late batch does not fire at {clock:HH:mm:ss}");
                 Assert.True(await FiresAsync(clock.AddHours(-3), clock), $"a row three hours back does not fire at {clock:HH:mm:ss}");
             }
+        }
+    }
+
+    /// <summary>
+    /// The trigger's skew margin (#5812 review): it compares the monitored server's <c>first_execution_time</c> with the
+    /// store's <c>now()</c>, and the 60-minute interval that has just ended, which the collector rewrites through the current
+    /// hour, starts one hour before it: exactly the old one-hour bound. On a pinned clock at every hour, a row at that start
+    /// and a row one second below it stay quiet through the hour, and the row at the start stays quiet with the store's clock
+    /// two seconds into the next hour (a store ahead of the monitored server). At the one-hour lag the row a second below
+    /// fired at every hour and the row at the start fired once the store's hour rolled over, so the open days read live on
+    /// every tick. A row exactly at the two-hour bound stays quiet, and one a second below it fires.
+    /// </summary>
+    [Fact]
+    public async Task TheJustEndedIntervalsRows_AtTheOldBoundAndASecondBelow_StayQuietUnderAStoreClockAhead_AndARowBelowTheBoundFires()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 trigger-margin test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        var predicate = await ShippedTriggerPredicateAsync(connection, ct);
+        Task<bool> FiresAsync(DateTime first, DateTime clock) => TriggerFiresAsync(connection, predicate, first, clock, ct);
+
+        var day = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        for (var hour = 0; hour < 24; hour++)
+        {
+            var hourStart = day.AddHours(hour);
+            var justEnded = hourStart.AddHours(-1);
+            var lastSecond = hourStart.AddMinutes(59).AddSeconds(59);
+            foreach (var clock in new[] { hourStart, lastSecond })
+            {
+                Assert.False(await FiresAsync(justEnded, clock), $"the just-ended interval's start fires at {clock:HH:mm:ss}");
+                Assert.False(await FiresAsync(justEnded.AddSeconds(-1), clock), $"a second below the just-ended interval's start fires at {clock:HH:mm:ss}");
+            }
+
+            Assert.False(await FiresAsync(justEnded, lastSecond.AddSeconds(2)), $"the just-ended interval's start fires on a store two seconds ahead at {lastSecond:HH:mm:ss}");
+
+            var bound = hourStart.AddHours(-2);
+            Assert.False(await FiresAsync(bound, hourStart.AddMinutes(30)), $"a row at the two-hour bound fires at {hourStart:HH}:30");
+            Assert.True(await FiresAsync(bound.AddSeconds(-1), hourStart.AddMinutes(30)), $"a row a second below the two-hour bound does not fire at {hourStart:HH}:30");
         }
     }
 
@@ -602,12 +621,47 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
     /* ---- helpers ----------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The first execution of a steady row (#5812): the start of the current hour. V185's trigger marks a row whose first
-    /// execution is below <see cref="PlanRegressionDaily.LateTriggerLagHours"/> hour before the store's current hour, so
-    /// a steady row must sit at or above that bound. The current hour's start does, and still does if the hour rolls
-    /// over once while the test runs. The test's own clock is not the store's, which is why it is not <c>now - 1h</c>.
+    /// The first execution of a steady row (#5812): the start of the previous hour, the 60-minute interval that has just
+    /// ended, which the collector still rewrites through the current hour. V185's trigger marks a row whose first execution
+    /// is below <see cref="PlanRegressionDaily.LateTriggerLagHours"/> hours before the store's current hour, so a steady row
+    /// must sit at or above that bound. This row sits exactly on the bound of the old one-hour lag, and stays quiet under
+    /// the two-hour lag also when the store's hour has rolled over once past the test's clock (a store clock ahead of the
+    /// monitored server's, or an hour boundary crossed while the test runs).
     /// </summary>
-    private static DateTime SteadyFirst(DateTime now) => new(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+    private static DateTime SteadyFirst(DateTime now) => new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-1);
+
+    /// <summary>
+    /// The shipped late-row trigger's WHEN clause, read back from the migrated store, with its row value and its clock made
+    /// parameters (<c>$1</c> the first execution, <c>$2</c> the store's <c>now()</c>), so a test evaluates the real bound on
+    /// a pinned clock (#5812).
+    /// </summary>
+    private static async Task<string> ShippedTriggerPredicateAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        string definition;
+        await using (var read = new NpgsqlCommand(
+            "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger AS t WHERE t.tgname = 'trg_plan_regression_daily_late'", connection))
+        {
+            definition = (string)(await read.ExecuteScalarAsync(ct))!;
+        }
+
+        var start = definition.IndexOf(" WHEN ", StringComparison.Ordinal);
+        var end = definition.IndexOf(" EXECUTE FUNCTION ", StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, definition);
+        var when = definition[(start + " WHEN ".Length)..end];
+        Assert.Contains("new.first_execution_time", when, StringComparison.Ordinal);
+        Assert.Contains("now()", when, StringComparison.Ordinal);
+        return when.Replace("new.first_execution_time", "$1::timestamp", StringComparison.Ordinal)
+            .Replace("now()", "$2::timestamptz", StringComparison.Ordinal);
+    }
+
+    /// <summary>Whether the shipped trigger fires for a row with this first execution when the store's clock reads <paramref name="clock"/>.</summary>
+    private static async Task<bool> TriggerFiresAsync(NpgsqlConnection connection, string predicate, DateTime first, DateTime clock, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT " + predicate, connection);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, first);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.TimestampTz, DateTime.SpecifyKind(clock, DateTimeKind.Utc));
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
+    }
 
     /// <summary>A steady row's last execution: <paramref name="wanted"/>, never before its first.</summary>
     private static DateTime SteadyLast(DateTime first, DateTime wanted) => wanted < first ? first : wanted;

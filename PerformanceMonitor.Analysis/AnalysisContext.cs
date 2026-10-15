@@ -261,8 +261,9 @@ public class AnalysisContext
     /// <summary>
     /// Darling only (#5812): true when this pass may reuse the PLAN_REGRESSION candidate rows an earlier current pass on
     /// the same server read, while they are fresh (<c>PgFactCollector.PlanRegressionCandidateCache</c>). Set by the
-    /// current-time callers (the scheduled pass, <c>analyze_server</c> and <c>get_analysis_facts</c> with no <c>as_of</c>);
-    /// false everywhere else, so a past <c>as_of</c> and every other caller read live, as before.
+    /// current-time on-demand callers (<c>analyze_server</c> and <c>get_analysis_facts</c> with no <c>as_of</c>). The
+    /// scheduled pass never sets it: it sets <see cref="RefreshPlanRegressionCandidates"/> instead. False everywhere else, so
+    /// a past <c>as_of</c> and every other caller read live, as before.
     /// </summary>
     public bool ReusePlanRegressionCandidates { get; set; }
 

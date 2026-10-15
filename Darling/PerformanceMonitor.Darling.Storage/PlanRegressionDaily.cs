@@ -58,17 +58,27 @@ public static class PlanRegressionDaily
 
     /// <summary>The open days (newer than <see cref="ClosedDayLagDays"/>) are built too, as partial days (#5812): a build covers
     /// the rows whose <c>first_execution_time</c> is below its watermark, <c>built_through</c>, which is this many hours before
-    /// the current hour by the store's clock. It sits one hour under the bound of V185's trigger (one hour before the current
-    /// hour), so a write whose transaction began up to an hour before a build still marks the day it changes, and the
-    /// interval that has just ended, which the collector still writes, stays above the watermark and in the live half.</summary>
-    public const int PartialWatermarkLagHours = 2;
+    /// the current hour by the store's clock. It sits one hour under the bound of V185's trigger (<see cref="LateTriggerLagHours"/>
+    /// hours before the current hour), so a write whose transaction began up to an hour before a build still marks the day it
+    /// changes, and the interval that has just ended, which the collector still writes, stays above the watermark and in the
+    /// live half. The rung pays off only while steady collection leaves the trigger quiet, and the trigger compares the
+    /// monitored server's clock with the store's, so this lag carries the skew bet too: it is three hours, not two, so the
+    /// trigger's bound sits an hour below the start of the interval that has just ended (#5812 review). A store clock up to an
+    /// hour ahead of a monitored server with 60-minute Query Store intervals still leaves that interval's rewrites above the
+    /// bound; a bigger skew, or longer intervals, fires the trigger on every apply, and the open days then read live, as before
+    /// #5812, without a wrong number. The cost is an hour of live-half width: the read covers the last three to four hours of
+    /// first executions, not two to three.</summary>
+    public const int PartialWatermarkLagHours = 3;
 
     /// <summary>The late-row trigger's upper bound, in hours before the current hour by the store's clock (V185): a write whose
     /// <c>first_execution_time</c> is below it marks its day and the next. V185's SQL interpolates this constant, and
     /// <see cref="PartialWatermarkLagHours"/> must stay at least one hour more (a pinned pair, #5812): with the watermark at or
     /// above the trigger's bound, a write below the watermark could land without marking its day, and its row would then be
-    /// in neither the totals nor the live half.</summary>
-    public const int LateTriggerLagHours = 1;
+    /// in neither the totals nor the live half. It is two hours, not one, because <c>first_execution_time</c> is the
+    /// monitored server's clock and <c>now()</c> the store's: at one hour, the start of the 60-minute interval that has just
+    /// ended sat exactly on the bound, so a store clock a second ahead fired the trigger on every steady apply and the open
+    /// days silently read live again (#5812 review). Two hours gives that interval an hour of skew margin.</summary>
+    public const int LateTriggerLagHours = 2;
 
     /// <summary>The newest day the builder builds, in days after today: tomorrow, so a row of a server whose clock runs ahead,
     /// dated tomorrow with a first execution below the watermark, is in a built day and the live half of the read can start at

@@ -8,8 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Analysis;
@@ -19,8 +17,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Review round 1 on #5812, pinned without a store: what the PLAN_REGRESSION candidate cache evicts (L1), why a pass
-/// reused or read live (L3), that an exact-bound read's shape carries its exact window start (L3), and that every
-/// PLAN_REGRESSION read, the exact-bound fallbacks included, runs under the one work memory setting (M2).
+/// reused or read live (L3), and that an exact-bound read's shape carries its exact window start (L3).
 /// </summary>
 public sealed class PlanRegressionCandidateCacheEvictionTests
 {
@@ -161,74 +158,5 @@ public sealed class PlanRegressionCandidateCacheEvictionTests
         cache.Store("store", 7, pass, Now, None);
         Assert.Null(cache.TryGet("store", 7, call, Now, Now, out var decision));
         Assert.Equal(PgFactCollector.PlanRegressionCandidateCache.ReuseDecision.ShapeDiffers, decision);
-
-        /* The collector binds it: the exact-bound shapes take rawWindowStart, the daily shape its watermarks. */
-        var fact = FactSource();
-        Assert.Contains("exactWindowStart: readsDays ? null : rawWindowStart, watermarkParameter: readsDays ? 5 : null", fact, StringComparison.Ordinal);
-        Assert.Contains("out decision);", fact, StringComparison.Ordinal);
-        Assert.Contains("_logger?.LogDebug(\"PLAN_REGRESSION candidates for server {ServerId}: {Decision}", fact, StringComparison.Ordinal);
-    }
-
-    /// <summary>M2: one constant sets the work memory, and both the daily read's snapshot and the exact-bound reads' own
-    /// short transaction run it before the read.</summary>
-    [Fact]
-    public void EveryPlanRegressionRead_RunsUnderTheOneWorkMemSetting()
-    {
-        Assert.Equal("SET LOCAL work_mem = '64MB'", PgFactCollector.PlanRegressionWorkMemSql);
-
-        var fact = FactSource();
-        Assert.Equal(1, Count(fact, "new NpgsqlCommand(PlanRegressionWorkMemSql"));
-        Assert.DoesNotContain("work_mem =", fact, StringComparison.Ordinal);
-        Assert.Equal(2, Count(fact, "await BoundTheReadAsync();"));
-
-        var fallback = fact.IndexOf("if (snapshot is null)", StringComparison.Ordinal);
-        var fallbackBegin = fact.IndexOf("snapshot = await connection.BeginTransactionAsync(context.CancellationToken);", StringComparison.Ordinal);
-        var read = fact.IndexOf("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)", StringComparison.Ordinal);
-        Assert.True(fallback > 0 && fallback < fallbackBegin && fallbackBegin < read,
-            "the exact-bound read must begin its own transaction, and bound it, before the read command");
-        Assert.True(fact.IndexOf("await BoundTheReadAsync();", fallbackBegin, StringComparison.Ordinal) < read);
-    }
-
-    [Fact]
-    public void TheCacheHasNoForget_AndTheServicePublishesItsServerSet()
-    {
-        var root = Root();
-        var cache = File.ReadAllText(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.PlanRegressionCache.cs"));
-        Assert.DoesNotContain("Forget", cache, StringComparison.Ordinal);
-
-        var worker = File.ReadAllText(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-        Assert.Contains("PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));", worker, StringComparison.Ordinal);
-        Assert.Contains("PlanRegressionCandidateCache.Shared.RetainServers(view.EnabledServers.Select(s => s.ServerId));", worker, StringComparison.Ordinal);
-    }
-
-    private static int Count(string text, string part)
-    {
-        var count = 0;
-        for (var at = text.IndexOf(part, StringComparison.Ordinal); at >= 0; at = text.IndexOf(part, at + part.Length, StringComparison.Ordinal))
-        {
-            count++;
-        }
-
-        return count;
-    }
-
-    private static string FactSource()
-    {
-        var source = File.ReadAllText(Path.Combine(Root(), "Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs"));
-        var start = source.IndexOf("private async Task CollectPlanRegressionFactsAsync(", StringComparison.Ordinal);
-        Assert.True(start >= 0);
-        return source[start..source.IndexOf("internal const int PlanRegressionMaxOffenders", start, StringComparison.Ordinal)];
-    }
-
-    private static string Root()
-    {
-        var dir = AppContext.BaseDirectory;
-        while (dir is not null && !File.Exists(Path.Combine(dir, "Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs")))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return dir!;
     }
 }

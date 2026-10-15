@@ -559,6 +559,12 @@ WITH plan_agg AS
     /// (<c>hash_mem_multiplier</c>). 64MB is the bound: 32MB also did not spill, but it is below its own peak (about 35MB)
     /// and fits only through that multiplier, so 64MB keeps the headroom. A hash or sort takes memory only as it grows, so
     /// a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every bound on one plant).
+    /// The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may take up to 6 x 64MB,
+    /// doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the plant peaked near 37MB
+    /// in each of two hash aggregates. Across the fleet, scheduled reads run inside each server's sweep, so the ceiling is that
+    /// times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
+    /// <c>get_analysis_facts</c> reads that miss the candidate cache run outside the sweep gate and add to it; size
+    /// <c>MaxConcurrentSweeps</c> against the store's memory before raising this bound.
     /// </summary>
     internal const string PlanRegressionWorkMemSql = "SET LOCAL work_mem = '64MB'";
 
