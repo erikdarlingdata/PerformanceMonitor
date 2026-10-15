@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// The keyed census that proves the table covers what the readers really return lives in the six statement-filter
 /// live classes.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpDataDetailMaskerTests
 {
     private const string Withheld = McpDataDetailMasker.WithheldText;
@@ -363,6 +364,49 @@ public sealed class McpDataDetailMaskerTests
             "SELECT * FROM dbo.t1 WHERE id = ? AND name = N'?'",
             Masked(json, McpDataDetail.MaskLiterals)[key]!.GetValue<string>());
         Assert.Equal(Withheld, Masked(json, McpDataDetail.MetadataOnly)[key]!.GetValue<string>());
+    }
+
+    /* ---- #5632 review round 2: send_error, the answer key the round-1 sweep missed ---- */
+
+    [Fact]
+    public void SendError_LiteralsReplaced_ThenWithheld()
+    {
+        const string json = "{\"send_error\":\"SMTP authentication failed for 'alerts@corp.test' (535)\",\"alert_sent\":false}";
+        var literals = Masked(json, McpDataDetail.MaskLiterals);
+        Assert.DoesNotContain("alerts@corp.test", literals["send_error"]!.GetValue<string>(), StringComparison.Ordinal);
+        var meta = Masked(json, McpDataDetail.MetadataOnly);
+        Assert.Equal(Withheld, meta["send_error"]!.GetValue<string>());
+        Assert.False(meta["alert_sent"]!.GetValue<bool>());
+    }
+
+    /// <summary>
+    /// The sweep as a test, so the next error-text key fails here rather than shipping raw: every answer key the MCP tools of
+    /// either SKU name <c>error</c>, or end in <c>_error</c>, <c>_error_message</c> or <c>_error_text</c>, is masked as
+    /// statement-class text. The one exception is a number, not text, and says why.
+    /// </summary>
+    [Fact]
+    public void EveryErrorTextAnswerKey_InEitherSku_IsInTheTable()
+    {
+        var notText = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["last_os_error"] = "the ring buffer's OS error number (a long), not a message",
+        };
+        var folders = new[] { RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service", "Mcp"), RepoFile.PathTo("Lite", "Mcp") };
+        var keys = folders
+            .SelectMany(f => System.IO.Directory.EnumerateFiles(f, "*.cs"))
+            .SelectMany(f => System.Text.RegularExpressions.Regex.Matches(
+                System.IO.File.ReadAllText(f), @"(?m)^\s+((?:[a-z_]+_)?error(?:_message|_text)?)\s*=[^=>]"))
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("send_error", keys);
+        Assert.All(notText.Keys, k => Assert.Contains(k, keys));
+        var missing = keys
+            .Where(k => !notText.ContainsKey(k) && McpDataDetailKeys.Classify(k) != McpDataDetailClass.Statement)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToList();
+        Assert.True(missing.Count == 0, "Answer keys that carry error text but ship raw under both masked levels: "
+            + string.Join(", ", missing) + ". Add each to McpDataDetailKeys' error-text list with its reason.");
     }
 
     /* ---- #5632 wave 3 (LC): the field-table gaps the data-setting lane named ---- */

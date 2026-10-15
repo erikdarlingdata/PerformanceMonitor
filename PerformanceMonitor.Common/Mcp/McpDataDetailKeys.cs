@@ -95,6 +95,9 @@ public static class McpDataDetailKeys
             // Error text.
             "error_message", "message_text", "last_error", "last_error_truncated", "last_message", "error",
             "errors",
+            // get_alert_history (Darling and Lite): why a notification was not delivered, which can quote a channel's URL
+            // or the login a mail server refused.
+            "send_error",
             // Free text that can quote collected text: the generic "message" key (a tool's status sentence, which can
             // quote what the monitored server said) and the job-failure alert context label "Message" (the step's
             // output, normalized to the same entry).
