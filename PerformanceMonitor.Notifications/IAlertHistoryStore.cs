@@ -171,4 +171,16 @@ public sealed record AlertHistoryRecord(
     /// the same instant as the history row it names. Darling's and Lite's stores honor it when set.
     /// </summary>
     public DateTime? AlertTimeUtc { get; init; }
+
+    /// <summary>When a resolution was delivered to at least one channel (UTC), or null (#5825). Written only by Darling,
+    /// on a resolution row, as <c>resolution_sent_at</c>; every other row leaves the three resolution members null.</summary>
+    public DateTime? ResolutionSentAtUtc { get; init; }
+
+    /// <summary>The channels a resolution went to, or would have gone to when muted: comma-separated
+    /// <see cref="NotificationRouter"/> channel names (#5825). Persisted as <c>resolution_channels</c>.</summary>
+    public string? ResolutionChannels { get; init; }
+
+    /// <summary>What the resolution's send did: <c>sent</c>, <c>failed: </c> and the failed channels, or <c>muted</c>
+    /// (#5825). Persisted as <c>resolution_outcome</c>.</summary>
+    public string? ResolutionOutcome { get; init; }
 }

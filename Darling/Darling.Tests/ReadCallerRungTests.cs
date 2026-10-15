@@ -69,27 +69,26 @@ public sealed class ReadCallerRungTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        /* V185's sentinel (#5812) is the last parameter and V184's (#5632) the one before it; this one is just below them. */
-        Assert.Equal("hasCollectionLogHourly", parameters[^1].Name);
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^2].Name);
-        Assert.Equal("hasInvestigations", parameters[^3].Name);
-        Assert.Equal("hasReadCaller", parameters[^4].Name);
-        Assert.Equal("hasReadLatencyCapacityFields", parameters[^5].Name);
+        /* Found by name, not by distance from the top: every later rung's sentinel moved that distance (#5812, #5825). */
+        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasReadCaller");
+        Assert.True(ownOrdinal > 0, "MapProbedSchemaVersion takes this rung's sentinel");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({parameters.Length - 3})", viewer, StringComparison.Ordinal);
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
+        /* A store stopped here: this rung's sentinel and every one below it, none above it. */
         var atThisRung = (object[])all.Clone();
-        atThisRung[^1] = false;
-        atThisRung[^2] = false;
-        atThisRung[^3] = false;
+        for (var i = ownOrdinal + 1; i < atThisRung.Length; i++)
+        {
+            atThisRung[i] = false;
+        }
+
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var behind = (object[])atThisRung.Clone();
-        behind[^4] = false;
+        behind[ownOrdinal] = false;
         Assert.Equal(182, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasReadCaller)", StringComparison.Ordinal);
@@ -113,6 +112,7 @@ public sealed class ReadCallerRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V182 shape and the ladder back to 182. */
+        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);

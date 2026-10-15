@@ -141,6 +141,10 @@ public sealed record NotificationRoute(
     /// <summary>How long a request nobody claims stays open before it expires (<c>agent_expiry_minutes</c>, #5632).</summary>
     public int AgentExpiryMinutes { get; init; } = DefaultAgentExpiryMinutes;
 
+    /// <summary>Whether this route's destinations get an alert's resolution (<c>send_resolutions</c>, #5825): null follows
+    /// each channel's own setting, true sends it and false does not, whatever the channel says.</summary>
+    public bool? SendResolutions { get; init; }
+
     /// <summary>Whether this route sets the agent channel at all (#5632): either level, as opposed to inheriting.</summary>
     public bool HasAgentLevel => AgentLevel.HasValue;
 

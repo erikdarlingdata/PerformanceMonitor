@@ -86,9 +86,11 @@ public sealed class CollectionLogHourlyLiveTests
 
         Assert.True(await TableExistsAsync(connection, ct));
         Assert.Equal(new[] { "server_id", "collector_name", "hour_start" }, await PrimaryKeyColumnsAsync(connection, ct));
-        Assert.Equal(186, await ProbeAsync(scratch.ConnectionString, ct));
+        Assert.Equal(StorageVersion.SchemaVersion, await ProbeAsync(scratch.ConnectionString, ct));
 
         /* Back to V185: the table gone and the ladder at 185. The probe must say 185, not 186. */
+        /* V187 (#5825) sits above this rung, so its sentinel goes too. */
+        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 186;");
         Assert.False(await TableExistsAsync(connection, ct));
@@ -96,8 +98,8 @@ public sealed class CollectionLogHourlyLiveTests
 
         await PgMigrations.MigrateAsync(connection, ct);
         Assert.True(await TableExistsAsync(connection, ct));
-        Assert.Equal(186, await ProbeAsync(scratch.ConnectionString, ct));
-        Assert.Equal(186, await ScalarAsync<int>(connection, ct, "SELECT max(version) FROM darling_schema_version;"));
+        Assert.Equal(StorageVersion.SchemaVersion, await ProbeAsync(scratch.ConnectionString, ct));
+        Assert.Equal(StorageVersion.SchemaVersion, await ScalarAsync<int>(connection, ct, "SELECT max(version) FROM darling_schema_version;"));
 
         /* Idempotent: the rung re-applied over its own table (the stamp rewound, the table kept) changes nothing. */
         await ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 186;");
@@ -105,7 +107,7 @@ public sealed class CollectionLogHourlyLiveTests
         await PgMigrations.MigrateAsync(connection, ct);
         Assert.Equal(1L, await ScalarAsync<long>(connection, ct,
             "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND indexname = 'idx_collection_log_hourly_hour';"));
-        Assert.Equal(186, await ProbeAsync(scratch.ConnectionString, ct));
+        Assert.Equal(StorageVersion.SchemaVersion, await ProbeAsync(scratch.ConnectionString, ct));
     }
 
     [Fact]

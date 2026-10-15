@@ -169,12 +169,32 @@ ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     }
 
     /// <summary>
-    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's newest sentinel), with its index. Safe on a store that
+    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's V186 sentinel), with its index. Safe on a store that
     /// never had it. Nothing before V186 reads it.
     /// </summary>
     internal static async Task DropV186SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.collection_log_hourly;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V187 (#5825): the four per-channel resolution flags, the route override and the alert log's three resolution columns
+    /// (<c>resolution_outcome</c> is the probe's newest sentinel). Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV187SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS config.config_notification
+    DROP COLUMN IF EXISTS slack_send_resolutions,
+    DROP COLUMN IF EXISTS teams_send_resolutions,
+    DROP COLUMN IF EXISTS generic_send_resolutions,
+    DROP COLUMN IF EXISTS email_send_resolutions;
+ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS send_resolutions;
+ALTER TABLE IF EXISTS config.config_alert_log
+    DROP COLUMN IF EXISTS resolution_sent_at,
+    DROP COLUMN IF EXISTS resolution_channels,
+    DROP COLUMN IF EXISTS resolution_outcome;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

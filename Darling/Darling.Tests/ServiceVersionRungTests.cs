@@ -97,8 +97,6 @@ public sealed class ServiceVersionRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();

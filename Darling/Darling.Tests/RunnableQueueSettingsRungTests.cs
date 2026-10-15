@@ -96,22 +96,17 @@ public sealed class RunnableQueueSettingsRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
-        Assert.Equal("hasCollectionLogHourly", parameters[^1].Name);
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^2].Name);
         Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 7].Name);
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 6].Name);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 5].Name);
         Assert.Equal("hasNotificationRouteScope", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
-        Assert.Equal(ProbeOrdinal + 9, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
         /* Every sentinel present answers this build's version (V180's). With the later sentinels absent this rung is the answer, 177; with
@@ -125,7 +120,12 @@ public sealed class RunnableQueueSettingsRungTests
         /* With V182's sentinel (#5506) absent too the answer is V181's. */
         /* With V186's (#5810) and V185's (#5812) sentinels absent the answer is V184's (#5632); with V184's absent too, V183's. */
         var withoutV185 = (object[])all.Clone();
-        withoutV185[ProbeOrdinal + 9] = false;
+        /* V187 (#5825) and any later rung's sentinel are absent in every case below. */
+        for (var i = ProbeOrdinal + 9; i < withoutV185.Length; i++)
+        {
+            withoutV185[i] = false;
+        }
+
         withoutV185[ProbeOrdinal + 8] = false;
         Assert.Equal(184, (int)method.Invoke(null, withoutV185)!);
 

@@ -27,6 +27,11 @@ public partial class NotificationRouteEditDialog : Window
 {
     private const string ExactMetricChoice = "Exact metric name…";
     private const string AgentInheritChoice = "Inherit";
+
+    /* #5825: the route's override of the channels' "send resolutions" setting. */
+    internal const string ResolutionsChannelChoice = "Use channel setting";
+    internal const string ResolutionsAlwaysChoice = "Always";
+    internal const string ResolutionsNeverChoice = "Never";
     private const string AgentOffChoice = "Off";
     private const string AgentInvestigateChoice = "Investigate";
 
@@ -63,6 +68,12 @@ public partial class NotificationRouteEditDialog : Window
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentOffChoice, Tag = NotificationRoute.AgentLevelOff });
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInvestigateChoice, Tag = NotificationRoute.AgentLevelInvestigate });
         ShowAgent(existing ?? new NotificationRouteRow());
+
+        SendResolutionsCombo.Items.Add(new ComboBoxItem { Content = ResolutionsChannelChoice, Tag = null });
+        SendResolutionsCombo.Items.Add(new ComboBoxItem { Content = ResolutionsAlwaysChoice, Tag = true });
+        SendResolutionsCombo.Items.Add(new ComboBoxItem { Content = ResolutionsNeverChoice, Tag = false });
+        var storedResolutions = existing?.SendResolutions;
+        SendResolutionsCombo.SelectedItem = SendResolutionsCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedResolutions));
 
         var scopeOptions = ViewerNotificationRouteScope.ScopeOptions(scopeInputs);
         var picked = existing is null ? scopeOptions[0] : ViewerNotificationRouteScope.OptionFor(existing, scopeOptions);
@@ -246,6 +257,7 @@ public partial class NotificationRouteEditDialog : Window
     private string? ReadAgent()
     {
         Route.AgentLevel = SelectedAgentLevel();
+        Route.SendResolutions = (SendResolutionsCombo.SelectedItem as ComboBoxItem)?.Tag as bool?;
         if (!TryReadNumber(AgentMaxPerHourBox, "Requests per hour", out var perHour, out var error)
             || !TryReadNumber(AgentMaxPerDayBox, "Requests per day", out var perDay, out error)
             || !TryReadNumber(AgentLeaseMinutesBox, "Lease minutes", out var lease, out error)

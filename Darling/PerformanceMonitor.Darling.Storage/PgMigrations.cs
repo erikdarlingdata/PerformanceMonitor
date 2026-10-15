@@ -1234,6 +1234,37 @@ ALTER TABLE collect.read_latency
     private static readonly string V184Sql = InvestigationTables.CreateSql;
 
     /// <summary>
+    /// V187 (#5825): alert resolutions can be sent to the channels that got the fire, opt-in per channel.
+    /// <c>config.config_notification</c> gains four fleet flags, <c>slack_send_resolutions</c>, <c>teams_send_resolutions</c>,
+    /// <c>generic_send_resolutions</c> (the generic webhook) and <c>email_send_resolutions</c>, non-null and FALSE by default,
+    /// so a store that does not turn one on keeps sending no resolution anywhere. <c>config.config_notification_routes</c>
+    /// gains the nullable <c>send_resolutions</c>: NULL follows the channel's flag, TRUE or FALSE overrides it for that
+    /// route's destinations. <c>config.config_alert_log</c> gains what a sent resolution records on its own history row:
+    /// <c>resolution_sent_at</c> (UTC, like <c>alert_time</c>), <c>resolution_channels</c> (the channels it went to) and
+    /// <c>resolution_outcome</c> (what the send did). All three are NULL on every row a resolution was not sent for,
+    /// including every row written before this rung.
+    ///
+    /// <para>Catalog-only and idempotent. No GRANT here: the read roles' column-level SELECT on the notification and routes
+    /// tables is provisioning's (<c>DarlingManagedRoles.ViewerRestrictedConfigTables</c>, mirrored in
+    /// <c>Darling/tools/provision-roles.sql</c>), and every new column is on its non-secret list; the alert log keeps its
+    /// table-wide SELECT. <b>No Lite twin</b> (#5825 decision 4: Lite shows a resolution as a tray notification).</para>
+    /// </summary>
+    private const string V187Sql = @"
+ALTER TABLE config.config_notification
+    ADD COLUMN IF NOT EXISTS slack_send_resolutions boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS teams_send_resolutions boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS generic_send_resolutions boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS email_send_resolutions boolean NOT NULL DEFAULT FALSE;
+
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS send_resolutions boolean;
+
+ALTER TABLE config.config_alert_log
+    ADD COLUMN IF NOT EXISTS resolution_sent_at timestamp,
+    ADD COLUMN IF NOT EXISTS resolution_channels text,
+    ADD COLUMN IF NOT EXISTS resolution_outcome text;";
+
+    /// <summary>
     /// V185 (#5812): the open days of <c>collect.plan_regression_daily</c> are built too, as partial days.
     /// <c>collect.plan_regression_daily_built</c> gains <c>built_through</c>, the <c>first_execution_time</c> the build covered
     /// (exclusive) by a partial build: a day's totals are its rows (by <c>last_execution_time</c>) whose first execution is
@@ -1615,6 +1646,7 @@ $rung$;";
         new Migration(184, "agent-investigations", V184Sql),
         new Migration(185, "plan-regression-partial-days", V185Sql),
         new Migration(186, "collection-log-hourly", V186Sql),
+        new Migration(187, "alert-resolution-delivery", V187Sql),
     };
 
     /// <summary>

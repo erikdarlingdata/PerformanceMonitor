@@ -311,11 +311,12 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         var darling = DarlingRouteFields("internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r, IReadOnlyDictionary<int, (int LastHour, int LastDay)>? agentUse) => new");
         Assert.NotEmpty(darling);
         /* #5632: the agent channel is Darling's alone (Lite has no investigation requests), so its five settings and the
-           route's two request counts are the one named exception; every one of them must still be in Darling's projection. */
+           route's two request counts are the one named exception; every one of them must still be in Darling's projection.
+           #5825: the route's send-resolutions override is Darling's alone too (Lite is out of that issue's scope, decision 4). */
         var darlingOnly = new[]
         {
             "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes",
-            "agent_requests_last_hour", "agent_requests_last_day",
+            "agent_requests_last_hour", "agent_requests_last_day", "send_resolutions",
         };
         Assert.All(darlingOnly, f => Assert.Contains(f, darling));
         Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));

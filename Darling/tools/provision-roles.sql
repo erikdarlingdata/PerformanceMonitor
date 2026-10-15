@@ -588,6 +588,30 @@ GRANT SELECT (agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_mi
     ON config.config_notification_routes TO viewer;
 $v184$;
       END IF;
+      -- V187 (#5825): a route's override of the channels' "send resolutions" flags. Non-secret. Granted here, inside
+      -- the routes table's guard and on its own column, so a store without the table or below V187 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'send_resolutions' AND NOT attisdropped) THEN
+         EXECUTE $v187$
+GRANT SELECT (send_resolutions) ON config.config_notification_routes TO viewer;
+$v187$;
+      END IF;
+   END IF;
+END $$;
+-- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
+-- pagerduty_auto_resolve), so they are granted. Guarded on the column, so a store below V187 still commits the rest
+-- of the carve. This block names config_notification only: a grant on the routes table here, outside that table's
+-- guard, failed on a store without it and rolled the whole carve back (#5855 review).
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.config_notification'::regclass
+                AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
+      EXECUTE $v187$
+GRANT SELECT (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+    ON config.config_notification TO viewer;
+$v187$;
    END IF;
 END $$;
 
@@ -631,6 +655,30 @@ GRANT SELECT (agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_mi
     ON config.config_notification_routes TO mcp;
 $v184$;
       END IF;
+      -- V187 (#5825): a route's override of the channels' "send resolutions" flags. Non-secret. Granted here, inside
+      -- the routes table's guard and on its own column, so a store without the table or below V187 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'send_resolutions' AND NOT attisdropped) THEN
+         EXECUTE $v187$
+GRANT SELECT (send_resolutions) ON config.config_notification_routes TO mcp;
+$v187$;
+      END IF;
+   END IF;
+END $$;
+-- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
+-- pagerduty_auto_resolve), so they are granted. Guarded on the column, so a store below V187 still commits the rest
+-- of the carve. This block names config_notification only: a grant on the routes table here, outside that table's
+-- guard, failed on a store without it and rolled the whole carve back (#5855 review).
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.config_notification'::regclass
+                AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
+      EXECUTE $v187$
+GRANT SELECT (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+    ON config.config_notification TO mcp;
+$v187$;
    END IF;
 END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
@@ -1102,6 +1150,19 @@ GRANT INSERT ON collect.analysis_findings TO mcp;
 GRANT INSERT ON config.analysis_muted TO mcp;
 GRANT UPDATE ON config.config_alert_settings TO mcp;
 GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO mcp;
+-- #5825 (V187): update_alert_settings writes delivery.send_resolutions, the four per-channel resolution flags.
+-- Guarded on the column, so a store below V187 still commits the rest.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.config_notification'::regclass
+                AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
+      EXECUTE $v187$
+GRANT UPDATE (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+    ON config.config_notification TO mcp;
+$v187$;
+   END IF;
+END $$;
 GRANT UPDATE (enabled, modified_at), DELETE ON config.config_notification_routes TO mcp;
 GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;
 REVOKE UPDATE ON config.config_monitored_servers FROM mcp;

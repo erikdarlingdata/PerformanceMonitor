@@ -875,7 +875,9 @@ public class WebhookAlertService
             if (!string.IsNullOrEmpty(database))
                 facts.Add(new { name = "Database", value = TeamsEscape(database) });
             facts.Add(new { name = "Current Value", value = TeamsEscape(currentValue) });
-            facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
+            /* #5825: an alert resolution has no threshold, and an empty fact says nothing. */
+            if (!string.IsNullOrEmpty(thresholdValue))
+                facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
             facts.Add(new { name = "Time (UTC)", value = utcNow.ToString("yyyy-MM-dd HH:mm:ss") });
             facts.Add(new { name = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
@@ -2034,7 +2036,9 @@ public class WebhookAlertService
             if (!string.IsNullOrEmpty(database))
                 fields.Add(new { type = "mrkdwn", text = $"*Database:*\n{SlackEscape(database)}" });
             fields.Add(new { type = "mrkdwn", text = $"*Current Value:*\n{SlackEscape(currentValue)}" });
-            fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{SlackEscape(thresholdValue)}" });
+            /* #5825: an alert resolution has no threshold, and an empty field says nothing. */
+            if (!string.IsNullOrEmpty(thresholdValue))
+                fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{SlackEscape(thresholdValue)}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (UTC):*\n{utcNow:yyyy-MM-dd HH:mm:ss}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (Local):*\n{localNow:yyyy-MM-dd HH:mm:ss}" });
         }
@@ -2716,8 +2720,8 @@ public class WebhookAlertService
     #region PagerDuty
 
     /// <summary>
-    /// Closes the PagerDuty incident an external alert's fire opened (#5654), and does nothing else: a clear is never an
-    /// email, Teams, Slack or generic webhook post. Sends a <c>resolve</c> on the dedup key the fire's trigger used
+    /// Closes the PagerDuty incident an external alert's fire opened (#5654), and does nothing else: the clear's email,
+    /// Teams, Slack and generic webhook posts are #5825's resolution send. Sends a <c>resolve</c> on the dedup key the fire's trigger used
     /// (<paramref name="firingMetric"/> on <paramref name="serverId"/>), to the routing key the route resolves for that
     /// metric, and only when PagerDuty auto-resolve is on. Returns <see cref="AlertChannelOutcome.NotAttempted"/> when it
     /// is off or PagerDuty is not routed for the metric, <see cref="AlertChannelOutcome.Delivered"/> or
@@ -2767,6 +2771,62 @@ public class WebhookAlertService
         }
     }
 
+    /// <summary>
+    /// Posts one alert resolution (#5825) to the Teams, Slack or generic webhook destination its fire reached, in that
+    /// channel's alert shape with <paramref name="title"/> (the resolution's own name, such as "CPU Resolved") as the
+    /// headline. No cooldown and no route: the caller passes the destination the fire used. Null when the post
+    /// succeeded, the error text when it did not; never throws except for the caller's own cancellation.
+    /// </summary>
+    internal async Task<string?> TrySendResolutionAsync(
+        string channel, string destination, AlertResolutionFacts facts, string serverId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var delivery = _settings.SnapshotForDelivery();
+        /* The card's Server fact names the server; the detail prose carries the alert, when it fired and cleared, how
+           long it lasted and the last value; the card's time is the clear's. No threshold row. */
+        var detailText = facts.DetailText();
+        var title = facts.Title;
+        var serverName = facts.ServerName;
+        var triageUrl = facts.TriageUrl;
+        var now = facts.ClearedAtUtc;
+        return channel switch
+        {
+            NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
+                delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                displayName: null, cancellationToken),
+            NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
+                delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                displayName: null, cancellationToken),
+            NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
+                delivery, destination, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
+                cancellationToken),
+            _ => $"{channel} does not carry a resolution post",
+        };
+    }
+
+    /// <summary>
+    /// Closes one PagerDuty incident an alert's fire opened (#5825): a <c>resolve</c> on <paramref name="dedupKey"/> (the
+    /// key the fire's trigger used) to <paramref name="routingKey"/> (the service the fire went to). The caller checks
+    /// <c>pagerduty_auto_resolve</c>. A delivered resolve clears the fire's cooldown entry, as
+    /// <see cref="TrySendPagerDutyResolveAsync"/> does, so the next fire opens a new incident. Null when it posted, the
+    /// error text when it did not; never throws except for the caller's own cancellation.
+    /// </summary>
+    internal async Task<string?> TrySendPagerDutyResolveAsync(
+        string routingKey, string dedupKey, string firingMetric, string serverName, string serverId, string? detailText,
+        CancellationToken cancellationToken = default)
+    {
+        var error = await TrySendPagerDutyAlertAsync(
+            _settings.SnapshotForDelivery(), autoResolve: true, routingKey, firingMetric, serverName, "resolved", "", serverId,
+            context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
+            resolveIncident: true, dedupKeyOverride: dedupKey, cancellationToken: cancellationToken);
+        if (error is null)
+        {
+            _cooldown.ClearMetric(serverId, firingMetric, null);
+        }
+
+        return error;
+    }
+
     internal Func<string, string, Task<string?>>? PostPagerDutyAsyncOverride { get; set; }
 
     /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
@@ -2786,14 +2846,16 @@ public class WebhookAlertService
         DateTime nowUtc,
         string? displayName = null,
         bool resolveIncident = false,
+        string? dedupKeyOverride = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
                the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable
-               metric+server key when there is no incident. */
-            var dedupKey = DerivePagerDutyDedupKey(serverId, metricName, context, autoResolve);
+               metric+server key when there is no incident. #5825: an alert resolution passes the key its fire
+               opened, because the clear carries no incidents to derive it from. */
+            var dedupKey = dedupKeyOverride ?? DerivePagerDutyDedupKey(serverId, metricName, context, autoResolve);
 
             /* #3598: the routed routing key (a PagerDuty SERVICE is a destination); the EU-region flag and
                proxy stay the parent's. */

@@ -129,6 +129,24 @@ public sealed class AdminPageBehaviourTests
         Assert.Contains("ops@example.test", texts);
     }
 
+    /// <summary>#5825: the route's send-resolutions override reads in the route dialog's words (null follows the channel), and
+    /// the settings tab draws the per-channel flags as yes/no, never "—" and never a value that is not a boolean.</summary>
+    [Fact]
+    public void TheSendResolutionsSettingAndRouteOverride_AreDrawnInTheViewersWords()
+    {
+        var routes = Texts(Tab("tab:routes"));
+        Assert.Contains("Send resolutions", routes);
+        Assert.Contains("Always", routes);
+        Assert.Contains("Never", routes);
+        // Route 9 sends null and routes 10 to 13 carry no field: all five follow the channel.
+        Assert.Equal(5, routes.Count(t => t == "Use channel setting"));
+
+        var settings = Texts(Tab("tab:settings"));
+        Assert.Contains("Delivery: send resolutions", settings);
+        Assert.Contains("Slack: yes, Teams: no, Generic webhook: no, Email: yes", settings);
+        Assert.DoesNotContain(settings, t => t.Contains("UNLISTED-RES", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void TheRoutesTab_ShowsWhereEachRouteApplies_AndAnOrphanOrUnreadableScopeNeverReadsAsOk()
     {

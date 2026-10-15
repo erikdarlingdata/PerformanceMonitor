@@ -170,6 +170,48 @@ public sealed class AlertDetailWindowTests
         });
     }
 
+    /* #5825 with #5847: a resolution row's three fields are copied below Status, as the window shows them; a fire row
+       copies none of them. */
+    [Fact]
+    public void CopyText_CarriesAResolutionRowsSend_AndAFireRowCarriesNone()
+    {
+        StaTestThread.Run(() =>
+        {
+            var resolution = new ViewerAlertRow
+            {
+                AlertTime = new DateTime(2026, 10, 15, 9, 30, 0),
+                ServerName = "SQL01",
+                MetricName = "High CPU",
+                AlertSent = true,
+                CurrentValue = 0,
+                ThresholdValue = 0,
+                NotificationType = "webhook",
+                Muted = false,
+                ResolutionSentAt = new DateTime(2026, 10, 15, 13, 30, 5, DateTimeKind.Utc),
+                ResolutionChannels = "Slack,Email",
+                ResolutionOutcome = "sent",
+            };
+            var shown = new AlertDetailWindow(resolution);
+            var fire = new AlertDetailWindow(Row("High CPU"));
+            try
+            {
+                var text = shown.BuildCopyText();
+                Assert.Contains("Status: " + resolution.StatusDisplay + Environment.NewLine
+                    + "Resolution sent: 2026-10-15 13:30:05 UTC" + Environment.NewLine
+                    + "Resolution channels: Slack,Email" + Environment.NewLine
+                    + "Resolution outcome: sent" + Environment.NewLine, text);
+                Assert.Equal("sent", shown.ResolutionOutcomeText.Text);
+
+                Assert.DoesNotContain("Resolution", fire.BuildCopyText());
+            }
+            finally
+            {
+                shown.Close();
+                fire.Close();
+            }
+        });
+    }
+
     [Theory]
     [InlineData("Blocking Detected", true, true)]
     [InlineData("Deadlocks Detected", true, true)]

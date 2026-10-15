@@ -146,4 +146,29 @@ public sealed class AlertHistoryAdviceTests
         Assert.Equal(new[] { "<svg onload=alert(3)> prose" }, Strings(r.GetProperty("paragraphs")));
         Assert.Equal(0, r.GetProperty("imgs").GetInt32());
     }
+
+    /// <summary>#5825: a resolution row's expanded detail shows what its send did (outcome, channels, when), and its
+    /// collapsed summary names the outcome when the row has no detail text; a fire row, whose three fields are null,
+    /// shows none of them.</summary>
+    [Fact]
+    public void AResolutionRow_ShowsItsSendOutcomeChannelsAndTime_AndAFireRowShowsNone()
+    {
+        var r = Run("resolution");
+        var rows = r.GetProperty("rows");
+
+        var resolution = rows.GetProperty("CPU Resolved");
+        Assert.Equal("Resolution: sent", resolution.GetProperty("summary").GetString());
+        Assert.Equal(
+            new[]
+            {
+                "Resolution outcomesent",
+                "Resolution channelsSlack,Email",
+                "Resolution sent" + r.GetProperty("expectedSent").GetString(),
+            },
+            Strings(resolution.GetProperty("fields")));
+
+        var fire = rows.GetProperty("High CPU");
+        Assert.Equal(new[] { "DatabaseSales", "Total CPU97%" }, Strings(fire.GetProperty("fields")));
+        Assert.DoesNotContain("Resolution", fire.GetProperty("summary").GetString()!, StringComparison.Ordinal);
+    }
 }
