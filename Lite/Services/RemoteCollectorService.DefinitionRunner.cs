@@ -478,10 +478,31 @@ public partial class RemoteCollectorService
                     /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
                        budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
                        write already in flight would trade a slow cycle for a partially-written one. */
-                    using (var dbRead = await OpenAzureDatabaseReadAsync(server, databaseName, dbPlan, commandTimeout, dbToken))
+                    /* #5813: the per-database budget on the Query Store runtime-stats read, the same as Darling's (null
+                       for every other collector). Here it also covers the per-database connect, which this host
+                       opens inside the read. Linked to dbToken, so the #2150 budget and shutdown win their own cases. */
+                    using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, dbToken);
+                    var readToken = readBudget?.Token ?? dbToken;
+                    AzureDatabaseRead? openedRead = null;
+                    try
+                    {
+                        openedRead = await OpenAzureDatabaseReadAsync(server, databaseName, dbPlan, commandTimeout, readToken);
+                        batch = await definition.ReadAsync(openedRead.Reader, context, readToken);
+                    }
+                    catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, dbToken))
+                    {
+                        openedRead?.Dispose();
+                        throw new QueryStoreReadTimeoutException(databaseName, QueryStoreReadBudgetSpan, ex);
+                    }
+                    catch
+                    {
+                        openedRead?.Dispose();
+                        throw;
+                    }
+
+                    using (var dbRead = openedRead!)
                     {
                         var dbReader = dbRead.Reader;
-                        batch = await definition.ReadAsync(dbReader, context, dbToken);
 
                         /* #1875: the payload path's probe-failure contract, on the path that used to
                            ignore it. blocked_process_report is the declaring collector that also runs per
@@ -620,7 +641,12 @@ public partial class RemoteCollectorService
                         OnQueryStoreItemFailed(serverId, databaseName);
                     }
 
-                    _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+                    /* #5813: a Query Store read that ran out of its budget is the run's slowest item under its marked
+                       name and warns once per database per UTC day; anything else is the routine skip. */
+                    if (!NoteQueryStoreReadTimeout(server, serverId, ex, fanout))
+                    {
+                        _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+                    }
                 }
             }
 
@@ -826,8 +852,21 @@ public partial class RemoteCollectorService
                         var batch = new List<TRow>();
                         context.DropStagedItemState();
                         using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
-                        using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
-                        await definition.ReadItemAsync(item, itemReader, batch, context, ct);
+                        /* #5813: the per-database budget on this one statement, open through drain (null for every
+                           collector but query_store). A timed-out read ships nothing, so this database's DuckDB
+                           watermark stays and the next pass reads from it; the driver moves on to the next database. */
+                        using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, ct);
+                        var readToken = readBudget?.Token ?? ct;
+                        try
+                        {
+                            using var itemReader = await itemCommand.ExecuteReaderAsync(readToken);
+                            await definition.ReadItemAsync(item, itemReader, batch, context, readToken);
+                        }
+                        catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, ct))
+                        {
+                            throw new QueryStoreReadTimeoutException(item, QueryStoreReadBudgetSpan, ex);
+                        }
+
                         return batch;
                     },
                     writeBatch: (batch, ct) => Task.FromResult(WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context)),
@@ -899,6 +938,13 @@ public partial class RemoteCollectorService
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             OnQueryStoreItemFailed(serverId, item);
+                        }
+
+                        /* #5813: a read that ran out of its budget is the run's slowest item under its marked name,
+                           and warns once per database per UTC day rather than on every pass. */
+                        if (NoteQueryStoreReadTimeout(server, serverId, ex, fanout))
+                        {
+                            return;
                         }
 
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",

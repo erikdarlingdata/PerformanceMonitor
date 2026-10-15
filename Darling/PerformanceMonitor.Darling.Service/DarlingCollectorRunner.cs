@@ -497,6 +497,46 @@ public sealed class DarlingCollectorRunner
 
     internal QueryStoreWatermarkReader QueryStoreWatermarkSeedReader => _queryStoreWatermarkReader;
 
+    /// <summary>The once-per-database-per-UTC-day throttle on the Query Store read's timed-out warning (#5813).</summary>
+    private readonly QueryStoreReadTimeoutLog _queryStoreReadTimeouts = new();
+
+    /// <summary>
+    /// The per-database budget on the live Query Store runtime-stats read (#5813), <see cref="QueryStoreReadBudget.Budget"/>
+    /// in production. Settable so a test can plant a slow read without waiting 30 seconds per database.
+    /// </summary>
+    internal TimeSpan QueryStoreReadBudgetSpan { get; set; } = QueryStoreReadBudget.Budget;
+
+    /// <summary>The clock the timed-out warning's UTC day is read from (#5813); a test moves it across midnight.</summary>
+    internal Func<DateTime> QueryStoreReadTimeoutClockForTests { get; set; } = static () => DateTime.UtcNow;
+
+    /// <summary>
+    /// #5813: one database's live Query Store read ran out of <see cref="QueryStoreReadBudgetSpan"/>. Counts it in the run's
+    /// fan-out cost under its marked name, so <c>slowest_item</c> names it, and logs it at Warning once per database per UTC
+    /// day (Debug for the rest of that day). Returns false, doing nothing, for every other exception, so the caller's own
+    /// log line stands.
+    /// </summary>
+    private bool NoteQueryStoreReadTimeout(ServerRuntime server, Exception exception, FanoutCostAccumulator fanout)
+    {
+        if (!QueryStoreReadBudget.ObserveTimeout(exception, fanout))
+        {
+            return false;
+        }
+
+        var timeout = (QueryStoreReadTimeoutException)exception;
+        if (_queryStoreReadTimeouts.ShouldWarn(server.ServerId, timeout.Database, QueryStoreReadTimeoutClockForTests()))
+        {
+            _logger?.LogWarning(
+                "query_store on '{Server}' timed out: {Message} Logged once per database per UTC day; every timeout is in that run's collection_log row.",
+                server.Config.DisplayName, timeout.Message);
+        }
+        else
+        {
+            _logger?.LogDebug("query_store on '{Server}' timed out again today: {Message}", server.Config.DisplayName, timeout.Message);
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// When a server's live query_store collection last failed a per-database item — the backfill
     /// worker's yield-to-live signal (#2111), read through <see cref="LastQueryStoreItemFailureUtc"/>
@@ -2739,11 +2779,20 @@ public sealed class DarlingCollectorRunner
                            only when the first rowset is available, so this is server-side work before the
                            first row, which no client-side budget shortens. Hoisted out of the `using` header
                            only so the reader below keeps its original disposal scope. */
+                        /* #5813: the per-database budget on the runtime-stats statement, open through drain, the
+                           same as the enumerated readItem (null for every collector but query_store). Linked to
+                           dbToken, so the #2150 item budget and shutdown still win their own cases. */
+                        using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, dbToken);
+                        var readToken = readBudget?.Token ?? dbToken;
                         var openWatch = Stopwatch.StartNew();
                         DbDataReader openedReader;
                         try
                         {
-                            openedReader = await dbCommand.ExecuteReaderAsync(dbToken);
+                            openedReader = await dbCommand.ExecuteReaderAsync(readToken);
+                        }
+                        catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, dbToken))
+                        {
+                            throw new QueryStoreReadTimeoutException(databaseName, QueryStoreReadBudgetSpan, ex);
                         }
                         finally
                         {
@@ -2759,7 +2808,11 @@ public sealed class DarlingCollectorRunner
                         var drainWatch = Stopwatch.StartNew();
                         try
                         {
-                            batch = await definition.ReadAsync(dbReader, context, dbToken);
+                            batch = await definition.ReadAsync(dbReader, context, readToken);
+                        }
+                        catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, dbToken))
+                        {
+                            throw new QueryStoreReadTimeoutException(databaseName, QueryStoreReadBudgetSpan, ex);
                         }
                         finally
                         {
@@ -3065,7 +3118,12 @@ public sealed class DarlingCollectorRunner
                         }
                     }
 
-                    _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+                    /* #5813: a Query Store read that ran out of its budget is the run's slowest item under its marked
+                       name and warns once per database per UTC day; anything else is the routine skip. */
+                    if (!NoteQueryStoreReadTimeout(server, ex, fanout))
+                    {
+                        _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+                    }
 
                     /* #2896: the split, at the SAME Debug as the skip it decomposes — deliberately, and it
                        is the level question the issue raises answered rather than dodged.
@@ -3393,19 +3451,40 @@ public sealed class DarlingCollectorRunner
                            subtracts open from the item total, so an unstamped 500s open hands its whole cost
                            to drain: and blames row streaming for a statement that never returned a row. The
                            flag is set in the same finally so the two can never disagree. */
+                        /* #5813: the per-database budget on this ONE statement, open through drain (null for every
+                           collector but query_store). The plan and text fetches below stay outside it. A timed-out
+                           read ships nothing, so this database's watermark stays where it was and the next pass
+                           reads from it; the driver records the item as failed and moves on to the next database. */
+                        using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, ct);
+                        var readToken = readBudget?.Token ?? ct;
                         var openWatch = Stopwatch.StartNew();
-                        DbDataReader openedReader;
+                        DbDataReader? openedReader = null;
                         try
                         {
-                            openedReader = await itemCommand.ExecuteReaderAsync(ct);
+                            try
+                            {
+                                openedReader = await itemCommand.ExecuteReaderAsync(readToken);
+                            }
+                            finally
+                            {
+                                context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
+                                context.PerItemPhasesMeasured = true;
+                            }
+                            await definition.ReadItemAsync(item, openedReader, batch, context, readToken);
                         }
-                        finally
+                        catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, ct))
                         {
-                            context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
-                            context.PerItemPhasesMeasured = true;
+                            openedReader?.Dispose();
+                            throw new QueryStoreReadTimeoutException(item, QueryStoreReadBudgetSpan, ex);
+                        }
+                        catch
+                        {
+                            /* The reader keeps the scope it always had on success (the fetches below run with it
+                               still open); on any other fault it is closed here, as its `using` used to close it. */
+                            openedReader?.Dispose();
+                            throw;
                         }
                         using var itemReader = openedReader;
-                        await definition.ReadItemAsync(item, itemReader, batch, context, ct);
                         /* #2210 / #2150: this database's plan-XML and statement-text fetches, right after its
                            runtime-stats read. One method, because the Azure SQL Database per-database loop runs the
                            same two for each database it reads; the why and the shape are on the method. */
@@ -3534,6 +3613,13 @@ public sealed class DarlingCollectorRunner
                         {
                             OnQueryStoreItemFailed(server.ServerId, item);
                             DiscardQueryStoreDatabaseWatermark(server, item, stagedDatabaseWatermarks);
+                        }
+
+                        /* #5813: a read that ran out of its budget is the run's slowest item under its marked name,
+                           and warns once per database per UTC day rather than on every pass. */
+                        if (NoteQueryStoreReadTimeout(server, ex, fanout))
+                        {
+                            return;
                         }
 
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
