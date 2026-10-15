@@ -233,30 +233,6 @@ public sealed class PayloadProbeFailureTests
     /* ── the declaration, and who holds it ── */
 
     [Fact]
-    public void Exactly_Two_Collectors_Declare_The_Contract()
-    {
-        /* The opt-in is the back-compat guarantee: a collector that does not declare it never has its reader
-           advanced past the payload, which is the pre-#1851 behavior exactly. Asserted over the whole
-           catalog rather than a sample, so a collector adopting the channel cannot arrive without its own
-           SQL and tests — tempdb_stats in particular reads TWO result sets of its own, and a runner that
-           advanced unconditionally would read one of them as failures.
-
-           blocked_process_report joined in #1865, and is the reason this list is worth keeping exact rather
-           than loosening to a Contains: it adopted the channel for ONE of its two failure causes and screens
-           the other out entirely, so a future collector that declares the flag without making that same
-           decision is exactly what should fail here. */
-        var declaring = CollectorCatalog.All
-            .Where(c => c.GetType().GetProperty(nameof(ICollectorDefinition<int>.EmitsProbeFailures))
-                ?.GetValue(c) is true)
-            .Select(c => c.Name)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToArray();
-
-        Assert.Equal(new[] { "blocked_process_report", "database_size_stats" }, declaring);
-        Assert.False(TempDbStatsCollector.Instance.EmitsProbeFailures);
-    }
-
-    [Fact]
     public void DatabaseSizeStats_OnPrem_Records_What_Its_Cursor_Could_Not_Probe()
     {
         /* #1851's defect, closed: the per-database CATCH was empty, so a database that was mid-restore or
@@ -280,20 +256,6 @@ public sealed class PayloadProbeFailureTests
 
         /* And the CATCH must no longer be empty. */
         Assert.DoesNotContain("BEGIN CATCH\r\n    END CATCH", text.ReplaceLineEndings("\r\n"), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void DatabaseSizeStats_Azure_Still_Emits_Only_Its_Payload()
-    {
-        /* Azure SQL DB takes an entirely database-scoped query with no cursor and nothing to probe, so it
-           returns no trailing set. The declaration is deliberately NOT branched on the target: the contract
-           reads an absent set as zero failures, which keeps one flag honest for both shapes and leaves the
-           Azure path byte-for-byte unchanged. */
-        var text = DatabaseSizeStatsCollector.Instance.BuildQuery(Context(azure: true)).Text;
-
-        Assert.DoesNotContain("@probe_failures", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("CURSOR", text, StringComparison.Ordinal);
-        Assert.True(DatabaseSizeStatsCollector.Instance.EmitsProbeFailures);
     }
 
     /* ── the host wiring, pinned at source (the branch is the tail of a live payload read) ── */

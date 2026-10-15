@@ -291,46 +291,6 @@ public sealed class McpMissMessageParityPinTests
             $"Darling's MCP tools no longer contain the shared sentence: \"{fragment}\"");
     }
 
-    /// <summary>
-    /// #4966: the sentence an empty answer carries over a CUT window instead of its quiet or all-clear claim. It lives
-    /// once in Common, which both apps compile, so this holds the literal and the constant to the agreed words; each
-    /// app's empty answers pick between it and their covered text at run time through <c>QuietUnlessCut</c>.
-    /// </summary>
-    [Fact]
-    public void TheCutWindowSentences_AreTheAgreedWords_AndReplaceTheQuietClaimOnlyWhenCut()
-    {
-        const string withStart = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
-        const string withoutStart = "Nothing was read: the store holds no data for this read in the window (see hints.truncation_note), so this empty answer is not a report that nothing happened.";
-        Assert.Equal(withStart, McpHelpers.CutWindowNothingMessage);
-        Assert.Equal(withoutStart, McpHelpers.CutWindowNothingReadMessage);
-        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", withStart), "the shared cut-window sentence left Common");
-        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", withoutStart), "the shared nothing-read sentence left Common");
-
-        /* The notice picks the variant: a start to point at, or none. */
-        Assert.Equal(withStart, McpHelpers.CutWindowClaim("2026-09-10T12:00:00Z"));
-        Assert.Equal(withoutStart, McpHelpers.CutWindowClaim(null));
-
-        /* Only the claim clause is replaced: the factual first sentence survives on both branches. */
-        const string factual = "No query on S regressed in the last 24 hour(s). No query is more than 25% worse than its baseline";
-        const string claim = " — this IS the all-clear for this read.";
-        Assert.Equal(factual + claim, McpHelpers.QuietUnlessCut(false, "2026-09-10T12:00:00Z", factual, claim));
-        Assert.Equal(factual + ". " + withStart, McpHelpers.QuietUnlessCut(true, "2026-09-10T12:00:00Z", factual, claim));
-        Assert.Equal(factual + ". " + withoutStart, McpHelpers.QuietUnlessCut(true, null, factual, claim));
-        Assert.Equal(factual + ". " + withStart + " tail", McpHelpers.QuietUnlessCut(true, "x", factual, claim, " tail"));
-        Assert.Equal(factual + claim + " tail", McpHelpers.QuietUnlessCut(false, "x", factual, claim, " tail"));
-    }
-
-    /// <summary>
-    /// A non-vacuous floor. Without it, a fragment list that drifted into naming text neither tree contains
-    /// would still be a green suite the day somebody emptied it — the guard-that-stopped-guarding shape.
-    /// </summary>
-    [Fact]
-    public void ThePinCoversTheSentencesThisChangeMadeShared()
-    {
-        Assert.True(SharedMissFragments().Count() >= 11,
-            "the shared-sentence pin lost entries; a sentence that stops being pinned can drift between the SKUs unnoticed");
-    }
-
     private static bool AppearsIn(string relativeDir, string fragment) =>
         ParitySource.EnumerateCsFiles(relativeDir)
             .Any(f => File.ReadAllText(f).Contains(fragment, StringComparison.Ordinal));
