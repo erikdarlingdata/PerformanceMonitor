@@ -118,7 +118,8 @@ public sealed class DarlingMcpInvestigationTools
         "within the route's hourly and daily limits; alerts of one server and family join one request inside a 30-minute " +
         "window. States: open (claimable), claimed (a live lease), reported, closed, expired (past its expiry, or out of its " +
         "three claims). Filters are optional: state, server_name (exact, then partial), family (blocking, query_performance, " +
-        "resources, availability, jobs, self_monitor, other), limit (1-100, default 20).")]
+        "resources, availability, jobs, self_monitor, other), limit (1-100, default 20). requests_returned is how many rows " +
+        "you got; truncated says more requests matched than limit (raise limit or narrow the filters).")]
     public static async Task<string> ListInvestigationRequests(
         NpgsqlDataSource postgres,
         [Description("open, claimed, reported, closed or expired. Omit for all.")] string? state = null,
@@ -145,12 +146,16 @@ public sealed class DarlingMcpInvestigationTools
                 serverId = resolved.ServerId;
             }
 
-            var rows = await Store(postgres).ListAsync(state, serverId, family, limit, cancellationToken);
+            /* #5834, the #3699 shape: read one row past the limit, return the page, and say whether more matched. */
+            var fetched = await Store(postgres).ListAsync(state, serverId, family, limit + 1, cancellationToken);
+            var truncated = fetched.Count > limit;
+            IReadOnlyList<InvestigationRequestRow> rows = truncated ? fetched.Take(limit).ToList() : fetched;
             return JsonSerializer.Serialize(new
             {
                 status = rows.Count == 0 ? "empty" : "ok",
                 message = rows.Count == 0 ? "No investigation request matches these filters." : null,
-                count = rows.Count,
+                requests_returned = rows.Count,
+                truncated,
                 requests = rows.Select(RequestPayload),
             }, McpHelpers.JsonOptions);
         }
@@ -758,6 +763,9 @@ public sealed class DarlingMcpInvestigationTools
         "root_cause, evidence and summary as the agent returned them: unreviewed and self-attributed, so read them as an " +
         "agent's claim, not a finding. The journal lists what happened to each request, newest first (opened, joined, " +
         "claimed, refused with its reason, lease_expired, reported, expired, claims_exhausted), at most 200 rows. " +
+        "THE WINDOW IS BOUNDED AT 100 REQUESTS, newest first: requests_returned is how many you got, truncated says the " +
+        "window held more (the reports and journal are those of the returned requests only; narrow hours_back or pass " +
+        "server_name or request_id), and journal_truncated says their journal held more than 200 rows. " +
         "hours_back 1-168, default 24.")]
     public static Task<string> GetInvestigationReports(
         NpgsqlDataSource postgres,
@@ -891,7 +899,9 @@ public sealed class DarlingMcpInvestigationTools
         {
             ["status"] = "ok",
             ["hours_back"] = hoursBack,
-            ["request_count"] = read.Requests.Count,
+            ["requests_returned"] = read.Requests.Count,
+            ["truncated"] = read.RequestsTruncated,
+            ["journal_truncated"] = read.JournalTruncated,
             ["requests"] = JsonSerializer.SerializeToNode(read.Requests.Select(RequestPayload), McpHelpers.JsonOptions),
             ["reports"] = reports,
             ["journal"] = journal,
