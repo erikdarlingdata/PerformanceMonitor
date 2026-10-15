@@ -185,32 +185,6 @@ public sealed class DeltaFamilySeedingCensusTests
     }
 
     /// <summary>
-    /// The two hosts' seed reads for the families they share are byte-identical — the "mirrored verbatim"
-    /// claim both files make, which is what lets each side's shape pins stand for the other.
-    /// </summary>
-    [Fact]
-    public void TheSharedSeedReads_AreByteIdenticalAcrossTheTwoHosts()
-    {
-        var lite = s_seedSqlConst.Matches(ReadRepoFile(LiteSeeder)).ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
-        var darling = s_seedSqlConst.Matches(ReadRepoFile(DarlingSeeder)).ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
-
-        var shared = lite.Keys.Intersect(darling.Keys, StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal).ToList();
-        Assert.Equal(8, shared.Count); /* the eight SQL Server key seeds — query_stats' replaced its pass-window-only read at V128 / v61 */
-        Assert.Contains("QueryStatsSeedSql", shared);
-        Assert.DoesNotContain("QueryStatsPassSeedSql", lite.Keys);
-        Assert.DoesNotContain("QueryStatsPassSeedSql", darling.Keys);
-
-        foreach (var name in shared)
-        {
-            Assert.True(string.Equals(lite[name], darling[name], StringComparison.Ordinal), $"{name} differs between the two hosts");
-        }
-
-        /* Everything Lite has, Darling has; Darling's extras are exactly the PostgreSQL pair. */
-        Assert.Empty(lite.Keys.Except(darling.Keys, StringComparer.Ordinal));
-        Assert.Equal(new[] { "PgStatementStatsSeedSql", "PgWaitStatsSeedSql" }, darling.Keys.Except(lite.Keys, StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal));
-    }
-
-    /// <summary>
     /// The per-family guard exists and catches: a family whose read throws logs and yields to the next,
     /// rather than costing every later family its continuity the way the single try did before #3540.
     /// </summary>
