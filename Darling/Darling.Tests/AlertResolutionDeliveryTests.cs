@@ -192,6 +192,34 @@ public sealed class AlertResolutionDeliveryTests
         Assert.Equal(slackPosts, routed.Bodies.Count);
     }
 
+    /// <summary>The deliverer that delivered the fire still remembers it at the clear (no restart between). A route
+    /// disabled or deleted since the fire gets nothing, exactly as after a restart: no post to the destination the fire
+    /// reached, and the row says why (#5855 review: this path used to post the clear and record it sent).</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AClearWhoseRouteWasDisabledOrDeletedSinceTheFire_SendsNothing_AndTheRowSaysWhy_WithoutARestart(bool deleted)
+    {
+        using var routed = new CapturingWebhookEndpoint();
+        var config = new DarlingConfig();
+        config.Webhooks.SlackSendResolutions = true;
+        var route = new NotificationRoute(1, Metric, "", routed.Url, "", "", "", true);
+        config.NotificationRoutes = new[] { route };
+        var rig = Rig.Build(config);
+
+        await rig.FireAsync();
+        Assert.Single(routed.Bodies);
+        config.NotificationRoutes = deleted ? Array.Empty<NotificationRoute>() : new[] { route with { Enabled = false } };
+        await rig.Deliverer.DeliverResolutionAsync(CpuResolution(), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Single(routed.Bodies);
+        var row = rig.History.Records[^1];
+        Assert.Equal("route deleted or disabled: Slack", row.ResolutionOutcome);
+        Assert.Equal(NotificationRouter.SlackChannel, row.ResolutionChannels);
+        Assert.Null(row.ResolutionSentAtUtc);
+        Assert.False(row.AlertSent);
+    }
+
     /// <summary>A resolution whose post fails says so on its row, naming the channel and not the error (which can carry
     /// the URL), and records no sent time.</summary>
     [Fact]

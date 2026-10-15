@@ -478,21 +478,34 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 continue;
             }
 
+            /* The route that carried the fire, as it is now. Deleted or disabled since the fire: the same answer as the
+               history path below (#5855 review), so the clear goes nowhere on that channel and the row says why. */
+            var route = RouteNow(reached.RouteId, routes, out var gone);
+            if (gone)
+            {
+                if (!fire.RouteGoneChannels.Contains(channel))
+                {
+                    fire.RouteGoneChannels.Add(channel);
+                }
+
+                continue;
+            }
+
             if (channel == NotificationRouter.PagerDutyChannel
                 && (!options.ClosePagerDuty || fire.PagerDutyDedupKeys.Count == 0))
             {
                 continue;
             }
 
-            var route = reached.RouteId is { } routeId ? routes.FirstOrDefault(r => r.RouteId == routeId) : null;
             if (NotificationRouteResolutions.SendsResolutions(route, channel, flags))
             {
                 targets.Add((channel, reached.Destination));
             }
         }
 
-        /* A channel whose route was deleted or disabled since the fire (read back from history) has no destination now.
-           Nothing goes there, and the row says why, where the channel's own setting would have sent the clear. */
+        /* A channel whose route was deleted or disabled since the fire (found above from memory, or read back from history)
+           has no destination now. Nothing goes there, and the row says why, where the channel's own setting would have sent
+           the clear. */
         foreach (var channel in s_channelOrder)
         {
             if (fire.RouteGoneChannels.Contains(channel)
@@ -697,20 +710,40 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         return fire;
     }
 
+    /// <summary>The route that supplied a channel at the fire, as it is now (#5825): the one place a clear decides whether that
+    /// route is gone, for the memory path and the history path alike. Null with <paramref name="routeGone"/> false when no
+    /// route supplied the channel; null with it true when the route was deleted, or disabled (a disabled route is skipped at
+    /// resolution exactly as if it did not exist, <see cref="NotificationRoute.Enabled"/>).</summary>
+    private static NotificationRoute? RouteNow(int? routeId, IReadOnlyList<NotificationRoute> routes, out bool routeGone)
+    {
+        routeGone = false;
+        if (routeId is not { } id)
+        {
+            return null;
+        }
+
+        var route = routes.FirstOrDefault(r => r.RouteId == id);
+        if (route is null || !route.Enabled)
+        {
+            routeGone = true;
+            return null;
+        }
+
+        return route;
+    }
+
     /// <summary>A channel's destination now (#5825): the route's own when a route supplied it at the fire, else the
     /// channel's current default. <paramref name="routeGone"/> is true when that route is deleted or disabled.</summary>
     private string? CurrentDestination(string channel, int? routeId, IReadOnlyList<NotificationRoute> routes, out bool routeGone)
     {
-        routeGone = false;
-        if (routeId is { } id)
+        var route = RouteNow(routeId, routes, out routeGone);
+        if (routeGone)
         {
-            var route = routes.FirstOrDefault(r => r.RouteId == id);
-            if (route is null || !route.Enabled)
-            {
-                routeGone = true;
-                return null;
-            }
+            return null;
+        }
 
+        if (route is not null)
+        {
             var own = channel switch
             {
                 NotificationRouter.TeamsChannel => route.TeamsUrl,
