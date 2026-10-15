@@ -7,8 +7,6 @@
  */
 
 using System;
-using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading;
 using PerformanceMonitor.Collectors;
 using Xunit;
@@ -16,13 +14,12 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #5813: the Query Store read budget's shared pieces, and its wiring into all four per-database read sites (Darling's
-/// enumerated readItem and Azure loop, Lite's twins). <see cref="QueryStoreReadBudgetLiveTests"/> drives one site end to
-/// end; these pins keep the other three from drifting off the same shape.
+/// #5813: the Query Store read budget's shared pieces. Its wiring into the four per-database read sites (Darling's
+/// enumerated arm and Azure loop, Lite's twins) is driven end to end by <see cref="QueryStoreReadBudgetLiveTests"/> and
+/// Lite's <c>QueryStoreReadBudgetLiteTests</c>.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
-public sealed class QueryStoreReadBudgetWiringPinTests
+public sealed class QueryStoreReadBudgetTests
 {
     [Fact]
     public void TheBudgetIsThirtySeconds_ATenthOfTheFiveMinuteCadence()
@@ -111,42 +108,5 @@ public sealed class QueryStoreReadBudgetWiringPinTests
         using var budget = QueryStoreReadBudget.Start("query_store", TimeSpan.FromMinutes(5), outer.Token);
         outer.Cancel();
         Assert.False(QueryStoreReadBudget.Expired(budget, outer.Token));
-    }
-
-    [Theory]
-    [InlineData("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")]
-    [InlineData("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")]
-    public void BothFanOutArms_BudgetTheRead_AndNoteTheTimeout(string a, string b, string c)
-    {
-        var code = RepoFile.ReadRepoFileLf(a, b, c);
-
-        /* Two reads, two translations to the timeout, two error arms that note it: the enumerated arm and the Azure arm. */
-        Assert.Equal(2, Regex.Matches(code, @"QueryStoreReadBudget\.Start\(definition\.Name, QueryStoreReadBudgetSpan, ").Count);
-        Assert.True(Regex.Matches(code, @"when \(ex is not OutOfMemoryException && QueryStoreReadBudget\.Expired\(readBudget, ").Count >= 2);
-        Assert.Equal(2, Regex.Matches(code, @"NoteQueryStoreReadTimeout\(server, ").Count);
-
-        /* The reads run on the budget's token, never the item token, so only the read is cut. */
-        Assert.True(code.Contains("ExecuteReaderAsync(readToken)", StringComparison.Ordinal));
-        Assert.True(Regex.Matches(code, @"Read(Item)?Async\([^;]*readToken\)").Count >= 2);
-    }
-
-    /// <summary>
-    /// The one-database server: when every database failed, both arms of both products hand the pass's fan-out to the
-    /// ERROR row, directly before the rethrow, so a timed-out database is named there. Darling stamps it on the exception
-    /// and the worker's general ERROR arm reads it back; Lite puts it in the telemetry slot its ERROR row already reads.
-    /// </summary>
-    [Fact]
-    public void AnAllFailedRun_CarriesItsFanoutToTheErrorRow_InBothProducts()
-    {
-        var runner = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
-        Assert.Equal(2, Regex.Matches(
-            runner, @"CollectorFaultFanout\.Stamp\((firstFailure|driverResult\.FirstError), fanout\.Result\);[^\n]*\n\s*System\.Runtime\.ExceptionServices\.ExceptionDispatchInfo\.Capture\(\1!?\)\.Throw\(\);").Count);
-
-        var worker = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        Assert.Single(Regex.Matches(worker, @"""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout\.For\(ex\)"));
-
-        var lite = RepoFile.ReadRepoFileLf("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs");
-        Assert.Equal(2, Regex.Matches(
-            lite, @"telemetry\.Fanout = fanout\.Result;[^\n]*\n\s*System\.Runtime\.ExceptionServices\.ExceptionDispatchInfo\.Capture\((firstFailure|driverResult\.FirstError!)\)\.Throw\(\);").Count);
     }
 }

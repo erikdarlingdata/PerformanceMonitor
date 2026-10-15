@@ -36,7 +36,8 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// Supplies the primary reader of the server-wide (not per-database) single-query path instead of a live
-    /// connection (#5320, the twin of <see cref="AzureDatabaseReaderOverrideForTests"/>). Null in production.
+    /// connection (#5320, the twin of <see cref="AzureDatabaseReaderOverrideForTests"/>), and the enumeration and
+    /// per-item readers of the enumerated arm on the same connection (#5813). Null in production.
     /// </summary>
     internal Func<CollectorQuery, DbDataReader>? ServerReaderOverrideForTests { get; set; }
 
@@ -711,7 +712,9 @@ public partial class RemoteCollectorService
                 /* Enumeration always uses the host default timeout, matching the originals —
                    the per-collector override applies only to the heavy per-item commands. */
                 using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
-                using (var enumerationReader = await enumerationCommand.ExecuteReaderAsync(cancellationToken))
+                using (var enumerationReader = ServerReaderOverrideForTests is { } enumerationOverride
+                    ? enumerationOverride(enumerationPlan)
+                    : await enumerationCommand.ExecuteReaderAsync(cancellationToken))
                 {
                     /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
                        enumeration could not probe. Both hosts route through it so the item read, the
@@ -868,7 +871,8 @@ public partial class RemoteCollectorService
                     {
                         var batch = new List<TRow>();
                         context.DropStagedItemState();
-                        using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
+                        var itemPlan = definition.BuildPerItemQuery(item, context);
+                        using var itemCommand = CreateCollectorCommand(itemPlan, sqlConnection, itemTimeout);
                         /* #5813: the per-database budget on this one statement, open through drain (null for every
                            collector but query_store). A timed-out read ships nothing, so this database's DuckDB
                            watermark stays and the next pass reads from it; the driver moves on to the next database. */
@@ -876,7 +880,9 @@ public partial class RemoteCollectorService
                         var readToken = readBudget?.Token ?? ct;
                         try
                         {
-                            using var itemReader = await itemCommand.ExecuteReaderAsync(readToken);
+                            using var itemReader = ServerReaderOverrideForTests is { } itemOverride
+                                ? itemOverride(itemPlan)
+                                : await itemCommand.ExecuteReaderAsync(readToken);
                             await definition.ReadItemAsync(item, itemReader, batch, context, readToken);
                         }
                         catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, ct))

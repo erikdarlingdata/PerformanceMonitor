@@ -35,8 +35,8 @@ namespace Lite.Tests;
 /// from the same cutoff, and <c>slowest_item</c> names the database with its marker and the budget. On a one-database
 /// server that row is the ERROR row; with a sibling that answered it is the SUCCESS row with the partial-failure note.
 ///
-/// <para>The enumerated arm wraps the same statement the same way; it needs a live connection to enumerate, so it stays
-/// under the source pins in <c>QueryStoreReadBudgetWiringPinTests</c>.</para>
+/// <para>The enumerated arm (every engine but Azure SQL Database) is driven the same way through
+/// <c>ServerReaderOverrideForTests</c>, which supplies its enumeration and per-database readers.</para>
 /// </summary>
 public sealed class QueryStoreReadBudgetLiteTests : IDisposable
 {
@@ -158,6 +158,34 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         Assert.Equal(30_000, fanout.GetProperty("slowest_ms").GetInt32());
     }
 
+    /// <summary>
+    /// The enumerated arm: query_store lists the server's databases and reads each on the same connection. The only
+    /// database's read never answers, so the read is cut at the budget and the run's ERROR row names that database with
+    /// the budget, as the Azure loop's row does. Without the budget the read would wait out the guard and write no row.
+    /// </summary>
+    [Fact]
+    public async Task TheEnumeratedArm_CutsATimedOutRead_AndItsErrorRowNamesTheDatabase()
+    {
+        var fixture = await BuildFixtureAsync(engineEdition: 3);
+        var enumeration = new DataTable();
+        enumeration.Columns.Add("database_name", typeof(string));
+        enumeration.Rows.Add(Alpha);
+        fixture.Service.ServerReaderOverrideForTests = plan =>
+            plan.Parameters?.Any(static p => p.Name == "@cutoff_time") == true
+                ? new NeverAnsweringReader()
+                : enumeration.CreateDataReader();
+
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await fixture.Service.RunCollectorAsync(fixture.Server, QueryStoreCollector.Instance.Name, guard.Token);
+
+        var cut = await NewestLogRowAsync(fixture);
+        Assert.Equal("ERROR", cut.Status);
+        Assert.Contains("timed out", cut.Error ?? string.Empty, StringComparison.Ordinal);
+        Assert.Equal(Alpha, cut.SlowestItem);
+        Assert.Equal((int)Budget.TotalMilliseconds, cut.SlowestItemMs);
+        Assert.Equal(1, cut.ItemCount);
+    }
+
     private sealed record Fixture(RemoteCollectorService Service, ServerConnection Server, int ServerId, DuckDbInitializer DuckDb, ServerManager Servers);
 
     /// <summary>
@@ -233,8 +261,9 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
     }
 
     /// <summary>A logical-server registration on the Azure SQL Database engine edition, so query_store takes the
-    /// per-database loop, with the read budget at one second.</summary>
-    private async Task<Fixture> BuildFixtureAsync()
+    /// per-database loop, with the read budget at one second. Any other <paramref name="engineEdition"/> takes the
+    /// enumerated arm.</summary>
+    private async Task<Fixture> BuildFixtureAsync(int engineEdition = 5)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
@@ -243,7 +272,7 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         var serverManager = new ServerManager(_configDir);
         var server = new ServerConnection { ServerName = "azure-test", DisplayName = "azure-test" };
         serverManager.AddServer(server);
-        serverManager.GetConnectionStatus(server.Id).SqlEngineEdition = 5;
+        serverManager.GetConnectionStatus(server.Id).SqlEngineEdition = engineEdition;
 
         var service = new RemoteCollectorService(duckDb, serverManager, new ScheduleManager(_configDir))
         {

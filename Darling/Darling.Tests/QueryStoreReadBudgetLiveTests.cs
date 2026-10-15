@@ -16,9 +16,12 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -30,8 +33,8 @@ namespace Darling.Tests;
 /// cut at the read budget, that database's watermark does not move, the sibling database is written in the same pass,
 /// the timed-out database is the run's slowest item under its marker, and the next pass that can read it resumes from
 /// the same watermark with every interval stored exactly once. The timed-out warning is logged once per database per
-/// UTC day. The enumerated arm wraps the same statement the same way; its wiring is pinned by
-/// <see cref="QueryStoreReadBudgetWiringPinTests"/>. The same harness reaches the plan-XML fetch (its gate is the
+/// UTC day. The enumerated arm (every engine but Azure SQL Database) is driven through the same fake, which lists the
+/// databases and reads each one's <c>[db].sys.sp_executesql</c> statement. The same harness reaches the plan-XML fetch (its gate is the
 /// provider's engine since #5813, a fact the fake states), so the plan fetch's time budget is driven here too.
 ///
 /// <para><b>#1776 own-store</b> - every test here creates and drops its own scratch database through
@@ -46,11 +49,11 @@ public sealed class QueryStoreReadBudgetLiveTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static ServerRuntime MakeServer() => new()
+    private static ServerRuntime MakeServer(bool azure = true) => new()
     {
         Config = new MonitoredServer { Name = "t", Host = "h" },
         ConnectionString = "Server=azure;Database=master",
-        Target = new CollectorTargetInfo { IsAzureSqlDb = true, Engine = CollectorTargetEngine.SqlServer },
+        Target = new CollectorTargetInfo { IsAzureSqlDb = azure, Engine = CollectorTargetEngine.SqlServer },
         StorageName = "h",
         ServerId = LiveServerId,
     };
@@ -66,6 +69,9 @@ public sealed class QueryStoreReadBudgetLiveTests
         public Dictionary<string, List<object[]>> Rows { get; } = new(StringComparer.Ordinal);
         public string? SlowOn { get; set; }
         public int SlowReads;
+
+        /// <summary>The databases the enumerated arm's list query returns (null on the Azure arm, which lists by override).</summary>
+        public List<string>? Enumerated { get; set; }
 
         /// <summary>
         /// #5813 plan fetch: how long the statement takes per requested plan before it ships its first row, the stand-in
@@ -343,11 +349,19 @@ public sealed class QueryStoreReadBudgetLiveTests
         Assert.Equal((int)Budget.TotalMilliseconds, carried.Value.SlowestItemMs);
         Assert.Equal(1, carried.Value.ItemCount);
 
-        /* The row, written as the worker's general ERROR arm writes it (fanout: CollectorFaultFanout.For(ex); that
-           expression is pinned in QueryStoreReadBudgetWiringPinTests). */
-        await DarlingObservability.LogCollectionAsync(
-            rig.Source, MakeServer(), QueryStoreCollector.Instance.Name, "ERROR", 0, (long)Budget.TotalMilliseconds, 0, timeout.Message,
-            fanout: CollectorFaultFanout.For(timeout), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, rig.Log, token);
+        /* The same pass through the worker: its general ERROR arm reads the fan-out back off the exception into the row. */
+        var config = new MonitoredServer { Name = "t", Host = "h" };
+        var loop = new DarlingWorker.ServerLoopState { Config = config, Runtime = MakeServer() };
+        var worker = new DarlingWorker(
+            NullLogger<DarlingWorker>.Instance, NullLoggerFactory.Instance, new McpRuntimeState(), new WebRuntimeState(),
+            new MonitoredServerRegistryState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(),
+            new ReadLatencyAccumulator())
+        {
+            StoreForTests = rig.Source,
+        };
+        var effective = StoreConfigProvider.ResolveSchedule(QueryStoreCollector.Instance.Name, LiveServerId, worker.ScheduleOverridesForTest);
+        Assert.False(await worker.RunOnLoadAsync(loop, rig.Runner, QueryStoreCollector.Instance.Name, LiveServerId, effective, token));
+        Assert.Equal(2, target.SlowReads);
         var row = await NewestLogRowAsync(rig, token);
         Assert.Equal("ERROR", row.Status);
         Assert.Equal(Alpha, row.SlowestItem);
@@ -361,6 +375,37 @@ public sealed class QueryStoreReadBudgetLiveTests
         await PassAsync(rig, target, token, Alpha);
         Assert.Equal(new Dictionary<long, long> { [1] = 1, [2] = 1 }, await StoredAsync(rig, Alpha, token));
         Assert.Equal(second, await StoreAsync(rig.Runner, Alpha, token));
+    }
+
+    /// <summary>
+    /// The enumerated arm (every engine but Azure SQL Database): query_store lists the databases, then reads each on the
+    /// same connection. The only database's read never answers, so it is cut at the budget, logged as timed out, and the
+    /// rethrown timeout carries the fan-out that names it with the budget. Without the budget the read would wait out the
+    /// guard and surface as a cancellation instead.
+    /// </summary>
+    [Fact]
+    public async Task TheEnumeratedArm_CutsATimedOutRead_AndCarriesItsFanoutToTheRethrow()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 read-budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+
+        var target = new Target { SlowOn = Alpha, Enumerated = [Alpha] };
+        var provider = new FakeTargetProvider(target);
+        rig.Runner.TargetProviderOverrideForTests = _ => provider;
+        using var guard = CancellationTokenSource.CreateLinkedTokenSource(token);
+        guard.CancelAfter(TimeSpan.FromSeconds(20));
+
+        var timeout = await Assert.ThrowsAsync<QueryStoreReadTimeoutException>(
+            () => rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer(azure: false), guard.Token));
+        Assert.Equal(1, target.SlowReads);
+        Assert.Equal(Alpha, timeout.Database);
+        var carried = CollectorFaultFanout.For(timeout);
+        Assert.NotNull(carried);
+        Assert.Equal(Alpha, carried!.Value.SlowestItem);
+        Assert.Equal((int)Budget.TotalMilliseconds, carried.Value.SlowestItemMs);
+        Assert.Equal(1, carried.Value.ItemCount);
+        Assert.Equal(1, rig.Log.TimedOutWarnings(Alpha));
     }
 
     /// <summary>
@@ -697,19 +742,27 @@ public sealed class QueryStoreReadBudgetLiveTests
                 return new PlanReader(target, ids);
             }
 
+            if (cutoff is null && target.Enumerated is { } listed && query.Text.Contains("FROM sys.databases AS d", StringComparison.Ordinal))
+            {
+                return new Reader(listed.Select(static d => new object[] { d }).ToArray());
+            }
+
             if (cutoff is null)
             {
                 return new Reader(Array.Empty<object[]>());
             }
 
-            if (owner.DatabaseName == target.SlowOn)
+            /* The enumerated arm reads every database on the master connection through [db].sys.sp_executesql. */
+            var item = System.Text.RegularExpressions.Regex.Match(query.Text, @"EXECUTE \[([^\]]+)\]\.sys\.sp_executesql");
+            var database = item.Success ? item.Groups[1].Value : owner.DatabaseName;
+            if (database == target.SlowOn)
             {
                 Interlocked.Increment(ref target.SlowReads);
                 await Task.Delay(Timeout.Infinite, cancellationToken);
             }
 
             var floor = DateTime.SpecifyKind(cutoff.Value, DateTimeKind.Utc);
-            var rows = target.Rows.TryGetValue(owner.DatabaseName, out var all) ? all : new List<object[]>();
+            var rows = target.Rows.TryGetValue(database, out var all) ? all : new List<object[]>();
             return new Reader(rows.Where(r => ((DateTimeOffset)r[4]).UtcDateTime > floor).ToArray());
         }
     }
