@@ -108,6 +108,7 @@ public partial class SettingsWindow : Window
 
         _appSettingsStore = appSettingsStore;
         _appSettings = appSettingsStore.Load();
+        SelectTabByName(_appSettings.SettingsWindowTab);
         _dataService = dataService;
         _servers = servers ?? Array.Empty<DarlingServer>();
 
@@ -255,6 +256,90 @@ public partial class SettingsWindow : Window
 
     /// <summary>Reflects a read-only seat: a banner + the operator-action buttons disabled. The threshold
     /// inputs stay visible for reference; a Save attempt surfaces the friendly read-only message.</summary>
+    // ── Tabs (#5846) ──
+
+    /// <summary>The tab that holds <paramref name="element"/>, or null for the window-wide parts (the title, the
+    /// read-only banner, Save and Close). Walks the LOGICAL tree: a tab that is not selected keeps its content as a
+    /// logical child, while that content is out of the visual tree.</summary>
+    internal static TabItem? TabOf(DependencyObject? element)
+    {
+        for (var node = element; node is not null; node = LogicalTreeHelper.GetParent(node))
+        {
+            if (node is TabItem tab)
+            {
+                return tab;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Opens the tab holding <paramref name="element"/>, if it is on one.</summary>
+    private void SelectTabOf(DependencyObject element)
+    {
+        if (TabOf(element) is { } tab)
+        {
+            SettingsTabs.SelectedItem = tab;
+        }
+    }
+
+    /// <summary>Opens the first tab, in tab order, that holds a control with an invalid value, and returns it
+    /// (null when no error sits on a tab). Tab order, not the order Save checked the fields in, so the operator
+    /// starts from the left.</summary>
+    internal TabItem? SelectFirstTabWithError(SettingsValidationErrors errors)
+    {
+        var first = errors.Sources
+            .Select(TabOf)
+            .OfType<TabItem>()
+            .OrderBy(tab => SettingsTabs.Items.IndexOf(tab))
+            .FirstOrDefault();
+        if (first is not null)
+        {
+            SettingsTabs.SelectedItem = first;
+        }
+        return first;
+    }
+
+    /// <summary>Each message prefixed with the name of the tab its field is on.</summary>
+    private static IEnumerable<string> DescribeErrors(SettingsValidationErrors errors) =>
+        errors.Messages.Zip(errors.Sources, (message, source) =>
+            TabOf(source) is { } tab ? $"{tab.Header}: {message}" : message);
+
+    private void SelectTabByName(string? name)
+    {
+        var tab = SettingsTabs.Items.OfType<TabItem>().FirstOrDefault(t => t.Name == name);
+        if (tab is not null)
+        {
+            SettingsTabs.SelectedItem = tab;
+        }
+    }
+
+    private void SettingsTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        /* SelectionChanged bubbles: a ComboBox inside a tab raises it here too. Only the tab strip's own counts,
+           and not while InitializeComponent is still building the window (the settings are not loaded yet). */
+        if (!IsInitialized || !ReferenceEquals(e.OriginalSource, SettingsTabs) || SettingsTabs.SelectedItem is not TabItem tab)
+        {
+            return;
+        }
+        /* Kept on the in-memory copy too, so a Save (which writes that whole copy) carries the current tab. */
+        _appSettings.SettingsWindowTab = tab.Name;
+    }
+
+    /// <summary>Writes the open tab to the viewer's own settings (#5846), the way the overview sort is kept: read
+    /// the file fresh, change the one value, write it. Runs on close, after any Save, and only on a change.</summary>
+    internal void RememberSelectedTab()
+    {
+        var current = (SettingsTabs.SelectedItem as TabItem)?.Name ?? "";
+        var settings = _appSettingsStore.Load();
+        if (settings.SettingsWindowTab == current)
+        {
+            return;
+        }
+        settings.SettingsWindowTab = current;
+        /* A failed write only means the window opens on another tab next time; the store logs why. */
+        _appSettingsStore.Save(settings);
+    }
+
     private void ApplyReadOnlyGating()
     {
         var readOnly = _dataService?.IsReadOnly == true;
@@ -446,6 +531,7 @@ public partial class SettingsWindow : Window
         }
         else if (mcpEnabled)
         {
+            SelectTabOf(McpPortTextBox);
             MessageBox.Show(
                 "MCP port must be between 1024 and 65535.\nPorts 0-1023 are well-known privileged ports reserved by the operating system.",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -458,6 +544,7 @@ public partial class SettingsWindow : Window
         }
         else if (webEnabled)
         {
+            SelectTabOf(WebPortTextBox);
             MessageBox.Show(
                 "Web dashboard port must be between 1024 and 65535.\nPorts 0-1023 are well-known privileged ports reserved by the operating system.",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -473,6 +560,7 @@ public partial class SettingsWindow : Window
         }
         else
         {
+            SelectTabOf(QueryStoreTextBudgetMbTextBox);
             MessageBox.Show(
                 "Query Store text budget must be between 4 and 256 MB.",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -485,6 +573,7 @@ public partial class SettingsWindow : Window
         }
         else
         {
+            SelectTabOf(MaxConcurrentSweepsTextBox);
             MessageBox.Show(
                 "Concurrent server sweeps must be between 1 and 16.",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -842,7 +931,7 @@ public partial class SettingsWindow : Window
 
     /// <summary>Builds the store row from the alert + analysis controls, validating the numeric fields. Adds
     /// range errors to <paramref name="errors"/>; a bad field keeps its default rather than throwing.</summary>
-    private AlertSettingsRow BuildAlertRowFromControls(List<string> errors)
+    internal AlertSettingsRow BuildAlertRowFromControls(SettingsValidationErrors errors)
     {
         var row = new AlertSettingsRow
         {
@@ -937,7 +1026,8 @@ public partial class SettingsWindow : Window
         {
             errors.Add(!warningOk
                 ? "Runnable queue Warning must be a whole number of at least 1 runnable task per scheduler."
-                : "Runnable queue Critical must be a whole number no lower than the Warning bar.");
+                : "Runnable queue Critical must be a whole number no lower than the Warning bar.",
+                AlertRunnableQueueWarningBox);
         }
         /* #5640: the Client Timeouts bars, the engine's own rule (AttentionEvaluator.ClampBars: Warning at least 1, Critical never
            below Warning), refused rather than clamped, and whatever the checkbox says, for the reason above (the row is built fresh
@@ -955,7 +1045,8 @@ public partial class SettingsWindow : Window
                 ? "Client timeouts Warning must be a whole number of at least 1 attention per minute."
                 : !ctCriticalOk
                     ? "Client timeouts Critical must be a whole number of at least 1 attention per minute."
-                    : "Client timeouts Critical must be a whole number no lower than the Warning bar.");
+                    : "Client timeouts Critical must be a whole number no lower than the Warning bar.",
+                AlertClientTimeoutsWarningBox);
         }
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             row.LongRunningQueryThresholdMinutes = lrq;
@@ -1031,23 +1122,23 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown is >= 1 and <= 120)
             row.CooldownMinutes = alertCooldown;
         else
-            errors.Add("Tray notification cooldown must be between 1 and 120 minutes.");
+            errors.Add("Tray notification cooldown must be between 1 and 120 minutes.", AlertCooldownBox);
 
         if (int.TryParse(AnalysisIntervalBox.Text, out var analysisInterval) && analysisInterval is >= 5 and <= 360)
             row.AnalysisIntervalMinutes = analysisInterval;
         else
-            errors.Add("Analysis interval must be between 5 and 360 minutes.");
+            errors.Add("Analysis interval must be between 5 and 360 minutes.", AnalysisIntervalBox);
 
         if (double.TryParse(AnalysisNotifySeverityBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var analysisSeverity)
             && analysisSeverity is >= 0.0 and <= 2.0)
             row.AnalysisNotifySeverity = analysisSeverity;
         else
-            errors.Add("Analysis notify severity must be between 0.0 and 2.0.");
+            errors.Add("Analysis notify severity must be between 0.0 and 2.0.", AnalysisNotifySeverityBox);
 
         if (int.TryParse(AnalysisNotifyCooldownBox.Text, out var analysisCooldown) && analysisCooldown is >= 30 and <= 10080)
             row.AnalysisNotifyCooldownMinutes = analysisCooldown;
         else
-            errors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
+            errors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.", AnalysisNotifyCooldownBox);
 
         /* #3466 (V124): the bounds are the same named constants update_alert_settings enforces and the
            worker clamps to, so the three writers into this column cannot disagree about what is
@@ -1057,20 +1148,20 @@ public partial class SettingsWindow : Window
             && fleetSweepInterval <= FleetSweepCadence.IntervalMinutesCeiling)
             row.FleetSweepIntervalMinutes = fleetSweepInterval;
         else
-            errors.Add($"Fleet sweep interval must be between {FleetSweepCadence.IntervalMinutesFloor} and {FleetSweepCadence.IntervalMinutesCeiling} minutes.");
+            errors.Add($"Fleet sweep interval must be between {FleetSweepCadence.IntervalMinutesFloor} and {FleetSweepCadence.IntervalMinutesCeiling} minutes.", FleetSweepIntervalBox);
 
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
         if (int.TryParse(AlertPerEventMaxBox.Text, out var perEventMax) && perEventMax is >= 1 and <= 100)
             row.PerEventMax = perEventMax;
         else
-            errors.Add("Per-event max-per-cycle must be between 1 and 100.");
+            errors.Add("Per-event max-per-cycle must be between 1 and 100.", AlertPerEventMaxBox);
 
         return row;
     }
 
     /// <summary>Persists the viewer-LOCAL alert fields to <see cref="ViewerAppSettings"/> (the store never sees them).</summary>
-    private void SaveViewerLocalAlertFields(List<string> errors)
+    private void SaveViewerLocalAlertFields(SettingsValidationErrors errors)
     {
         _appSettings.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         /* AlertDeliveryMode/PerEventMax, the long-running-query read shape (max-results + the five noise filters),
@@ -1437,7 +1528,7 @@ public partial class SettingsWindow : Window
     /// <summary>Builds the <see cref="NotificationRow"/> from the SMTP + webhook controls. A DISABLED channel
     /// writes EMPTY key fields so the service (which derives enablement from non-empty fields) treats it as off;
     /// an enabled SMTP channel seals the typed password (or preserves the existing blob when left unchanged).</summary>
-    private NotificationRow BuildNotificationRowFromControls(List<string> errors)
+    private NotificationRow BuildNotificationRowFromControls(SettingsValidationErrors errors)
     {
         var row = new NotificationRow();
         _smtpPasswordToSeal = null;
@@ -1445,7 +1536,7 @@ public partial class SettingsWindow : Window
         if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown is >= 1 and <= 120)
             row.EmailCooldownMinutes = emailCooldown;
         else
-            errors.Add("Email alert cooldown must be between 1 and 120 minutes.");
+            errors.Add("Email alert cooldown must be between 1 and 120 minutes.", EmailCooldownBox);
 
         if (SmtpEnabledCheckBox.IsChecked == true)
         {
@@ -1483,7 +1574,7 @@ public partial class SettingsWindow : Window
                     GenericWebhookHeadersBox.Text, GenericWebhookUrlBox.Text,
                     _loadedNotification?.GenericHeaders, _loadedNotification?.GenericUrl))
             {
-                errors.Add(ViewerWebhookSealing.RetypeUrlForHeadersText);
+                errors.Add(ViewerWebhookSealing.RetypeUrlForHeadersText, GenericWebhookUrlBox);
             }
             /* Persist the empty "use built-in default" sentinel unless the operator actually edited the body box
                (the Settings load pre-fills it with the default), so a future release can still improve it. */
@@ -1500,7 +1591,7 @@ public partial class SettingsWindow : Window
                 row.GenericBodyTemplate);
             if (configError != null)
             {
-                errors.Add(configError);
+                errors.Add(configError, GenericWebhookHeadersBox);
             }
         }
 
@@ -1561,7 +1652,7 @@ public partial class SettingsWindow : Window
     /// SSL flag or user name changed (the stored password only opens for the settings it was sealed for). A typed password
     /// is sealed later, in <see cref="SealSmtpPasswordAsync"/>, once the service's key has been read; its text is checked here.
     /// </summary>
-    private void ResolveSmtpPassword(NotificationRow row, List<string> errors)
+    private void ResolveSmtpPassword(NotificationRow row, SettingsValidationErrors errors)
     {
         _smtpPasswordToSeal = null;
         row.SmtpEncryptedPassword = _loadedNotification.SmtpEncryptedPassword;
@@ -1570,16 +1661,16 @@ public partial class SettingsWindow : Window
         switch (ViewerSmtpSeal.Decide(_loadedNotification, null, row, typed))
         {
             case ViewerSmtpPasswordAction.Refuse:
-                errors.Add(ViewerSmtpSeal.ReenterText);
+                errors.Add(ViewerSmtpSeal.ReenterText, SmtpPasswordBox);
                 break;
             case ViewerSmtpPasswordAction.Seal:
                 if (!ViewerSmtpSeal.IsValidText(typed))
                 {
-                    errors.Add(ViewerPasswordSealer.PasswordCharactersText);
+                    errors.Add(ViewerPasswordSealer.PasswordCharactersText, SmtpPasswordBox);
                 }
                 else if (ViewerSmtpSeal.FirstInvalidBoundField(row.SmtpHost, row.SmtpUsername) is { } field)
                 {
-                    errors.Add(ViewerPasswordSealer.FieldCharactersText(field));
+                    errors.Add(ViewerPasswordSealer.FieldCharactersText(field), SmtpServerBox);
                 }
                 else
                 {
@@ -1999,7 +2090,7 @@ public partial class SettingsWindow : Window
 
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
-        var errors = new List<string>();
+        var errors = new SettingsValidationErrors();
         var mcpValid = TryReadServiceFlags(
             out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort,
             out var textBudgetMb, out var maxSweeps);
@@ -2052,8 +2143,11 @@ public partial class SettingsWindow : Window
 
         if (errors.Count > 0)
         {
+            /* #5846: the field may sit on a tab that is not showing. Open the first tab holding one, and name
+               each message's tab, so the warning never points at a page the operator cannot see. */
+            SelectFirstTabWithError(errors);
             MessageBox.Show(
-                "Some settings have invalid values and were not saved:\n\n" + string.Join("\n", errors),
+                "Some settings have invalid values and were not saved:\n\n" + string.Join("\n", DescribeErrors(errors)),
                 "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
@@ -2146,6 +2240,8 @@ public partial class SettingsWindow : Window
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
+        RememberSelectedTab();
+
         /* Catches the title-bar X / Esc: an unsaved theme preview reverts to what was active on open. */
         if (!_themeSaved)
         {
