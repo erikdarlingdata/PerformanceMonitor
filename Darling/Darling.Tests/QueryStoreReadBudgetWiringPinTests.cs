@@ -112,4 +112,24 @@ public sealed class QueryStoreReadBudgetWiringPinTests
         Assert.True(code.Contains("ExecuteReaderAsync(readToken)", StringComparison.Ordinal));
         Assert.True(Regex.Matches(code, @"Read(Item)?Async\([^;]*readToken\)").Count >= 2);
     }
+
+    /// <summary>
+    /// The one-database server: when every database failed, both arms of both products hand the pass's fan-out to the
+    /// ERROR row, directly before the rethrow, so a timed-out database is named there. Darling stamps it on the exception
+    /// and the worker's general ERROR arm reads it back; Lite puts it in the telemetry slot its ERROR row already reads.
+    /// </summary>
+    [Fact]
+    public void AnAllFailedRun_CarriesItsFanoutToTheErrorRow_InBothProducts()
+    {
+        var runner = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        Assert.Equal(2, Regex.Matches(
+            runner, @"CollectorFaultFanout\.Stamp\((firstFailure|driverResult\.FirstError), fanout\.Result\);[^\n]*\n\s*System\.Runtime\.ExceptionServices\.ExceptionDispatchInfo\.Capture\(\1!?\)\.Throw\(\);").Count);
+
+        var worker = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Single(Regex.Matches(worker, @"""ERROR"", 0, runClock\.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout\.For\(ex\)"));
+
+        var lite = RepoFile.ReadRepoFileLf("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs");
+        Assert.Equal(2, Regex.Matches(
+            lite, @"telemetry\.Fanout = fanout\.Result;[^\n]*\n\s*System\.Runtime\.ExceptionServices\.ExceptionDispatchInfo\.Capture\((firstFailure|driverResult\.FirstError!)\)\.Throw\(\);").Count);
+    }
 }

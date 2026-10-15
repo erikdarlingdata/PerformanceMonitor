@@ -16523,9 +16523,13 @@ LIMIT 1";
                    instantaneous — a 300-second timeout and a refused connection stored the identical
                    row, and the number that separates them is the only one an operator needs first.
                    Read from the stopwatch rather than from the exception, because most faults carry
-                   no duration at all. */
+                   no duration at all.
+
+                   #5813: the fan-out comes off the exception, where the runner's all-failed rethrow put it, so a
+                   one-database server whose Query Store read timed out names that database in slowest_item with
+                   the budget as slowest_item_ms. Null for every fault that carries none, as before. */
                 await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                    _postgres!, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout.For(ex), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             }
             catch
             {

@@ -3182,6 +3182,10 @@ public sealed class DarlingCollectorRunner
             {
                 _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
                     definition.Name, attempted, server.Config.DisplayName);
+
+                /* #5813: the fan-out rides on the rethrown failure, so the worker's ERROR row names a database whose
+                   Query Store read timed out. On a one-database server that is the only row the timeout ever writes. */
+                CollectorFaultFanout.Stamp(firstFailure, fanout.Result);
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
             }
         }
@@ -3660,6 +3664,7 @@ public sealed class DarlingCollectorRunner
                     _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
                         definition.Name, driverResult.Attempted, server.Config.DisplayName);
                     CollectorFaultDatabase.Stamp(driverResult.FirstError, driverResult.FailedItems?[0]);
+                    CollectorFaultFanout.Stamp(driverResult.FirstError, fanout.Result); // #5813, as the Azure loop's rethrow
                     System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(driverResult.FirstError!).Throw();
                 }
 

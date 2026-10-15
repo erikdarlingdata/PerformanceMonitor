@@ -139,12 +139,32 @@ public sealed class QueryStoreReadBudgetLiveTests
         return row;
     }
 
-    private static Task<CollectorRunResult> PassAsync(Rig rig, Target target, CancellationToken token)
+    private static Task<CollectorRunResult> PassAsync(Rig rig, Target target, CancellationToken token, params string[] databases)
     {
         var provider = new FakeTargetProvider(target);
         rig.Runner.TargetProviderOverrideForTests = _ => provider;
-        rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { Alpha, Zeta });
+        var listed = databases.Length == 0 ? new List<string> { Alpha, Zeta } : databases.ToList();
+        rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(listed);
         return rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer(), token);
+    }
+
+    /// <summary>The newest collection_log row the test wrote for query_store: status, slowest item, its ms, item count.</summary>
+    private static async Task<(string Status, string? SlowestItem, int? SlowestItemMs, int? ItemCount)> NewestLogRowAsync(
+        Rig rig, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        await using var command = new NpgsqlCommand(
+            "SELECT status, slowest_item, slowest_item_ms, fanout_item_count FROM collection_log "
+            + "WHERE server_id = @s AND collector_name = 'query_store' ORDER BY collection_time DESC, log_id DESC LIMIT 1",
+            connection);
+        command.Parameters.AddWithValue("s", LiveServerId);
+        await using var reader = await command.ExecuteReaderAsync(token);
+        Assert.True(await reader.ReadAsync(token), "the run wrote a collection_log row");
+        return (reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(2) ? null : reader.GetInt32(2),
+            reader.IsDBNull(3) ? null : reader.GetInt32(3));
     }
 
     /// <summary>Each stored interval of <paramref name="database"/> and how many raw rows hold it.</summary>
@@ -233,6 +253,62 @@ public sealed class QueryStoreReadBudgetLiveTests
         await PassAsync(rig, target, token);
         Assert.Equal(2, rig.Log.TimedOutWarnings(Alpha));
         Assert.Equal(0, rig.Log.TimedOutWarnings(Zeta));
+    }
+
+    /// <summary>
+    /// The one-database server, the shape of the field's slowest servers: its only database times out, so every
+    /// database in the pass failed and the run is an ERROR (the #3754 rule; a run that wrote nothing is never SUCCESS).
+    /// The rethrown timeout carries the pass's fan-out, and the row the worker's ERROR arm writes from it names the
+    /// database with its marker and the budget, where it used to hold NULL. The watermark stays and the next pass resumes.
+    /// </summary>
+    [Fact]
+    public async Task OneDatabaseServer_ATimedOutRead_IsAnErrorRowThatNamesTheDatabase_AndTheNextPassResumes()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 read-budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+
+        var now = DateTime.UtcNow;
+        now = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var first = now.AddMinutes(-8);
+        var second = now.AddMinutes(-4);
+
+        var target = new Target();
+        target.Rows[Alpha] = [Row(1, first)];
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal(first, await StoreAsync(rig.Runner, Alpha, token));
+
+        target.Rows[Alpha].Add(Row(2, second));
+        target.SlowOn = Alpha;
+
+        /* The only database times out: the runner surfaces the timeout itself, with the fan-out on it. */
+        var timeout = await Assert.ThrowsAsync<QueryStoreReadTimeoutException>(() => PassAsync(rig, target, token, Alpha));
+        Assert.Equal(1, target.SlowReads);
+        Assert.Equal(Alpha, timeout.Database);
+        var carried = CollectorFaultFanout.For(timeout);
+        Assert.NotNull(carried);
+        Assert.Equal(QueryStoreReadBudget.SlowestItemName(Alpha), carried!.Value.SlowestItem);
+        Assert.Equal((int)Budget.TotalMilliseconds, carried.Value.SlowestItemMs);
+        Assert.Equal(1, carried.Value.ItemCount);
+
+        /* The row, written as the worker's general ERROR arm writes it (fanout: CollectorFaultFanout.For(ex); that
+           expression is pinned in QueryStoreReadBudgetWiringPinTests). */
+        await DarlingObservability.LogCollectionAsync(
+            rig.Source, MakeServer(), QueryStoreCollector.Instance.Name, "ERROR", 0, (long)Budget.TotalMilliseconds, 0, timeout.Message,
+            fanout: CollectorFaultFanout.For(timeout), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, rig.Log, token);
+        var row = await NewestLogRowAsync(rig, token);
+        Assert.Equal("ERROR", row.Status);
+        Assert.Equal(QueryStoreReadBudget.SlowestItemName(Alpha), row.SlowestItem);
+        Assert.Equal((int)Budget.TotalMilliseconds, row.SlowestItemMs);
+        Assert.Equal(1, row.ItemCount);
+
+        /* Nothing shipped, so the watermark stayed; the next good pass reads from it and stores interval 2 once. */
+        Assert.Equal(new Dictionary<long, long> { [1] = 1 }, await StoredAsync(rig, Alpha, token));
+        Assert.Equal(first, await StoreAsync(rig.Runner, Alpha, token));
+        target.SlowOn = null;
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal(new Dictionary<long, long> { [1] = 1, [2] = 1 }, await StoredAsync(rig, Alpha, token));
+        Assert.Equal(second, await StoreAsync(rig.Runner, Alpha, token));
     }
 
     private sealed class FakeTargetProvider(Target target) : ITargetProvider

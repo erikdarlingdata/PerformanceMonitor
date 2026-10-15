@@ -673,6 +673,11 @@ public partial class RemoteCollectorService
             {
                 _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
                     definition.Name, attempted, server.DisplayName);
+
+                /* #5813: the fan-out onto this server's telemetry slot, which RunCollectorAsync's ERROR arm writes, so a
+                   one-database server whose Query Store read timed out names that database in slowest_item. Darling
+                   carries it on the exception (CollectorFaultFanout); Lite's row already reads this slot. */
+                telemetry.Fanout = fanout.Result;
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
             }
         }
@@ -975,6 +980,7 @@ public partial class RemoteCollectorService
                 {
                     _logger?.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
                         definition.Name, driverResult.Attempted, server.DisplayName);
+                    telemetry.Fanout = fanout.Result; // #5813, as the Azure loop's rethrow
                     System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(driverResult.FirstError!).Throw();
                 }
 
