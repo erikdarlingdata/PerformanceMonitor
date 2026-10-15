@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// <see cref="CallerFilePathAttribute"/> names the tree the assembly was compiled from, which is the tree
 /// these pins are reading. Resolved from THIS file rather than from each caller, so there is one answer
 /// rather than one per call site; the invariant that keeps those identical — every pin living in this one
-/// directory — is asserted in <see cref="RepoFileResolutionEquivalenceTests"/> rather than assumed.</para>
+/// directory — is asserted in <c>RepoFileResolutionEquivalenceTests</c> rather than assumed.</para>
 ///
 /// <para><b>The root is a MARKER, not the target file.</b> Twenty-two of the copies walked up probing for
 /// the RELATIVE PATH itself, so the root they resolved varied with the argument, and a path that did not
@@ -48,7 +48,7 @@ namespace Darling.Tests;
 /// normalised because three call sites spell their path with forward slashes.</para>
 ///
 /// <para><b>That there is exactly ONE of these is asserted, not stated.</b>
-/// <see cref="RepoFileAdoptionTests"/> re-derives the declaring set from the tree, so a thirty-fifth private
+/// <c>RepoFileAdoptionTests</c> re-derives the declaring set from the tree, so a thirty-fifth private
 /// copy arriving by paste fails the build instead of joining the family silently — which is how these
 /// thirty-four came to exist. It carries the boundary of what that scan can and cannot see.</para>
 ///
@@ -90,7 +90,7 @@ internal static class RepoFile
     /// callers naming a DIRECTORY use <see cref="Root"/> directly, and the file check belongs with the
     /// read that would otherwise return nothing.
     ///
-    /// <para>Internal rather than private so <see cref="RepoFileResolutionEquivalenceTests"/> can compare
+    /// <para>Internal rather than private so <c>RepoFileResolutionEquivalenceTests</c> can compare
     /// the PATH each replaced resolver produced against the path this one produces. Inferring that from
     /// content instead would be satisfied by two different files that happen to hold the same bytes — and
     /// this repository is full of deliberate parity copies, which is the reason that pin exists.</para></summary>

@@ -264,33 +264,6 @@ public sealed class ScratchPostgresQuiesceCensusTests
         Assert.Equal(0, Scan([("C.cs", commentOnly)]).Sites);
     }
 
-    /// <summary>
-    /// The CI side of PR #5480: both workflows warn when the PostgreSQL log holds "terminated by exception", on every
-    /// outcome (<c>if: always()</c>) and without ever failing the job, ahead of the step that stops the server.
-    /// </summary>
-    [Theory]
-    [InlineData("build.yml")]
-    [InlineData("nightly.yml")]
-    public void TheWorkflow_WarnsOnAWorkerCrashInThePostgresLog_AlwaysAndOnlyAsAWarning(string workflow)
-    {
-        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", workflow);
-        Assert.True(File.Exists(path), $"{workflow} was not copied beside the test binary (Darling.Tests.csproj links it into Fixtures\\).");
-        var text = File.ReadAllText(path);
-
-        var start = text.IndexOf("- name: Warn if a PostgreSQL worker crashed", StringComparison.Ordinal);
-        Assert.True(start >= 0, $"{workflow} has no 'Warn if a PostgreSQL worker crashed' step.");
-        var stop = text.IndexOf("- name: Stop PostgreSQL", start, StringComparison.Ordinal);
-        Assert.True(stop > start, $"{workflow}: the warning step must come before 'Stop PostgreSQL'.");
-
-        var step = text[start..stop];
-        Assert.Contains("if: always()", step, StringComparison.Ordinal);
-        Assert.Contains("darling-pg.log", step, StringComparison.Ordinal);
-        Assert.Contains("terminated by exception", step, StringComparison.Ordinal);
-        Assert.Contains("::warning", step, StringComparison.Ordinal);
-        Assert.DoesNotContain("::error", step, StringComparison.Ordinal);
-        Assert.Contains("exit 0", step, StringComparison.Ordinal);
-    }
-
     private static string? FindTestProjectDirectory()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

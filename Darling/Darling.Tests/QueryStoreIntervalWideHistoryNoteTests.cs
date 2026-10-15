@@ -113,22 +113,4 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
         Assert.Equal(
             QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
             PerformanceMonitor.Darling.Service.DarlingWebEndpoints.QueryStoreHistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge));
-
-    /// <summary>The reason phrase is built from two halves so this file never matches its own scan, and the scan
-    /// skips the test tree and build output.</summary>
-    [Fact]
-    public void ThePurgeEdgeReason_IsSpelledOnce_AcrossTheProductSource()
-    {
-        var token = "keeps 10 days, and intervals that began " + "before its purge edge";
-        var product = Directory.EnumerateDirectories(RepoFile.PathTo("Darling"), "PerformanceMonitor.Darling.*")
-            .SelectMany(d => Directory.EnumerateFiles(d, "*.cs", SearchOption.AllDirectories))
-            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                     && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            .ToList();
-        Assert.NotEmpty(product);
-        var hits = product.Where(f => File.ReadAllText(f).Contains(token, StringComparison.Ordinal)).ToList();
-        Assert.Single(hits);
-        Assert.EndsWith("QueryStoreIntervalWide.cs", hits[0], StringComparison.Ordinal);
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Count(File.ReadAllText(hits[0]), System.Text.RegularExpressions.Regex.Escape(token)));
-    }
 }

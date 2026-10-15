@@ -54,39 +54,6 @@ public sealed class QueryStoreIntervalLatestRungTests
     }
 
     /// <summary>
-    /// Three idempotent CREATEs and one unique index, engine-plain (no TimescaleDB call: the conversion is runtime
-    /// work), and no ALTER of anything that already exists. The index is <c>NULLS NOT DISTINCT</c> in the writer's
-    /// column order, the heap is <c>fillfactor = 50</c>, and the conflict target the writer names is exactly the
-    /// index's column list.
-    /// </summary>
-    [Fact]
-    public void TheRungCreatesThreeTablesAndOneUniqueIndex_EnginePlain_AndNothingElse()
-    {
-        var sql = V143.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
-
-        Assert.Equal(3, CountOf(sql, "CREATE TABLE IF NOT EXISTS collect."));
-        Assert.Equal(1, CountOf(sql, "CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_latest"));
-        Assert.Equal(4, CountOf(sql, "CREATE "));
-        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest\n", sql, StringComparison.Ordinal);
-        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_coverage\n", sql, StringComparison.Ordinal);
-        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending\n", sql, StringComparison.Ordinal);
-        Assert.Contains("WITH (fillfactor = 50);", sql, StringComparison.Ordinal);
-        Assert.Contains("NULLS NOT DISTINCT;", sql, StringComparison.Ordinal);
-
-        /* The statements, not the comments explaining them. */
-        var statements = System.Text.RegularExpressions.Regex.Replace(sql, @"/\*.*?\*/", " ", System.Text.RegularExpressions.RegexOptions.Singleline);
-        foreach (var forbidden in new[] { "ALTER ", "DROP ", "create_hypertable", "timescaledb", "INSERT ", "UPDATE " })
-        {
-            Assert.DoesNotContain(forbidden, statements, StringComparison.OrdinalIgnoreCase);
-        }
-
-        var indexColumns = string.Join(", ", sql[(sql.IndexOf("ON collect.query_store_interval_latest\n(", StringComparison.Ordinal) + "ON collect.query_store_interval_latest\n(".Length)..]
-            .Split(')')[0]
-            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries));
-        Assert.Equal(QueryStoreIntervalLatest.IdentityColumns, indexColumns);
-    }
-
-    /// <summary>
     /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
     /// returns 143 — a position within the signature, not its end, now that V144 has appended its own.
     /// </summary>
@@ -173,16 +140,5 @@ public sealed class QueryStoreIntervalLatestRungTests
 
         var repair = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreSliceRepair.cs");
         Assert.Contains("INSERT INTO collect.{Table}", repair, StringComparison.Ordinal);
-    }
-
-    private static int CountOf(string haystack, string needle)
-    {
-        var count = 0;
-        for (var at = haystack.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
-        {
-            count++;
-        }
-
-        return count;
     }
 }

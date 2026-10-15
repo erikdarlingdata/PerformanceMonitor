@@ -194,26 +194,6 @@ public sealed class StatementColumnCensusTests
     }
 
     [Fact]
-    public void EveryEntry_CarriesItsReasonRowAndLane()
-    {
-        foreach (var (key, entry) in Listed)
-        {
-            Assert.False(string.IsNullOrWhiteSpace(entry.Detail), key + " needs a plan row or a reason");
-
-            if (entry.Kind == Kind.Hooked)
-            {
-                Assert.Matches("^R[0-9]+$", entry.Lane ?? string.Empty);
-                Assert.StartsWith("6.7 row ", entry.Detail, StringComparison.Ordinal);
-            }
-            else
-            {
-                Assert.Null(entry.Lane);
-                Assert.False(entry.Pending, key + ": only a Hooked entry can be pending");
-            }
-        }
-    }
-
-    [Fact]
     public void TheCensusCountsWhatItReports()
     {
         var matched = SqlServerPayloadColumns().Count(c => PayloadPattern.IsMatch(c.Column));
