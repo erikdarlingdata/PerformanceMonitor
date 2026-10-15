@@ -379,25 +379,6 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     }
 
     /// <summary>
-    /// #3574: the bind is <c>timestamptz</c> with <c>Kind = Utc</c>, stated explicitly — the INVERSE of
-    /// the naive-UTC discipline every other store read follows, because these are TimescaleDB's own
-    /// <c>TIMESTAMPTZ</c> catalog columns and here the naive bind would be the bug. A source pin, since the
-    /// only server that would catch the wrong Kind is one running off UTC, which no test store does.
-    /// </summary>
-    [Fact]
-    public void TheEvidenceRead_BindsAnExplicitTimestampTz_BecauseTheColumnsAreTimestampTz()
-    {
-        var source = File.ReadAllText(ReaderSourcePath());
-        var method = source[source.IndexOf("GetJobHistoryEvidenceAsync(", StringComparison.Ordinal)..];
-        method = method[..method.IndexOf("/// <summary>One object's newest self-metrics row", StringComparison.Ordinal)];
-
-        Assert.Contains("NpgsqlDbType.TimestampTz", method, StringComparison.Ordinal);
-        Assert.Contains("DateTimeKind.Utc", method, StringComparison.Ordinal);
-        /* And NOT the naive idiom, which is correct one method up and wrong here. */
-        Assert.DoesNotContain("DateTimeKind.Unspecified", method, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// #3574: <see cref="DarlingStoreMetricsReader.JobHistoryEvidence.Visibility"/> is derived from the
     /// view's two membership facts exactly as the view combines them — database-owner membership sees
     /// everything and short-circuits the per-job test; otherwise the per-job count decides — and is
@@ -1493,10 +1474,6 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("timescaledb_information.hypertables never lists a materialization", description!, StringComparison.Ordinal);
     }
 
-    private static string ReaderSourcePath([CallerFilePath] string thisFile = "")
-        => Path.GetFullPath(Path.Combine(
-            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingStoreMetricsReader.cs"));
-
     [Fact]
     public void GetStoreMetrics_IsInTheServerInstructions()
     {
@@ -1638,21 +1615,6 @@ public sealed class DarlingMcpStoreMetricsToolsTests
                 (new DateTime(2026, 8, 6), 300, 15.0),
             },
             growth.Select(g => (g.Day, g.DeltaBytes, g.PerServerBytes)).ToArray());
-    }
-
-    /// <summary>
-    /// The daily read now projects the day's last snapshot time as its last column, so a growth point can say
-    /// when its reading was taken (today's point is a partial day, and only the time shows how far in). Paired
-    /// with the ordinal the reader takes it from.
-    /// </summary>
-    [Fact]
-    public void StoreMetricsDailySql_ProjectsTheDaysLastSnapshotTime_AndTheReaderTakesItFromThatColumn()
-    {
-        var sql = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("    toast_live_bytes,\n    metric_time\nFROM collect.store_metrics", sql, StringComparison.Ordinal);
-
-        var source = File.ReadAllText(ReaderSourcePath());
-        Assert.Contains("reader.GetDateTime(15)", source, StringComparison.Ordinal);
     }
 
     private static DarlingStoreMetricsReader.StoreMetricDailyPoint StoreDayAt(

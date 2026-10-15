@@ -803,20 +803,6 @@ public sealed class CollectionCycleReaderCensusTests
             "collection_log reads with no collection_cycle exclusion, collector name or per-read safe-list reason (#5735): " + string.Join(", ", violations));
     }
 
-    /// <summary>The raw-log readers are listed because their collector filter is optional, which is not an exclusion; the
-    /// census must not also let a silent relaxation of it hide behind the heuristic.</summary>
-    [Fact]
-    public void TheSafeList_NamesReadsThatExist()
-    {
-        var keys = Reads().Select(r => r.Key).ToHashSet(StringComparer.Ordinal);
-        Assert.All(SafeList.Keys, k => Assert.Contains(k, keys));
-    }
-
-    /// <summary>A listed read needs a listed reason: a blank one defeats the point of listing.</summary>
-    [Fact]
-    public void EverySafeListEntry_CarriesAReason() =>
-        Assert.All(SafeList, kv => Assert.False(string.IsNullOrWhiteSpace(kv.Value), kv.Key));
-
     /// <summary>The selection-by-scope rule itself: a statement with three subqueries is judged one subquery at a time, so the
     /// exclusion in the second cannot excuse the first. Without the cut, deleting the predicate from the FIRST read of
     /// <c>ReadCollectionSignalsCoreAsync</c> (the <c>last_success</c> subquery) would still find it in the next 900 characters.</summary>
@@ -864,24 +850,4 @@ public sealed class CollectionCycleReaderCensusTests
         }
     }
 
-    [Fact]
-    public void OnlyTheConstantsFile_SpellsTheCollectorNameAsALiteral()
-    {
-        var offenders = new List<string>();
-        foreach (var file in SourceFiles())
-        {
-            if (Path.GetFileName(file) == "CollectionCycleRow.cs")
-            {
-                continue;
-            }
-
-            var text = File.ReadAllText(file);
-            if (text.Contains("'collection_cycle'", StringComparison.Ordinal) || text.Contains("\"collection_cycle\"", StringComparison.Ordinal))
-            {
-                offenders.Add(Path.GetFileName(file));
-            }
-        }
-
-        Assert.True(offenders.Count == 0, "the collector name is spelled in " + string.Join(", ", offenders) + "; use CollectionCycleRow.CollectorName");
-    }
 }

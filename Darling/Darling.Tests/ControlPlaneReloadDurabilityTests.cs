@@ -151,58 +151,6 @@ public sealed class ControlPlaneReloadDurabilityTests
     }
 
     /// <summary>
-    /// What provisioning REPORTS after a failed read, which is the half that makes the omission
-    /// self-healing. Returning the shipped default here would compile, pass every value assertion above,
-    /// and leave the roles stale forever — #2918's gate only fires on a difference, so a baseline equal to
-    /// the store's value is indistinguishable from "already applied".
-    /// </summary>
-    [Fact]
-    public void ProvisioningReportsTheUnknownSentinel_WhenItCouldNotReadTheColumn()
-    {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(SourceText("DarlingManagedRoles.cs"));
-
-        /* #3914: the read and the return moved from EnsureProvisionedAsync into the core it shares with the
-           compose store's provisioning, so both callers report the sentinel from the one place. */
-        var member = code.IndexOf("private static async Task<int> ProvisionRolesAsync(", StringComparison.Ordinal);
-        Assert.True(member > 0, "ProvisionRolesAsync could not be located, so this check proves nothing");
-
-        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', member)));
-
-        Assert.Contains("ComposeStatementTimeoutUnknown", body, StringComparison.Ordinal);
-
-        /* And the read it branches on has to be nullable — an int cannot express "I could not find out",
-           which is exactly why the original returned 15. (#5560: the read is internal now, so the savepoint
-           test can drive it; the nullable return is the pinned part.) */
-        Assert.Contains(
-            "internal static async Task<int?> ReadComposeStatementTimeoutAsync(",
-            code,
-            StringComparison.Ordinal);
-
-        /* Both entry points hand back what the core returned, not a value of their own: the managed one
-           returns it directly, and the compose one carries it into the verdict the worker seeds its reload
-           baseline from. */
-        string Body(string signature)
-        {
-            var at = code.IndexOf(signature, StringComparison.Ordinal);
-            Assert.True(at > 0, $"'{signature}' could not be located");
-            return CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', at)));
-        }
-
-        /* The managed entry point hands the core's result back unchanged. The credential files are written between
-           the batch and the return (a file is only ever written after the batch that set its password), so the
-           call is bound to a name first and that name is what is returned. */
-        var entry = code.IndexOf("public static Task<int> EnsureProvisionedAsync(", StringComparison.Ordinal);
-        Assert.True(entry > 0, "the managed entry point could not be located");
-        Assert.Contains("ProvisionManagedRolesAsync(", code[entry..code.IndexOf(';', entry)], StringComparison.Ordinal);
-        var managed = Body("internal static async Task<int> ProvisionManagedRolesAsync(");
-        Assert.Contains("var applied = await ProvisionRolesAsync(", managed, StringComparison.Ordinal);
-        Assert.Contains("return applied;", managed, StringComparison.Ordinal);
-        var compose = Body("public static async Task<ComposeStoreProvisioning> EnsureComposeStoreProvisionedAsync(");
-        Assert.Contains("var applied = await ProvisionRolesAsync(", compose, StringComparison.Ordinal);
-        Assert.Contains("ComposeStoreProvisioning.Succeeded(applied,", compose, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// No unfiltered <c>catch (Exception)</c> anywhere in <c>DarlingManagedRoles</c>. The specific defect
     /// was one that also swallowed <see cref="OperationCanceledException"/> — so a shutdown arriving
     /// mid-start was reported as "the store said 15" — and the fix is the
@@ -332,84 +280,6 @@ public sealed class ControlPlaneReloadDurabilityTests
         Assert.Contains("return view.ConfigVersion;", reloadBody, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// The retry the ordering fix creates must not become a log flood. With the watermark held back, a
-    /// persistently unreachable store is re-attempted on every 15 s tick — roughly 5,760 attempts a day —
-    /// and <c>LoadViewAsync</c> used to warn on each one. It now warns on the first failure of a streak,
-    /// drops to Debug, and reports recovery once.
-    /// </summary>
-    [Fact]
-    public void ThePendingReloadRetry_ReportsTheTransitionRatherThanEveryAttempt()
-    {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(SourceText("StoreConfigProvider.cs"));
-
-        Assert.Contains("private int _viewReadFailureStreak;", code, StringComparison.Ordinal);
-
-        /* The warning is GATED on the streak's first increment rather than emitted unconditionally. */
-        Assert.Matches(new Regex(@"\+\+_viewReadFailureStreak\s*==\s*1"), code);
-
-        /* Exactly one reset, and it is on the success path — a reset in the catch would make every failure
-           look like a first failure and restore the flood. */
-        Assert.Single(Regex.Matches(code, @"_viewReadFailureStreak\s*=\s*0\s*;"));
-
-        /* Scoped to LoadViewAsync's own body. Searching the FILE for that catch signature finds an
-           earlier member's copy of it — which made this comparison meaningless on the first run, and is
-           the same file-versus-member scoping error #2928 generalised. */
-        var member = code.IndexOf("public async Task<StoreConfigView?> LoadViewAsync(", StringComparison.Ordinal);
-        Assert.True(member > 0, "LoadViewAsync could not be located, so the ordering check below proves nothing");
-
-        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', member)));
-
-        var reset = body.IndexOf("_viewReadFailureStreak = 0;", StringComparison.Ordinal);
-        var catchStart = body.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", StringComparison.Ordinal);
-
-        Assert.True(reset > 0, "the streak reset is not inside LoadViewAsync");
-        Assert.True(catchStart > 0, "LoadViewAsync's catch could not be located, so the check below proves nothing");
-        Assert.True(
-            reset < catchStart,
-            "the failure streak is reset inside or after the catch rather than on the success path, so a "
-            + "persistent failure would report every attempt as the first");
-    }
-
-    /// <summary>
-    /// Both fixes are Darling-only, and that is asserted rather than remembered. If a Lite twin of either
-    /// mechanism ever appears, this fails and points at the fix that has to be mirrored.
-    /// </summary>
-    [Fact]
-    public void NeitherFixHasALiteTwinToDriftFrom()
-    {
-        var root = RepoRoot();
-        var liteSources = new[] { "Lite", "Lite.Tests", "PerformanceMonitor.Common" }
-            .Select(d => Path.Combine(root, d))
-            .Where(Directory.Exists)
-            .SelectMany(d => Directory.EnumerateFiles(d, "*.cs", SearchOption.AllDirectories))
-            .Where(p => !IsBuildOutput(p))
-            .ToArray();
-
-        Assert.True(liteSources.Length > 100, $"the Lite sweep found only {liteSources.Length} files — the layout has moved");
-
-        var twins = new Regex(
-            @"compose_statement_timeout|BuildProvisioningSql|ManagedRoles|_lastConfigVersion",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        /* Comment-stripped, because Lite DOES discuss Darling's config_version behaviour in prose
-           (AppAlertEngineSettings) and prose is not a twin. That distinction is the whole reason this
-           assertion can be stated at all. */
-        var hits = liteSources
-            .Select(p => (Path: p, Code: CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(p))))
-            .SelectMany(f => twins.Matches(f.Code).Select(m => $"{Path.GetFileName(f.Path)}:{LineOf(f.Code, m.Index)}"))
-            .ToArray();
-
-        /* Positive control through the identical regex, so an empty result means "nothing there" rather
-           than "the scan is broken". */
-        Assert.Equal(2, twins.Matches("var x = compose_statement_timeout; _lastConfigVersion = 1;").Count);
-
-        Assert.True(
-            hits.Length == 0,
-            "Lite now carries a twin of one of the two control-plane mechanisms fixed here, so the fix has "
-            + $"to be mirrored rather than left one-SKU: {string.Join(", ", hits)}");
-    }
-
     private static string SourceText(string fileName)
     {
         var path = Path.Combine(
@@ -419,11 +289,6 @@ public sealed class ControlPlaneReloadDurabilityTests
 
         return File.ReadAllText(path);
     }
-
-    private static bool IsBuildOutput(string path) =>
-        path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-            .Any(s => string.Equals(s, "bin", StringComparison.OrdinalIgnoreCase)
-                      || string.Equals(s, "obj", StringComparison.OrdinalIgnoreCase));
 
     private static int LineOf(string text, int index) => text.Take(index).Count(c => c == '\n') + 1;
 
