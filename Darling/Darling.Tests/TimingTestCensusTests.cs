@@ -55,6 +55,7 @@ public sealed class TimingTestCensusTests
         ["PerDatabaseFaultPathSplitTests.cs"] = "the clock is a running slice the code under test reads; the test spins until it passes a minimum and asserts it keeps running and freezes when stopped, with no upper bound",
         ["PgWaitSamplerLiveTests.cs"] = LiveStore + "; the bound is the sampling window plus 30 s, with the window as the lower bound",
         ["PlanRegressionDailyTriggerCostRig.cs"] = Diagnostic + " (a cost rig, never asserted)",
+        ["PlanRegressionDailyNoSpillRig.cs"] = Diagnostic + " (a manual rig: CompareWithDev prints each read's client wall time, never asserted)",
         ["ProvisioningSerializationTests.cs"] = "lower bounds on a deliberate wait plus ceilings of 20 s and 90 s over it, which are hang guards; the same file also holds a live-postgres member",
         ["QueryStoreBackfillCutChunkLiveTests.cs"] = Diagnostic,
         ["QueryStoreIntervalConvergenceLiveTests.cs"] = Diagnostic + " (each step's duration is recorded for the failure message)",
