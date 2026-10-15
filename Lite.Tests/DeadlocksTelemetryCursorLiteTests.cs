@@ -162,14 +162,16 @@ public class DeadlocksTelemetryCursorLiteTests
         var root = FindRepoRoot();
         Assert.True(root is not null, "repo root not found -- the source pin cannot run");
 
-        foreach (var (host, write, serverWriteText) in new[]
+        /* #5813: Lite's Azure loop reads from the reader its read budget opened (openedRead.Reader), so each host
+           names its own per-database read. */
+        foreach (var (host, readText, write, serverWriteText) in new[]
         {
-            ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "WriteBatchAsync(pgConnection, definition, batch", "WriteBatchAsync(pgConnection, definition, rows"),
-            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "WriteBatch(duckConnection, definition, batch", "WriteBatch(duckConnection, definition, rows"),
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "batch = await definition.ReadAsync(dbReader", "WriteBatchAsync(pgConnection, definition, batch", "WriteBatchAsync(pgConnection, definition, rows"),
+            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "batch = await definition.ReadAsync(openedRead.Reader", "WriteBatch(duckConnection, definition, batch", "WriteBatch(duckConnection, definition, rows"),
         })
         {
             var source = File.ReadAllText(Path.Combine(root!, host.Replace('/', Path.DirectorySeparatorChar)));
-            var read = source.IndexOf("batch = await definition.ReadAsync(dbReader", StringComparison.Ordinal);
+            var read = source.IndexOf(readText, StringComparison.Ordinal);
             Assert.True(read > 0, $"{host}: per-database read not found");
             var drop = source.LastIndexOf("context.DropStagedItemState();", read, StringComparison.Ordinal);
             var flush = source.IndexOf(write, read, StringComparison.Ordinal);
