@@ -173,9 +173,10 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var logger = new ListLogger();
         var table = Wide;
 
-        await PromoteAsync(connection, table, Now.AddDays(-12), logger, ct);
+        /* Promoted thirteen days ago (S = 9-27): under the 10-day horizon (#5809) the cutoff is 9-28 14:55, so 9-27 is the whole expired day. */
+        await PromoteAsync(connection, table, Now.AddDays(-13), logger, ct);
         await QueryStoreIntervalPartitions.CreateAheadAsync(connection, table, Now, logger, ct);
-        var wholeDay = new DateTime(2026, 9, 28);
+        var wholeDay = new DateTime(2026, 9, 27);
         Assert.True(await ExistsAsync(connection, table.DayPartition(wholeDay), ct));
 
         /* A reader of the parent blocks the DROP's ACCESS EXCLUSIVE lock for longer than the 5 s lock timeout. */
