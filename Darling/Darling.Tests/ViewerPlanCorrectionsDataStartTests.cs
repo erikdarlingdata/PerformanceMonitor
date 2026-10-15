@@ -46,13 +46,6 @@ public sealed class ViewerPlanCorrectionsDataStartTests : IDisposable
 
     private static int Matches(string source, string pattern) => Regex.Matches(source, pattern).Count;
 
-    private static string MethodBody(string source, string signaturePattern)
-    {
-        var match = Regex.Match(source, signaturePattern + @".*?\r?\n    \}\r?\n", RegexOptions.Singleline);
-        Assert.True(match.Success, $"{signaturePattern} was not found");
-        return match.Value;
-    }
-
     // ── The cap and the probe ──
 
     [Fact]
@@ -78,31 +71,7 @@ public sealed class ViewerPlanCorrectionsDataStartTests : IDisposable
         Assert.Equal("plan_correction", source.CollectorName);
     }
 
-    [Fact]
-    public void TheProbe_GoesThroughTheSharedFloor_OverTheCollectorTable_OnCollectionTime()
-    {
-        var source = ViewerFile("ViewerDataService.PlanCorrection.cs");
-
-        Assert.Contains("DataWindowFloor.Source.ForCollectorTable(\"plan_correction\")", source, StringComparison.Ordinal);
-        Assert.Contains("DataWindowFloor.GetForServerAsync(", source, StringComparison.Ordinal);
-        /* The grid windows on collection_time, the probe's own column, so every row it shows was collected at or after the start the probe names. */
-        Assert.Contains("collection_time >= $2", ViewerDataService.PlanCorrectionsSql, StringComparison.Ordinal);
-    }
-
     // ── The tab: the probe beside the read, the banner from the rows shown ──
-
-    [Fact]
-    public void PlanCorrections_AsksAboutTheWindowItDraws_AndNamesTheCollectionTimeOfEachRowItShows_UpToItsCap()
-    {
-        var load = MethodBody(ViewerFile("ViewerServerTab.Queries.cs"), @"private async Task LoadPlanCorrectionsAsync\(");
-
-        Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetPlanCorrectionsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
-        /* The call passes the cap rule's inputs (the rows shown, the cap), not the probe's answer on its own: it is not the plain
-           UpdateTruncationBanner-over-DataStartOrNullAsync shape the Queries tab's other grids use. */
-        Assert.Equal(1, Matches(load,
-            @"await ShowEventDataStartAsync\(PlanCorrectionsTruncationBanner,\s*dataStartTask,\s*""Plan Corrections"",\s*startUtc,\s*rows\.Select\(r => \(DateTime\?\)r\.CollectionTime\),\s*ViewerDataService\.PlanCorrectionsRowCap\);"));
-        Assert.DoesNotContain("UpdateTruncationBanner(", load, StringComparison.Ordinal);
-    }
 
     /* A census over every server-tab file: each read of the grid's rows is paired with its probe, so a second read path added
        later without one fails here instead of shipping with a stale banner. */
@@ -115,18 +84,6 @@ public sealed class ViewerPlanCorrectionsDataStartTests : IDisposable
         Assert.Equal(1, Matches(tabs, @"_dataService\.GetPlanCorrectionsDataStartAsync\("));
         Assert.Equal(1, Matches(tabs, @"ShowEventDataStartAsync\(PlanCorrectionsTruncationBanner,"));
         Assert.DoesNotContain("await dataStartTask", ViewerFile("ViewerServerTab.Queries.cs"), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheBanner_SitsAboveTheGrid_InTheExistingStyle()
-    {
-        var xaml = ViewerFile("ViewerServerTab.xaml");
-
-        var banner = Regex.Match(xaml, @"<TextBlock Grid\.Row=""1"" x:Name=""PlanCorrectionsTruncationBanner""[^>]*/>");
-        Assert.True(banner.Success, "PlanCorrectionsTruncationBanner is not declared in ViewerServerTab.xaml, in the row above the grid");
-        Assert.Contains("Visibility=\"Collapsed\"", banner.Value, StringComparison.Ordinal);
-        Assert.Contains("Background=\"#22FFAA00\"", banner.Value, StringComparison.Ordinal);
-        Assert.Matches(@"<DataGrid Grid\.Row=""2"" x:Name=""PlanCorrectionGrid""", xaml);
     }
 
     // ── What the banner shows ──

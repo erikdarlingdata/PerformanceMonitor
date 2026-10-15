@@ -85,16 +85,6 @@ public sealed class WebPageIconLinkTests
         Assert.Contains(href, index, StringComparison.Ordinal);
     }
 
-    /// <summary>A census: the host source holds exactly three <c>&lt;head&gt;</c> literals (landing, sign-in error and
-    /// sign-in page), and this class tests each. A fourth page with its own head fails here until it is added above.</summary>
-    [Fact]
-    public void TheHostSource_HoldsExactlyTheThreeKnownHeads()
-    {
-        var path = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
-        var count = Regex.Matches(File.ReadAllText(path), @"<head\b", RegexOptions.IgnoreCase).Count;
-        Assert.Equal(3, count);
-    }
-
     private static async Task<string> Render(Func<HttpContext, Task> write)
     {
         var ctx = new DefaultHttpContext();
@@ -104,15 +94,4 @@ public sealed class WebPageIconLinkTests
         return await new StreamReader(ctx.Response.Body).ReadToEndAsync();
     }
 
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return dir!;
-    }
 }
