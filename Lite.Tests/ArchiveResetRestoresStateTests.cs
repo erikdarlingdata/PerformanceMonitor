@@ -253,6 +253,34 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM collector_state WHERE server_id = 1 AND collector_name = 'default_trace_events' AND state_key = 'last_file' AND state_value = 'log_42.trc'"));
     }
 
+    /// <summary>#5820: the six investigation tables survive a size-triggered reset the way the route table does, through
+    /// <see cref="ArchiveService.PreservedConfigTables"/>: a reported request with its alert row, report and journal, an
+    /// approved note and an environment profile all come back, and the store reads the report through them.</summary>
+    [Fact]
+    public async Task InvestigationTables_SurviveRealReset_WithTheReportAndTheApprovedNote()
+    {
+        const string Request = "11111111-2222-3333-4444-555555555555";
+        await SeedAsync(
+            $"INSERT INTO investigation_requests (request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, window_until, state, opened_at, expires_at, claim_id, claim_count, reported_at) VALUES ('{Request}', 1, 7, 'srv-7', 'blocking', 'Blocking', {Ts(T1)}, {Ts(T1)}, {Ts(T2)}, 'reported', {Ts(T1)}, {Ts(T3)}, '{Request}', 1, {Ts(T2)})",
+            $"INSERT INTO investigation_request_alerts (request_alert_id, request_id, alert_time, server_id, metric_name, dedup_key) VALUES (1, '{Request}', {Ts(T1)}, 7, 'Blocking', '7:Blocking')",
+            $"INSERT INTO investigation_reports (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, evidence, server_id) VALUES (1, '{Request}', 1, 'agent-a', '{Request}', {Ts(T2)}, 'real', 'a long blocking chain', true, '[]', 7)",
+            $"INSERT INTO investigation_journal (journal_id, event_time, request_id, server_id, event, actor, once_key) VALUES (1, {Ts(T1)}, '{Request}', 7, 'claimed', 'agent:agent-a', 'claimed:{Request}')",
+            $"INSERT INTO investigation_notes (note_id, server_id, note_text, author, source_request_id, state, created_at, expires_at, decided_at, decided_by) VALUES (1, 7, 'the nightly ETL holds this lock', 'agent:agent-a', '{Request}', 'approved', {Ts(T2)}, {Ts(T3)}, {Ts(T3)}, 'person:admin')",
+            $"INSERT INTO agent_environment_profiles (profile_id, scope_server_id, profile_text, modified_at) VALUES (1, 7, 'a reporting server', {Ts(T3)})");
+        await ResetAsync();
+
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_requests WHERE request_id = '{Request}' AND state = 'reported'"));
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_request_alerts WHERE request_id = '{Request}'"));
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_reports WHERE request_id = '{Request}' AND verdict = 'real'"));
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_journal WHERE once_key = 'claimed:{Request}'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM investigation_notes WHERE state = 'approved' AND decided_by = 'person:admin'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM agent_environment_profiles WHERE scope_server_id = 7"));
+
+        var read = await new DuckDbInvestigationStore(_duckDb).ReadReportsAsync(
+            Guid.Parse(Request), null, DateTime.MinValue, 10, 10, TestContext.Current.CancellationToken);
+        Assert.Equal("a long blocking chain", Assert.Single(read.Reports).RootCause);
+    }
+
     [Fact]
     public async Task EdgeTriggerWatermarkLoads_AfterRealReset_ReturnTheSeededRows()
     {
