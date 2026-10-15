@@ -166,6 +166,7 @@ public sealed class EffectiveReadWindowTests
 /// real tool with no window argument that notes its window; and no Darling read calls the shared validators directly,
 /// which would skip the note.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class EffectiveReadWindowCensusTests
 {
     private static readonly string[] WindowParameters = ["hours", "hours_back", "days_back"];
