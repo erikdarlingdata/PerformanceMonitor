@@ -403,6 +403,7 @@ public sealed class StoreSelfMetricsTests
             ["collect.plan_regression_daily"] = "the per-day plan totals PLAN_REGRESSION reads for closed days, rebuilt from the interval table (V168 doc)",
             ["collect.plan_regression_daily_built"] = "per-day build and validity bookkeeping for the per-day plan totals, bytes too small to matter (V168 doc)",
             ["collect.query_store_top_daily_built"] = "per-day build bookkeeping for the daily summary, bytes too small to matter (V161 doc)",
+            ["collect.collection_log_hourly"] = "the hourly rollup get_collection_health reads for closed hours, one row per server, collector and hour, pruned to a little over 7 days and derived from collection_log rather than collected (V186 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
         };
 

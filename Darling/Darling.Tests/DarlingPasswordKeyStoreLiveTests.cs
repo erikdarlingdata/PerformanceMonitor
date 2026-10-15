@@ -61,7 +61,8 @@ public sealed class DarlingPasswordKeyStoreLiveTests
 
             // A second start finds the file and the published key agree and says "loaded".
             var again = await store.StartAsync(logger: logger);
-            Assert.Equal("ok", again.State);
+            /* #5829: CI once saw this second start answer "refused" with nothing to say why; the state row's note does. */
+            Assert.True(again.State == "ok", $"The second start answered {again.State}: {(await store.ReadStateAsync("example-host")).Note}");
             Assert.Equal(runtime.Ring.Status.KeyId, again.Ring.Status.KeyId);
             Assert.Contains(logger.Lines, l => l.StartsWith($"Password key {PasswordSeal.DisplayKeyId(published.KeyId)} loaded from ", StringComparison.Ordinal));
 

@@ -438,19 +438,20 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) is next and V185's (#5812) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, and V186's (#5810) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 14})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal + 12, arity - 1);
+        Assert.Equal(ProbeOrdinal + 13, arity - 1);
         Assert.Equal("hasQueryStoreComposeStamp", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
@@ -465,13 +466,14 @@ public sealed class QueryStoreComposeStampTests
         behind[ProbeOrdinal + 5] = false;
         behind[ProbeOrdinal + 6] = false;
         behind[ProbeOrdinal + 7] = false;
-        /* V181's (#5750), V182's (#5506), V183's (#5793), V184's (#5632) and V185's (#5812) sentinels sit above V173's, so a store missing V173 is
+        /* V181's (#5750), V182's (#5506), V183's (#5793), V184's (#5632), V185's (#5812) and V186's (#5810) sentinels sit above V173's, so a store missing V173 is
            missing them too; leaving any true would map the store to that rung. */
         behind[ProbeOrdinal + 8] = false;
         behind[ProbeOrdinal + 9] = false;
         behind[ProbeOrdinal + 10] = false;
         behind[ProbeOrdinal + 11] = false;
         behind[ProbeOrdinal + 12] = false;
+        behind[ProbeOrdinal + 13] = false;
         Assert.Equal(172, (int)method.Invoke(null, behind)!);
 
         /* Everything through V173's sentinel true and the newer one false maps to V173 itself. */
@@ -488,6 +490,7 @@ public sealed class QueryStoreComposeStampTests
         atThisRung[ProbeOrdinal + 10] = false;
         atThisRung[ProbeOrdinal + 11] = false;
         atThisRung[ProbeOrdinal + 12] = false;
+        atThisRung[ProbeOrdinal + 13] = false;
         Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var arm = viewer.IndexOf("if (hasQueryStoreComposeStamp)", StringComparison.Ordinal);

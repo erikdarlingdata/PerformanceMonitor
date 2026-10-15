@@ -26,8 +26,13 @@ namespace PerformanceMonitorLite.Tests;
 /// is a hook that throws at that point after switching the fake store off (<see cref="FakeRouteSecrets.Dead"/>), so the
 /// store's own cleanup cannot run, as after a real process death; a second store over the same file then stands in for the
 /// restart. Credential Manager is an in-memory fake, never the real one.
+///
+/// <para>Collection <c>app-logger-statics</c>, not <c>app-alert-statics</c>: these tests drain the process-wide log buffer,
+/// and a drain from beside that collection took the lines its classes count (#5829: <c>WatermarkReadFailureLogTests</c> saw 2
+/// of its 4). Nothing here configures the route cache; the store's writes only invalidate it, which the cache tests already
+/// allow from other classes.</para>
 /// </summary>
-[Collection("app-alert-statics")]
+[Collection("app-logger-statics")]
 public sealed class NotificationRouteSecretGenerationTests : IDisposable
 {
     private const string OldTeams = "https://teams.old-secret.test/hook/aaa111";
@@ -78,7 +83,7 @@ public sealed class NotificationRouteSecretGenerationTests : IDisposable
     }
 
     /* The log buffer is process-wide and classes in other collections write to it at the same time, so a test reads only the
-       lines with its own wording. */
+       lines with its own wording. Every class that drains it is in app-logger-statics, so no drain takes another's lines. */
     private static string[] RouteLines(string wording) =>
         AppLogger.DrainBufferedLines()
             .Where(l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal) && l.Contains(wording, StringComparison.Ordinal))

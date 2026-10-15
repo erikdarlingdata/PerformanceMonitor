@@ -43,8 +43,8 @@ public sealed class InvestigationRungTests
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(InvestigationTables.RungVersion, RungVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V185 (#5812) took the top of the ladder; this rung stays registered just below it. */
-        Assert.Equal(RungVersion, PgMigrations.Scripts[^2].Version);
+        /* V185 (#5812) and V186 (#5810) sit above this rung. */
+        Assert.Equal(RungVersion, PgMigrations.Scripts[^3].Version);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Equal(InvestigationTables.CreateSql, Rung.Sql);
     }
@@ -80,9 +80,10 @@ public sealed class InvestigationRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         /* V185's sentinel (#5812) is the last parameter; this one is just below it. */
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^1].Name);
-        Assert.Equal("hasInvestigations", parameters[^2].Name);
-        Assert.Equal("hasReadCaller", parameters[^3].Name);
+        Assert.Equal("hasCollectionLogHourly", parameters[^1].Name);
+        Assert.Equal("hasPlanRegressionPartialDays", parameters[^2].Name);
+        Assert.Equal("hasInvestigations", parameters[^3].Name);
+        Assert.Equal("hasReadCaller", parameters[^4].Name);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({parameters.Length - 2})", viewer, StringComparison.Ordinal);
@@ -93,10 +94,11 @@ public sealed class InvestigationRungTests
         /* A store stopped here: every sentinel but V185's. */
         var atThisRung = (object[])all.Clone();
         atThisRung[^1] = false;
+        atThisRung[^2] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var behind = (object[])atThisRung.Clone();
-        behind[^2] = false;
+        behind[^3] = false;
         Assert.Equal(183, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasInvestigations)", StringComparison.Ordinal);
@@ -120,6 +122,7 @@ public sealed class InvestigationRungTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
+        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
         await ExecAsync(connection, @"
