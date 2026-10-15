@@ -385,6 +385,13 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        /* #5632: the fleet investigation workflow (claim/submit/list/get) reads and writes the central Postgres
+           store's investigation queue for the headless service's agent seat; Darling-ONLY by architecture, the
+           same kind of entry as the server-tag tools above: Lite has no agent seat and no central store. */
+        "claim_investigation_request",
+        "get_investigation_reports",
+        "list_investigation_requests",
+        "submit_investigation_report",
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
         "get_finops_inventory",
         "get_finops_recommendations",
