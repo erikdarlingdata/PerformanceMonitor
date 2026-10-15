@@ -103,7 +103,8 @@ public sealed class AlertSettingsControlWiringTests
     public void LiteSaveAlertSettings_PersistsEveryStaticItAssigns()
     {
         var source = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "Windows", "SettingsWindow.xaml.cs")));
-        var body = MethodBody(source, "SaveAlertSettings", "Lite");
+        /* #5846 split the dialog off SaveAlertSettings: the copy-and-write pairs now live in ApplyAlertSettings. */
+        var body = MethodBody(source, "ApplyAlertSettings", "Lite");
 
         /* "App.Foo =" but not "App.Foo ==" — the assignments the Save button makes. */
         var assigned = Regex.Matches(body, @"App\.(\w+)\s*=(?!=)")
@@ -125,7 +126,7 @@ public sealed class AlertSettingsControlWiringTests
             .ToList();
 
         Assert.True(unpersisted.Count == 0,
-            "Lite: SaveAlertSettings copies these controls into App statics but never writes them to " +
+            "Lite: ApplyAlertSettings copies these controls into App statics but never writes them to " +
             "settings.json, so the setting applies for this session and silently reverts on next launch: " +
             string.Join(", ", unpersisted));
     }

@@ -210,7 +210,7 @@ public sealed class SettingsSaveButtonHonestyTests
     [Fact]
     public void TheSaveButton_AsksTheClassifierBeforeItSaysAnything()
     {
-        var body = MethodBody(SettingsWindowSource(), "SaveButton_Click");
+        var body = SavePath(SettingsWindowSource());
 
         Assert.Contains("App.WriteSettingsDocument(", body, StringComparison.Ordinal);
         Assert.Contains("SettingsSaveReport.Classify(", body, StringComparison.Ordinal);
@@ -220,7 +220,7 @@ public sealed class SettingsSaveButtonHonestyTests
         var classify = body.IndexOf("SettingsSaveReport.Classify(", StringComparison.Ordinal);
         var firstToast = body.IndexOf("Settings saved", StringComparison.Ordinal);
         Assert.True(classify < firstToast,
-            "SaveButton_Click can reach \"Settings saved.\" without going through SettingsSaveReport.Classify, " +
+            "The Save path can reach \"Settings saved.\" without going through SettingsSaveReport.Classify, " +
             "which is #2433: the toast is about whether the boxes validated rather than whether anything " +
             "reached disk.");
     }
@@ -234,12 +234,12 @@ public sealed class SettingsSaveButtonHonestyTests
     public void CredentialFailures_AreReportedAfterTheWrite_AndNoMutatorClaimsTheRestWasSaved()
     {
         var source = SettingsWindowSource();
-        var body = MethodBody(source, "SaveButton_Click");
+        var body = SavePath(source);
 
         var write = body.IndexOf("App.WriteSettingsDocument(", StringComparison.Ordinal);
         var report = body.IndexOf("SettingsSaveReport.CredentialFailureText(", StringComparison.Ordinal);
         Assert.True(write >= 0 && report > write,
-            "SaveButton_Click must build the credential failure text after the settings.json write is known.");
+            "The Save path must build the credential failure text after the settings.json write is known.");
         Assert.Contains("credentialsSaved:", body, StringComparison.Ordinal);
 
         Assert.DoesNotContain("Your other settings were saved", source, StringComparison.Ordinal);
@@ -255,14 +255,14 @@ public sealed class SettingsSaveButtonHonestyTests
     public void EveryWriterTheSaveButtonCalls_TakesTheSharedDocument()
     {
         var source = SettingsWindowSource();
-        var body = MethodBody(source, "SaveButton_Click");
+        var body = SavePath(source);
 
         var called = Regex.Matches(body, @"\b(Save[A-Za-z]+)\(root\)")
             .Select(m => m.Groups[1].Value)
             .ToList();
 
         Assert.True(called.Count >= 9,
-            $"SaveButton_Click hands the shared document to only {called.Count} writer(s) — the rest are " +
+            $"The Save path hands the shared document to only {called.Count} writer(s) — the rest are " +
             "opening settings.json for themselves again.");
 
         foreach (var name in called)
@@ -281,7 +281,7 @@ public sealed class SettingsSaveButtonHonestyTests
     public void TheLiveThemePreview_OnlySurvivesASaveThatWrote()
     {
         var source = SettingsWindowSource();
-        var body = MethodBody(source, "SaveButton_Click");
+        var body = SavePath(source);
 
         Assert.Contains("_saved = written;", body, StringComparison.Ordinal);
         Assert.DoesNotContain("_saved = true;", body, StringComparison.Ordinal);
@@ -300,7 +300,7 @@ public sealed class SettingsSaveButtonHonestyTests
     [Fact]
     public void TheMcpRestart_OnlyFollowsASaveThatWrote()
     {
-        var body = MethodBody(SettingsWindowSource(), "SaveButton_Click");
+        var body = SavePath(SettingsWindowSource());
 
         Assert.Contains("if (mcpChanged && written) McpSettingsChanged = true;", body, StringComparison.Ordinal);
     }
@@ -317,7 +317,7 @@ public sealed class SettingsSaveButtonHonestyTests
     [Fact]
     public void EveryMutator_SitsInsideTheGuardedRegion()
     {
-        var body = MethodBody(SettingsWindowSource(), "SaveButton_Click");
+        var body = SavePath(SettingsWindowSource());
 
         var openTry = body.IndexOf("try", StringComparison.Ordinal);
         var firstMutator = body.IndexOf("SaveMcpSettingsAsync(root)", StringComparison.Ordinal);
@@ -325,12 +325,24 @@ public sealed class SettingsSaveButtonHonestyTests
         var theCatch = body.IndexOf("catch (Exception", StringComparison.Ordinal);
 
         Assert.True(openTry >= 0 && firstMutator >= 0 && lastMutator >= 0 && theCatch >= 0,
-            "SaveButton_Click no longer has the shape this guard describes — its anchors moved and it is " +
+            "SaveCoreAsync no longer has the shape this guard describes — its anchors moved and it is " +
             "testing nothing.");
         Assert.True(openTry < firstMutator && lastMutator < theCatch,
-            "A mutator sits outside SaveButton_Click's try, so an exception building a settings value " +
+            "A mutator sits outside SaveCoreAsync's try, so an exception building a settings value " +
             "escapes into App's generic unhandled-exception dialog instead of the honest \"Nothing was " +
             "saved\" this method owes the user.");
+    }
+
+    /// <summary>
+    /// The body of the Save path. #5846 split the button: <c>SaveButton_Click</c> now only awaits
+    /// <c>SaveCoreAsync</c> and then selects the leftmost tab holding an invalid value, so the confirm, the
+    /// guarded mutators, the write and the classifier all live in <c>SaveCoreAsync</c>. The click is checked to
+    /// still call it, so these rules cannot pass over a method the button no longer runs.
+    /// </summary>
+    private static string SavePath(string source)
+    {
+        Assert.Contains("await SaveCoreAsync();", MethodBody(source, "SaveButton_Click"), StringComparison.Ordinal);
+        return MethodBody(source, "Task SaveCoreAsync");
     }
 
     private static string MethodBody(string source, string methodName)

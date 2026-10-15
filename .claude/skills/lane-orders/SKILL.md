@@ -184,9 +184,13 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
 - **The gate, before every push.** From the worktree root, run `bash .github/scripts/pre-push.sh`. It builds both
   test projects, runs the whole `Stage=Guard` trait of both suites as CI's first job does, then the classes CI's
   test map selects for your diff plus every class in a test file that names a symbol you changed, capped. It prints
-  result lines only and ends in `GATE GREEN` or `GATE RED`. Push only on `GATE GREEN`, and put its two Guard result
-  lines and its `classes:` line in the PR body. A `symbols dropped` line means most of the suite names those
-  symbols: run your brief's own class list for them. `--dry-run` only lists the classes. CI decides the rest.
+  result lines only and ends in `GATE GREEN`, `GATE RED` or `GATE STOP`. Push only on `GATE GREEN`, and put its two
+  Guard result lines and its `classes:` line in the PR body. A `symbols dropped` line means most of the suite names
+  those symbols: run your brief's own class list for them. A line `<batch> ran 0 tests: the filter matched nothing`
+  makes the gate `GATE RED`, because a run that matches no test exits 0 without running anything. `GATE STOP:
+  selection is the whole suite (darling N, lite M)` (exit 3) means the selection is over 400 classes in one project,
+  which the laptop never runs: push on its green Guard lines plus your brief's own classes, and CI decides the rest.
+  `--dry-run` lists the classes and each batch's size. CI decides the rest.
   The map's part (#5872) is the same set a pull request's CI passes run: a test, docs or `.github/` diff gets no
   drift, so it selects its own classes, their xunit collection mates, the classes that read its files as text and
   the always-run ones (`Stage=Guard`, whole-tree readers, `Gate=Env`, new test classes): about 330 Darling classes,

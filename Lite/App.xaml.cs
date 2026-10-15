@@ -346,6 +346,10 @@ public partial class App : Application
     /* NOC Overview tile sort ("Cpu" = CPU% descending default, or "Name") */
     public static ServerOverviewSortMode OverviewSortMode { get; set; } = ServerOverviewSort.Default;
 
+    /// <summary>The Settings window tab open when it last closed (#5846), by the tab's name ("AlertRulesTab"). Empty, or
+    /// a name no tab has any more, opens the first tab. Written by the Settings window on close.</summary>
+    public static string SettingsWindowTab { get; set; } = "";
+
     /// <summary>Sidebar fleet-tree groups the user has collapsed (#2020 2b-i-b), each a
     /// <c>FleetGroupKey.ToStorageString()</c> value ("Favorites" / "Untagged" / "Tag:{id}"), so expand/collapse
     /// survives a restart — the Lite twin of the viewer's <c>ViewerPreferences.CollapsedFleetGroups</c>.</summary>
@@ -1487,6 +1491,9 @@ public partial class App : Application
 
             /* NOC Overview tile sort */
             if (read.TryGetProperty("overview_sort_mode", out v)) OverviewSortMode = ServerOverviewSort.ParseMode(v.TextOrNull());
+
+            /* Settings window: the tab it reopens on (#5846) */
+            if (read.TryGetProperty("settings_window_tab", out v)) SettingsWindowTab = v.TextOrNull() ?? "";
 
             /* Sidebar fleet-tree collapsed groups (#2020 2b-i-b) */
             if (read.TryGetProperty("collapsed_fleet_groups", out v) && v.IsArray())

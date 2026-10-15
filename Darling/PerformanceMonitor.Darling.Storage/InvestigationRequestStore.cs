@@ -159,6 +159,12 @@ public sealed record InvestigationReportsRead(
     bool RequestsTruncated = false,
     bool JournalTruncated = false);
 
+/// <summary>
+/// One request as the long-poll's catch-up read returns it (#5822): the request id, its route, the server name, the family
+/// and when it opened (UTC), and nothing else.
+/// </summary>
+public sealed record InvestigationOpenedRow(Guid RequestId, int RouteId, string ServerName, string Family, DateTime OpenedAtUtc);
+
 /// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,
@@ -334,6 +340,16 @@ WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
 UPDATE config.investigation_requests
 SET state = 'open', claimed_by = NULL, claim_id = NULL, claimed_at = NULL, lease_until = NULL
 WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
+
+    /* #5822: the long-poll's catch-up read. Every request opened after $1 on the routes in $2 (all routes when NULL), oldest
+       first, whatever its state now: it answers what opened, and the claim decides what is still claimable. */
+    internal const string OpenedSinceSql = @"
+SELECT request_id, route_id, server_name, family, opened_at
+FROM config.investigation_requests
+WHERE opened_at > $1
+  AND ($2::integer[] IS NULL OR route_id = ANY ($2))
+ORDER BY opened_at, request_id
+LIMIT $3";
 
     internal const string ListSql = @"
 SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
@@ -945,6 +961,38 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
                 reader.GetInt32(14),
                 reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The requests opened after <paramref name="sinceUtc"/> on <paramref name="routeIds"/> (every route when null or empty),
+    /// oldest first, at most <paramref name="limit"/> (#5822, the long-poll's catch-up read). Writes nothing.
+    /// </summary>
+    public async Task<IReadOnlyList<InvestigationOpenedRow>> OpenedSinceAsync(
+        DateTime sinceUtc, IReadOnlyCollection<int>? routeIds, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, OpenedSinceSql,
+            P(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Utc)),
+            new NpgsqlParameter<int[]?>
+            {
+                TypedValue = routeIds is { Count: > 0 } ? routeIds.ToArray() : null,
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer,
+            },
+            P(limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<InvestigationOpenedRow>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new InvestigationOpenedRow(
+                reader.GetGuid(0),
+                reader.GetInt32(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetFieldValue<DateTime>(4)));
         }
 
         return rows;
