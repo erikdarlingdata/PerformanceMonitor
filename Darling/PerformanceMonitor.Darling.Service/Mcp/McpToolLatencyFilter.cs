@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
@@ -38,6 +39,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// runner shared with the web composer, which already records one <c>Compose</c> sample per call. Recording
 /// here too would double-count every MCP custom-view run as both <c>Compose</c> and <c>Mcp</c>.</para>
 ///
+/// <para><b>The tools in <see cref="UntimedTools"/> pass straight through</b>, each for the reason it lists there.</para>
+///
 /// <para><b>Outcome.</b> A thrown exception (a binding-layer throw the tool's own try/catch did not
 /// catch) classifies through <see cref="ReadOutcomeClassifier.Classify"/>, the same as the web loop's
 /// backstop arm. A normal return classifies its result: <see cref="CallToolResult.IsError"/> set true, or a
@@ -55,6 +58,19 @@ public sealed class McpToolLatencyFilter
     /// <summary>The tool name this filter never records against <see cref="ReadSurface.Mcp"/> — it is already
     /// counted once as <c>compose</c> by <c>RunComposedPanelAsync</c>.</summary>
     internal const string SkippedToolName = "run_custom_view_panel";
+
+    /// <summary>
+    /// The tools this filter passes straight through: not timed, not admitted, no read scope (so no slow-read record), each
+    /// with why (#5822; #5856 review round 1 made the exemption a roster). Not <see cref="ReadAdmission.SkippedRoutes"/>:
+    /// that roster holds health reads, which are still timed, and this tool must not be timed at all.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> UntimedTools = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [DarlingMcpInvestigationTools.WaitToolName] =
+            "long poll: it waits up to 25 seconds by design, so timing it would fill the read-latency percentiles and the " +
+            "slow-read record with its waits, and admitting it would hold a read slot for the whole wait; its catch-up " +
+            "reads are small and keyed on opened_at",
+    };
 
     private readonly ReadLatencyAccumulator _readLatency;
     private readonly ILogger? _logger;
@@ -86,10 +102,7 @@ public sealed class McpToolLatencyFilter
                 return await next(request, cancellationToken);
             }
 
-            /* #5822: the investigation long poll is not a read to time or admit. It waits up to 25 seconds by design, so
-               timing it would fill the read-latency percentiles and the slow-read record with its waits, and admitting it
-               would hold a read slot for the whole wait. Its catch-up reads are small and keyed on opened_at. */
-            if (string.Equals(toolName, DarlingMcpInvestigationTools.WaitToolName, StringComparison.Ordinal))
+            if (UntimedTools.ContainsKey(toolName))
             {
                 return await next(request, cancellationToken);
             }

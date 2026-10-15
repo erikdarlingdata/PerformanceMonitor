@@ -324,13 +324,19 @@ public sealed class DarlingMcpInvestigationTools
             Version + "." + Watermark.Ticks.ToString(CultureInfo.InvariantCulture) + "." +
             string.Join(",", Seen.OrderBy(id => id).Select(id => id.ToString("N")));
 
+        /// <summary>
+        /// Reads a cursor an earlier call answered. Bounded on both sides (#5856 review round 1): every read subtracts
+        /// <see cref="CursorOverlap"/> from the watermark, so a watermark at or under the overlap (<c>v1.0.</c>) is
+        /// refused here as an <c>invalid</c> cursor instead of throwing below <see cref="DateTime.MinValue"/> in the read.
+        /// </summary>
         internal static bool TryParse(string text, out WaitCursor? cursor)
         {
             cursor = null;
             var parts = text.Split('.');
             if (parts.Length != 3 || parts[0] != Version
                 || !long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)
-                || ticks > DateTime.MaxValue.Ticks)
+                || ticks > DateTime.MaxValue.Ticks
+                || ticks <= CursorOverlap.Ticks)
             {
                 return false;
             }

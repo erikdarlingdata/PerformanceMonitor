@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -264,13 +265,30 @@ public sealed class InvestigationLongPollTests
     [InlineData(26, null, "timeout_seconds")]
     [InlineData(5, "not-a-cursor", "after")]
     [InlineData(5, "v1.123.nothex", "after")]
+    [InlineData(5, "v1.0.", "after")]
+    [InlineData(5, "v1.2999999999.", "after")]
+    [InlineData(5, "v1.3000000000.", "after")]
     public async Task ABadTimeoutOrCursor_IsRefused_WithoutWaiting(int timeoutSeconds, string? after, string parameter)
     {
+        // The last three parse as cursors but sit at or under the five-minute overlap (3,000,000,000 ticks), which every
+        // read subtracts: before #5856 review round 1 they answered status = error from the subtraction, not this refusal.
         var rig = new Rig();
-        var answer = await rig.WaitAsync(null, after, timeoutSeconds);
+        var started = Stopwatch.GetTimestamp();
+        var answer = Answer(await rig.WaitAsync(null, after, timeoutSeconds));
 
-        Assert.Contains(parameter, answer, StringComparison.Ordinal);
-        Assert.NotEqual("ok", (string?)Answer(answer)["status"]);
+        Assert.Equal("invalid", (string?)answer["status"]);
+        Assert.Equal(parameter, (string?)answer["hints"]?["parameter"]);
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(2));
         Assert.Equal(0, rig.Signal.WaiterCount);
+    }
+
+    [Fact]
+    public async Task ACursorJustPastTheOverlap_IsAccepted_AndAnswersFromItsWatermark()
+    {
+        var rig = new Rig();
+        var answer = Answer(await rig.WaitAsync(null, "v1.3000000001.", 0, TestContext.Current.CancellationToken));
+
+        Assert.Equal("empty", (string?)answer["status"]);
+        Assert.StartsWith("v1.3000000001.", (string)answer["cursor"]!, StringComparison.Ordinal);
     }
 }
