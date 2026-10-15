@@ -1147,7 +1147,11 @@ public sealed class McpPageContractTests
     public void TheUncappedReads_RefuseANonPositiveSpan_ThroughTheSharedValidator(string file, string toolName)
     {
         var body = Strip(ToolBody(ReadRepoFileLf(file.Split('/')), toolName));
-        Assert.Contains("McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd)", body, StringComparison.Ordinal);
+        /* #5814: Darling calls the shared validator through DarlingReadWindow, which only adds the window note. */
+        var shared = file.StartsWith("Lite/", StringComparison.Ordinal)
+            ? "McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd)"
+            : "DarlingReadWindow.ValidateUncapped(hours_back, as_of, out var windowEnd)";
+        Assert.Contains(shared, body, StringComparison.Ordinal);
         Assert.DoesNotContain("McpHelpers.ResolveAsOf(", body, StringComparison.Ordinal);
     }
 

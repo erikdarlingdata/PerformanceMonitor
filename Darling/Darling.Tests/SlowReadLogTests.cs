@@ -111,6 +111,19 @@ public sealed class SlowReadLogTests
     }
 
     [Fact]
+    public void AnHoursBackPastTheCalendar_LiftsNoWindow_AndDoesNotThrow()
+    {
+        /* #5844: a read that ignores hours_back (get_investigation_reports with request_id) accepts any value, and the
+           row is built from the arguments the caller sent: a value past DateTime's range must not throw the row away. */
+        var started = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var (_, _, start, end) = SlowReadLog.NormaliseArguments(
+            new JsonObject { ["hours_back"] = 1_000_000_000 }, null, started);
+        Assert.Null(start);
+        Assert.Null(end);
+    }
+
+    [Fact]
     public void ARepeatedAsOfKey_RecordedAsAnArray_EndsTheWindowAtItsFirstValue()
     {
         var started = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
