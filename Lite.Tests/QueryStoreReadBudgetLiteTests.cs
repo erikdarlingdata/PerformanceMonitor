@@ -11,8 +11,10 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -115,9 +117,15 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         Assert.Equal((int)Budget.TotalMilliseconds, row.SlowestItemMs);
         Assert.Equal(2, row.ItemCount);
 
-        /* #5813 review: the timed-out database's SQL slice is in the run's sql_duration_ms. The slice starts before the
-           read's budget, so it is at least the budget; before the fix the catch arm never added it. */
-        Assert.True(row.SqlMs >= (int)Budget.TotalMilliseconds, $"sql_duration_ms {row.SqlMs} holds the timed-out slice");
+        /* #5813 review: the timed-out database's SQL slice is in the run's sql_duration_ms. The slice's stopwatch starts
+           before the read opens and stops after the cut read has thrown, so it holds at least the time the read waited, as
+           the reader itself measured it; before the fix the catch arm never added it and sql_duration_ms held only zeta's
+           instant read. Compared with the measured wait, not with the budget: a CancelAfter timer fires on the system
+           timer's tick, so at Windows' default 15.6 ms tick a 1,000 ms budget can cut the read a few milliseconds short of
+           1,000 by the stopwatch (CI read 999). The wait's floor keeps the comparison from passing on a read never cut. */
+        var waited = fixture.SlowWaitMs.Value;
+        Assert.True(waited >= (long)(Budget.TotalMilliseconds / 2), $"the slow read waited {waited} ms before its cut");
+        Assert.True(row.SqlMs >= waited, $"sql_duration_ms {row.SqlMs} holds the timed-out slice of {waited} ms");
         Assert.Contains("timed out", fixture.Service.TelemetryFor(fixture.ServerId).Note ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal(1, await CountAsync(fixture, Alpha));
         Assert.Equal(watermark, reads.Single(r => r.Database == Alpha).Cutoff);
@@ -186,7 +194,9 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         Assert.Equal(1, cut.ItemCount);
     }
 
-    private sealed record Fixture(RemoteCollectorService Service, ServerConnection Server, int ServerId, DuckDbInitializer DuckDb, ServerManager Servers);
+    /// <param name="SlowWaitMs">How long the slow database's read waited before its token cut it, in stopwatch
+    /// milliseconds (-1 until a read is cut); one per test, so no other test's read can write it.</param>
+    private sealed record Fixture(RemoteCollectorService Service, ServerConnection Server, int ServerId, DuckDbInitializer DuckDb, ServerManager Servers, StrongBox<long> SlowWaitMs);
 
     /// <summary>
     /// Lists <paramref name="databases"/>; each read records the database and the runtime-stats cutoff it was asked
@@ -205,7 +215,7 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
                 reads.Add((database, cutoff));
             }
 
-            return database == slow ? new NeverAnsweringReader() : new DataTable().CreateDataReader();
+            return database == slow ? new NeverAnsweringReader(fixture.SlowWaitMs) : new DataTable().CreateDataReader();
         };
 
         return reads;
@@ -278,15 +288,30 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         {
             QueryStoreReadBudgetSpan = Budget,
         };
-        return new Fixture(service, server, RemoteCollectorService.GetServerId(server), duckDb, serverManager);
+        return new Fixture(service, server, RemoteCollectorService.GetServerId(server), duckDb, serverManager, new StrongBox<long>(-1));
     }
 
-    /// <summary>The runtime-stats read that never answers: its first row waits until its token is cancelled.</summary>
-    private sealed class NeverAnsweringReader : DbDataReader
+    /// <summary>
+    /// The runtime-stats read that never answers: its first row waits until its token is cancelled, and records how long
+    /// it waited in <paramref name="waitedMs"/> when one is given.
+    /// </summary>
+    private sealed class NeverAnsweringReader(StrongBox<long>? waitedMs = null) : DbDataReader
     {
         public override async Task<bool> ReadAsync(CancellationToken cancellationToken)
         {
-            await Task.Delay(Timeout.Infinite, cancellationToken);
+            var wait = Stopwatch.StartNew();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            finally
+            {
+                if (waitedMs is not null)
+                {
+                    waitedMs.Value = wait.ElapsedMilliseconds;
+                }
+            }
+
             return false;
         }
 
