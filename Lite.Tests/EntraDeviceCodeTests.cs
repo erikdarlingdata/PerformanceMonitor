@@ -450,7 +450,7 @@ public class EntraDeviceCodeTests
         Assert.Contains("data collection does not", text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("per run of the app", text, StringComparison.OrdinalIgnoreCase);
 
-        var readme = ParitySource.ReadFile("README.md");
+        var readme = ParitySource.ReadFile("docs/authentication.md"); // #5860: moved from the root README
         Assert.Contains("data collection does not skip them", readme, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(
             "Background connectivity sweeps skip these servers rather than raising a code at nobody, collection prompts once",
@@ -1571,7 +1571,7 @@ public class EntraDeviceCodeTests
 
            Each absence is paired with the statement that replaced it, because deleting a paragraph
            satisfies a bare DoesNotContain. */
-        var readme = ParitySource.ReadFile("README.md");
+        var readme = ParitySource.ReadFile("docs/authentication.md"); // #5860: moved from the root README
 
         Assert.DoesNotContain(
             "The driver's callback carries no connection id, so two at once cannot be told apart",
@@ -2492,7 +2492,7 @@ public class EntraDeviceCodeTests
            caveat travels with it. The caveat is the one a reader acts on, and the one most likely to
            be quietly dropped when the mode is eventually confirmed - at which point dropping it is
            correct, and this test is where that decision is recorded. */
-        var readme = ParitySource.ReadFile("README.md");
+        var readme = ParitySource.ReadFile("docs/authentication.md"); // #5860: moved from the root README
 
         Assert.Contains("| Device Code | Lite |", readme, StringComparison.Ordinal);
         Assert.Contains("### Device Code (Lite only, `ActiveDirectoryDeviceCodeFlow`)", readme, StringComparison.Ordinal);

@@ -987,6 +987,24 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>Prefixes the fleet-level raw-purge-over-horizon alert serverKey so it never parses as a server_id.</summary>
     private const string RawPurgeOverHorizonKeyPrefix = "rawpurgehorizon:";
 
+    /* Query Store Compose Hours Stuck edge state (#5867). FLEET-level, ONE key: the store has hours of the Query Store compose
+       rollup whose build has failed often enough to be retried only once a day (QueryStoreComposeStamp.FailuresBeforeBackoff, or a
+       statement timeout under the extended timeout). STANDING, the Raw Purge Over Horizon idiom: fire once, re-fire on the state
+       cooldown while it persists, one clearing resolution when no hour is in backoff. */
+    private readonly ConcurrentDictionary<string, bool> _activeComposeStuck = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastComposeStuckAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #5867 alert metric: hours of the Query Store compose rollup in daily backoff.</summary>
+    internal const string ComposeHoursStuckMetric = "Compose Rollup Hours Stuck";
+
+    /// <summary>The resolution title <see cref="ComposeHoursStuckMetric"/> clears with.</summary>
+    internal const string ComposeHoursStuckClearedMetric = "Compose Rollup Hours Built";
+
+    /// <summary>Prefixes the fleet-level compose alert serverKey so it never parses as a server_id.</summary>
+    private const string ComposeHoursStuckKeyPrefix = "composestuck:";
+
+    private const string ComposeHoursStuckKey = "querystore";
+
     /* Notification Channel Failing edge state (#4750). FLEET-level, MULTI-keyed by channel name (Teams, Slack,
        Generic, PagerDuty). A webhook channel counts its own failures in a row and logs the first few, but
        nothing else showed it, so a channel could fail for weeks while another one delivered every alert.
@@ -7091,6 +7109,86 @@ WHERE c.is_enabled";
                     RawPurgeOverHorizonClearedMetric,
                     $"{_storeLabel}: {label} purged successfully and is back under {warnRatio:F1}x its {reading.DropAfter} horizon"), cancellationToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #5867 Compose Rollup Hours Stuck check: the worker calls it after each compose tick with the
+    /// failure record it read (<see cref="QueryStoreComposeStamp.ReadFailuresAsync"/>). Same failure isolation as
+    /// <see cref="EvaluateRawPurgeOverHorizonAsync"/>.
+    /// </summary>
+    public async Task EvaluateComposeHoursStuckAsync(
+        IReadOnlyList<QueryStoreComposeStamp.HourFailure> failures, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyComposeHoursStuckAsync(failures, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the failure record is a parameter; the read that produces it is
+               isolated in DarlingWorker.BuildQueryStoreComposeStampAsync. */
+            _logger?.LogError("Compose-rollup-hours-stuck self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Compose Rollup Hours Stuck condition (#5867): one WARNING while any hour of the Query Store compose
+    /// rollup is in backoff (<see cref="QueryStoreComposeStamp.HourFailure.InBackoff"/>: its build has failed
+    /// <see cref="QueryStoreComposeStamp.FailuresBeforeBackoff"/> times in a row, or timed out under the extended timeout, and is now
+    /// tried once a day). The alert names how many hours, the oldest, its count and its last reason; <c>get_store_metrics</c> lists
+    /// them all. Hours that failed but are still retried every tick do not fire it. A STANDING condition, the Raw Purge Over Horizon
+    /// idiom: fire once, re-fire on the cooldown while it persists, one clearing resolution once no hour is in backoff. Gated on the
+    /// master alerts switch. Internal so it pins directly with a recording deliverer and a controllable clock.
+    /// </summary>
+    internal async Task ApplyComposeHoursStuckAsync(
+        IReadOnlyList<QueryStoreComposeStamp.HourFailure> failures, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var key = ComposeHoursStuckKey;
+        var stuck = failures.Where(f => f.InBackoff).OrderBy(f => f.Hour).ToList();
+        if (stuck.Count > 0)
+        {
+            _activeComposeStuck[key] = true;
+            var decision = DecideStateAlert(_lastComposeStuckAlert, key, ComposeHoursStuckMetric, key, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastComposeStuckAlert[key] = now;
+                var oldest = stuck[0];
+                var reason = string.IsNullOrEmpty(oldest.LastSqlState) ? oldest.LastReason : $"{oldest.LastSqlState}: {oldest.LastReason}";
+                var delivery = await FireAsync(
+                    StoreKey(ComposeHoursStuckKeyPrefix + key), _storeLabel, ComposeHoursStuckMetric,
+                    $"{stuck.Count} hour(s)", "0 hours",
+                    detail: StateRepeatNote(decision, refire) +
+                        $"{stuck.Count} hour(s) of the Query Store compose rollup failed to build {QueryStoreComposeStamp.FailuresBeforeBackoff} times in a row " +
+                        "(or timed out under the longer timeout) and are now retried once a day. " +
+                        $"The oldest is {oldest.Hour:yyyy-MM-dd HH}:00 UTC: {oldest.Failures} failure(s), last reason {reason}, next attempt {oldest.NextAttemptAt:yyyy-MM-dd HH:mm} UTC. " +
+                        "get_store_metrics lists every such hour under query_store_compose; the service log's 'Query Store compose rollup: building hour' " +
+                        "lines carry each failure.",
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: $"{stuck.Count} Query Store compose hour(s) retried once a day - {reason}",
+                    numericCurrentValue: stuck.Count,
+                    numericThresholdValue: 0,
+                    cancellationToken);
+                NoteStateSend(ComposeHoursStuckMetric, key, delivery);
+            }
+        }
+        else if (_activeComposeStuck.TryRemove(key, out var was) && was)
+        {
+            EndStateAlert(_lastComposeStuckAlert, key, ComposeHoursStuckMetric, key);
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(ComposeHoursStuckKeyPrefix + key), _storeLabel, ComposeHoursStuckMetric,
+                ComposeHoursStuckClearedMetric,
+                $"{_storeLabel}: no Query Store compose hour is in daily backoff any more"), cancellationToken);
         }
     }
 

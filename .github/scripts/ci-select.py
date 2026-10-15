@@ -705,6 +705,10 @@ KEEP_FULL = (
     "**/xunit.runner.json",
 )
 
+# map_select()'s `reason` for a change that holds documentation files only (#5894).
+DOCS_ONLY_REASON = ("documentation-only change: only a class that reads a changed document as text is selected "
+                    "(CI's docs fast path runs no test)")
+
 # The documentation allowlist (the `docs` filter in build.yml); selection_args() passes the live one.
 DOC_PATTERNS = (
     "**/*.md",
@@ -811,7 +815,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                doc_patterns: "tuple[str, ...] | list[str]" = DOC_PATTERNS,
                now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
                max_drift: int = MAP_MAX_DRIFT, base_ref: str = "",
-               named: "dict[str, set[str]] | None" = None) -> dict:
+               named: "dict[str, set[str]] | None" = None, guard_stage_separate: bool = False) -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -834,7 +838,12 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     of it matches a changed file, it reads the whole tree and any non-documentation file changed, the map has
     never seen it and it holds a test, it shares an xunit collection (of at most COLLECTION_MATE_CAP classes) with a
     class whose own file changed, or its source names a changed symbol (`named`). The last reason only adds classes,
-    so a selection never shrinks for it. A file changed since the map counts as changed too (it may have grown new
+    so a selection never shrinks for it. With `guard_stage_separate` (#5894) the caller runs the whole Stage=Guard
+    trait as a stage of its own (the pre-push gate does), so a Stage=Guard class is left out of `selected` and
+    `seconds`: `why` keeps it, marked "run in the guard stage", and the answer says `guard_stage_separate`. A pull
+    request whose every changed file is documentation (`doc_patterns`) selects only the classes that read a changed
+    document as text (no Guard, new or environment-gated class, no changed symbol); the answer says `docs_only` and
+    `reason` says why: CI's docs fast path runs nothing for it either (#5894). A file changed since the map counts as changed too (it may have grown new
     call edges), but only when the change holds a product source file the map knows (#5872). `via` names, per
     "covers a changed file" class, the changed file the walk came from; `unknown` names each file the map did not know
     and the rule that took it; `drift` is how many drifted files counted.
@@ -921,6 +930,12 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             return bool(live)
         return _pattern_hit(g, live, docs_changed)
 
+    # #5894: a change of documentation files only. CI's `docs` filter takes the docs fast path for it (decide():
+    # docs_fastpath, no guard run, no shards) and runs nothing, so the selection holds only the classes that read a
+    # changed document as text (#5872: a class pinned to README.md still runs for it): no Guard class, no "new class",
+    # no class gated on an environment, no changed symbol.
+    docs_only = bool(changed) and not live
+
     new_classes = any(cls not in parsed.get(suite, {}) for suite, found in discovered.items() for cls in found)
     # A file the map does not know is named with the rule that caught it (#5872), in the FULL reason or in `unknown`.
     unknown: dict[str, str] = {}
@@ -968,7 +983,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                 via.setdefault(suite, {})[cls] = sorted(live_set & covered)[0]
             elif text_hit(cls):
                 reasons[cls] = "reads the tree" if globs.get(cls) == "tree" else "text pattern"
-        for cls, traits in found.items():
+        for cls, traits in ([] if docs_only else found.items()):
             if cls not in mapped:
                 # #5872: a helper type (a fake, a logger, a harness) declares no test, so the map never has it and the
                 # runner runs nothing for it; only a class that holds or inherits a test is new.
@@ -997,15 +1012,21 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         # the files it RAN; a class that only reads a source file as text, or reflects over a catalog, has no such
         # link, and a small pull request whose files the map knows would leave it out. Last, with setdefault, so a
         # class keeps the reason it already had and the selection only grows.
-        for cls in sorted((named or {}).get(suite, ())):
+        for cls in sorted({} if docs_only else (named or {}).get(suite, ())):
             if cls in mapped or cls in found:
                 reasons.setdefault(cls, "names a changed symbol")
-        selected[suite] = sorted(reasons)
-        why[suite] = {c: reasons[c] for c in sorted(reasons)}
-        seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in reasons if c in mapped), 3)
+        # #5894: the caller runs the whole Stage=Guard trait on its own, so a Guard class in the selection would run twice.
+        # It keeps its `why` entry (the printed summary still counts it) but is not selected.
+        in_guard_stage = {c for c in reasons if "Stage=Guard" in found.get(c, ())} if guard_stage_separate else set()
+        kept = sorted(c for c in reasons if c not in in_guard_stage)
+        selected[suite] = kept
+        why[suite] = {c: ("run in the guard stage" if c in in_guard_stage else reasons[c]) for c in sorted(reasons)}
+        seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in kept if c in mapped), 3)
         total[suite] = len(set(mapped) | set(found))
-    return {"full": False, "reason": "", "selected": selected, "why": why, "seconds": seconds, "total": total,
-            "via": via, "drift": len(drift) if drift_applies else 0, "unknown": unknown}
+    return {"full": False, "reason": DOCS_ONLY_REASON if docs_only else "", "selected": selected, "why": why,
+            "seconds": seconds, "total": total, "via": via, "drift": len(drift) if drift_applies else 0,
+            "unknown": unknown, "docs_only": docs_only,
+            "guard_stage_separate": guard_stage_separate}
 
 
 def load_map(path: str) -> "dict | None":
@@ -1155,7 +1176,10 @@ def map_keep(selection: object, suite: str) -> "tuple[set[str] | None, str]":
         return None, f"the selection is FULL ({selection.get('reason') or 'no reason given'})"
     chosen = selection.get("selected")
     names = chosen.get(suite) if isinstance(chosen, dict) else None
-    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n for n in names):
+    # #5894: an empty list is trusted only when the selection says why it is empty: Guard classes left out because the
+    # caller runs that stage itself, or a documentation-only change. CI's selection sets neither.
+    explained = selection.get("guard_stage_separate") is True or selection.get("docs_only") is True
+    if not isinstance(names, list) or (not names and not explained) or not all(isinstance(n, str) and n for n in names):
         return None, f"the selection holds no usable class list for the {suite} suite"
     return set(names), ""
 
@@ -1838,6 +1862,9 @@ def main(argv: list[str]) -> int:
     ms.add_argument("--drift-file", help="the drift as one path per line, instead of --base (`-` for none)")
     ms.add_argument("--root", default=ROOT, help="the tree whose test classes are listed (default: this repository)")
     ms.add_argument("--files-from", help="the changed files as one path per line, in place of the arguments")
+    ms.add_argument("--guard-stage-separate", action="store_true",
+                    help="the caller runs the whole Stage=Guard trait itself (the pre-push gate): leave Guard classes "
+                         "out of the selection (#5894)")
     ms.add_argument("--out", help="also write the selection JSON to this file (stdout keeps the notice and the JSON)")
     ms.add_argument("--summary", help="also write the shadow step-summary markdown to this file")
     ms.add_argument("files", nargs="*")
@@ -1900,7 +1927,9 @@ def main(argv: list[str]) -> int:
         # #5776: with the base, the classes that name a changed symbol are one more reason (it only adds classes).
         named = symbol_classes(args.root, args.base) if args.base else None
         result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
-                            named=named, **selection_args(Rules()))
+                            named=named, guard_stage_separate=args.guard_stage_separate, **selection_args(Rules()))
+        if result.get("docs_only"):
+            print(f"::notice::test map: {result['reason']}")
         if result["full"]:
             print(f"::notice::test map: running everything ({result['reason']})")
         for f, rule in sorted((result.get("unknown") or {}).items()):

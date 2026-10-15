@@ -13,7 +13,8 @@
 
 ## Documentation
 
-- [README](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/README.md): Main documentation including quick start, permissions, collector reference, alert configuration, MCP server setup, and edition comparison
+- [README](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/README.md): Overview, quick start for Lite and Darling, and links to the detail pages
+- [Detail pages](https://github.com/erikdarlingdata/PerformanceMonitor/tree/main/docs): Edition comparison, Lite guide and collector reference, permissions, authentication, alert configuration, MCP server setup, and troubleshooting
 - [Darling operator guide](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/Darling/README.md): Installing and configuring the Darling service, its store, PostgreSQL targets, and its MCP tools
 - [Releases](https://github.com/erikdarlingdata/PerformanceMonitor/releases): Download pre-built binaries
 - [Product page](https://erikdarling.com/free-sql-server-performance-monitoring/): Overview and commercial support options

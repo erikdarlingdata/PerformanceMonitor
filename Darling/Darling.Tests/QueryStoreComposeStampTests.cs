@@ -32,6 +32,15 @@ public sealed class QueryStoreComposeStampTests
 
     /* ---- the column map ------------------------------------------------------------------------------- */
 
+    /// <summary>#5871: <see cref="QueryStoreComposeStamp.FailuresRungVersion"/> is read by no code, so a renumber at merge could miss it and still
+    /// compile. The rung that creates the failure table is the migration that carries the table's DDL.</summary>
+    [Fact]
+    public void TheFailuresRungVersion_IsTheVersionOfTheMigrationThatCreatesTheFailureTable()
+    {
+        var rung = Assert.Single(PgMigrations.Scripts, s => s.Sql == QueryStoreComposeStamp.FailuresCreateSql);
+        Assert.Equal(QueryStoreComposeStamp.FailuresRungVersion, rung.Version);
+    }
+
     [Fact]
     public void TheMap_HasUniqueColumnsAndExpressions_OverTheFactAlias_NeverDoublePrecision()
     {
@@ -168,7 +177,9 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains("WHERE p.rn <= $2", plan, StringComparison.Ordinal);
         Assert.Contains("b.built_seq IS DISTINCT FROM b.late_seq", plan, StringComparison.Ordinal);
         /* The build lag is read off the STORE's clock, the one the row trigger's WHEN uses; the service's clock is only the retention floor. */
-        Assert.Contains("date_trunc('hour', coalesce($3::timestamp, now() AT TIME ZONE 'UTC') - interval '3 hours')", plan, StringComparison.Ordinal);
+        /* #5867: the store clock moved into the plan's clock CTE, which the failure filter reads too. */
+        Assert.Contains("SELECT coalesce($3::timestamp, now() AT TIME ZONE 'UTC') AS at", plan, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', clock.at - interval '3 hours')", plan, StringComparison.Ordinal);
         Assert.DoesNotContain("$1::timestamp - interval", plan, StringComparison.Ordinal);
         Assert.Contains("greatest($1::timestamp,", plan, StringComparison.Ordinal);
         Assert.Contains("filled_since", plan, StringComparison.Ordinal);
@@ -178,7 +189,9 @@ public sealed class QueryStoreComposeStampTests
         Assert.Equal(6, QueryStoreComposeStamp.MaxBuildsPerTick);
         Assert.Equal(60, QueryStoreComposeStamp.BuildStatementTimeoutSeconds);
         Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreComposeStamp.MaxTickDuration);
-        Assert.Contains("60s", typeof(QueryStoreComposeStamp).GetField("StatementTimeoutSql", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!.ToString(), StringComparison.Ordinal);
+        /* #5867: the timeout text is built per attempt (the normal 60 s, or the extended timeout after a statement timeout). */
+        Assert.Contains("60s", typeof(QueryStoreComposeStamp).GetMethod("StatementTimeoutSql", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { 60 })!.ToString(), StringComparison.Ordinal);
+        Assert.Equal(240, QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds);
     }
 
     [Fact]
@@ -282,6 +295,21 @@ public sealed class QueryStoreComposeStampTests
         Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick / 2, chosen.Count(b => b.Stale));
         /* Stale first, newest first; then the never-built hours, newest first. */
         Assert.Equal(new[] { B(3, true), B(4, true), B(5, true), B(20, false), B(21, false), B(22, false) }, chosen);
+    }
+
+    /// <summary>#5867: an hour that has failed before runs after the hours that have not, whatever its kind and age, so a build that may
+    /// run to its (extended) timeout again cannot spend the tick's wall-clock budget before the other hours get their turn. Which hours
+    /// are chosen does not change.</summary>
+    [Fact]
+    public void ChooseBuilds_RunsTheHoursThatFailedBefore_AfterTheOthers_AndChoosesTheSameHours()
+    {
+        var failedStale = B(3, true) with { Failures = 1, Extended = true };
+        var failedMissing = B(20, false) with { Failures = 2 };
+        var candidates = new[] { failedStale, B(4, true), B(5, true), failedMissing, B(21, false), B(22, false), B(23, false) };
+
+        var chosen = QueryStoreComposeStamp.ChooseBuilds(candidates, QueryStoreComposeStamp.MaxBuildsPerTick);
+
+        Assert.Equal(new[] { B(4, true), B(5, true), B(21, false), B(22, false), failedStale, failedMissing }, chosen);
     }
 
     [Fact]
@@ -438,7 +466,7 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, and V187's (#5825) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, V187's (#5825) and V188's (#5821) next, and V189's (#5867) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);

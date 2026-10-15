@@ -214,4 +214,14 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts
     DROP COLUMN IF EXISTS context_json;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    /// <summary>
+    /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c> (the probe's newest sentinel), the compose builder's
+    /// failure record. Safe on a store that never had it. Nothing before V189 reads it.
+    /// </summary>
+    internal static async Task DropV189SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.query_store_compose_stamp_failures;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
 }
