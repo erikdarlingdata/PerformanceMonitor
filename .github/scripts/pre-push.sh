@@ -10,6 +10,10 @@
 #      diff, or the hunk's enclosing declaration, or an added file's type). Symbols are added in order of how many
 #      test files name them; once the union would pass the cap the rest are dropped and listed, since a symbol named
 #      by most of the suite is the suite (the laptop never runs a full suite: CI decides).
+#   Stage 2 already ran every Stage=Guard class, so stage 3 leaves them out: map-select gets --guard-stage-separate and
+#   the symbol set drops the classes of `-list classes/json -trait Stage=Guard` (#5894). A diff of documentation files
+#   only selects just the classes that read a changed document as text (CI's docs fast path runs no test for it) and
+#   the gate prints why; its Guard stage still runs. A map older than the newest nightly's is named in the `map:` header line with both run ids.
 #   The map and the symbol scan both name a class by its simple name; the runner's -class filter matches only the
 #   full name and runs nothing for any other (Total: 0, exit 0), so every name is resolved against the build's own
 #   class listing (-list classes/json), exactly as CI's shard scripts do, and run in batches under the command-line
@@ -91,6 +95,7 @@ if [ $MAP -eq 1 ]; then
     ids=$(gh api "repos/erikdarlingdata/PerformanceMonitor/actions/workflows/nightly.yml/runs?status=success&per_page=8" \
       --jq '.workflow_runs[] | select(.event == "schedule" or .event == "workflow_dispatch") | .id' 2>/dev/null)
   fi
+  newest=""; for id in $ids; do newest=$id; break; done
   for id in $ids; do
     if [ -f "$CACHE/map-$id/test-map.json.gz" ]; then mapfile="$CACHE/map-$id/test-map.json.gz"; break; fi
     if gh run download "$id" -n test-map -D "$CACHE/map-$id" > /dev/null 2>&1 && [ -f "$CACHE/map-$id/test-map.json.gz" ]; then
@@ -101,9 +106,23 @@ if [ $MAP -eq 1 ]; then
   if [ -z "$mapfile" ]; then
     echo "map: no nightly test-map artifact could be fetched; symbol set only"
   elif [ -z "${PRE_PUSH_SELECTION:-}" ] && ! timeout 120 python .github/scripts/ci-select.py map-select --map "$mapfile" --event pull_request --base-ref dev \
-        --base "$base" --files-from "$SCRATCH/changed.txt" --out "$SCRATCH/selection.json" > "$SCRATCH/map-select.log" 2>&1; then
+        --guard-stage-separate --base "$base" --files-from "$SCRATCH/changed.txt" --out "$SCRATCH/selection.json" > "$SCRATCH/map-select.log" 2>&1; then
     echo "map: map-select failed (log $SCRATCH/map-select.log); symbol set only"
   else
+    # #5894: name the map (run id, build time) and say so when a newer nightly exists that could not be used
+    if [ -z "${PRE_PUSH_SELECTION:-}" ]; then
+    built=$(python -c 'import gzip, json, sys
+try:
+    print(json.load(gzip.open(sys.argv[1], "rt", encoding="utf-8")).get("built_at", "unknown"))
+except Exception:
+    print("unknown")' "$mapfile" 2>/dev/null)
+    stale=""; mapid=$(basename "$(dirname "$mapfile")"); mapid=${mapid#map-}
+    if [ -n "$newest" ] && [ -z "${PRE_PUSH_SELECTION:-}" ] && [ "$mapid" != "$newest" ]; then stale=" (STALE: nightly run $newest is newer and its map could not be fetched, so a class added since $built shows as a new class)"; fi
+    echo "map: nightly run $mapid, built $built$stale"
+    fi
+    if [ -f "$SCRATCH/selection.json" ] && python -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("docs_only") is True else 1)' "$SCRATCH/selection.json"; then
+      echo "map: $(python -c 'import json, sys; print(json.load(open(sys.argv[1])).get("reason", ""))' "$SCRATCH/selection.json")"
+    fi
     for suite in darling lite; do
       python .github/scripts/ci-select.py map-keep --selection "$SCRATCH/selection.json" --suite $suite > "$SCRATCH/keep-$suite.txt" 2>&1
       if head -n1 "$SCRATCH/keep-$suite.txt" | grep -qE '^SELECTED [0-9]+$'; then
@@ -167,16 +186,17 @@ fi
 # selected name is resolved against the build's own class listing, keyed by the simple name split on [.+/] as
 # test-map.py, ci-select.py and run-darling-pg-shard.ps1 key it. A name with no test class in the listing (a helper
 # class of a symbol file, a class the map holds but this build no longer has) is counted, not run.
-list_classes() { # list_classes <project> <outfile>: one full class name per line, from the runner's -list classes/json
-  dotnet run --project "$1" -c Debug --no-build -- -list classes/json > "$2.raw" 2>&1 || return 1
+list_classes() { # list_classes <project> <outfile> [runner filter...]: one full class name per line, from the runner's -list classes/json
+  local proj=$1 out=$2; shift 2
+  dotnet run --project "$proj" -c Debug --no-build -- -list classes/json "$@" > "$out.raw" 2>&1 || return 1
   python -c '
 import json, sys
 rows = [l for l in open(sys.argv[1], encoding="utf-8", errors="replace") if l.lstrip().startswith("[")]
 names = json.loads(rows[0]) if len(rows) == 1 else []
 open(sys.argv[2], "w", encoding="utf-8", newline="\n").write("".join(n + "\n" for n in names))
-sys.exit(0 if names else 1)' "$2.raw" "$2"
+sys.exit(0 if names else 1)' "$out.raw" "$out"
 }
-declare -A sel_n=() miss_n=(); resolved=1
+declare -A sel_n=() miss_n=(); resolved=1; guard_out=""
 for suite in darling lite; do
   if [ $suite = darling ]; then proj=$DARLING; keys=("${!want_d[@]}"); else proj=$LITE; keys=("${!want_l[@]}"); fi
   : > "$SCRATCH/keys-$suite.txt"; : > "$SCRATCH/selected-$suite.txt"; : > "$SCRATCH/unlisted-$suite.txt"
@@ -197,10 +217,18 @@ for suite in darling lite; do
       { k = $0; sub(/.*[.+\/]/, "", k); if (k in want) { print; hit[k] = 1 } }
       END { for (w in want) if (!(w in hit)) print w > miss }' "$SCRATCH/keys-$suite.txt" "$SCRATCH/listing-$suite.txt" \
       | sort -u > "$SCRATCH/selected-$suite.txt"
+    # #5894: stage 2 ran every Stage=Guard class of the suite, so one named by a changed symbol must not run again
+    : > "$SCRATCH/guardlist-$suite.txt"
+    if list_classes "$proj" "$SCRATCH/guardlist-$suite.txt" -trait Stage=Guard && [ -s "$SCRATCH/guardlist-$suite.txt" ]; then
+      grep -vxFf "$SCRATCH/guardlist-$suite.txt" "$SCRATCH/selected-$suite.txt" > "$SCRATCH/selected-$suite.nog" || true
+      guard_out="$guard_out $suite $(( $(wc -l < "$SCRATCH/selected-$suite.txt") - $(wc -l < "$SCRATCH/selected-$suite.nog") ))"
+      mv "$SCRATCH/selected-$suite.nog" "$SCRATCH/selected-$suite.txt"
+    fi
   fi
   sel_n[$suite]=$(wc -l < "$SCRATCH/selected-$suite.txt" | tr -d ' ')
   miss_n[$suite]=$(wc -l < "$SCRATCH/unlisted-$suite.txt" | tr -d ' ')
 done
+[ -n "$guard_out" ] && echo "guard-stage classes left out of the selection (stage 2 ran them):$guard_out"
 echo "classes: darling ${sel_n[darling]}, lite ${sel_n[lite]} (selected names: darling ${#want_d[@]}, lite ${#want_l[@]}; symbols: $nnames candidates; lists in $SCRATCH)"
 if [ $resolved -eq 0 ]; then
   echo "classes: not resolved, no Debug build to list (simple names; build once for the real batches)"
