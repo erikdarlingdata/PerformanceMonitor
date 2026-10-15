@@ -91,9 +91,9 @@ public static class QueryStoreComposeStamp
 
     private const int CommandTimeoutSeconds = BuildStatementTimeoutSeconds + 30;
 
-    /// <summary>The store schema version of the rung that creates <see cref="FailuresTable"/> (V186, #5867). The number is the next
+    /// <summary>The store schema version of the rung that creates <see cref="FailuresTable"/> (V187, #5867). The number is the next
     /// free rung when this was written; it is renumbered at merge if another rung took it first.</summary>
-    public const int FailuresRungVersion = 186;
+    public const int FailuresRungVersion = 187;
 
     /// <summary>The failure record of each hour whose last build threw (#5867): one row per hour, removed when the hour builds.</summary>
     public const string FailuresTable = "collect.query_store_compose_stamp_failures";
@@ -315,13 +315,13 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
 
     /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
     /// <summary>
-    /// V186 (#5867): the failure record of the hours whose build threw. One row per hour, written by <see cref="RecordFailureSql"/>
+    /// V187 (#5867): the failure record of the hours whose build threw. One row per hour, written by <see cref="RecordFailureSql"/>
     /// after the failed build rolled back, and deleted by the build that succeeds (in its own transaction) or by the cleanup once the
-    /// hour falls below the floor. <c>next_attempt_at</c> is on the store's clock, as the plan's "now" is; the plan skips an hour
+    /// hour falls below the floor. <c>retry_at</c> is on the store's clock, as the plan's "now" is; the plan skips an hour
     /// until it is due. <c>last_timeout_seconds</c> is the <c>statement_timeout</c> the failed attempt ran under. Naive UTC.
     /// </summary>
     public const string FailuresCreateSql = """
-/* V186 (#5867): one row per Query Store compose hour whose last build failed: how many times in a row, the last error, and when
+/* V187 (#5867): one row per Query Store compose hour whose last build failed: how many times in a row, the last error, and when
    the builder tries it again. The builder deletes the row when the hour builds. Naive UTC throughout. */
 CREATE TABLE IF NOT EXISTS collect.query_store_compose_stamp_failures
 (
@@ -332,7 +332,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_compose_stamp_failures
     last_timeout_seconds integer NOT NULL,
     first_failed_at timestamp NOT NULL,
     last_failed_at timestamp NOT NULL,
-    next_attempt_at timestamp NOT NULL,
+    retry_at timestamp NOT NULL,
     CONSTRAINT pk_query_store_compose_stamp_failures PRIMARY KEY (hour)
 );
 """;
@@ -525,10 +525,10 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     /// while a writer pins the newest ones (#5582 review round 2). The blocked rows are only counted, for the log; the per-build check stays,
     /// because a writer can start between the plan and the build.</para>
     ///
-    /// <para>An hour with a failure record (<see cref="FailuresTable"/>, #5867) is planned only once its <c>next_attempt_at</c> is due by
+    /// <para>An hour with a failure record (<see cref="FailuresTable"/>, #5867) is planned only once its <c>retry_at</c> is due by
     /// the same clock, so an hour in backoff is not planned at all between its daily attempts. The fourth column is its consecutive
     /// failures (0 for none), which <see cref="ChooseBuilds"/> uses to run it after the other hours; the fifth is true when its last
-    /// failure was a statement timeout, so its next attempt runs under <see cref="ExtendedBuildStatementTimeoutSeconds"/>.</para>
+    /// failure was a statement timeout (its SQLSTATE is $4, <see cref="StatementTimeoutSqlState"/>), so its next attempt runs under <see cref="ExtendedBuildStatementTimeoutSeconds"/>.</para>
     /// </summary>
     public const string PlanSql = @"
 WITH bounds AS
@@ -572,13 +572,13 @@ SELECT p.hour, p.stale, p.blocked, p.failures, p.extended
 FROM
 (
     SELECT u.hour, u.stale, u.blocked, coalesce(f.failures, 0) AS failures,
-           coalesce(f.last_sqlstate = '57014', false) AS extended,
+           coalesce(f.last_sqlstate = $4::text, false) AS extended,
            row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC) AS rn
     FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
     LEFT JOIN collect.query_store_compose_stamp_failures AS f ON f.hour = u.hour
     CROSS JOIN clock
     WHERE f.hour IS NULL
-       OR f.next_attempt_at <= clock.at
+       OR f.retry_at <= clock.at
 ) AS p
 WHERE p.rn <= $2
 ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
@@ -587,16 +587,16 @@ ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
     /// Records a failed build of an hour (#5867) and returns its consecutive failures, its next attempt, and whether that is a backoff:
     /// $1 the hour, $2 the SQLSTATE (NULL when the error had none), $3 the error message, $4 the <c>statement_timeout</c> the attempt ran
     /// under, $5 the store clock a test passes (NULL in the service: the store's own, as <see cref="PlanSql"/>'s), $6
-    /// <see cref="FailuresBeforeBackoff"/>, $7 <see cref="ExtendedBuildStatementTimeoutSeconds"/>, $8 <see cref="BackoffInterval"/>. The
-    /// next attempt is the next tick (<c>next_attempt_at</c> = now) until the hour has failed <see cref="FailuresBeforeBackoff"/> times in
+    /// <see cref="FailuresBeforeBackoff"/>, $7 <see cref="ExtendedBuildStatementTimeoutSeconds"/>, $8 <see cref="BackoffInterval"/>, $9 <see cref="StatementTimeoutSqlState"/>. The
+    /// next attempt is the next tick (<c>retry_at</c> = now) until the hour has failed <see cref="FailuresBeforeBackoff"/> times in
     /// a row, or until a build under the extended timeout has timed out too; from then on it is one attempt a day. Runs after the
     /// build's transaction rolled back.
     /// </summary>
     public const string RecordFailureSql = @"
 INSERT INTO collect.query_store_compose_stamp_failures AS f
-    (hour, failures, last_sqlstate, last_reason, last_timeout_seconds, first_failed_at, last_failed_at, next_attempt_at)
+    (hour, failures, last_sqlstate, last_reason, last_timeout_seconds, first_failed_at, last_failed_at, retry_at)
 SELECT $1, 1, $2::text, $3::text, $4::integer, c.at, c.at,
-       c.at + CASE WHEN 1 >= $6::integer OR ($2::text = '57014' AND $4::integer >= $7::integer) THEN $8::interval ELSE interval '0' END
+       c.at + CASE WHEN 1 >= $6::integer OR ($2::text = $9::text AND $4::integer >= $7::integer) THEN $8::interval ELSE interval '0' END
 FROM (SELECT coalesce($5::timestamp, now() AT TIME ZONE 'UTC') AS at) AS c
 ON CONFLICT (hour) DO UPDATE
 SET failures = f.failures + 1,
@@ -604,10 +604,10 @@ SET failures = f.failures + 1,
     last_reason = EXCLUDED.last_reason,
     last_timeout_seconds = EXCLUDED.last_timeout_seconds,
     last_failed_at = EXCLUDED.last_failed_at,
-    next_attempt_at = EXCLUDED.last_failed_at
-        + CASE WHEN f.failures + 1 >= $6::integer OR (EXCLUDED.last_sqlstate = '57014' AND EXCLUDED.last_timeout_seconds >= $7::integer)
+    retry_at = EXCLUDED.last_failed_at
+        + CASE WHEN f.failures + 1 >= $6::integer OR (EXCLUDED.last_sqlstate = $9::text AND EXCLUDED.last_timeout_seconds >= $7::integer)
                THEN $8::interval ELSE interval '0' END
-RETURNING f.failures, f.next_attempt_at, f.next_attempt_at > f.last_failed_at AS backed_off;";
+RETURNING f.failures, f.retry_at, f.retry_at > f.last_failed_at AS backed_off;";
 
     /// <summary>A successful build clears the hour's failure record (#5867): $1 the hour. In the build's own transaction.</summary>
     public const string ClearFailureSql = @"
@@ -625,8 +625,8 @@ WHERE hour < $1;";
     /// or timed out under the extended timeout); the others are retried next tick.
     /// </summary>
     public const string ReadFailuresSql = @"
-SELECT f.hour, f.failures, f.last_sqlstate, f.last_reason, f.last_timeout_seconds, f.first_failed_at, f.last_failed_at, f.next_attempt_at,
-       f.next_attempt_at > f.last_failed_at AS in_backoff
+SELECT f.hour, f.failures, f.last_sqlstate, f.last_reason, f.last_timeout_seconds, f.first_failed_at, f.last_failed_at, f.retry_at,
+       f.retry_at > f.last_failed_at AS in_backoff
 FROM collect.query_store_compose_stamp_failures AS f
 ORDER BY f.hour DESC;";
 
@@ -734,6 +734,7 @@ WHERE hour < $1;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = FloorHour(nowUtc, retentionDays) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxBuildsPerTick });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -892,7 +893,7 @@ WHERE hour < $1;";
     /// </summary>
     public static async Task<long?> BuildHourAsync(
         NpgsqlConnection connection, DateTime hour, DateTime nowUtc, CancellationToken cancellationToken, Func<Task>? beforeCommit = null,
-        int statementTimeoutSeconds = BuildStatementTimeoutSeconds)
+        int statementTimeoutSeconds = BuildStatementTimeoutSeconds, Action<NpgsqlCommand>? commandCreated = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentOutOfRangeException.ThrowIfLessThan(statementTimeoutSeconds, 1);
@@ -902,18 +903,28 @@ WHERE hour < $1;";
         var commandTimeout = Math.Max(CommandTimeoutSeconds, statementTimeoutSeconds + 30);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using (var timeout = new NpgsqlCommand(StatementTimeoutSql(statementTimeoutSeconds), connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        /* The attempt's client timeout is one value for every command in it (#5871): the server grants each statement the whole
+           statement_timeout, so a command left at the short client timeout would be cancelled client-side first, as a timeout
+           that carries no 57014. commandCreated is a test seam that sees each command as it is made. */
+        NpgsqlCommand NewCommand(string sql)
+        {
+            var created = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = commandTimeout };
+            commandCreated?.Invoke(created);
+            return created;
+        }
+
+        await using (var timeout = NewCommand(StatementTimeoutSql(statementTimeoutSeconds)))
         {
             await timeout.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var advisory = new NpgsqlCommand(HourLockSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var advisory = NewCommand(HourLockSql))
         {
             advisory.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = HourNumber(hourValue) });
             await advisory.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var writers = new NpgsqlCommand(OpenWriterSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var writers = NewCommand(OpenWriterSql))
         {
             writers.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             /* One row (the oldest such writer) when an hour would defer, none when no writer of the wide table could hold an unmarked row. */
@@ -926,7 +937,7 @@ WHERE hour < $1;";
 
         var servers = new List<int>();
         var lateSeqs = new List<long>();
-        await using (var readPairs = new NpgsqlCommand(ReadPairsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var readPairs = NewCommand(ReadPairsSql))
         {
             readPairs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await using var reader = await readPairs.ExecuteReaderAsync(cancellationToken);
@@ -937,26 +948,26 @@ WHERE hour < $1;";
             }
         }
 
-        await using (var delete = new NpgsqlCommand(DeleteHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var delete = NewCommand(DeleteHourSql))
         {
             delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var insert = new NpgsqlCommand(BuildHourInsertSql, connection, transaction) { CommandTimeout = commandTimeout })
+        await using (var insert = NewCommand(BuildHourInsertSql))
         {
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         long sourceRows;
-        await using (var count = new NpgsqlCommand(SourceRowsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var count = NewCommand(SourceRowsSql))
         {
             count.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             sourceRows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
         }
 
-        await using (var built = new NpgsqlCommand(UpsertBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var built = NewCommand(UpsertBuiltSql))
         {
             built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
@@ -965,14 +976,14 @@ WHERE hour < $1;";
             await built.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var hours = new NpgsqlCommand(UpsertHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var hours = NewCommand(UpsertHourSql))
         {
             hours.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             hours.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
             await hours.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var clear = new NpgsqlCommand(ClearFailureSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var clear = NewCommand(ClearFailureSql))
         {
             clear.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await clear.ExecuteNonQueryAsync(cancellationToken);
@@ -1004,6 +1015,7 @@ WHERE hour < $1;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = FailuresBeforeBackoff });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ExtendedBuildStatementTimeoutSeconds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = BackoffInterval });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
         return new FailureOutcome(reader.GetInt32(0), reader.GetDateTime(1), reader.GetBoolean(2));

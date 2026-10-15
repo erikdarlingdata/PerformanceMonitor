@@ -63,7 +63,7 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
 
     /// <summary>A day passes for the hours in backoff: their next attempt moves back by <see cref="QueryStoreComposeStamp.BackoffInterval"/>.</summary>
     private static Task ADayPassesAsync(NpgsqlConnection connection, CancellationToken ct) =>
-        ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_failures SET next_attempt_at = next_attempt_at - interval '1 day', last_failed_at = last_failed_at - interval '1 day'", ct);
+        ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_failures SET retry_at = retry_at - interval '1 day', last_failed_at = last_failed_at - interval '1 day'", ct);
 
     private static Task<QueryStoreComposeStamp.TickResult> TickAsync(NpgsqlDataSource source, ILogger logger, CancellationToken ct) =>
         QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, logger, () => TimeSpan.Zero, ct,
@@ -212,6 +212,46 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             Assert.Equal(0, third.Failed);
             Assert.Equal(0, third.Built);
             Assert.Equal(0, await HoursBuiltAsync(connection, failing, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// #5871: an attempt's client timeout is the same for EVERY command in it, because the server grants each statement the whole
+    /// <c>statement_timeout</c>: a command left at the short client timeout would be cancelled by the client first, with no 57014 to
+    /// key the failure record on. Seen through <c>commandCreated</c>, which lists each command's timeout as it is made.
+    /// </summary>
+    [Fact]
+    public async Task EveryCommandOfABuildAttempt_CarriesTheAttemptsClientTimeout_ExtendedOrNot()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var hour = hourNow.AddHours(-5);
+            await UnbuildAsync(connection, hour, ct);
+
+            var normal = new System.Collections.Generic.List<int>();
+            Assert.NotNull(await QueryStoreComposeStamp.BuildHourAsync(connection, hour, DateTime.UtcNow, ct, commandCreated: c => normal.Add(c.CommandTimeout)));
+
+            await UnbuildAsync(connection, hour, ct);
+            var extended = new System.Collections.Generic.List<int>();
+            Assert.NotNull(await QueryStoreComposeStamp.BuildHourAsync(connection, hour, DateTime.UtcNow, ct,
+                statementTimeoutSeconds: QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds, commandCreated: c => extended.Add(c.CommandTimeout)));
+
+            /* The two attempts must differ, or the check below could pass with one timeout for everything. */
+            var normalTimeout = Assert.Single(normal.Distinct());
+            var extendedTimeout = Assert.Single(extended.Distinct());
+            Assert.True(extendedTimeout > normalTimeout);
+            Assert.True(extendedTimeout >= QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds);
+            Assert.Equal(normal.Count, extended.Count);
+            Assert.True(extended.Count > 1);
             bodySucceeded = true;
         }
         finally

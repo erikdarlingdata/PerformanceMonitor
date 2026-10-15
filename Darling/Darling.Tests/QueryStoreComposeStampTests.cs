@@ -32,6 +32,15 @@ public sealed class QueryStoreComposeStampTests
 
     /* ---- the column map ------------------------------------------------------------------------------- */
 
+    /// <summary>#5871: <see cref="QueryStoreComposeStamp.FailuresRungVersion"/> is read by no code, so a renumber at merge could miss it and still
+    /// compile. The rung that creates the failure table is the migration that carries the table's DDL.</summary>
+    [Fact]
+    public void TheFailuresRungVersion_IsTheVersionOfTheMigrationThatCreatesTheFailureTable()
+    {
+        var rung = Assert.Single(PgMigrations.Scripts, s => s.Sql == QueryStoreComposeStamp.FailuresCreateSql);
+        Assert.Equal(rung.Version, QueryStoreComposeStamp.FailuresRungVersion);
+    }
+
     [Fact]
     public void TheMap_HasUniqueColumnsAndExpressions_OverTheFactAlias_NeverDoublePrecision()
     {

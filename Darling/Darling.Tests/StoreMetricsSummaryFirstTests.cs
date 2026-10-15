@@ -308,7 +308,7 @@ public sealed class StoreMetricsSummaryFirstTests
         var method = ToolMethod();
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        Assert.Matches(@"SUMMARY FIRST: by default[^.]*three ranked lists, each bounded by limit[^.]*truncated", description);
+        Assert.Matches(@"SUMMARY FIRST: by default[^.]*four ranked lists, each bounded by limit[^.]*truncated", description);
         foreach (var key in new[] { "objects", "fastest_growing", "background_jobs", "delta_since" })
         {
             Assert.Contains(key, description, StringComparison.Ordinal);
