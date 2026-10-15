@@ -30,14 +30,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// read reports the upper bound of the slot that holds the 95th percentile.</para>
 ///
 /// <para><b>How it is kept.</b> <see cref="RollUpAsync"/> runs on the store self-metrics sweep, next to
-/// <c>collector_cost</c>'s flush. One statement upserts every closed hour from the hour after the newest rolled hour to the
-/// current hour, and always the last <see cref="RecomputeHours"/> closed hours, so a run written late into an hour that is
-/// already rolled is counted on the next pass. On an empty table (the first pass after the upgrade) the same statement
-/// backfills the whole retention window. A second statement deletes hours older than <see cref="RetentionHours"/>.</para>
+/// <c>collector_cost</c>'s flush. One statement upserts the last <see cref="RecomputeHours"/> closed hours on every pass,
+/// so a run written late into an hour that is already rolled is counted on the next pass, plus at most
+/// <see cref="CatchUpHours"/> older closed hours the table is missing, newest first, so the first passes after the upgrade
+/// backfill the retention window a day at a time. A second statement deletes hours older than <see cref="RetentionHours"/>.</para>
 ///
-/// <para><b>Coverage.</b> Every closed hour from the oldest kept hour through the newest rolled hour is in the table for
-/// every collector that ran in it: an hour in which a collector did not run has no row for it. Hours after the newest rolled
-/// hour (the open hour, and closed hours while a pass is failing) are only in the raw log. The status predicates are baked in
+/// <para><b>Coverage.</b> A rolled hour holds a row for every collector of every server that ran in it: an hour in which
+/// a collector did not run has no row for it. Any other hour (the open hour, a backlog still being caught up, hours while a
+/// pass is failing) is only in the raw log, and the read takes it from there. The status predicates are baked in
 /// when an hour is rolled, so a predicate change reaches hours rolled after it (and the last two hours on its first pass),
 /// not older ones, until they age out.</para>
 /// </summary>
@@ -51,6 +51,11 @@ public static class CollectionLogHourly
 
     /// <summary>Closed hours every pass recomputes from the raw log, to count runs written late into an hour.</summary>
     public const int RecomputeHours = 2;
+
+    /// <summary>The most missing closed hours one pass rolls up besides the <see cref="RecomputeHours"/> it always
+    /// recomputes, newest first (coordinator ruling on #5810): a store with a 7-day backlog is caught up in about 7
+    /// passes, and no pass reads more than about a day of the raw log.</summary>
+    public const int CatchUpHours = 24;
 
     /// <summary>Command timeout of each of the pass's two statements.</summary>
     public const int PassTimeoutSeconds = 120;
@@ -113,38 +118,15 @@ public static class CollectionLogHourly
     private static string HistogramSql =>
         "ARRAY[" + string.Join(", ", Enumerable.Range(0, SlotCount).Select(s => $"COUNT(*) FILTER (WHERE w.slot = {s})")) + "]::integer[]";
 
-    /// <summary>The columns the upsert writes, in order, after the key.</summary>
-    private const string ValueColumns = @"total_runs, success_count, error_count, permission_denied_count, yield_count,
-    abandoned_count, extension_missing_count, session_missing_count, note_count, runs_with_rows, rows_stored,
-    duration_sum, duration_count, max_duration_ms, max_slowest_item_ms,
-    last_success_time, last_run_time, last_error_time, last_failure_text_time, last_note_time, last_denied_time,
-    last_non_skip_time, last_productive_time, last_streak_break_time, duration_histogram";
-
     /// <summary>
-    /// One pass's upsert. <c>$1</c> is the current hour (exclusive end), <c>$2</c> the oldest hour kept, <c>$3</c> the first
-    /// hour every pass recomputes, <c>$4</c> <see cref="DurationBucketBounds"/>. It rolls every hour from the hour after the
-    /// newest rolled hour, or from <c>$3</c> when that is earlier, and never below <c>$2</c>. Each aggregate is the one
-    /// <c>DarlingDataReader.CollectionHealthSql</c>'s <c>health</c> computes over the same rows, per hour.
+    /// The aggregates of one row, in <see cref="ValueColumns"/> order, over a subquery aliased <c>w</c> that has the raw
+    /// log's columns plus <c>slot</c> (<c>width_bucket(duration_ms - 1, bounds)</c>). Each is the aggregate
+    /// <c>DarlingDataReader.CollectionHealthSql</c>'s <c>health</c> computes over the same rows. The writer runs it per
+    /// hour, and the read (<c>DarlingDataReader.CollectionHealthComposedSql</c>) runs it per collector over the slices the
+    /// table does not hold, so a rolled hour and a raw slice cannot count a run differently.
     /// </summary>
-    internal static readonly string UpsertSql = $@"
-WITH bounds AS
-(
-    SELECT
-        GREATEST($2::timestamp,
-                 LEAST(COALESCE(MAX(h.hour_start) + interval '1 hour', $2::timestamp), $3::timestamp)) AS from_hour
-    FROM collect.collection_log_hourly AS h
-)
-INSERT INTO collect.collection_log_hourly
-(
-    server_id, collector_name, hour_start,
-    {ValueColumns}
-)
-SELECT
-    w.server_id,
-    w.collector_name,
-    w.hour_start,
-    COUNT(*)::integer,
-    COUNT(*) FILTER (WHERE w.status = 'SUCCESS')::integer,
+    internal static readonly string AggregatesSql = $@"COUNT(*)::integer,
+    COUNT(*) FILTER (WHERE w.status = 'SUCCESS' AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})::integer,
     COUNT(*) FILTER (WHERE w.status = 'ERROR')::integer,
     COUNT(*) FILTER (WHERE w.status = 'PERMISSIONS')::integer,
     COUNT(*) FILTER (WHERE w.status = 'YIELDED')::integer,
@@ -161,7 +143,8 @@ SELECT
     MAX(w.collection_time) FILTER (WHERE w.status IN ('SUCCESS', 'SKIPPED')),
     MAX(w.collection_time),
     MAX(w.collection_time) FILTER (WHERE w.status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')),
-    MAX(w.collection_time) FILTER (WHERE w.status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')),
+    MAX(w.collection_time) FILTER (WHERE w.status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')
+                                     AND w.error_message IS NOT NULL),
     MAX(w.collection_time) FILTER (WHERE w.status = 'SUCCESS' AND w.error_message IS NOT NULL),
     MAX(w.collection_time) FILTER (WHERE w.status = 'PERMISSIONS'),
     MAX(w.collection_time) FILTER (WHERE w.status IS NULL
@@ -170,7 +153,65 @@ SELECT
     MAX(w.collection_time) FILTER (WHERE NOT (w.status = 'SUCCESS'
                                               AND COALESCE(w.rows_collected, 0) = 0
                                               AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})),
-    {HistogramSql}
+    {HistogramSql}";
+
+    /// <summary>The bounds as a SQL array literal, for a statement that inlines them instead of binding them.</summary>
+    internal static string BoundsArraySql => "'{" + string.Join(",", DurationBucketBounds) + "}'::integer[]";
+
+    /// <summary>The columns the upsert writes, in order, after the key.</summary>
+    internal const string ValueColumns = @"total_runs, success_count, error_count, permission_denied_count, yield_count,
+    abandoned_count, extension_missing_count, session_missing_count, note_count, runs_with_rows, rows_stored,
+    duration_sum, duration_count, max_duration_ms, max_slowest_item_ms,
+    last_success_time, last_run_time, last_error_time, last_failure_text_time, last_note_time, last_denied_time,
+    last_non_skip_time, last_productive_time, last_streak_break_time, duration_histogram";
+
+    /// <summary>
+    /// One pass's upsert. <c>$1</c> is the current hour (exclusive end), <c>$2</c> the oldest hour kept, <c>$3</c> the first
+    /// hour every pass recomputes, <c>$4</c> <see cref="DurationBucketBounds"/>. It rolls the hours from <c>$3</c> on, plus at
+    /// most <see cref="CatchUpHours"/> closed hours from <c>$2</c> on that hold raw rows and no rolled row, newest
+    /// first. Which hours are missing is a store-wide fact: one statement rolls an hour for every server at once. Each aggregate is the one
+    /// <c>DarlingDataReader.CollectionHealthSql</c>'s <c>health</c> computes over the same rows, per hour.
+    /// </summary>
+    internal static readonly string UpsertSql = $@"
+WITH todo AS
+(
+    -- The last two closed hours, always (late writers).
+    SELECT r.hour_start
+    FROM generate_series($3::timestamp, $1::timestamp - interval '1 hour', interval '1 hour') AS r(hour_start)
+    UNION ALL
+    -- At most {CatchUpHours} older closed hours the table does not hold yet, newest first: a backlog (the first passes
+    -- after the upgrade, or passes that failed) is caught up a day per pass instead of in one statement. An hour with
+    -- no raw row is not missing, so an outage cannot hold the cap on hours that will never get a row. The series runs
+    -- newest first and is filtered in place, so the LIMIT stops the probes at the last hour it takes: a raw-log probe
+    -- of a compressed chunk costs tens of milliseconds, and a sort would make every pass probe every missing hour. The
+    -- probes sit inside a CASE so the planner keeps them as per-row filters in the series' order (an EXISTS in WHERE
+    -- can become a hash join, which loses the order), and the raw probe runs only for an hour the table lacks.
+    SELECT m.hour_start
+    FROM
+    (
+        SELECT g.hour_start
+        FROM generate_series($3::timestamp - interval '1 hour', $2::timestamp, interval '-1 hour') AS g(hour_start)
+        WHERE CASE
+                  WHEN EXISTS (SELECT 1 FROM collect.collection_log_hourly AS h WHERE h.hour_start = g.hour_start)
+                  THEN FALSE
+                  ELSE EXISTS (SELECT 1
+                               FROM collect.collection_log AS x
+                               WHERE x.collection_time >= g.hour_start
+                               AND   x.collection_time < g.hour_start + interval '1 hour')
+              END
+        LIMIT {CatchUpHours}
+    ) AS m
+)
+INSERT INTO collect.collection_log_hourly
+(
+    server_id, collector_name, hour_start,
+    {ValueColumns}
+)
+SELECT
+    w.server_id,
+    w.collector_name,
+    w.hour_start,
+    {AggregatesSql}
 FROM
 (
     SELECT
@@ -185,8 +226,9 @@ FROM
         date_trunc('hour', l.collection_time) AS hour_start,
         width_bucket(l.duration_ms - 1, $4::integer[]) AS slot
     FROM collect.collection_log AS l
-    WHERE l.collection_time >= (SELECT b.from_hour FROM bounds AS b)
+    WHERE l.collection_time >= (SELECT MIN(t.hour_start) FROM todo AS t)
     AND   l.collection_time < $1::timestamp
+    AND   date_trunc('hour', l.collection_time) IN (SELECT t.hour_start FROM todo AS t)
     AND   {CollectionCycleRow.NotCycleRowSql}
 ) AS w
 GROUP BY

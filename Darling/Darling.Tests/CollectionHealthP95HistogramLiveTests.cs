@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -102,6 +103,106 @@ public sealed class CollectionHealthP95HistogramLiveTests
         }
     }
 
+    /// <summary>
+    /// #5810 rollup read: <see cref="DarlingDataReader.CollectionHealthComposedSql"/> (the production statement) gives every
+    /// column <see cref="DarlingDataReader.CollectionHealthSql"/> gives, with p95 as the upper bound of the histogram slot
+    /// that holds the exact p95 (capped at the max), in each state the rollup can be in: empty (the first read after the
+    /// upgrade, all raw), caught up (every closed hour from the table), and holed (closed hours missing in the middle and
+    /// at the old end, read raw beside the table's hours).
+    /// </summary>
+    [Fact]
+    public async Task TheRollupRead_MatchesTheRawRead_WithP95InTheExactP95sBucket_EmptyCaughtUpAndHoled_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-health rollup read test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
+            now = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMillisecond), DateTimeKind.Utc);
+            var windowStart = DarlingMcpTestData.Naive(now.AddDays(-7));
+            var planted = await PlantWeekAsync(connection, now, ct);
+
+            var exact = await ReadAsync(connection, DarlingDataReader.CollectionHealthSql, windowStart, ct);
+            Assert.Equal(planted.Keys.OrderBy(k => k, StringComparer.Ordinal), exact.Select(r => (string)r[0]!));
+
+            /* Empty table: the whole window is read raw. */
+            Assert.Equal(0L, await ScalarLongAsync(connection, ct, "SELECT COUNT(*) FROM collect.collection_log_hourly"));
+            AssertMatches(exact, await ReadAsync(connection, DarlingDataReader.CollectionHealthComposedSql, windowStart, ct), "empty");
+
+            /* Caught up: enough passes to roll every closed hour of the window. */
+            for (var pass = 0; pass < 9; pass++)
+                await CollectionLogHourly.RollUpAsync(connection, now, null, ct);
+            var closedHours = await ScalarLongAsync(connection, ct,
+                "SELECT COUNT(DISTINCT hour_start) FROM collect.collection_log_hourly WHERE server_id = $1 AND hour_start >= $2", ServerId, windowStart);
+            Assert.True(closedHours >= 160, $"expected the week rolled, found {closedHours} hours");
+            AssertMatches(exact, await ReadAsync(connection, DarlingDataReader.CollectionHealthComposedSql, windowStart, ct), "caught up");
+
+            /* Holed: two islands of missing closed hours, one in the middle and one at the old end. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+DELETE FROM collect.collection_log_hourly
+WHERE (hour_start >= $1 AND hour_start < $1 + interval '5 hours')
+OR    hour_start < $2 + interval '20 hours'", DarlingMcpTestData.Naive(now.AddDays(-3)), windowStart);
+            AssertMatches(exact, await ReadAsync(connection, DarlingDataReader.CollectionHealthComposedSql, windowStart, ct), "holed");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    /// <summary>Every column equal to the exact read's, except p95: the upper bound of the slot the exact p95 falls in,
+    /// capped at the collector's max duration (the max itself for the slot above an hour), NULL when there is none.</summary>
+    private static void AssertMatches(List<object?[]> exact, List<object?[]> composed, string state)
+    {
+        const int p95Ordinal = 6;
+        const int maxOrdinal = 5;
+        Assert.Equal(exact.Count, composed.Count);
+        for (var r = 0; r < exact.Count; r++)
+        {
+            Assert.Equal(exact[r].Length, composed[r].Length);
+            for (var i = 0; i < exact[r].Length; i++)
+            {
+                if (i == p95Ordinal)
+                    continue;
+                Assert.True(Equals(exact[r][i], composed[r][i]),
+                    $"{state}: collector {exact[r][0]}, column {i}: raw <{exact[r][i] ?? "NULL"}> but rollup <{composed[r][i] ?? "NULL"}>");
+            }
+
+            int? expected = null;
+            if (exact[r][p95Ordinal] is not null)
+            {
+                var max = Convert.ToInt32(exact[r][maxOrdinal]);
+                var bound = CollectionLogHourly.UpperBoundOfSlot(CollectionLogHourly.SlotOf(Convert.ToInt64(exact[r][p95Ordinal])));
+                expected = bound is null ? max : Math.Min(bound.Value, max);
+            }
+
+            int? actual = composed[r][p95Ordinal] is null ? null : Convert.ToInt32(composed[r][p95Ordinal]);
+            Assert.True(expected == actual,
+                $"{state}: collector {exact[r][0]} p95: expected <{expected?.ToString() ?? "NULL"}> (exact {exact[r][p95Ordinal] ?? "NULL"}) but rollup <{actual?.ToString() ?? "NULL"}>");
+        }
+    }
+
+    private static async Task<long> ScalarLongAsync(NpgsqlConnection connection, CancellationToken ct, string sql, params object[] values)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        foreach (var v in values)
+            command.Parameters.AddWithValue(v);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct));
+    }
+
     /// <summary>A week for six collectors: duplicates, NULL durations, a one-run collector, an untimed one, two
     /// runs older than the window, and enough distinct durations that the 95th position falls between ties.</summary>
     private static async Task<Dictionary<string, List<int?>>> PlantWeekAsync(NpgsqlConnection connection, DateTime now, CancellationToken ct)
@@ -180,6 +281,7 @@ FROM unnest($4::text[], $5::timestamp[], $6::integer[], $7::text[], $8::integer[
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collect.collection_log_hourly WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);

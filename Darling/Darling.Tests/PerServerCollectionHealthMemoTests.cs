@@ -528,7 +528,7 @@ public sealed class PerServerCollectionHealthMemoTests
         Assert.Contains("GetCollectionHealthAsync(postgres, scanServerId, scanWindowStart, scanToken)", line, StringComparison.Ordinal);
 
         Assert.Contains(
-            "await using var command = postgres.CreateCommand(CollectionHealthSql);\n        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;",
+            "await using var command = postgres.CreateCommand(CollectionHealthComposedSql);\n        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;",
             reader,
             StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log\n            WHERE server_id = $1\n            AND   collection_time >= $2", reader, StringComparison.Ordinal);

@@ -293,6 +293,58 @@ public sealed class CollectionLogHourlyLiveTests
         }
     }
 
+    [Fact]
+    public async Task ABacklog_IsCaughtUpADayPerPass_NewestFirst_AndTheRecomputedHoursAlways_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the hourly rollup test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* One run in each of the 60 closed hours before the current one, plus an empty 6-hour outage that must not use
+               up the cap: hours with no raw row are not missing. */
+            var runs = Enumerable.Range(1, 60)
+                .Where(back => back is < 30 or > 35)
+                .Select(back => new Run("alpha", CurrentHour.AddHours(-back).AddMinutes(7), "SUCCESS", back, 1))
+                .ToList();
+            await PlantAsync(connection, runs, ct);
+            var withRows = runs.Select(r => r.Time.AddMinutes(-7)).OrderByDescending(h => h).ToList();
+
+            /* Pass 1: the two recomputed hours plus the 24 newest missing hours that hold rows (the ruled cap, spelled out). */
+            await CollectionLogHourly.RollUpAsync(connection, Now, null, ct);
+            var expected = withRows.Take(2 + 24).OrderBy(h => h).ToList();
+            Assert.Equal(expected, (await ReadHourlyAsync(connection, ct)).Keys.Select(k => k.Hour).OrderBy(h => h));
+
+            /* Pass 2, same hour: the next 24 missing hours, newest first, skipping the outage. */
+            await CollectionLogHourly.RollUpAsync(connection, Now, null, ct);
+            expected = withRows.Take(2 + 2 * 24).OrderBy(h => h).ToList();
+            Assert.Equal(expected, (await ReadHourlyAsync(connection, ct)).Keys.Select(k => k.Hour).OrderBy(h => h));
+
+            /* Pass 3: the rest, and every rolled hour holds exactly what its raw rows give. */
+            await CollectionLogHourly.RollUpAsync(connection, Now, null, ct);
+            var rolled = await ReadHourlyAsync(connection, ct);
+            Assert.Equal(withRows.OrderBy(h => h), rolled.Keys.Select(k => k.Hour).OrderBy(h => h));
+            foreach (var (key, row) in ExpectedRows(runs))
+            {
+                Assert.Equal(row, rolled[key]);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
     private sealed record HourRow(
         int TotalRuns, int SuccessCount, int ErrorCount, int PermissionDeniedCount, int YieldCount, int AbandonedCount,
         int ExtensionMissingCount, int SessionMissingCount, int NoteCount, int RunsWithRows, long RowsStored,
@@ -325,7 +377,7 @@ public sealed class CollectionLogHourlyLiveTests
 
                 return new HourRow(
                     rows.Count,
-                    rows.Count(r => r.Status == "SUCCESS"),
+                    rows.Count(r => r.Status == "SUCCESS" && !AbandonedByNote(r)),
                     rows.Count(r => r.Status == "ERROR"),
                     rows.Count(r => r.Status == "PERMISSIONS"),
                     rows.Count(r => r.Status == "YIELDED"),
@@ -342,7 +394,7 @@ public sealed class CollectionLogHourlyLiveTests
                     Last(rows, r => r.Status is "SUCCESS" or "SKIPPED"),
                     rows.Max(r => r.Time),
                     Last(rows, Failure),
-                    Last(rows, Failure),
+                    Last(rows, r => Failure(r) && r.Error is not null),
                     Last(rows, r => r.Status == "SUCCESS" && r.Error is not null),
                     Last(rows, r => r.Status == "PERMISSIONS"),
                     Last(rows, r => !CollectorRuntimePrecondition.NamedSkipStatuses.Contains(r.Status)),
