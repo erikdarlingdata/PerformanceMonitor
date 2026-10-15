@@ -110,21 +110,23 @@ public sealed class ExternalAlertRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels sit above this one; V184's (#5632) is next and V185's (#5812) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels sit above this one; V184's (#5632) and V185's (#5812) are next, and V186's (#5810) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 5, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 6, parameters.Length - 1);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 2].Name);
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasPlanRegressionPartialDays", parameters[ProbeOrdinal + 5].Name);
+        Assert.Equal("hasCollectionLogHourly", parameters[ProbeOrdinal + 6].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal - 1].Name);
 
@@ -132,12 +134,13 @@ public sealed class ExternalAlertRungTests
         var previousArm = viewer.IndexOf("if (hasClientTimeoutSettings)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && previousArm > thisArm, "the V180 arm sits above the next rung down");
 
-        /* Every sentinel present: maps to the ladder's top. V185's (#5812), V184's (#5632), V183's (#5793), V182's (#5506) and V181's (#5750) absent: this rung. This sentinel
+        /* Every sentinel present: maps to the ladder's top. V186's (#5810), V185's (#5812), V184's (#5632), V183's (#5793), V182's (#5506) and V181's (#5750) absent: this rung. This sentinel
            absent too: a rung back. */
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
 
         var withoutV185 = (object[])allPresent.Clone();
+        withoutV185[ProbeOrdinal + 6] = false;
         withoutV185[ProbeOrdinal + 5] = false;
         Assert.Equal(184, (int)method.Invoke(null, withoutV185)!);
 

@@ -70,10 +70,11 @@ public sealed class ReadCallerRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         /* V185's sentinel (#5812) is the last parameter and V184's (#5632) the one before it; this one is just below them. */
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[^1].Name);
-        Assert.Equal("hasInvestigations", parameters[^2].Name);
-        Assert.Equal("hasReadCaller", parameters[^3].Name);
-        Assert.Equal("hasReadLatencyCapacityFields", parameters[^4].Name);
+        Assert.Equal("hasCollectionLogHourly", parameters[^1].Name);
+        Assert.Equal("hasPlanRegressionPartialDays", parameters[^2].Name);
+        Assert.Equal("hasInvestigations", parameters[^3].Name);
+        Assert.Equal("hasReadCaller", parameters[^4].Name);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[^5].Name);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({parameters.Length - 3})", viewer, StringComparison.Ordinal);
@@ -84,10 +85,11 @@ public sealed class ReadCallerRungTests
         var atThisRung = (object[])all.Clone();
         atThisRung[^1] = false;
         atThisRung[^2] = false;
+        atThisRung[^3] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var behind = (object[])atThisRung.Clone();
-        behind[^3] = false;
+        behind[^4] = false;
         Assert.Equal(182, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasReadCaller)", StringComparison.Ordinal);
