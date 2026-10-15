@@ -180,6 +180,7 @@ public sealed class QueryStoreWatermarksRungTests
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
 
+            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);

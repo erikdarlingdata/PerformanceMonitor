@@ -120,6 +120,7 @@ public sealed class InvestigationRungTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
+        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
         await ExecAsync(connection, @"

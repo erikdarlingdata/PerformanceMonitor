@@ -111,6 +111,7 @@ public sealed class ReadCallerRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V182 shape and the ladder back to 182. */
+        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);

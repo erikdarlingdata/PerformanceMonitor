@@ -239,6 +239,7 @@ public sealed class ExternalAlertRungTests
             /* An upgraded store: one rung behind (no tables, no column, no version row), then migrated, gets all of it. */
             await ExecAsync(connection, "DROP TABLE config.external_alert_state; DROP TABLE config.external_alert_pending; DROP TABLE config.external_alert_source; ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ExternalAlertTables.RungVersion, ct);
+            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
