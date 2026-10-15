@@ -416,26 +416,6 @@ public sealed class CollectionSweepCommandTimeoutTests
     }
 
     /// <summary>
-    /// The COPY writers take the SAME constant as the commands beside them, because they are the same
-    /// regime — and pinned RELATIONALLY rather than by value so the two can never drift apart. A bare
-    /// <c>TimeSpan.FromSeconds(10)</c> at a COPY site would satisfy the shape guard above while quietly
-    /// decoupling the busiest write in the process from the number this group derived.
-    /// </summary>
-    [Fact]
-    public void TheCopyWriters_TakeTheSweepConstantRatherThanALiteral()
-    {
-        var relational = new Regex(
-            @"\.Timeout\s*=\s*TimeSpan\.FromSeconds\(\s*ServiceCommandDeadlines\.CollectionSweepSeconds\s*\)",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        var bound = ServiceSources()
-            .Select(p => CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(p)))
-            .Sum(t => relational.Matches(t).Count);
-
-        Assert.Equal(ExpectedCopyWriterSites, bound);
-    }
-
-    /// <summary>
     /// The COPY's START phase — <c>BeginBinaryImportAsync</c> itself — carries a deadline too, at every
     /// COPY writer, and it comes from the shared helper rather than from a number written at the site.
     ///

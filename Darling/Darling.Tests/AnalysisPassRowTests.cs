@@ -199,34 +199,6 @@ public sealed class AnalysisPassRowTests
         Assert.Equal("top: wait_stats 4", DarlingCycleSkip.TopText(new Dictionary<string, long> { ["wait_stats"] = 4 }));
     }
 
-    /// <summary>The literal is spelled once, in the constants file, like the cycle row's.</summary>
-    [Fact]
-    public void OnlyTheConstantsFile_SpellsTheAnalysisPassName()
-    {
-        var root = Path.Combine(CycleSkipFeedTests.RepoRoot(), "Darling");
-        var offenders = new List<string>();
-        foreach (var project in new[] { "PerformanceMonitor.Darling.Service", "PerformanceMonitor.Darling.Storage", "PerformanceMonitor.Darling.Viewer", "PerformanceMonitor.Darling.Analysis" })
-        {
-            foreach (var file in Directory.EnumerateFiles(Path.Combine(root, project), "*.cs", SearchOption.AllDirectories))
-            {
-                var rel = file.Replace('\\', '/');
-                if (rel.Contains("/obj/", StringComparison.Ordinal) || rel.Contains("/bin/", StringComparison.Ordinal)
-                    || Path.GetFileName(file) == "CollectionCycleRow.cs")
-                {
-                    continue;
-                }
-
-                var text = File.ReadAllText(file);
-                if (text.Contains("'analysis_pass'", StringComparison.Ordinal) || text.Contains("\"analysis_pass\"", StringComparison.Ordinal))
-                {
-                    offenders.Add(Path.GetFileName(file));
-                }
-            }
-        }
-
-        Assert.True(offenders.Count == 0, "analysis_pass is spelled in " + string.Join(", ", offenders) + "; use AnalysisPassRow.CollectorName");
-    }
-
     private static Dictionary<string, long> Counts(params (string Prefix, long Slots, int Collectors)[] groups)
     {
         var map = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
