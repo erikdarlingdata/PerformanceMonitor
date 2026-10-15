@@ -190,8 +190,9 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             await InsertProcAsync(connection, watermark.AddHours(-35), "0xSTART_FAR", "far", ct);
             await InsertProcAsync(connection, watermark.AddMinutes(30), "0xSTART_NEW", "new", ct);
 
-            /* The seed row at the watermark is re-read too: the slack reaches back past it. */
-            Assert.Equal(3, await DarlingModuleMap.RefreshAsync(connection, null, ct));
+            /* The seed row at the watermark is re-read too (the slack reaches back past it), but its names and
+               last_seen are what the map holds, so it is not rewritten and not counted (#5824): two rows written. */
+            Assert.Equal(2, await DarlingModuleMap.RefreshAsync(connection, null, ct));
             Assert.True(await InMapAsync(connection, "0xSTART_NEW", ct));
             Assert.True(await InMapAsync(connection, "0xSTART_BEHIND", ct));
             Assert.False(await InMapAsync(connection, "0xSTART_FAR", ct));
@@ -218,13 +219,15 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             await InsertProcAsync(connection, Ago(TimeSpan.FromHours(20)), "0xLATE_DAILY", "late-daily", ct);
             await InsertProcAsync(connection, Ago(TimeSpan.FromHours(26)), "0xLATE_START", "late-start", ct);
 
-            /* The hourly path cannot see either row. */
-            Assert.Equal(1, await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct));
+            /* The hourly path cannot see either row. It re-reads the seed, which is unchanged, so it writes nothing
+               (#5824: an unchanged row is not rewritten). */
+            Assert.Equal(0, await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct));
             Assert.False(await InMapAsync(connection, "0xLATE_DAILY", ct));
             Assert.False(await InMapAsync(connection, "0xLATE_START", ct));
 
-            /* The daily repairs both (a row stamped 26 hours before it is inside the 30-hour span). */
-            Assert.Equal(3, await DarlingModuleMap.RefreshAsync(connection, null, ct));
+            /* The daily repairs both (a row stamped 26 hours before it is inside the 30-hour span); the seed it
+               re-reads is unchanged and not rewritten (#5824). */
+            Assert.Equal(2, await DarlingModuleMap.RefreshAsync(connection, null, ct));
             Assert.True(await InMapAsync(connection, "0xLATE_DAILY", ct));
             Assert.True(await InMapAsync(connection, "0xLATE_START", ct));
         });
@@ -282,7 +285,8 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             await InsertProcAsync(connection, watermark.AddHours(-10), "0xDAILY_LATE10", "late10", ct);
             await InsertProcAsync(connection, watermark.AddHours(-40), "0xDAILY_TOOLATE", "toolate", ct);
 
-            Assert.Equal(3, await DarlingModuleMap.RefreshAsync(connection, null, ct));
+            /* Two rows written: the seed is re-read but unchanged, so it is not rewritten (#5824). */
+            Assert.Equal(2, await DarlingModuleMap.RefreshAsync(connection, null, ct));
             Assert.True(await InMapAsync(connection, "0xDAILY_LATE", ct));
             Assert.True(await InMapAsync(connection, "0xDAILY_LATE10", ct));
             Assert.False(await InMapAsync(connection, "0xDAILY_TOOLATE", ct));
@@ -400,6 +404,37 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             await DarlingModuleMap.RefreshRecentAsync(connection, null, Now, ct);
             Assert.Equal("after_rename", await ObjectNameForAsync(connection, "0xRECENT_R", ct));
             Assert.Equal(Anchor.AddMinutes(20), await ScalarAsync(connection, $"SELECT last_seen FROM collect.module_map WHERE server_name = '{Server}' AND sql_handle = '0xRECENT_R'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ARefreshOverUnchangedRows_WritesAndLocksNothing_AndCountsOnlyTheChangedRow()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            /* #5824: every refresh re-reads a slack behind the watermark, so it reads handles the map already holds
+               with the same names and last_seen. Those rows used to be rewritten (a new row version and its WAL on
+               every run). A rewritten row gets a new xmin; a row an ON CONFLICT arm only locked gets an xmax. An
+               unchanged row must get neither, and the count is the rows written. */
+            await InsertProcAsync(connection, Anchor, "0xSAME_A", "same_a", ct);
+            await InsertProcAsync(connection, Anchor, "0xSAME_B", "same_b", ct);
+            Assert.Equal(2, await DarlingModuleMap.RefreshRecentAsync(connection, null, Now, ct));
+            var tupleA = $"SELECT xmin::text || '/' || xmax::text FROM collect.module_map WHERE server_name = '{Server}' AND sql_handle = '0xSAME_A'";
+            var tupleB = $"SELECT xmin::text || '/' || xmax::text FROM collect.module_map WHERE server_name = '{Server}' AND sql_handle = '0xSAME_B'";
+            var beforeA = (string)(await ScalarAsync(connection, tupleA, ct))!;
+            var beforeB = (string)(await ScalarAsync(connection, tupleB, ct))!;
+            Assert.EndsWith("/0", beforeA, StringComparison.Ordinal);
+
+            Assert.Equal(0, await DarlingModuleMap.RefreshRecentAsync(connection, null, Now, ct));
+            Assert.Equal(beforeA, await ScalarAsync(connection, tupleA, ct));
+            Assert.Equal(beforeB, await ScalarAsync(connection, tupleB, ct));
+
+            /* B is seen again later under the same names: last_seen moves, so B alone is written. */
+            await InsertProcAsync(connection, Anchor.AddMinutes(5), "0xSAME_B", "same_b", ct);
+            Assert.Equal(1, await DarlingModuleMap.RefreshRecentAsync(connection, null, Now, ct));
+            Assert.Equal(beforeA, await ScalarAsync(connection, tupleA, ct));
+            Assert.NotEqual(beforeB, await ScalarAsync(connection, tupleB, ct));
+            Assert.Equal(Anchor.AddMinutes(5), await ScalarAsync(connection, $"SELECT last_seen FROM collect.module_map WHERE server_name = '{Server}' AND sql_handle = '0xSAME_B'", ct));
         });
     }
 
