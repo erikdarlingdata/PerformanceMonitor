@@ -108,7 +108,9 @@ public sealed class CollectionHealthKeyedLookupParityTests
             /* The viewer's statement has no window left at all; the MCP statement keeps ONE, the trailing
                zero-row count, over the rows from the newest streak break on (a lookup, never the window). */
             Assert.Equal(0, await CountWindowAggsAsync(connection, ViewerDataService.CollectionHealthSql, windowStart, ct));
-            Assert.Equal(1, await CountWindowAggsAsync(connection, DarlingDataReader.CollectionHealthSql, windowStart, ct));
+            /* #5810 moved this pin from 1 to 3: the p95 CTE's running sum and total are two more WindowAggs, but
+               over the per-(collector, duration) HISTOGRAM (an Aggregate's output), never over the window's runs. */
+            Assert.Equal(3, await CountWindowAggsAsync(connection, DarlingDataReader.CollectionHealthSql, windowStart, ct));
 
             bodySucceeded = true;
         }
