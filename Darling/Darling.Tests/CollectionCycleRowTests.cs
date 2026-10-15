@@ -659,8 +659,7 @@ public sealed class CollectionCycleReaderCensusTests
     ];
 
     /// <summary>"File.cs::Name" (the statement constant, or the method for SQL written inline) to the reason THAT read is safe
-    /// unfiltered. A new unfiltered read, in a listed file or not, fails the census until it is listed with its own reason; an
-    /// entry that names no read fails <see cref="TheSafeList_NamesReadsThatExist"/>.</summary>
+    /// unfiltered. A new unfiltered read, in a listed file or not, fails the census until it is listed with its own reason.</summary>
     private static readonly Dictionary<string, string> SafeList = new(StringComparer.Ordinal)
     {
         ["DarlingDataReader.cs::CollectionLogBody"] = "get_collection_log is the raw log by design; its optional collector filter is the caller's, not an exclusion",

@@ -44,8 +44,7 @@ namespace Darling.Tests;
 /// <c>PerformanceMonitor.Common/</c>), and it has no <c>config_version</c> beacon — its settings are
 /// applied in-process by the Settings window, so there is no store-side watermark to advance early. The
 /// only <c>config_version</c> mention under <c>Lite/</c> is a comment in <c>AppAlertEngineSettings</c>
-/// describing Darling's behaviour. <see cref="NeitherFixHasALiteTwinToDriftFrom"/> pins that, so a Lite
-/// twin appearing later fails asking for the same fix rather than drifting quietly.</para>
+/// describing Darling's behaviour.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
