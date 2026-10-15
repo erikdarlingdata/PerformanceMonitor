@@ -188,6 +188,60 @@ public sealed class InvestigationDispatchCore
     }
 
     /// <summary>
+    /// #5821, shared by #5820: opens or joins the request for an alert that is about to be sent and recorded, and returns the
+    /// generic webhook's <c>{{investigation_json}}</c> value for it (<see cref="InvestigationWebhookToken"/>), or null when no
+    /// request was opened or joined (muted, no family, no agent route, the route's limit, a failure). The request is read
+    /// back through <paramref name="readRequest"/> only when it is not null and the generic webhook this alert posts to has
+    /// the token in its body template (<see cref="GenericPostCarriesToken"/>); otherwise the value names the request id only
+    /// and no read is made. Never throws: a failed read-back, or a brief that cannot be rendered, still renders the request id.
+    /// </summary>
+    /// <param name="readRequest">The product's read of one request and its stored brief; null reads nothing.</param>
+    /// <param name="dataDetail">The <c>mcp.dataDetail</c> level the token's brief is masked at.</param>
+    public async Task<string?> OpenForWebhookAsync(
+        string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
+        string? storyPathHash, InvestigationAlertFacts? facts,
+        Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? readRequest,
+        McpDataDetail dataDetail, CancellationToken cancellationToken)
+    {
+        var result = await OpenOrJoinAsync(
+            serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts, cancellationToken);
+        if (result is not { RequestId: Guid requestId } || result.Outcome == InvestigationOpenOutcome.LimitReached)
+        {
+            return null;
+        }
+
+        var opened = result.Outcome == InvestigationOpenOutcome.Opened;
+        try
+        {
+            (InvestigationRequestRow Row, string? Brief)? read = null;
+            if (readRequest is not null && GenericPostCarriesToken(serverId, metricName))
+            {
+                try
+                {
+                    read = await readRequest(requestId, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "Investigation request {RequestId} could not be read back for the webhook; it carries the id only: {Message}",
+                        requestId, ex.Message);
+                }
+            }
+
+            return InvestigationWebhookToken.Render(requestId, opened, read?.Row, read?.Brief, dataDetail);
+        }
+        catch (Exception ex)
+        {
+            /* The render parses and masks the stored brief; whatever fails there, the page still goes, carrying the id. The
+               id-only render parses nothing. */
+            _logger.LogWarning(
+                "Investigation request {RequestId} could not be rendered for the webhook; it carries the id only: {Message}",
+                requestId, ex.Message);
+            return InvestigationWebhookToken.Render(requestId, opened, null, null, dataDetail);
+        }
+    }
+
+    /// <summary>
     /// The PagerDuty-style dedup key the send path derives for this row, then every incident's own key: the store records a
     /// link row per distinct key, so the request names each incident of the alert and not only the first.
     /// </summary>

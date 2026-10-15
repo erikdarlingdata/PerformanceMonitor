@@ -160,45 +160,12 @@ public sealed class InvestigationDispatcher
     /// (<see cref="WebhookAlertService.TemplateCarriesInvestigationToken"/>); otherwise the value names the request id only and
     /// no read is made. Never throws: a failed read-back, or a brief that cannot be rendered, still renders the request id.
     /// </summary>
-    public async Task<string?> OpenForWebhookAsync(
+    public Task<string?> OpenForWebhookAsync(
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
         string? storyPathHash = null, InvestigationAlertFacts? facts = null, CancellationToken cancellationToken = default)
     {
-        var result = await _core.OpenOrJoinAsync(
-            serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts, cancellationToken);
-        if (result is not { RequestId: Guid requestId } || result.Outcome == InvestigationOpenOutcome.LimitReached)
-        {
-            return null;
-        }
-
-        var opened = result.Outcome == InvestigationOpenOutcome.Opened;
-        try
-        {
-            (InvestigationRequestRow Row, string? Brief)? read = null;
-            if (_readRequest is not null && _core.GenericPostCarriesToken(serverId, metricName))
-            {
-                try
-                {
-                    read = await _readRequest(requestId, cancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(
-                        "Investigation request {RequestId} could not be read back for the webhook; it carries the id only: {Message}",
-                        requestId, ex.Message);
-                }
-            }
-
-            return InvestigationWebhookToken.Render(requestId, opened, read?.Row, read?.Brief, _dataDetail);
-        }
-        catch (Exception ex)
-        {
-            /* The render parses and masks the stored brief; whatever fails there, the page still goes, carrying the id. The
-               id-only render parses nothing. */
-            _logger.LogWarning(
-                "Investigation request {RequestId} could not be rendered for the webhook; it carries the id only: {Message}",
-                requestId, ex.Message);
-            return InvestigationWebhookToken.Render(requestId, opened, null, null, _dataDetail);
-        }
+        return _core.OpenForWebhookAsync(
+            serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts,
+            _readRequest, _dataDetail, cancellationToken);
     }
 }
