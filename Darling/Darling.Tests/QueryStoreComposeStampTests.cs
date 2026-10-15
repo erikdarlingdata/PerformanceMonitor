@@ -168,7 +168,9 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains("WHERE p.rn <= $2", plan, StringComparison.Ordinal);
         Assert.Contains("b.built_seq IS DISTINCT FROM b.late_seq", plan, StringComparison.Ordinal);
         /* The build lag is read off the STORE's clock, the one the row trigger's WHEN uses; the service's clock is only the retention floor. */
-        Assert.Contains("date_trunc('hour', coalesce($3::timestamp, now() AT TIME ZONE 'UTC') - interval '3 hours')", plan, StringComparison.Ordinal);
+        /* #5867: the store clock moved into the plan's clock CTE, which the failure filter reads too. */
+        Assert.Contains("SELECT coalesce($3::timestamp, now() AT TIME ZONE 'UTC') AS at", plan, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', clock.at - interval '3 hours')", plan, StringComparison.Ordinal);
         Assert.DoesNotContain("$1::timestamp - interval", plan, StringComparison.Ordinal);
         Assert.Contains("greatest($1::timestamp,", plan, StringComparison.Ordinal);
         Assert.Contains("filled_since", plan, StringComparison.Ordinal);
@@ -178,7 +180,9 @@ public sealed class QueryStoreComposeStampTests
         Assert.Equal(6, QueryStoreComposeStamp.MaxBuildsPerTick);
         Assert.Equal(60, QueryStoreComposeStamp.BuildStatementTimeoutSeconds);
         Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreComposeStamp.MaxTickDuration);
-        Assert.Contains("60s", typeof(QueryStoreComposeStamp).GetField("StatementTimeoutSql", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!.ToString(), StringComparison.Ordinal);
+        /* #5867: the timeout text is built per attempt (the normal 60 s, or the extended timeout after a statement timeout). */
+        Assert.Contains("60s", typeof(QueryStoreComposeStamp).GetMethod("StatementTimeoutSql", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { 60 })!.ToString(), StringComparison.Ordinal);
+        Assert.Equal(240, QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds);
     }
 
     [Fact]
@@ -282,6 +286,21 @@ public sealed class QueryStoreComposeStampTests
         Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick / 2, chosen.Count(b => b.Stale));
         /* Stale first, newest first; then the never-built hours, newest first. */
         Assert.Equal(new[] { B(3, true), B(4, true), B(5, true), B(20, false), B(21, false), B(22, false) }, chosen);
+    }
+
+    /// <summary>#5867: an hour that has failed before runs after the hours that have not, whatever its kind and age, so a build that may
+    /// run to its (extended) timeout again cannot spend the tick's wall-clock budget before the other hours get their turn. Which hours
+    /// are chosen does not change.</summary>
+    [Fact]
+    public void ChooseBuilds_RunsTheHoursThatFailedBefore_AfterTheOthers_AndChoosesTheSameHours()
+    {
+        var failedStale = B(3, true) with { Failures = 1, Extended = true };
+        var failedMissing = B(20, false) with { Failures = 2 };
+        var candidates = new[] { failedStale, B(4, true), B(5, true), failedMissing, B(21, false), B(22, false), B(23, false) };
+
+        var chosen = QueryStoreComposeStamp.ChooseBuilds(candidates, QueryStoreComposeStamp.MaxBuildsPerTick);
+
+        Assert.Equal(new[] { B(4, true), B(5, true), B(21, false), B(22, false), failedStale, failedMissing }, chosen);
     }
 
     [Fact]

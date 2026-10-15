@@ -12793,6 +12793,27 @@ AND   j.hypertable_name = '{relation}'", connection))
         {
             _logger.LogWarning("Query Store compose rollup could not run; the next hourly tick retries: {Message}", ex.Message);
         }
+
+        /* #5867: the hours whose build now waits a day between attempts raise the Compose Rollup Hours Stuck self-alert. Its own read
+           after the tick, failure-isolated: an unreadable record leaves the alert's standing state as it was. */
+        if (_selfAlerts is null)
+        {
+            return;
+        }
+
+        IReadOnlyList<QueryStoreComposeStamp.HourFailure> failures;
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(stoppingToken);
+            failures = await QueryStoreComposeStamp.ReadFailuresAsync(connection, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug("Query Store compose rollup: the failure record could not be read for the self-alert: {Message}", ex.Message);
+            return;
+        }
+
+        await _selfAlerts.EvaluateComposeHoursStuckAsync(failures, stoppingToken);
     }
 
     /// <summary>

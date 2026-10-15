@@ -342,7 +342,8 @@ public sealed class StoreMetricsSummaryFirstTests
             new Regex(@"view\s*==\s*DarlingStoreMetricsReader\.StoreMetricsView\.Object\s*\?\s*DarlingStoreMetricsReader\.SeriesFor\(daily,\s*selection\.Matched\[0\]\)"),
             code);
         /* Every list the payload publishes is bounded through the shared page helper. */
-        Assert.Equal(3, Regex.Matches(code, @"McpHelpers\.BoundPage\(").Count);
+        /* Four since #5867 added the Query Store compose failure list. */
+        Assert.Equal(4, Regex.Matches(code, @"McpHelpers\.BoundPage\(").Count);
     }
 
     /// <summary>The web mirror advertises and binds the three new parameters, so /api/read and the triage page

@@ -1568,7 +1568,18 @@ $rung$;";
         new Migration(183, "read-caller", V183Sql),
         new Migration(184, "agent-investigations", V184Sql),
         new Migration(185, "plan-regression-partial-days", V185Sql),
+        new Migration(186, "query-store-compose-failures", V186Sql),
     };
+
+    /// <summary>
+    /// V186 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row
+    /// per hour whose last build threw, with its consecutive failures, last error and next attempt, so a build that cannot finish backs
+    /// off to one attempt a day instead of running every tick, and <c>get_store_metrics</c> and the self-alert can show it
+    /// (<see cref="QueryStoreComposeStamp.FailuresCreateSql"/>). A plain empty table, no GRANT (the <c>collect</c> schema's blanket
+    /// SELECT covers it). <b>No Lite twin:</b> Lite has no PostgreSQL store. A const, so the list above reads it whatever the
+    /// order of the static initializers.
+    /// </summary>
+    private const string V186Sql = QueryStoreComposeStamp.FailuresCreateSql;
 
     /// <summary>
     /// V114 — the statistics ESTIMATE columns on <c>collect.pg_index_bloat</c>, and the retirement of the

@@ -170,6 +170,21 @@ public sealed class DarlingMcpStoreMetricsTools
                     .ToList();
             }
 
+            /* #5867: the Query Store compose hours whose build failed, and which of them wait a day between attempts. Its own
+               checkout and failure-isolated to null ("Unreadable"), never to an empty list, which would read as "no hour failing". */
+            IReadOnlyList<QueryStoreComposeStamp.HourFailure>? composeFailures;
+            try
+            {
+                await using var composeConnection = await postgres.OpenConnectionAsync(cancellationToken);
+                composeFailures = await QueryStoreComposeStamp.ReadFailuresAsync(composeConnection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                composeFailures = null;
+            }
+
+            var (composePage, composeTruncated) = McpHelpers.BoundPage(composeFailures ?? Array.Empty<QueryStoreComposeStamp.HourFailure>(), limit);
+
             var heldPolicies = holds
                 .Where(h => !h.Armed)
                 .OrderByDescending(h => h.OverHorizonRatio ?? 0)
@@ -360,6 +375,38 @@ public sealed class DarlingMcpStoreMetricsTools
                         chunk_count = h.ChunkCount,
                         actual_span_days = h.SpanSeconds is { } sec ? Math.Round(sec / 86400.0, 1) : (double?)null,
                         over_horizon_ratio = h.OverHorizonRatio is { } r ? Math.Round(r, 2) : (double?)null,
+                    }),
+                },
+                /* #5867. Present on EVERY response, for the #2813 reason above: "no compose hour is failing" and an absent block
+                   must not look alike. */
+                query_store_compose = new
+                {
+                    state = composeFailures is null ? "Unreadable" : "Observed",
+                    failing_hours = composeFailures?.Count,
+                    hours_in_backoff = composeFailures?.Count(f => f.InBackoff),
+                    hours_returned = composePage.Count,
+                    truncated = composeTruncated,
+                    note = composeFailures is null
+                        ? "The failure record of the Query Store compose rollup could not be read."
+                        : composeFailures.Count == 0
+                            ? "No Query Store compose hour is failing to build."
+                            : "These hours of the Query Store compose rollup failed to build. An hour is retried next tick (after a statement timeout, under a "
+                              + QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds.ToString(CultureInfo.InvariantCulture)
+                              + " s timeout) until it has failed "
+                              + QueryStoreComposeStamp.FailuresBeforeBackoff.ToString(CultureInfo.InvariantCulture)
+                              + " times in a row or timed out under the longer timeout; then in_backoff is true and it is tried once a "
+                              + "day, at next_attempt_at. A successful build removes the hour from this list. Times are UTC.",
+                    hours = composePage.Select(f => new
+                    {
+                        hour = f.Hour.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),
+                        failures = f.Failures,
+                        in_backoff = f.InBackoff,
+                        last_sqlstate = f.LastSqlState,
+                        last_reason = f.LastReason,
+                        last_timeout_seconds = f.LastTimeoutSeconds,
+                        first_failed_at = f.FirstFailedAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                        last_failed_at = f.LastFailedAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                        next_attempt_at = f.NextAttemptAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                     }),
                 },
                 /* #3175. Present on EVERY response, for the #2813 reason one line up and one step further:

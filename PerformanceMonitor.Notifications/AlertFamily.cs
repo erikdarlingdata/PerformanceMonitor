@@ -156,6 +156,8 @@ public static class AlertFamily
         ["Collector Cost Regression"] = SelfMonitor,
         /* #4299: the raw-retention over-horizon self-alert. */
         ["Raw Purge Over Horizon"] = SelfMonitor,
+        /* #5867: hours of the Query Store compose rollup whose build is retried only once a day. */
+        ["Compose Rollup Hours Stuck"] = SelfMonitor,
         /* #4750: a webhook channel that has failed three times in a row. */
         ["Notification Channel Failing"] = SelfMonitor,
         /* #3783: the store's own TOAST slack and checkpointer pressure — informational conditions about the

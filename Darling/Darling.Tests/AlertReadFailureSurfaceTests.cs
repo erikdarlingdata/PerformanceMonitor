@@ -1054,6 +1054,8 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Raw-purge-over-horizon self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Compose-rollup-hours-stuck self-alert failed"] = "handed its evidence as parameters; the read is isolated in DarlingWorker.BuildQueryStoreComposeStampAsync",
+        ["Query Store compose rollup: the failure record could not be read for the self-alert"] = "an unreadable failure record leaves the alert's standing state as it was, and the next hourly compose tick reads it again (#5867)",
         ["Notification-channel self-alert failed"] = "reads the webhook channels' failure counts from the webhook service's memory and performs no store read at all - there is no read for this condition to be the swallowing of",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
         ["Fleet gate self-alert failed"] = "handed its evidence (the worker's in-memory gate counts) as a parameter and performs no store read at all",
