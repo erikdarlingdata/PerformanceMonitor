@@ -119,9 +119,11 @@ public sealed class AlertSettingsControlWiringTests
         /* The collections are the legitimate exceptions: each reaches the document as a JsonArray built a
            few lines earlier rather than as a bare "= App.X" assignment. AlertExcludedDatabases was the one;
            #3653 (A5, Q5) added the Long-Running Query opt-out knob's two lists in the same shape, and the
-           source pin in Darling.Tests.LongRunningQueryExclusionsTests holds their root["..."] keys. */
+           source pin in Darling.Tests.LongRunningQueryExclusionsTests holds their root["..."] keys.
+           AlertCooldownMinutes (#5881) reaches the document from a local the same method sets the static from, so no
+           thread can change what is written; SettingsWindowTabsLiteTests checks the value in the root. */
         var unpersisted = assigned.Except(persisted)
-            .Except(new[] { "AlertExcludedDatabases", "AlertLongRunningQueryExcludedProgramNamePrefixes", "AlertLongRunningQueryExcludedLogins" })
+            .Except(new[] { "AlertExcludedDatabases", "AlertLongRunningQueryExcludedProgramNamePrefixes", "AlertLongRunningQueryExcludedLogins", "AlertCooldownMinutes" })
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 

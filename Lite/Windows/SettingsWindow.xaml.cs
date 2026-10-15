@@ -1033,8 +1033,15 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback >= 1 && failedJobLookback <= 1440)
             App.AlertFailedJobLookbackMinutes = failedJobLookback;
         App.AlertDatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true;
+        /* #5881: the value saved is held in a local, not read back from App.AlertCooldownMinutes at the root write below:
+           another thread can rewrite that process-wide static between the parse and the write, and the file then carries
+           a value the operator never typed. A refused value keeps the stored one. */
+        var alertCooldownToSave = App.AlertCooldownMinutes;
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
+        {
+            alertCooldownToSave = alertCooldown;
             App.AlertCooldownMinutes = alertCooldown;
+        }
         else
             validationErrors.Add("Tray notification cooldown must be between 1 and 120 minutes.", AlertCooldownBox);
         if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown >= 1 && emailCooldown <= 120)
@@ -1133,7 +1140,7 @@ public partial class SettingsWindow : Window
         root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
         root["alert_failed_job_enabled"] = App.AlertFailedJobEnabled;
         root["alert_failed_job_lookback_minutes"] = App.AlertFailedJobLookbackMinutes;
-        root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
+        root["alert_cooldown_minutes"] = alertCooldownToSave;
         root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
         root["alert_delivery_mode"] = App.AlertDeliveryMode.ToString();
         root["alert_per_event_max_per_cycle"] = App.AlertPerEventMaxPerCycle;
