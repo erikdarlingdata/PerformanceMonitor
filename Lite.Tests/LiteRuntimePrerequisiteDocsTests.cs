@@ -55,7 +55,7 @@ namespace Lite.Tests;
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class LiteRuntimePrerequisiteDocsTests
 {
-    private const string RootReadmePath = "README.md";
+    private const string RootReadmePath = "docs/lite-guide.md"; // #5860: the root README's Lite quick start moved here
     private const string LiteReadmePath = "Lite/README.md";
     private const string ShippedNoticePath = "Lite/READ-ME-FIRST.txt";
     private const string LiteProjectPath = "Lite/PerformanceMonitorLite.csproj";
@@ -73,7 +73,7 @@ public sealed class LiteRuntimePrerequisiteDocsTests
     /// the day its prerequisites get written down in the root README they will name the same two
     /// downloads. A whole-file rule would then go red for a reason that has nothing to do with Lite.
     /// </summary>
-    private const string RootReadmeLiteHeading = "## Quick Start — Lite";
+    private const string RootReadmeLiteHeading = "# Quick Start — Lite";
 
     /// <summary>
     /// Every <c>dotnet publish</c> of Lite in one workflow, as output directory to "was it published

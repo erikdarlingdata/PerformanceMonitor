@@ -500,7 +500,7 @@ public class EntraDefaultCredentialTests
            the README's "five authentication types" was correct until it did, then #3196's device
            code added a seventh. Derived from reflection rather than restated, so the numeral cannot
            go stale silently again - and it has now caught the same drift twice. */
-        var readme = ReadRepoFile("README.md");
+        var readme = ReadRepoFile("docs/authentication.md"); // #5860: moved from the root README
         var expected = AuthenticationModeConstants().Length;
 
         var words = new[] { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten" };

@@ -1,0 +1,40 @@
+# Choosing an edition
+
+Part of the [Performance Monitor documentation](../README.md#documentation).
+
+## Editions
+
+Pick by how you want collection to run — the monitoring brain (collectors, alert engine, plan analysis, MCP tools) is shared across all three at the library level.
+
+| | **[Lite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — flagship | **[Darling](../Darling/README.md)** — headless | **[Dashboard](../deprecated/Dashboard/README.md)** — *deprecated* |
+|---|---|---|---|
+| **How it runs** | Single desktop app monitors remotely, on demand | Service on Windows or Linux collects 24/7 into a central store. The Windows viewer and the web dashboard read it from any seat | SQL-Server-installed database + Agent collectors, separate viewer app |
+| **Installs on your server?** | No | No | Yes (a `PerformanceMonitor` database) |
+| **Stores data** | Local DuckDB + Parquet | PostgreSQL + TimescaleDB (bundled on Windows) | In the target SQL Server |
+| **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many SQL Server and PostgreSQL servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
+| **Requires** | `VIEW SERVER STATE` ([permissions](permissions.md#permissions)) | `VIEW SERVER STATE` (SQL Server) or [these grants](../Darling/README.md#permissions-on-a-postgresql-target) (PostgreSQL), plus a place to run the service | SQL Agent ([Dashboard docs](../deprecated/Dashboard/README.md)) |
+
+> **⚠️ The "Full" Dashboard edition is deprecated.** Existing installs keep working and remain on bug-fix support, but it is no longer the recommended path and — as of v3.3.0 — the Dashboard and its CLI installer are **no longer included in release assets**. The last shipped builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0), and both remain buildable from the repo. New deployments should use **Lite** or **Darling**. Its docs live with the code: **[deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)** (the app, tabs, permissions) and **[deprecated/Installer/README.md](../deprecated/Installer/README.md)** (the CLI database installer).
+
+**👉 Not sure? [Start with Lite.](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** One download, nothing installed on your server, data flowing in under 5 minutes.
+
+All editions include real-time alerts (email + webhooks), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude. Lite and Dashboard also show alerts in the system tray. All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
+
+## Edition Comparison
+
+| Capability | Lite | Darling | Dashboard *(deprecated)* |
+|---|---|---|---|
+| Target server installation | None | None | Required |
+| Runs collection | On-demand desktop app | 24/7 service (Windows or Linux) | SQL Agent on the target |
+| Multi-server from one seat | Built-in | Built-in (central store) | Per-server install |
+| Data storage | DuckDB + Parquet (local) | PostgreSQL + TimescaleDB (bundled on Windows) | SQL Server (on target) |
+| Azure SQL Database | Supported | Supported | Not supported |
+| Azure SQL MI / AWS RDS | Supported | Supported | Supported |
+| PostgreSQL (self-hosted, AWS RDS, Aurora) | Not supported | Supported | Not supported |
+| Graphical plan viewer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer |
+| Standalone plan viewer | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` |
+| Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
+| Themes | Dark and light | Dark and light | Dark and light |
+| Web dashboard | Not available | Optional, off by default (port 5153) | Not available |
+| Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
+| MCP server (LLM integration) | Built-in (93 tools) | On request (186 tools) | Built into Dashboard (66 tools) |
