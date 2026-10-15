@@ -111,15 +111,19 @@ internal static class CSharpMemberMap
     }
 
     /// <summary>
-    /// One declaration as a half-open range over walked source.
+    /// One declaration as a half-open range over walked source, plus where the NEXT declaration starts.
     ///
     /// <para><c>End</c> is <c>-1</c> when the brace walk never closed the body.</para>
+    ///
+    /// <para><c>NextStart</c> is the next declaration's regex match offset (the end of the file for the last
+    /// one), so <c>Start..NextStart</c> covers a declaration's head without depending on the brace walk.</para>
     /// </summary>
     internal readonly record struct DeclaredRange(
         string Name,
         DeclarationKind Kind,
         int Start,
-        int End);
+        int End,
+        int NextStart);
 
     /// <summary>Every declaration in one file, beside the walked source they are offsets into.</summary>
     internal sealed record MemberMap(string Code, IReadOnlyList<DeclaredRange> Declarations);
@@ -146,7 +150,8 @@ internal static class CSharpMemberMap
                 name,
                 kind,
                 head.Index,
-                DeclarationEnd(code, after)));
+                DeclarationEnd(code, after),
+                i + 1 < heads.Count ? heads[i + 1].Index : code.Length));
         }
 
         return new MemberMap(code, declarations);
