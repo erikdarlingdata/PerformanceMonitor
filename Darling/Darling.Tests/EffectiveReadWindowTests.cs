@@ -185,12 +185,15 @@ public sealed class EffectiveReadWindowTests
     [Fact]
     public async Task AnInvestigationReportsCallForOneRequest_RecordsNoWindow()
     {
-        /* hours_back is ignored with request_id, so the row carries no window whatever hours_back says, and an
-           out-of-range hours_back is not refused: the call goes on to read the request. */
+        /* hours_back is ignored with request_id, so the row carries no window whatever hours_back says, even when the
+           caller sent it and the arguments would otherwise lift it, and an out-of-range hours_back is not refused: the
+           call goes on to read the request. A value past DateTime's range must not throw into an error envelope either:
+           the helper's read only ends in the cancellation when the call reached the store. */
         var id = Guid.NewGuid().ToString();
-        foreach (var hoursBack in new[] { 24, 6, 0, 500 })
+        foreach (var hoursBack in new[] { 24, 6, 0, 500, 1_000_000_000 })
         {
-            var (record, notedStart) = await InvestigationReportsRecord(id, hoursBack, new JsonObject { ["request_id"] = id });
+            var (record, notedStart) = await InvestigationReportsRecord(id, hoursBack,
+                new JsonObject { ["request_id"] = id, ["hours_back"] = hoursBack });
             Assert.Null(notedStart);
             Assert.Null(record.WindowStart);
             Assert.Null(record.WindowEnd);
