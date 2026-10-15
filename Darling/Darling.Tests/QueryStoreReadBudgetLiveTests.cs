@@ -11,7 +11,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
-using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -70,9 +69,6 @@ public sealed class QueryStoreReadBudgetLiveTests
         public Dictionary<string, List<object[]>> Rows { get; } = new(StringComparer.Ordinal);
         public string? SlowOn { get; set; }
         public int SlowReads;
-
-        /// <summary>How long the newest slow read waited before its token cut it, in stopwatch milliseconds (-1 until one is).</summary>
-        public long SlowWaitMs = -1;
 
         /// <summary>The databases the enumerated arm's list query returns (null on the Azure arm, which lists by override).</summary>
         public List<string>? Enumerated { get; set; }
@@ -289,15 +285,12 @@ public sealed class QueryStoreReadBudgetLiveTests
         Assert.Equal(2, cut.Fanout.Value.ItemCount);
 
         /* #5813 review: the timed-out database's SQL slice is in the run's blended SQL time, as the enumerated driver's
-           finally puts it there. The slice's stopwatch starts before the read opens and stops after the cut read has
-           thrown, so it holds at least the time the stand-in waited, as the stand-in measured it; before the fix the catch
-           arm never added it and SqlMs held only zeta's instant read. Compared with the measured wait, not with the budget:
-           a CancelAfter timer fires on the system timer's tick, so at Windows' default 15.6 ms tick a 1,000 ms budget can
-           cut the read a few milliseconds short of 1,000 by the stopwatch (Lite's twin read 999 on CI). The wait's floor
-           keeps the comparison from passing on a read never cut. */
-        var waited = Interlocked.Read(ref target.SlowWaitMs);
-        Assert.True(waited >= (long)(Budget.TotalMilliseconds / 2), $"the slow read waited {waited} ms before its cut");
-        Assert.True(cut.SqlMs >= waited, $"SqlMs {cut.SqlMs} holds the timed-out slice of {waited} ms");
+           finally puts it there; before the fix the catch arm never added it and SqlMs held only zeta's instant read. The
+           floor is half the budget, not the budget: the budget is a CancelAfter timer, which fires on the system timer's
+           tick, so at Windows' default 15.6 ms tick a 1,000 ms budget can cut the read a few milliseconds short of 1,000
+           by the slice's stopwatch (Lite's twin read 999 on CI). Load only lengthens the slice, so half the budget
+           separates the two shapes with no clock in the test. */
+        Assert.True(cut.SqlMs >= (long)(Budget.TotalMilliseconds / 2), $"SqlMs {cut.SqlMs} holds the timed-out slice");
         Assert.Contains("timed out", cut.HostNote ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal(1, rig.Log.TimedOutWarnings(Alpha));
 
@@ -768,15 +761,7 @@ public sealed class QueryStoreReadBudgetLiveTests
             if (database == target.SlowOn)
             {
                 Interlocked.Increment(ref target.SlowReads);
-                var wait = Stopwatch.StartNew();
-                try
-                {
-                    await Task.Delay(Timeout.Infinite, cancellationToken);
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref target.SlowWaitMs, wait.ElapsedMilliseconds);
-                }
+                await Task.Delay(Timeout.Infinite, cancellationToken);
             }
 
             var floor = DateTime.SpecifyKind(cutoff.Value, DateTimeKind.Utc);
