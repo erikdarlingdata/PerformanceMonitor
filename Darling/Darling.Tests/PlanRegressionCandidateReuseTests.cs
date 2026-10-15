@@ -209,9 +209,9 @@ public sealed class PlanRegressionCandidateReuseLiveTests
            hit and miss counters (never the process-wide Shared one, which other classes and the worker touch) say which
            path ran.
            It once read pg_stat_statements' entries for the reads instead. Those are cluster-wide: this own-store class runs
-           in parallel with classes that call pg_stat_statements_reset() for the whole cluster or fill the hash table until
-           it evicts, so the pass's entry could vanish with no read at all (CI run 38702741139: hits 1, misses 0, and no
-           entry after the call). */
+           in parallel with classes that fill the hash table until it evicts (the one full pg_stat_statements_reset() is in
+           ComposeStoreRolesLiveTests, whose collection runs alone), so the pass's entry could vanish with no read at all (CI run
+           38702741139: hits 1, misses 0, and no entry after the call). */
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 reuse test.");
         var ct = TestContext.Current.CancellationToken;
