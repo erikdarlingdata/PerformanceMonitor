@@ -62,8 +62,9 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>The long-poll's wake-up (#5822).</b> When the store answers <see cref="InvestigationOpenOutcome.Opened"/>, and only
 /// then (a join is not a new request, and a limit opens nothing), the dispatcher fires <see cref="InvestigationOpenSignal.Opened"/>
-/// for the route (the core calls it through the <c>opened</c> delegate it is given), which wakes every <c>wait_for_investigation_requests</c> call waiting on it. The signal carries nothing: the
-/// woken call reads the committed request from the store. With nobody waiting it costs a lock and an empty loop.</para>
+/// for the route (the core calls it through the <c>opened</c> delegate it is given), which wakes every
+/// <c>wait_for_investigation_requests</c> call waiting on it. The signal carries nothing: the woken call reads the committed
+/// request from the store. With nobody waiting it costs a lock and an empty loop.</para>
 ///
 /// <para><b>Never throws.</b> A failure, a cancellation included, is logged and the delivery that called it goes on: the
 /// deliverer's and the finding sender's catch turn a throw into a null delivery, which would misreport a page that was sent.
