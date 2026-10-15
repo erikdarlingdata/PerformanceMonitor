@@ -420,13 +420,14 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         var now = TruncateToSeconds(DateTime.UtcNow);
         var late = now.Date.AddDays(-5).AddHours(2);
         var dayBefore = now.Date.AddDays(-5);
+        var steady = SteadyFirst(now);
 
         /* Steady, then a refresh of the same intervals: the trigger's WHEN is false, so nothing is marked. */
         await WriteAsync(runner, now.AddSeconds(-60), context, ct,
-            Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-2), 10, 500),
-            Row("qsA", 2, 21, 100, now.AddHours(-3), now.AddMinutes(-2), 4, 700));
+            Row("qsA", 1, 11, 100, steady, SteadyLast(steady, now.AddMinutes(-2)), 10, 500),
+            Row("qsA", 2, 21, 100, steady, SteadyLast(steady, now.AddMinutes(-2)), 4, 700));
         await WriteAsync(runner, now.AddSeconds(-30), context, ct,
-            Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-1), 15, 510));
+            Row("qsA", 1, 11, 100, steady, SteadyLast(steady, now.AddMinutes(-1)), 15, 510));
         Assert.Empty(await BuiltDaysAsync(connection, ServerId, ct));
 
         /* A late batch (COPY into raw, then the apply's upsert, one transaction): two rows, one per interval, mark
@@ -444,6 +445,61 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         await WriteAsync(runner, now.AddSeconds(5), context, ct, Row("qsA", 7, 71, 90, late, late.AddMinutes(40), 6, 900));
         Assert.Equal(2L, (await BuiltDaysAsync(connection, ServerId, ct))[dayBefore]);
         await AssertTableEqualsRawDedupAsync(connection, ct);
+    }
+
+    /// <summary>
+    /// The late-batch test's rows against the shipped trigger on a pinned clock (#5812): the real-clock test runs at one
+    /// hour, so this evaluates the trigger's own WHEN, read back from the migrated store, with <c>now()</c> pinned to every
+    /// hour of a day at its first and last second. A steady row (<see cref="SteadyFirst"/>) never fires it, also when the
+    /// hour rolls over once after the row's clock was read; the late batch's rows always do. A first execution three hours
+    /// back, the shape this test used before V184 moved the bound to the open days, fires it at every hour.
+    /// </summary>
+    [Fact]
+    public async Task TheLateBatchTestsRows_HoldAgainstTheShippedTriggerBound_AtEveryHourOfAPinnedClock()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 trigger-bound test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+
+        string definition;
+        await using (var read = new NpgsqlCommand(
+            "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger AS t WHERE t.tgname = 'trg_plan_regression_daily_late'", connection))
+        {
+            definition = (string)(await read.ExecuteScalarAsync(ct))!;
+        }
+
+        var start = definition.IndexOf(" WHEN ", StringComparison.Ordinal);
+        var end = definition.IndexOf(" EXECUTE FUNCTION ", StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, definition);
+        var when = definition[(start + " WHEN ".Length)..end];
+        Assert.Contains("new.first_execution_time", when, StringComparison.Ordinal);
+        Assert.Contains("now()", when, StringComparison.Ordinal);
+        var predicate = when.Replace("new.first_execution_time", "$1::timestamp", StringComparison.Ordinal)
+            .Replace("now()", "$2::timestamptz", StringComparison.Ordinal);
+
+        async Task<bool> FiresAsync(DateTime first, DateTime clock)
+        {
+            await using var command = new NpgsqlCommand("SELECT " + predicate, connection);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, first);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.TimestampTz, DateTime.SpecifyKind(clock, DateTimeKind.Utc));
+            return (bool)(await command.ExecuteScalarAsync(ct))!;
+        }
+
+        var day = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        for (var hour = 0; hour < 24; hour++)
+        {
+            foreach (var clock in new[] { day.AddHours(hour), day.AddHours(hour).AddMinutes(59).AddSeconds(59) })
+            {
+                var steady = SteadyFirst(clock);
+                Assert.False(await FiresAsync(steady, clock), $"a steady row fires at {clock:HH:mm:ss}");
+                Assert.False(await FiresAsync(steady, clock.AddHours(1)), $"a steady row fires after the hour after {clock:HH:mm:ss}");
+                Assert.True(await FiresAsync(clock.Date.AddDays(-5).AddHours(2), clock), $"the late batch does not fire at {clock:HH:mm:ss}");
+                Assert.True(await FiresAsync(clock.AddHours(-3), clock), $"a row three hours back does not fire at {clock:HH:mm:ss}");
+            }
+        }
     }
 
     /// <summary>
@@ -468,16 +524,17 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
 
         var now = TruncateToSeconds(DateTime.UtcNow);
         var late = now.Date.AddDays(-4).AddHours(5);
+        var steady = SteadyFirst(now);
 
-        await WriteAsync(runner, now.AddSeconds(-60), context, ct, Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-2), 10, 500));
-        await WriteOtherAsync(runner, now.AddSeconds(-60), otherContext, ct, Row("qsB", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-2), 10, 500));
+        await WriteAsync(runner, now.AddSeconds(-60), context, ct, Row("qsA", 1, 11, 100, steady, SteadyLast(steady, now.AddMinutes(-2)), 10, 500));
+        await WriteOtherAsync(runner, now.AddSeconds(-60), otherContext, ct, Row("qsB", 1, 11, 100, steady, SteadyLast(steady, now.AddMinutes(-2)), 10, 500));
 
         await ExecAsync(connection, "DROP TABLE collect.plan_regression_daily_built", ct);
 
         /* The late batch of the first server faults (42P01 from the trigger function); a steady batch of the other
            server, written after it, does not. */
         await WriteAsync(runner, now, context, ct, Row("qsA", 7, 71, 90, late, late.AddMinutes(30), 3, 900));
-        await WriteOtherAsync(runner, now.AddSeconds(1), otherContext, ct, Row("qsB", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-1), 12, 520));
+        await WriteOtherAsync(runner, now.AddSeconds(1), otherContext, ct, Row("qsB", 1, 11, 100, steady, SteadyLast(steady, now.AddMinutes(-1)), 12, 520));
 
         Assert.Equal(1, context.QueryStoreIntervalMisses);
         Assert.Equal(0, otherContext.QueryStoreIntervalMisses);
@@ -496,7 +553,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         /* Recreate the table the rung's way (idempotent DDL, the V168 rung), then a later steady batch drains the pending row, and the
            replayed late row marks its day. */
         await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 168).Sql, ct);
-        await WriteAsync(runner, now.AddSeconds(10), context, ct, Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-1), 14, 510));
+        await WriteAsync(runner, now.AddSeconds(10), context, ct, Row("qsA", 1, 11, 100, steady, SteadyLast(steady, now.AddMinutes(-1)), 14, 510));
 
         Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending", ct));
         Assert.Equal(1, context.QueryStoreIntervalMisses);
@@ -543,6 +600,17 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
     }
 
     /* ---- helpers ----------------------------------------------------------------------------------------- */
+
+    /// <summary>
+    /// The first execution of a steady row (#5812): the start of the current hour. V184's trigger marks a row whose first
+    /// execution is below <see cref="PlanRegressionDaily.LateTriggerLagHours"/> hour before the store's current hour, so
+    /// a steady row must sit at or above that bound. The current hour's start does, and still does if the hour rolls
+    /// over once while the test runs. The test's own clock is not the store's, which is why it is not <c>now - 1h</c>.
+    /// </summary>
+    private static DateTime SteadyFirst(DateTime now) => new(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>A steady row's last execution: <paramref name="wanted"/>, never before its first.</summary>
+    private static DateTime SteadyLast(DateTime first, DateTime wanted) => wanted < first ? first : wanted;
 
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
