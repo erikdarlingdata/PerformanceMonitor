@@ -181,6 +181,12 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
 - The tests are MTP executables: run `Darling.Tests.exe` / `Lite.Tests.exe` from `bin/Debug/<tfm>/`, filtered with
   `-class "*Name*"` or `-method "*Name*"`. `dotnet test` does not work.
 - For a lone failure in a class you didn't touch, re-run that class alone before calling it yours.
+- **The gate, before every push.** From the worktree root, run `bash .github/scripts/pre-push.sh`. It builds both
+  test projects, runs the whole `Stage=Guard` trait of both suites as CI's first job does, then the classes CI's
+  test map selects for your diff plus every class in a test file that names a symbol you changed, capped. It prints
+  result lines only and ends in `GATE GREEN` or `GATE RED`. Push only on `GATE GREEN`, and put its two Guard result
+  lines and its `classes:` line in the PR body. A `symbols dropped` line means most of the suite names those
+  symbols: run your brief's own class list for them. `--dry-run` only lists the classes. CI decides the rest.
 - **Run the classes that name what you changed.** Run `python .github/scripts/ci-select.py local-classes
   --base origin/dev`, then run its `-class` lines, plus `-class "*Census*"`, `-class "*Ratchet*"` and
   `-trait Stage=Guard`. It lists the test classes whose source names a symbol your change declares or edits, most
@@ -193,13 +199,15 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
 - **Filter by every class in every test file you touch**, not by the file's name. One file can hold several classes
   (`PgPlanCaptureCollectorDefinitionTests.cs` also holds `PgPlanLogParserTests`), and filtering on one class skips
   the others, including tests you just added.
-- Census, meta and pin tests are real gates:
-  - `McpPayloadContractCensusTests` and the MCP inventory pins;
-  - `StartupCommandTimeoutTests` and `StorageCommandTimeoutTests`;
-  - `AlertReadFailureSurfaceTests` and `DocCommentHygiene`;
-  - `LivePostgresCollectionHygieneTests` and `LiveCleanupConversionRatchetTests`.
-
-  Update a pin deliberately, with the reason. Never weaken one.
+- **Tests are load-bearing (#5833).** A test earns its place by failing on a real defect: a leaked error string, a
+  read against a monitored server without a deadline, a Lite fix that skipped Darling.
+  - A census, pin or ratchet that a correct change breaks is moved only when its rule still holds. When its rule is
+    spelling (a signature at a line, a SQL fragment's wording, a comment's text, a trait roster, a coverage
+    percentage), delete it and name it in the PR body. Never weaken one whose rule holds.
+  - Never add a census, pin, ratchet or parity test that reads source text. Cover a change with a behaviour test
+    that fails on the defect and passes on the fix.
+  - A review's UNCOVERED line is answered with such a behaviour test, or with one sentence in the PR body saying
+    why none is needed.
 - **Live classes:**
   - Clean up through `LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, ...)`, with `bodySucceeded` set
     as the body's last statement.
@@ -215,7 +223,7 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
 3. Fix it in the surrounding style. Comments say why and cite the issue. Results stay identical unless the issue
    asks for a behavior change.
 4. **Lite parity is mandatory** wherever the same read or pattern exists in Lite.
-5. Pin it with a regression test that fails on the old shape; prove that once by reverting. Add live tests wherever
+5. Cover it with a behaviour test that fails on the old code; prove that once by reverting. Add live tests wherever
    the relations or rows read change.
 6. Fix small in-lane defects in the same PR. File an issue only for large or design-level work, and list it.
 

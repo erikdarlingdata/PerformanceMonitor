@@ -440,8 +440,8 @@ internal static class WebDataStartNote
 
     private static string? ValidateWindowFor(string tool, int hours, string? asOf, out DateTime endUtc) =>
         UncappedWindowReads.Contains(tool)
-            ? McpHelpers.ValidateUncappedWindow(hours, asOf, out endUtc)
-            : McpHelpers.ValidateWindow(hours, asOf, out endUtc);
+            ? DarlingReadWindow.ValidateUncapped(hours, asOf, out endUtc)
+            : DarlingReadWindow.Validate(hours, asOf, out endUtc);
 
     /// <summary>
     /// The listed reads that LIST rows newest first under a row cap and read <c>collection_time</c>

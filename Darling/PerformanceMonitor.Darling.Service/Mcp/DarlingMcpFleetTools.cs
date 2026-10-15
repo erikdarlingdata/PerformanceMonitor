@@ -98,7 +98,7 @@ public sealed class DarlingMcpFleetTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        var validation = DarlingReadWindow.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
 
         var wantsCards = string.Equals(detail, "cards", StringComparison.OrdinalIgnoreCase);

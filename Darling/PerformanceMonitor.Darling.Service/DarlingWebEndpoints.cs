@@ -3187,7 +3187,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// the default <see cref="CatalogDescriptors"/> declares for that read, else <c>none</c>. Internal so a test can pin a
     /// request that sends no window against the catalog's default.</summary>
     internal static string WebWindowBand(string name, Func<string, string?> sent) =>
-        ReadWindowBand.Of(ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key)));
+        ReadWindowBand.OrFixed(ReadWindowBand.Of(ReadWindowBand.HoursOf(sent, key => CatalogDefaultText(name, key))), name);
 
     /// <summary>The default the catalog row of read <paramref name="name"/> declares for parameter <paramref name="key"/>,
     /// as text; null when the read is not in the catalog, does not take that parameter, or declares no default.</summary>
@@ -7073,7 +7073,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static string? FleetParamRefusal(int hours, int worstCount, Func<string, string?> lookup)
     {
-        var window = McpHelpers.ValidateHoursBack(hours);
+        /* The note this makes is inert today (#5814): /api/fleet calls this before its ReadScope opens, so there is no scope
+           to note on, and the route is never offered to the slow-read log. A route that starts offering it a row must note
+           its window inside the scope. */
+        var window = DarlingReadWindow.ValidateHoursBack(hours);
         if (window is not null)
         {
             return NameWindowParameterTheCallerSent(window, lookup);
