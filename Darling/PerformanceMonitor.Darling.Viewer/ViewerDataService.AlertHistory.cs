@@ -76,7 +76,7 @@ public sealed class ViewerAlertRow
     /// other row.</summary>
     public string? ResolutionOutcome { get; init; }
 
-    /// <summary>The resolution's send in one cell (#5825): "sent to Slack,Email", "muted (Slack)"; blank on any other row.</summary>
+    /// <summary>The resolution's send in one cell (#5825): "sent (Slack,Email)", "muted (Slack)"; blank on any other row.</summary>
     public string ResolutionDisplay => ResolutionOutcome is null
         ? ""
         : string.IsNullOrEmpty(ResolutionChannels) ? ResolutionOutcome : $"{ResolutionOutcome} ({ResolutionChannels})";

@@ -207,6 +207,31 @@ try {
       out.paragraphs = all.filter((n) => n.tag === "p").map((n) => n.textContent);
       out.imgs = all.filter((n) => ["img", "script", "svg", "b"].includes(n.tag)).length;
     },
+    /* #5825: a resolution row (no detail_text; get_alert_history's three resolution fields set) next to a fire row
+       (the three null). Each row's disclosure is opened; its summary and labelled fields are reported by metric. */
+    async resolution() {
+      const sentAt = new Date(T0 - 90000).toISOString();
+      alertsReply = { alerts: [
+        row(0, { metric_name: "CPU Resolved", server_id: 5, notification_type: "webhook", detail_text: null,
+          resolution_sent_at: sentAt, resolution_channels: "Slack,Email", resolution_outcome: "sent" }),
+        row(2, { metric_name: "High CPU", server_id: 5, notification_type: "webhook",
+          detail_text: "CPU is high.\n  Database: Sales\n  Total CPU: 97%",
+          resolution_sent_at: null, resolution_channels: null, resolution_outcome: null }),
+      ], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      out.rows = {};
+      for (const tr of bodyRows(main)) {
+        const d = tr.all("details")[0];
+        if (!d) continue;
+        d.open = true; d.fire("toggle"); await tick();
+        const metric = tr.children.map((c) => c.textContent).find((t) => t === "CPU Resolved" || t === "High CPU");
+        out.rows[metric] = {
+          summary: d.all("summary")[0].textContent,
+          fields: shape(d).fields,
+        };
+      }
+      out.expectedSent = new Date(sentAt).toLocaleString();
+    },
   };
   await scenarios[scenario]();
   console.log(JSON.stringify(out));
