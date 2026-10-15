@@ -80,8 +80,7 @@ public sealed class StoreApplicationNamePinTests
     /// Pins the HELPER and the SHAPE the worker's own site wires (<see cref="DarlingStoreConnection.WithApplicationName"/>
     /// wrapped in <see cref="DarlingStoreConnection.PinSessionTimeZoneUtc"/> straight into
     /// <c>NpgsqlDataSource.Create</c>), read back live from <c>pg_stat_activity</c> — not a product call
-    /// site: <see cref="StoreApplicationNameCensusTests"/> covers every real STORE site (including this
-    /// one, by name, in its roster), and <c>ViewerApplicationNameLiveTests</c> is the pin that goes through
+    /// site; <c>ViewerApplicationNameLiveTests</c> is the pin that goes through
     /// a real product constructor for the Viewer's own site.
     /// </summary>
     [Fact]

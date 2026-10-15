@@ -91,24 +91,37 @@ internal static class DarlingMcpInstructions
         var writeCount = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var adminCount = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
 
+        /* #5632 Phase A: the investigation tools are a third set (ruling R2), never served with the writes, so each set
+           names its own count and switch, and the census names the conflict instead of an unexplained remainder. */
+        var investigationsServed = served.Any(DarlingMcpWritePolicy.IsInvestigation);
+        var investigationCount = catalog.Count(DarlingMcpWritePolicy.IsInvestigation);
+        var off = new List<string>();
+        if (!writesServed)
+            off.Add($"the write tools are off, so the {writeCount + adminCount} that change monitoring configuration are not served " +
+                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
+                    $"{adminCount} more)");
+        else if (!adminServed)
+            off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
+                    "monitored servers are not served");
+        if (!investigationsServed && investigationCount > 0)
+            off.Add(writesServed
+                ? $"the {investigationCount} investigation tools stay off while `{DarlingMcpWritePolicy.WritesSetting}` is on (one token " +
+                  "cannot tell an agent from a person)"
+                : $"`{DarlingMcpWritePolicy.InvestigationsSetting}` with a token adds the {investigationCount} investigation tools");
+
         string opening;
         if (count == total)
             opening = $"This server exposes {total} tools.";
-        else if (!writesServed)
-            opening = $"This server exposes {count} of its {total} tools: the write tools are off, so the {total - count} that change " +
-                      $"monitoring configuration are not served (`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount}, " +
-                      $"`{DarlingMcpWritePolicy.ServerAdminSetting}` {adminCount} more).";
-        else if (!adminServed)
-            opening = $"This server exposes {count} of its {total} tools: `{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so " +
-                      $"the {total - count} tools that add, edit and remove monitored servers are not served.";
+        else if (off.Count > 0)
+            opening = $"This server exposes {count} of its {total} tools: " + string.Join("; ", off) + ".";
         else
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
         var families = adminServed
-            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and onboarding tools"
+            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding and investigation tools"
             : writesServed
-                ? "Custom Views, custom-alert-rule, alert-tuning and server-tag tools"
-                : "the Custom Views and custom-alert-rule reads";
+                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and investigation tools"
+                : "the Custom Views, custom-alert-rule and investigation reads";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
@@ -122,9 +135,9 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 182 tools. 91 are the same names Lite exposes. The remaining 91 are unique to Darling: " +
-        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag " +
-        "and onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
+        "This server exposes 186 tools. 91 are the same names Lite exposes. The remaining 95 are unique to Darling: " +
+        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag, " +
+        "onboarding and investigation tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
     /// <summary>
@@ -182,7 +195,7 @@ internal static class DarlingMcpInstructions
 
         When a read comes back with no data, the `status` word says which kind of nothing it is, and the four are not interchangeable. `empty` is a true negative: we looked and there was nothing to find. `unavailable` means this server could have that data and does not have it right now, so collection health is worth a look. `not_collected` means this server does not collect that at all — and when the reason is the engine, the gap is permanent: the collector serving that read does not run on this server's engine (an Azure SQL Database has no system_health session, no default trace and no SQL Agent; a PostgreSQL target collects none of the SQL Server signals at all, and the `get_pg_*` reads are the ones that answer there), so there is no session to start, no collector to enable, and nothing to check. The message names the engine and the collector. Do not send anyone to go and fix it. `precondition` is the one that is worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way — a Query Store that is off or has gone READ_ONLY, an Extended Events capture session that is not running, an extension that was never created, a grant the monitoring login was refused. The message names the precondition, quotes what the monitored server itself said, and gives the statement or grant that satisfies it. It is re-derived on every read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data — usually with nothing to restart on the monitoring side. A few preconditions are the exception and say so in their own message: the fact that gates them is read once when the service connects to that server and cached for the connection's life, so satisfying them also needs the service to reconnect before collection resumes. Read the message rather than assuming the general case — it tells you which kind you have, and telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates.
 
-        Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{"status":"error","message":"Error during <tool_name>: <what went wrong>","hints":{"operation":"<tool_name>"}}`. It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema. A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{"status":"invalid","message":"<what was refused, and what is accepted>","hints":{"parameter":"<parameter_name>"}}`. The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. The service also runs only a few long reads at a time: a read that would wait too long for a slot gets `busy`, `{"status":"busy","message":"<why>","hints":{"retry_after_seconds":<n>,"running":<n>,"queued":<n>}}`. The read did not run and the call was correct; `running` and `queued` are the long reads running and waiting when it was refused, and calling again after `retry_after_seconds` is the right move. Like `error` and `invalid`, it is not an answer about the data. Seven `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call), one wait (`busy`: retry after `retry_after_seconds`).
+        Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{"status":"error","message":"Error during <tool_name>: <what went wrong>","hints":{"operation":"<tool_name>"}}`. It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema. A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{"status":"invalid","message":"<what was refused, and what is accepted>","hints":{"parameter":"<parameter_name>"}}`. The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. The service runs only a few long reads at once: one that would wait too long for a slot gets `busy`, `{"status":"busy","message":"<why>","hints":{"retry_after_seconds":<n>,"running":<n>,"queued":<n>}}`. The call was correct but did not run (`running`, `queued`: long reads running and waiting then); call again after `retry_after_seconds`. Seven `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call), one wait (`busy`: retry later).
 
         `window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).
 

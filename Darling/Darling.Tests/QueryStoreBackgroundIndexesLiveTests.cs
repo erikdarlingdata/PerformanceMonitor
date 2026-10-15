@@ -579,6 +579,8 @@ CROSS JOIN generate_series(1, {queriesPerDay}) q;", ct);
             new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = DateOnly.FromDateTime(day) },
             new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(1) },
             new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(-1) },
+            /* #5812: V185's build takes a watermark; a closed day's is D + 1 day, a whole build. */
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(1) },
         };
         NpgsqlParameter[] FloorParameters() => new[] { new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 2 } };
 

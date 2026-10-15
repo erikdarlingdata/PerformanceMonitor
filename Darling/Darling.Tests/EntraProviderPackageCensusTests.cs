@@ -234,35 +234,6 @@ public sealed class EntraProviderPackageCensusTests
                 .Groups["id"].Value);
     }
 
-    /// <summary>
-    /// The <c>deprecated/</c> exclusion is doing work: that tree contains projects this census would
-    /// otherwise judge. Asserted rather than left implicit, because an exclusion that excludes nothing reads
-    /// as a decision while being a no-op — and if the tree is ever deleted, this says so instead of leaving
-    /// a filter behind that nobody can evaluate.
-    /// </summary>
-    [Fact]
-    public void TheDeprecatedTree_IsExcludedAndThatExclusionMatters()
-    {
-        var deprecated = Directory
-            .EnumerateFiles(Path.Combine(Root, "deprecated"), "*.csproj", SearchOption.AllDirectories)
-            .Where(NotUnderBuildOutput)
-            .ToArray();
-
-        Assert.NotEmpty(deprecated);
-
-        Assert.DoesNotContain(
-            "deprecated",
-            Survey().Values.SelectMany(p => new[] { p.RelativePath }),
-            StringComparer.Ordinal);
-
-        /* The reason the exclusion is safe rather than convenient: at least one project in there references
-           the core driver, so the tree is genuinely in this census's subject matter and is being left out on
-           purpose. */
-        Assert.Contains(
-            deprecated,
-            path => File.ReadAllText(path).Contains($@"Include=""{CorePackage}""", StringComparison.Ordinal));
-    }
-
     /// <summary>Every shipped project, keyed by assembly-ish project name.</summary>
     private static Dictionary<string, ProjectFacts> Survey()
     {

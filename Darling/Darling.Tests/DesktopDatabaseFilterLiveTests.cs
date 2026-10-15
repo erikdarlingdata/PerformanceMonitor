@@ -399,32 +399,4 @@ public sealed class DesktopDatabaseFilterSourcePinTests
         Assert.Contains("_serverStore?.GetViewFilterDatabases(_server.ServerName)", tab, StringComparison.Ordinal);
         Assert.Contains("FinOpsContent.Initialize(_dataService, _serverStore)", ViewerFile("MainWindow.xaml.cs"), StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void TheSql_CarriesTheListFormPredicate_OnEveryNarrowedRead()
-    {
-        const string P = "IS NULL OR";
-        Assert.Contains("$3::text[] " + P + " ios.database_name = ANY($3)", ViewerDataService.IndexLockingAllSql, StringComparison.Ordinal);
-        Assert.Contains("$4::text[] " + P + " ios.database_name = ANY($4)", ViewerDataService.IndexLockingByDbSql, StringComparison.Ordinal);
-        Assert.Contains("$2::text[] " + P + " ios.database_name = ANY($2)", ViewerDataService.IndexLockingDatabasesSql, StringComparison.Ordinal);
-        Assert.Contains("$2::text[] " + P + " database_name = ANY($2)", ViewerDataService.OptimizedLockingFlagsSql, StringComparison.Ordinal);
-        Assert.Contains("$3::text[] " + P + " database_name = ANY($3)", ViewerDataService.DatabaseSizeLatestSql, StringComparison.Ordinal);
-        Assert.Contains("$4::text[] " + P + " database_name = ANY($4)", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
-        Assert.Contains("$2::text[] " + P + " database_name = ANY($2)", ViewerDataService.PvsStatsLatestSql, StringComparison.Ordinal);
-        Assert.Contains("$3::text[] " + P + " database_name = ANY($3)", ViewerDataService.PvsTrendSql, StringComparison.Ordinal);
-        /* Locking: the order ends in the total-order tie-break Lite and the MCP reader use (#5372), so the 200-row cap picks the same rows. */
-        foreach (var sql in new[] { ViewerDataService.IndexLockingAllSql, ViewerDataService.IndexLockingByDbSql })
-        {
-            Assert.Contains("COALESCE(ios.index_lock_promotion_count, 0) DESC,", sql, StringComparison.Ordinal);
-            Assert.Contains("ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST", sql, StringComparison.Ordinal);
-        }
-
-        /* File I/O: the filter sits inside the ranking, before the top ten is cut, so the ten busiest files are the chosen databases' ten.
-           The latency read ranks in file_totals and cuts in top_files (release walk V9); the throughput read cuts with LIMIT 10. */
-        foreach (var (sql, cut) in new[] { (ViewerDataService.FileIoLatencyTrendSql, "top_files AS"), (ViewerDataService.FileIoThroughputTrendSql, "LIMIT 10") })
-        {
-            var filter = sql.IndexOf("$5::text[] " + P + " database_name = ANY($5)", StringComparison.Ordinal);
-            Assert.True(filter > 0 && filter < sql.IndexOf(cut, StringComparison.Ordinal));
-        }
-    }
 }

@@ -25,7 +25,7 @@ We have a daily figure only for the Query Store interval tables. These tables ar
 | Query Store interval tables, both | 0.33 GiB | about 14 GiB a day | Measured on store A |
 | `collect.query_store_interval_wide` | about 0.23 GiB | about 10 GiB a day | Measured on store A |
 | `collect.query_store_interval_latest` | about 0.09 GiB | about 4 GiB a day | Measured on store A |
-| Query Store interval tables at steady state | about 3.5 GiB per server in total | about 150 GiB | Computed from the daily sizes and the retention horizons: 10 GiB x 9 days + 4 GiB x 15 days = 150 GiB |
+| Query Store interval tables at steady state | about 3.7 GiB per server in total | about 160 GiB | Computed from the daily sizes and the retention horizons: 10 GiB x 10 days + 4 GiB x 15 days = 160 GiB |
 | Every other collector, SQL Server or PostgreSQL | not measured | not measured | The load test will add it |
 
 The Query Store interval tables are plain PostgreSQL tables, partitioned by day. TimescaleDB compression does not apply to them, so all of their rows stay uncompressed.
@@ -40,7 +40,7 @@ The sizes above assume the default retention horizons. If you change a horizon, 
 |---|---|
 | `query_snapshots`, `waiting_tasks`, `running_jobs`, `agent_status` | 7 days |
 | `query_store_stats_interval_hourly` (with TimescaleDB), a Query Store dedup aggregate | 7 days |
-| `collect.query_store_interval_wide` | 9 days |
+| `collect.query_store_interval_wide` | 10 days |
 | `query_store_stats_interval_daily` (with TimescaleDB), a Query Store dedup aggregate | 10 days |
 | `pg_plan_capture` | 14 days |
 | `collect.query_store_interval_latest` | 15 days |

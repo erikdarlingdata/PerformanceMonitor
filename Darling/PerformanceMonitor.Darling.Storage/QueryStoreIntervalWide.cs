@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// carry every outcome and every column the three new reads need broke PLAN_REGRESSION (H1, H2, H4) and the
 /// slicer (H4): PLAN_REGRESSION's near-full-table scan gets 2.6x wider rows for no benefit, and the slicer's
 /// <c>COALESCE</c> predicate can't use either measured index. F1's follow-up measurement confirmed split (c): V143
-/// untouched, plus this table, 8-9 days on <c>collection_time</c>/<c>first_execution_time</c>, no secondary index
+/// untouched, plus this table, 9-10 days on <c>collection_time</c>/<c>first_execution_time</c>, no secondary index
 /// (a window index took HOT to 0%, F1). This class is the write side only: the table, its own coverage claim and
 /// pending replay table, mirroring <see cref="QueryStoreIntervalLatest"/>'s shape column for column so a later
 /// gate can parametrize on the table rather than duplicate the decision (ruling issuecomment-5836972848, item 5).
@@ -779,7 +779,7 @@ FROM (
         Window,
         /// <summary>The table's coverage claim (<c>filled_since</c>) starts later than the window.</summary>
         FilledSince,
-        /// <summary>The 9-day purge edge plus the one-day interval-span margin starts later than the window.</summary>
+        /// <summary>The 10-day purge edge plus the one-day interval-span margin starts later than the window.</summary>
         TablePurgeEdge,
         /// <summary>No exact span below raw's chunk floor: the read is clamped at the floor, as before #4689.</summary>
         RawFloor,
@@ -809,7 +809,7 @@ FROM (
             WideStartBound.FilledSince =>
                 $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart}.",
             WideStartBound.TablePurgeEdge =>
-                "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
+                "The interval table keeps 10 days, and intervals that began before its purge edge are not read.",
             WideStartBound.RawFloorSlowCadence =>
                 $"{(!manyServers ? "This server's" : settingServer is null ? "A server's" : settingServer + "'s")} Query Store collection cadence is over 60 minutes, or its collection log shows a longer gap, so older intervals are not read from the interval table.",
             WideStartBound.RawFloorLogNotYetCovering =>
@@ -817,7 +817,7 @@ FROM (
             _ =>
                 "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
         };
-        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
+        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 10 days), which holds exactly what raw held for them. "
             + reason;
     }
 
@@ -826,7 +826,7 @@ FROM (
     public static string? BannerReason(WideStartBound bound) => bound switch
     {
         WideStartBound.FilledSince => " (interval table complete from then)",
-        WideStartBound.TablePurgeEdge => " (interval table keeps 9 days)",
+        WideStartBound.TablePurgeEdge => " (interval table keeps 10 days)",
         WideStartBound.RawFloorSlowCadence => " (slow Query Store cadence)",
         WideStartBound.RawFloorLogNotYetCovering => " (collection log not yet covering the purge edge)",
         _ => null,
@@ -875,7 +875,7 @@ FROM (
 
     /// <summary>
     /// The largest query_store collection gap over [floor day, floor day + <see cref="GapCacheWindowDays"/>],
-    /// cached per (store, server, floor day, cadence). The range sits 7-9 days back in compressed
+    /// cached per (store, server, floor day, cadence). The range sits 8-10 days back in compressed
     /// <c>collection_log</c> chunks, so each uncached read decompresses them. Caching is exact because the
     /// range is in the past and <c>collection_log</c> rows are only ever inserted with the wall-clock
     /// <c>collection_time</c> of the insert (DarlingObservability.InsertCollectionLogSql callers pass
@@ -990,7 +990,7 @@ FROM (
     /// <list type="bullet">
     /// <item><paramref name="filledSince"/>: the coverage claim starts there and is never backdated, and a gap
     /// check restarts it above a hole (<see cref="ResetCoverageSql"/>).</item>
-    /// <item><paramref name="tableFloor"/> + <see cref="PurgeEdgeMargin"/>: the 9-day purge deletes row by
+    /// <item><paramref name="tableFloor"/> + <see cref="PurgeEdgeMargin"/>: the 10-day purge deletes row by
     /// row on <c>first_execution_time</c>, so a row whose interval began before the table floor is gone even when
     /// its <c>collection_time</c> is inside the window.</item>
     /// <item><paramref name="windowStart"/>: never read before the window asked for.</item>

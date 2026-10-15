@@ -40,7 +40,37 @@ public static partial class SensitiveStatements
     /// input.</item>
     /// </list>
     /// </summary>
-    internal static string JsonCore(string output, Func<string?, string?> text, Func<string?, string?> xml, string refusal)
+    internal static string JsonCore(string output, Func<string?, string?> text, Func<string?, string?> xml, string refusal) =>
+        JsonCore(
+            output,
+            // A value shorter than MinTextChars cannot name a statement, so the statement filter does not judge it.
+            (key, value) => key is not null && value is { Length: < MinTextChars } ? value : text(value),
+            (_, value) => xml(value),
+            text,
+            refusal);
+
+    /// <summary>
+    /// The keyed form of the walk above (#5632): each value judge also receives the value's key, so a judge can
+    /// decide by field as well as by shape.
+    /// <list type="bullet">
+    /// <item>The key is the property the value sits under; an array element takes its array's key; a bare string
+    /// root takes the empty key, and a whole non-JSON
+    /// output takes null.</item>
+    /// <item>A <c>value</c> beside a string <c>label</c> (an alert context field, <c>{"label": "Query", "value":
+    /// ...}</c>) takes the label as its key, because the label is what says what the value holds.</item>
+    /// <item>Every string value reaches a judge, however short (a login can be two characters); the unkeyed form
+    /// keeps its own 5-character floor for values inside a document.</item>
+    /// <item>A key of 5 or more characters is judged by <paramref name="keyText"/> and renamed as the unkeyed form
+    /// renames it.</item>
+    /// </list>
+    /// Everything else (the unchanged instance, the refusal on any exception) is the unkeyed form's.
+    /// </summary>
+    internal static string JsonCore(
+        string output,
+        Func<string?, string?, string?> text,
+        Func<string?, string?, string?> xml,
+        Func<string?, string?> keyText,
+        string refusal)
     {
         try
         {
@@ -64,7 +94,7 @@ public static partial class SensitiveStatements
             if (root is null) return output;
 
             bool changed = false;
-            JsonNode? walked = Walk(root, text, xml, ref changed);
+            JsonNode? walked = Walk(root, null, text, xml, keyText, ref changed);
             if (!changed) return output;
             return walked is null ? "null" : walked.ToJsonString(McpHelpers.JsonOptions);
         }
@@ -75,9 +105,10 @@ public static partial class SensitiveStatements
     }
 
     /// <summary>Judges a non-JSON output as one piece. A judge that returns null for a non-empty piece fails closed.</summary>
-    private static string Whole(string output, Func<string?, string?> text, Func<string?, string?> xml, string refusal)
+    private static string Whole(
+        string output, Func<string?, string?, string?> text, Func<string?, string?, string?> xml, string refusal)
     {
-        string? judged = StartsWithAngle(output) ? xml(output) : text(output);
+        string? judged = StartsWithAngle(output) ? xml(null, output) : text(null, output);
         return judged ?? refusal;
     }
 
@@ -107,19 +138,21 @@ public static partial class SensitiveStatements
     /// Returns the node to keep in <paramref name="node"/>'s place: the node itself (its children may have been
     /// replaced in place) or a fresh string value. <paramref name="changed"/> turns true when anything differs.
     /// </summary>
-    private static JsonNode? Walk(JsonNode? node, Func<string?, string?> text, Func<string?, string?> xml, ref bool changed)
+    private static JsonNode? Walk(
+        JsonNode? node, string? key, Func<string?, string?, string?> text, Func<string?, string?, string?> xml,
+        Func<string?, string?> keyText, ref bool changed)
     {
         switch (node)
         {
             case JsonObject obj:
-                WalkObject(obj, text, xml, ref changed);
+                WalkObject(obj, text, xml, keyText, ref changed);
                 return obj;
             case JsonArray arr:
                 for (int i = 0; i < arr.Count; i++)
                 {
                     JsonNode? child = arr[i];
                     bool childChanged = false;
-                    JsonNode? replaced = Walk(child, text, xml, ref childChanged);
+                    JsonNode? replaced = Walk(child, key, text, xml, keyText, ref childChanged);
                     if (!childChanged) continue;
                     changed = true;
                     if (ReferenceEquals(replaced, child)) continue;
@@ -129,7 +162,7 @@ public static partial class SensitiveStatements
             case JsonValue val:
                 if (val.GetValueKind() != JsonValueKind.String) return val;
                 string s = val.GetValue<string>();
-                string? judged = JudgeValue(s, text, xml);
+                string? judged = JudgeValue(key, s, text, xml);
                 if (string.Equals(judged, s, StringComparison.Ordinal)) return val;
                 changed = true;
                 return judged is null ? null : JsonValue.Create(judged);
@@ -138,8 +171,16 @@ public static partial class SensitiveStatements
         }
     }
 
-    private static void WalkObject(JsonObject obj, Func<string?, string?> text, Func<string?, string?> xml, ref bool changed)
+    private static void WalkObject(
+        JsonObject obj, Func<string?, string?, string?> text, Func<string?, string?, string?> xml,
+        Func<string?, string?> keyText, ref bool changed)
     {
+        // An alert context field ({"label": ..., "value": ...}): the label says what the value holds.
+        string? label = obj.TryGetPropertyValue("label", out JsonNode? labelNode)
+            && labelNode is JsonValue labelValue && labelValue.GetValueKind() == JsonValueKind.String
+            ? labelValue.GetValue<string>()
+            : null;
+
         var pairs = new List<KeyValuePair<string, JsonNode?>>(obj.Count);
         foreach (KeyValuePair<string, JsonNode?> pair in obj) pairs.Add(pair);
 
@@ -154,7 +195,7 @@ public static partial class SensitiveStatements
             string newKey = key;
             if (key.Length >= MinTextChars)
             {
-                string? judgedKey = text(key);
+                string? judgedKey = keyText(key);
                 if (judgedKey is null || !string.Equals(judgedKey, key, StringComparison.Ordinal))
                 {
                     newKey = (judgedKey ?? string.Empty) + "#" + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -170,7 +211,8 @@ public static partial class SensitiveStatements
             }
 
             bool childChanged = false;
-            JsonNode? newValue = Walk(value, text, xml, ref childChanged);
+            string valueKey = label is not null && string.Equals(key, "value", StringComparison.Ordinal) ? label : key;
+            JsonNode? newValue = Walk(value, valueKey, text, xml, keyText, ref childChanged);
             if (childChanged) objectChanged = true;
             rebuilt.Add(new KeyValuePair<string, JsonNode?>(newKey, newValue));
         }
@@ -188,10 +230,10 @@ public static partial class SensitiveStatements
         }
     }
 
-    private static string? JudgeValue(string s, Func<string?, string?> text, Func<string?, string?> xml)
+    private static string? JudgeValue(
+        string? key, string s, Func<string?, string?, string?> text, Func<string?, string?, string?> xml)
     {
-        if (StartsWithAngle(s)) return xml(s);
-        if (s.Length >= MinTextChars) return text(s);
-        return s;
+        if (StartsWithAngle(s)) return xml(key, s);
+        return text(key ?? string.Empty, s);
     }
 }

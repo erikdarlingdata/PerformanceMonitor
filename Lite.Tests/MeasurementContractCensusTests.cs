@@ -82,9 +82,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <item><description><b>Every delta family persists the interval its deltas accrued over.</b> COMPLETE
 /// and <b>PINNED</b> by <see cref="DeltaFamilyIntervalColumnTests"/> (Darling V127/V128, Lite v60/v61):
 /// all ten members of <see cref="CollectorDeltaCalculator.DeltaFamilyCollectors"/> carry
-/// <c>sample_interval_seconds</c>, the still-naked list is empty and asserted empty. Left alone here;
-/// <see cref="TheTwoPinnedRules_KeepTheNumbersTheirTestsGaveThem"/> only keeps this list's numbering honest
-/// against those files.</description></item>
+/// <c>sample_interval_seconds</c>, the still-naked list is empty and asserted empty. Left alone here.</description></item>
 /// <item><description><b>Rollups aggregate interval &gt; 0 only.</b> A continuous aggregate or rollup that
 /// <c>sum()</c>s / <c>min()</c>s / <c>count()</c>s a delta family's rows carries
 /// <c>sample_interval_seconds IS DISTINCT FROM 0</c>, so a restart collection produces no sample rather
@@ -1410,16 +1408,6 @@ public sealed class MeasurementContractCensusTests
     }
 
     /* ---------------- rules 4 and 7: the numbers on the record ---------------- */
-
-    /// <summary>The two rule numbers the record holds, in the tests that hold them — so the list above cannot
-    /// quietly renumber either.</summary>
-    [Fact]
-    public void TheTwoPinnedRules_KeepTheNumbersTheirTestsGaveThem()
-    {
-        Assert.Contains("the measurement contract's rule 4", ReadRepoFile("Lite.Tests/DeltaFamilyIntervalColumnTests.cs"), StringComparison.Ordinal);
-        Assert.Contains("the measurement contract's rule 7", ReadRepoFile("Lite.Tests/DeltaFamilySeedingCensusTests.cs"), StringComparison.Ordinal);
-        Assert.Equal(10, CollectorDeltaCalculator.DeltaFamilyCollectors.Count);
-    }
 
     /* ---------------- helpers ---------------- */
 

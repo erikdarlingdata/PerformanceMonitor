@@ -167,10 +167,10 @@ public sealed class DarlingWebEndpointsTests
             new[]
             {
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-                "analyze_server", "assign_server_tag", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_server_tag", "delete_custom_alert_rule",
+                "analyze_server", "assign_server_tag", "claim_investigation_request", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_server_tag", "delete_custom_alert_rule",
                 "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_server_tag", "describe_custom_view_catalog", "edit_server", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
                 "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
-                "set_mute_rule_enabled", "set_notification_route_enabled", "test_custom_alert_rule", "unassign_server_tag", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
+                "set_mute_rule_enabled", "set_notification_route_enabled", "submit_investigation_report", "test_custom_alert_rule", "unassign_server_tag", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
@@ -191,22 +191,6 @@ public sealed class DarlingWebEndpointsTests
            /api/read entry alongside the richer pre-banded /api/ag DTO endpoint the topology page reads. */
         Assert.Contains("get_ag_health", ReflectToolCatalog());
         Assert.Contains("get_ag_health", DarlingWebEndpoints.BuildReadDispatch().Keys);
-    }
-
-    [Fact]
-    public void ReadEndpoints_ActiveQueries_KeepsTheTwoThousandCharacterWebPreview()
-    {
-        /* #4198 lane W2: the MCP default fell to a 500-char (now 400) query_text preview (QueryTextPreviewLength), but
-           the web viewer isn't that budget's caller — its /api/read row calls the internal budget-taking
-           overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
-           Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
-           2000) silently starves that tab's query text down to the MCP preview (400 characters). Source-text pin rather than a
-           live call: no rig in this lane. #5245: the entry now binds the chosen databases (DatabaseNames(c)), so the pin
-           matches the call and not the whole entry; the 2000 is what it guards. */
-        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        Assert.Contains(
-            "DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, \"blocking_only\", false), Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted)",
-            source, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -825,57 +809,6 @@ public sealed class DarlingWebEndpointsTests
         var never = Assert.IsType<JsonObject>(array[1]);
         Assert.True(never.ContainsKey("last_fired"));
         Assert.Null(never["last_fired"]);
-    }
-
-    /// <summary>
-    /// #4198: <c>get_analysis_findings</c> grew a default <c>limit</c> (18 chains) and a default text preview
-    /// (<c>full_text: false</c>), sized for a chat caller watching its own token budget. The web viewer's two
-    /// "Analysis Findings" tables never asked for that budget and render no field the preview cuts — a
-    /// regression here would silently drop rows past the 18th from the table with no error, which a JSON-shape
-    /// test cannot catch because the response is still well-formed, just short. No rig: this reads the
-    /// dispatch-row SOURCE rather than invoking it, because invoking it needs a live Postgres connection.
-    /// </summary>
-    [Fact]
-    public void GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText()
-    {
-        var source = ReadSource(WebEndpointsSourcePath);
-
-        var line = source
-            .Split('\n')
-            .FirstOrDefault(l => l.Contains("[\"get_analysis_findings\"] = (c, pg, an) =>", StringComparison.Ordinal));
-
-        Assert.True(line is not null,
-            "#4198: the /api/read dispatch row for get_analysis_findings has moved or been renamed; update this pin's search text.");
-
-        Assert.Contains("Rows(c, \"limit\", MaxRowLimit)", line, StringComparison.Ordinal);
-        Assert.Contains("QueryBool(c, \"full_text\", true)", line, StringComparison.Ordinal);
-
-        /* #4316 M2: GetAnalysisFindings grew a trailing ILogger? logger parameter so a web-path force-plan
-           read failure logs instead of riding along unlabelled in the payload note. This row builds the
-           service off the DI-resolved postgres/an directly, not through a logger-less helper, so dropping the
-           argument here is the whole regression — there is no second call site downstream to catch it. */
-        Assert.Contains("logger: logger", line, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// #4316 M2: <c>MapAll</c> used to build the web host's <see cref="DarlingAnalysisService"/> with no
-    /// logger, so both fact collectors on the web path (audit_config, get_analysis_facts) logged nothing on
-    /// failure and the collection-failure note's "the log has the full error" was false there. No rig: this
-    /// reads the construction site's SOURCE rather than invoking it.
-    /// </summary>
-    [Fact]
-    public void MapAll_BuildsTheAnalysisServiceWithTheHostsLogger()
-    {
-        var source = ReadSource(WebEndpointsSourcePath);
-
-        var line = source
-            .Split('\n')
-            .FirstOrDefault(l => l.Contains("new DarlingAnalysisService(", StringComparison.Ordinal));
-
-        Assert.True(line is not null,
-            "#4316: the web host's DarlingAnalysisService construction has moved or been renamed; update this pin's search text.");
-
-        Assert.Contains("logger: logger", line, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -226,7 +226,9 @@ FROM generate_series(1, $2) AS g", c) { CommandTimeout = 600 })
 
     /// <summary>True when a relation scan is reachable from <paramref name="node"/> without passing an aggregate:
     /// the node's input is the raw rows. A hypertable scan names its CHUNKS in <c>Relation Name</c>, so any
-    /// relation-bearing node counts, not just one named procedure_stats.</summary>
+    /// relation-bearing node counts, not just one named procedure_stats. The one exception is the map itself:
+    /// #5824's <c>NOT EXISTS</c> probes <c>module_map</c> (one row per handle, not the raw read), and the outer
+    /// <c>ORDER BY</c> that keeps the #1801 lock order sorts the handles that probe lets through.</summary>
     private static bool ReadsRawRows(JsonElement node)
     {
         foreach (var child in Children(node))
@@ -236,7 +238,8 @@ FROM generate_series(1, $2) AS g", c) { CommandTimeout = 600 })
                 continue;
             }
 
-            if (child.TryGetProperty("Relation Name", out _) || ReadsRawRows(child))
+            if ((child.TryGetProperty("Relation Name", out var relation) && relation.GetString() != "module_map")
+                || ReadsRawRows(child))
             {
                 return true;
             }

@@ -207,6 +207,11 @@ public sealed class DarlingAnalysisService
     /// by the collector from its own type (#3691). 0 when the pass never reached collection.</summary>
     public int LastCollectionFamilyCount { get; private set; }
 
+    /// <summary>#5824: the last pass's PLAN_REGRESSION read time in milliseconds (<see cref="AnalysisContext.PlanRegressionReadMs"/>);
+    /// null when the read did not run on that pass. Set when the pass finishes, so it is meaningful only once the pass's task has
+    /// completed.</summary>
+    public long? LastPlanRegressionReadMs { get; private set; }
+
     /// <summary>
     /// How many facts the last pass handed to the scorer — the collector's plus the anomaly detector's
     /// (#3691) — and how many of those came out with a non-zero severity. Both null when the pass never
@@ -381,6 +386,11 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than one analysis cadence; the
+               scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
+               live. */
+            ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,
+            RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,
             CancellationToken = cancellationToken,
 
             /* #2430. The fifth argument is what keeps the abandon classification truthful once
@@ -409,6 +419,7 @@ public sealed class DarlingAnalysisService
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
+        LastPlanRegressionReadMs = null;
         LastFactCount = null;
         LastFactsScored = null;
         EndedEarlyAs = null;
@@ -692,6 +703,9 @@ public sealed class DarlingAnalysisService
             //    exploratory and writes nothing. The findings are still built, enriched and returned in
             //    full; only the row is withheld, because the row would claim to be a current
             //    observation. AnalysisContext.PersistFindings carries the whole argument.
+            //    #5812 (L2): a current on-demand pass persists too, and its PLAN_REGRESSION findings may come from a
+            //    reused read up to PlanRegressionCandidateCache.RefreshAfter (one analysis cadence) old: the same band as
+            //    the scheduled pass's own findings when the next call reads them (see PgFactCollector.PlanRegressionCache).
             if (context.PersistFindings)
             {
                 await _findingStore.InsertFindingsAsync(findings, context);
@@ -765,6 +779,10 @@ public sealed class DarlingAnalysisService
         }
         finally
         {
+            /* #5824: stamped here, not after collection, so a pass that ran past its budget or failed, and then finished,
+               still reports the read time. The worker reads it only once this pass's task has completed
+               (DarlingWorker.PlanRegressionReadOfFinishedPass): a pass the sweep stopped waiting for has not reached this line. */
+            LastPlanRegressionReadMs = context.PlanRegressionReadMs;
             IsAnalyzing = false;
         }
     }
@@ -813,6 +831,9 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            /* #5812: get_analysis_facts with no as_of answers PLAN_REGRESSION from the candidates the last current pass
+               read while they are fresh; a past as_of reads live. */
+            ReusePlanRegressionCandidates = asOfUtc is null,
             CancellationToken = cancellationToken
         };
 

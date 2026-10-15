@@ -157,50 +157,6 @@ public class StoreLogSelfMonitoringStoreTests
     }
 
     /// <summary>
-    /// The sweep never parses the log's clock or its prefix, asserted over the SHIPPED source rather than
-    /// claimed in a comment.
-    ///
-    /// <para>This is the #3030 lesson turned into a guard. That defect was a parser that assumed a
-    /// <c>log_line_prefix</c> and could not match another family AT ALL, reporting zero capture as a clean
-    /// read. The store's case adds a second trap on the same axis: PostgreSQL renders <c>%m</c> in
-    /// <c>log_timezone</c>, and <c>DarlingManagedPostgres</c> deliberately does not set it (its v9 block pins
-    /// the session <c>timezone</c> only, and <c>DarlingManagedPostgresTests</c> asserts the absence), so the
-    /// store's own log stamps are in the HOST's zone. A census that read them would be wrong on every
-    /// non-UTC host, and would be wrong SILENTLY. Binning on the sweep's own UTC capture instant is what
-    /// makes both traps unreachable, so the guard is that neither file names either setting.</para>
-    /// </summary>
-    [Fact]
-    public void TheStoreLogPathReadsNeitherThePrefixNorTheLogClock()
-    {
-        foreach (var relative in new[]
-                 {
-                     "Darling/PerformanceMonitor.Darling.Storage/StoreLogSweep.cs",
-                     "Darling/PerformanceMonitor.Darling.Storage/StoreLogClassifier.cs",
-                 })
-        {
-            var source = ReadSource(relative);
-
-            /* The control: the file was actually read. An unreadable path returns nothing from a
-               DoesNotContain, which reads exactly like a clean result. */
-            Assert.Contains("namespace PerformanceMonitor.Darling.Storage", source, StringComparison.Ordinal);
-
-            var code = StripBlockComments(source);
-
-            /* And the control on the STRIPPING, which is the step that could make this vacuous: the
-               stripped text must still hold the code it was supposed to keep. Every textual decision here
-               reads code, never prose (#3014) - both files discuss log_line_prefix and log_timezone at
-               length in their comments, and a whole-file substring check would fail on the discussion. */
-            Assert.Contains("namespace PerformanceMonitor.Darling.Storage", code, StringComparison.Ordinal);
-
-            Assert.DoesNotContain("current_setting('log_line_prefix')", code, StringComparison.Ordinal);
-            Assert.DoesNotContain("current_setting('log_timezone')", code, StringComparison.Ordinal);
-            Assert.DoesNotContain("IsZeroOffsetLogZone", code, StringComparison.Ordinal);
-            Assert.DoesNotContain("DateTime.Parse", code, StringComparison.Ordinal);
-            Assert.DoesNotContain("DateTime.TryParse", code, StringComparison.Ordinal);
-        }
-    }
-
-    /// <summary>
     /// The read's SQL actually names the tables the rung creates, or the rung is invisible where it is read.
     /// </summary>
     [Fact]

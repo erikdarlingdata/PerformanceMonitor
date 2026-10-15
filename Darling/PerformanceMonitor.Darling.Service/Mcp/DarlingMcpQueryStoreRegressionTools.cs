@@ -46,7 +46,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// </summary>
     private const int QueryTextPreviewLength = 240;
 
-    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs a fixed 7-day baseline before it (see baseline_start/baseline_end). get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (#4195; before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs a fixed 7-day baseline before it (see baseline_start/baseline_end). get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (#4195; before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is. Reads the per-interval table when it holds the whole baseline and window, and the raw tier otherwise; history_source says which served.")]
     public static Task<string> GetQueryStoreRegressions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -81,7 +81,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
         try
@@ -97,7 +97,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 happens to have exactly `limit` regressions and nothing more, which is a false positive in
                 the one field whose whole reason for existing is that the cap should not have to be inferred.
             */
-            var rows = await DarlingQueryStoreRegressionReader.GetQueryStoreRegressionsAsync(
+            var (rows, historySource) = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
                 postgres, resolved.ServerId, start, end, databaseFilter, limit + 1, baselineStart, cancellationToken);
 
             /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this tool
@@ -127,6 +127,8 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5809: which tier answered, in get_query_store_top's words (interval_table or raw). */
+                history_source = historySource,
                 database_name = databaseFilter.Describe(),
                 /*
                     Named so the caller cannot mistake which side is which. "baseline" is NOT a fixed

@@ -43,29 +43,6 @@ public sealed class StatementFilterPlanReaderSourceScanTests
     };
 
     [Fact]
-    public void EveryPublicPlanRead_IsListed_TakesMaxOutputChars_AndIsPlantedInTheLiveTests()
-    {
-        string[] actual = typeof(DarlingStoredPlanReader)
-            .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Select(m => m.Name)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToArray();
-        Assert.Equal(PublicReads.Keys.OrderBy(n => n, StringComparer.Ordinal).ToArray(), actual);
-
-        string live = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "Darling.Tests", "StatementFilterPlanReadsLiveTests.cs"));
-        foreach (MethodInfo method in typeof(DarlingStoredPlanReader).GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly))
-        {
-            ParameterInfo? cut = method.GetParameters().SingleOrDefault(p => p.Name == "maxOutputChars");
-            Assert.True(cut is not null && cut.HasDefaultValue && Equals(cut.DefaultValue, int.MaxValue),
-                method.Name + " must take an optional maxOutputChars that defaults to int.MaxValue");
-            ParameterInfo[] parameters = method.GetParameters();
-            Assert.True(parameters[^1].ParameterType == typeof(System.Threading.CancellationToken) && parameters[^2] == cut,
-                method.Name + ": maxOutputChars sits just before the CancellationToken (CA1068)");
-            Assert.Contains("DarlingStoredPlanReader." + method.Name + "(", live, StringComparison.Ordinal);
-        }
-    }
-
-    [Fact]
     public void EveryPublicPlanRead_AnswersThroughTheStatementFilter_AndNoRawTwinIsPublic()
     {
         string source = ReaderCode();

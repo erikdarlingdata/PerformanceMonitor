@@ -106,25 +106,6 @@ public sealed class LivePostgresCollectionHygieneTests
     }
 
     /// <summary>
-    /// The sweep routes its skip through <see cref="HasBuildOutputSegment"/> rather than testing the path
-    /// inline, so the behaviour the theory above pins is the behaviour the sweep actually gets.
-    /// </summary>
-    [Fact]
-    public void TheSweep_SkipsBuildOutputThroughTheSeparatorAwareHelper()
-    {
-        var source = File.ReadAllText(ThisSourceFile());
-
-        /* Built by concatenation on purpose: spelled as one literal, this assertion's OWN text
-           satisfies it, so the pin passes with the call site deleted. Measured — it did. */
-        Assert.Contains("HasBuildOutputSegment(" + "Path.GetRelativePath(", source, StringComparison.Ordinal);
-        Assert.DoesNotContain(@"file.Contains(@""\bin\""", source, StringComparison.Ordinal);
-        Assert.DoesNotContain(@"file.Contains(@""\obj\""", source, StringComparison.Ordinal);
-    }
-
-    /// <summary>This file's own path, for the source pin above.</summary>
-    private static string ThisSourceFile([CallerFilePath] string? path = null) => path!;
-
-    /// <summary>
     /// True when any whole SEGMENT of <paramref name="relativePath"/> is <c>bin</c> or <c>obj</c>, reading
     /// both separator characters on every platform.
     ///

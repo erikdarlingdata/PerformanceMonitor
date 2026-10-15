@@ -90,11 +90,11 @@ Keep every monitored server enabled. A disabled server drops out of the reads an
 
 #### The time limit of a copy
 
-The copy gets no new Query Store rows, because its production servers cannot be reached. The reads of the test end at the newest Query Store row of the server (see "Measure at each N"), so their windows stay full. But the service still purges rows by their age each day. You cannot change the purge age: it is fixed in the code, at 9 days for `collect.query_store_interval_wide` and 15 days for `collect.query_store_interval_latest`. No setting raises it. So:
+The copy gets no new Query Store rows, because its production servers cannot be reached. The reads of the test end at the newest Query Store row of the server (see "Measure at each N"), so their windows stay full. But the service still purges rows by their age each day. You cannot change the purge age: it is fixed in the code, at 10 days for `collect.query_store_interval_wide` and 15 days for `collect.query_store_interval_latest`. No setting raises it. So:
 
-- The 7-day reads stay complete for 2 days after the newest row of the copy. The 1-day reads stay complete for 8 days.
+- The 7-day reads stay complete for 3 days after the newest row of the copy. The 1-day reads stay complete for 9 days.
 - The Reads step prints a `WARNING` line for each window that starts before the purge edge. When it does, the times of that window are too fast. Restore a newer copy, and start the sequence of N again.
-- Plan the whole sequence of N to finish within 2 days of the backup, or restore a new copy in the middle of it.
+- Plan the whole sequence of N to finish within 3 days of the backup, or restore a new copy in the middle of it.
 
 ### Inflate to N
 
@@ -227,7 +227,7 @@ servers per store = largest passing N x source_servers
 
 - A synthetic server is enabled in both registries, with a host name that never resolves. The service tries to collect from it on each cycle and writes a failed collection, as it does for the production servers of the copy. The readers, the builders and the Custom Views read guard see it as a normal server.
 - The script clones the interval tables only. The query text and plan tables are not cloned, so a read that joins them finds no text for a synthetic row. The scan of the interval rows is the same.
-- The service's retention removes Query Store interval partitions older than 9 days (wide) and 15 days (latest). The clones go with them. Finish each N within a few hours of its inflate run. See "The time limit of a copy".
+- The service's retention removes Query Store interval partitions older than 10 days (wide) and 15 days (latest). The clones go with them. Finish each N within a few hours of its inflate run. See "The time limit of a copy".
 
 ## Teardown
 

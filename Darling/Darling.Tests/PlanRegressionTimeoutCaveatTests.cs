@@ -40,15 +40,16 @@ public sealed class PlanRegressionTimeoutCaveatTests
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalLatest.cs"));
 
         var fact = Slice(source, "private async Task CollectPlanRegressionFactsAsync(", "public const string ProcedureStatsSql");
-        var builtDays = Slice(storage, "public static async Task<List<DateOnly>> ReadBuiltDaysAsync(", "private readonly ConcurrentDictionary<int, byte> _coverageEnsured");
+        var builtDays = Slice(storage, "public static async Task<List<PlanRegressionDaily.BuiltDay>> ReadBuiltDaysAsync(", "private readonly ConcurrentDictionary<int, byte> _coverageEnsured");
 
         /* The fact's own read carries the deadline, and the built-days read is handed it (it builds its command in the
            storage helper, from the storage tenant's own SQL constant). */
-        /* Three commands: the snapshot transaction's SET TRANSACTION READ ONLY, the read, and (#5630) the input check's plan
-           read, one per candidate. All carry the deadline. The plan read's catch records the failure under the fact's family
+        /* Four commands: the snapshot transaction's SET TRANSACTION READ ONLY, its SET LOCAL work_mem (#5812, bound 2: the daily
+           read's sort went to disk at the default), the read, and (#5630) the input check's plan read, one per candidate.
+           All carry the deadline. The plan read's catch records the failure under the fact's family
            and keeps the candidate as the fact always had it. */
-        Assert.Equal(3, Regex.Matches(fact, @"new NpgsqlCommand\(").Count);
-        Assert.Equal(3, Regex.Matches(fact, @"CommandTimeout = FactCommandTimeoutSeconds").Count);
+        Assert.Equal(4, Regex.Matches(fact, @"new NpgsqlCommand\(").Count);
+        Assert.Equal(4, Regex.Matches(fact, @"CommandTimeout = FactCommandTimeoutSeconds").Count);
         Assert.Contains("snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds", fact, StringComparison.Ordinal);
         Assert.Contains("new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection, transaction)", builtDays, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(builtDays, @"new NpgsqlCommand\("));

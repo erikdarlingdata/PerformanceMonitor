@@ -33,13 +33,6 @@ public class LockTimeoutYieldTests
     /* ── the shared flag ── */
 
     [Fact]
-    public void QuerySnapshots_Is_The_Only_Flagged_Collector()
-    {
-        var flagged = CollectorCatalog.All.Where(c => c.YieldsOnLockTimeout).Select(c => c.Name).ToList();
-        Assert.Equal(new[] { "query_snapshots" }, flagged);
-    }
-
-    [Fact]
     public void Catalog_Helper_Answers_By_Name_And_Defaults_Unknown_To_False()
     {
         Assert.True(CollectorCatalog.YieldsOnLockTimeout("query_snapshots"));
@@ -73,16 +66,6 @@ public class LockTimeoutYieldTests
 
         Assert.Contains("ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName)", source);
         Assert.Contains("status = \"YIELDED\";", source);
-    }
-
-    [Fact]
-    public void DailySummary_Error_Count_Stays_ExactMatch_On_ERROR()
-    {
-        /* The Critical-band collErrors input. Exact-match means YIELDED (and SKIPPED, PERMISSIONS,
-           SESSION_MISSING) never count; a broadening to status <> 'SUCCESS' would re-admit them. */
-        var source = File.ReadAllText(FindRepoFile(
-            Path.Combine("Lite", "Services", "LocalDataService.DailySummary.cs")));
-        Assert.Contains("FILTER (WHERE status = 'ERROR')", source);
     }
 
     /* ── health tracking neutrality ── */

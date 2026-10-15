@@ -194,35 +194,10 @@ public class CrossAppGuardCiGateTests
         [$"{LiteTestsDir}/ParameterSensitivityFiringSignatureParityTests.cs"] =
             "NAMED READ. Same shape as the entry above, against ExpectedSignatureCopies.",
 
-        [$"{LiteTestsDir}/AnalysisPassTokenThreadingTests.cs"] =
-            "WHOLE-TREE READ. CommentFilterAdoptionTests enumerates every *.cs under BOTH test projects "
-            + "and compares the prefix-filter sites it finds against its own bounded set; this path is "
-            + "one of that set's keys and also one of the files the sweep opens. The string is a "
-            + "<project>/<filename> label, which for a file sitting directly under Lite.Tests happens "
-            + "to spell a real repo-rooted path - so requiring reachability of it is not a false "
-            + "positive, and nothing narrower than Lite.Tests/** would reach the sweep anyway.",
-
-        [$"{LiteTestsDir}/LiteSidebarDotRendersTheCardStatusTests.cs"] =
-            "WHOLE-TREE READ. The second key of that same bounded set, same sweep, same reason.",
-
-        [$"{LiteTestsDir}/FactScorerTests.cs"] =
-            "WHOLE-TREE READ. The third key of that same bounded set (#3538 A5: its lineage census collects "
-            + "the // run above each GetWaitThresholds entry), same sweep, same reason.",
-
         [$"{LiteTestsDir}/CrossSkuSurfaceSourceTests.cs"] =
             "LINKED COMPILE (#3938). Darling.Tests.csproj compiles this Lite.Tests file so its cross-SKU "
             + "source-scan pins run on a Mac; an edit to it changes the Darling suite, and a Lite.Tests-only "
             + "change is exactly the case darling-tree-guards runs the whole suite for.",
-
-        [$"{LiteTestsDir} (directory)"] =
-            "WHOLE-TREE READ, and the one #3076 made visible. ControlPlaneReloadDurabilityTests' "
-            + "NeitherFixHasALiteTwinToDriftFrom sweeps { \"Lite\", \"Lite.Tests\", "
-            + "\"PerformanceMonitor.Common\" } through Path.Combine and EnumerateFiles, so it reads "
-            + "every *.cs under Lite's test project as well as under Lite. Nothing narrower than "
-            + "Lite.Tests/** reaches a tree enumeration, and in the darling filter that entry would "
-            + "buy no guard execution — same measurement as the entries above. The companion "
-            + "reference from the same sweep, Lite (directory), needs no exemption: the darling "
-            + "filter's derived Lite/**/*.cs entry already reaches it.",
     };
 
     /// <summary>The exact command <c>darling-tree-guards</c> has to run for anything in

@@ -469,7 +469,8 @@ WITH plan_agg AS
     /// <see cref="PlanRegressionTableSql"/> with its <c>plan_agg</c> replaced by the sum of two reads, so everything from
     /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/> and cannot drift. $1 server_id, $2 M, $3 the
     /// built days (<see cref="PlanRegressionDaily.BuiltDaysSql"/>, date[]), $4 the live floor and $5 M - 1 day, both
-    /// timestamps (see <see cref="PlanRegressionLiveFloor"/>).
+    /// timestamps (see <see cref="PlanRegressionLiveFloor"/>), $6 each built day's watermark (timestamp[], aligned with $3; the
+    /// next midnight for a whole day, #5812).
     ///
     /// <para><b>The window edge moves in whole days.</b> This read's edge is M, the start of the day the exact edge falls
     /// in, for both halves; the exact-bound read it replaces cut mid-day. It is the same function of the same snapshots
@@ -491,9 +492,10 @@ WITH plan_agg AS
     private const string PlanRegressionDailyPrefix = @"
 WITH plan_agg AS
 (
-    -- #5448: closed days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other day
-    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half: its day
-    -- (last_execution_time::date) is in the built set or it is not.
+    -- #5448: built days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other row
+    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half by its day
+    -- (last_execution_time::date): a day not built is all live, and a built day keeps only its rows at or above its
+    -- watermark ($6) live (#5812: an open day is built partially; a whole day's watermark is its next midnight).
     SELECT
         database_name,
         query_id,
@@ -536,12 +538,35 @@ WITH plan_agg AS
         AND   l.last_execution_time >= $2::timestamp
         AND   l.collection_time >= $5::timestamp
         AND   l.first_execution_time >= $4::timestamp
-        AND   l.last_execution_time::date <> ALL($3::date[])
+        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark
+        -- (an open day is built partially; a whole day's watermark is its next midnight), so the live half is the rest.
+        -- A scalar lookup ($6 is aligned with $3; a day not built finds no watermark and keeps every row), so the test
+        -- stays a filter on the scan, as #5448's <> ALL($3) was, and adds no join whose strategy rests on an array estimate.
+        AND   l.first_execution_time >= COALESCE(($6::timestamp[])[array_position($3::date[], l.last_execution_time::date)], '-infinity'::timestamp)
         GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
     ) AS u
     GROUP BY database_name, query_id, plan_id, replica_role
 ),
 ";
+
+    /// <summary>
+    /// The work memory for every PLAN_REGRESSION read (#5812, bound 2): the daily read's snapshot transaction and the short
+    /// transaction each exact-bound read (table or raw) now runs in (M2). Set with <c>SET LOCAL</c> so it ends with
+    /// that transaction and touches no other statement on the pooled connection. The daily read groups every built day's
+    /// totals plus the live rows by plan. At the default 4MB the planner sorts them all, and on a planted busy server (15
+    /// built days, about 384,000 rows) that sort went to disk (an external merge of about 15MB). From 32MB up it hashes in
+    /// memory instead: two hash aggregates of about 35MB to 42MB each, under the hash limit of twice work_mem
+    /// (<c>hash_mem_multiplier</c>). 64MB is the bound: 32MB also did not spill, but it is below its own peak (about 35MB)
+    /// and fits only through that multiplier, so 64MB keeps the headroom. A hash or sort takes memory only as it grows, so
+    /// a small server's read uses what it needs (<c>PlanRegressionDailyNoSpillRig</c> measures every bound on one plant).
+    /// The figure is per node, not per read: the daily read has six sort or hash nodes, so one read may take up to 6 x 64MB,
+    /// doubled for a hash through <c>hash_mem_multiplier</c> (768MB at its default of 2), though the plant peaked near 37MB
+    /// in each of two hash aggregates. Across the fleet, scheduled reads run inside each server's sweep, so the ceiling is that
+    /// times <c>MaxConcurrentSweeps</c> (4 by default, at most 16), and on-demand <c>analyze_server</c> and
+    /// <c>get_analysis_facts</c> reads that miss the candidate cache run outside the sweep gate and add to it; size
+    /// <c>MaxConcurrentSweeps</c> against the store's memory before raising this bound.
+    /// </summary>
+    internal const string PlanRegressionWorkMemSql = "SET LOCAL work_mem = '64MB'";
 
     /// <summary>
     /// M: the start of the day the comparison window's exact edge (<paramref name="rawWindowStart"/>) falls in (#5448).
@@ -555,17 +580,42 @@ WITH plan_agg AS
     /// interval spans at most a day, so its first execution is at or above the floor. With every day from the window's
     /// start built up to some last one, the floor sits one day below the day after it, so a read still sees whatever
     /// comes after the built days (a skewed server's future-dated rows).
+    ///
+    /// <para>This is the whole-day case of <see cref="PlanRegressionLiveFloorWithWatermarks"/> (#5812): every day in
+    /// <paramref name="builtDays"/> is taken as built whole, with no watermark. The read itself calls the watermark form,
+    /// because a built day can be partial; only tests call this one.</para>
     /// </summary>
-    internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays)
+    internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays) =>
+        PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays.Select(d => new PlanRegressionDaily.BuiltDay(d, null)).ToList());
+
+    /// <summary>
+    /// The live floor with partial days (#5812): the lower of one day below the first day from <paramref name="windowFloor"/>
+    /// on that is not built, and the lowest watermark of a built day before it that is partial. The builder builds through
+    /// tomorrow, so on a store that is current the first unbuilt day is the day after tomorrow and the floor is today's
+    /// watermark: the live half reads the last two or three hours of first executions, not the open days.
+    /// </summary>
+    internal static DateTime PlanRegressionLiveFloorWithWatermarks(DateTime windowFloor, IReadOnlyCollection<PlanRegressionDaily.BuiltDay> builtDays)
     {
-        var built = new HashSet<DateOnly>(builtDays);
-        var day = DateOnly.FromDateTime(windowFloor);
-        while (built.Contains(day))
+        var through = new Dictionary<DateOnly, DateTime>();
+        foreach (var b in builtDays)
         {
-            day = day.AddDays(1);
+            through[b.Day] = b.ThroughOrDayEnd;
         }
 
-        return DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue).AddDays(-1), DateTimeKind.Unspecified);
+        var cursor = DateOnly.FromDateTime(windowFloor);
+        var floor = DateTime.MaxValue;
+        while (through.TryGetValue(cursor, out var t))
+        {
+            if (t < cursor.AddDays(1).ToDateTime(TimeOnly.MinValue) && t < floor)
+            {
+                floor = t;
+            }
+
+            cursor = cursor.AddDays(1);
+        }
+
+        var unbuilt = cursor.ToDateTime(TimeOnly.MinValue).AddDays(-1);
+        return DateTime.SpecifyKind(unbuilt < floor ? unbuilt : floor, DateTimeKind.Unspecified);
     }
 
     /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
@@ -722,11 +772,31 @@ ORDER BY c.regression_factor DESC";
         context.PlanRegressionReadsIntervalTable = null;
         context.PlanRegressionWindowStart = null;
 
+        /* #5824: how long this read took, stamped in the finally whatever the outcome, so the scheduled pass's analysis_pass
+           row in collection_log can say what the store's most expensive analysis read cost on this pass. */
+        context.PlanRegressionReadMs = null;
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+
         /* #5448: the built-days read and the daily read share this transaction (see PlanRegressionDailySql). */
         NpgsqlTransaction? snapshot = null;
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            /* #5812 (bound 2, M2): every PLAN_REGRESSION read runs read-only with PlanRegressionWorkMemSql, set here only,
+               on whichever transaction holds it (the daily read's snapshot or the exact-bound read's own). */
+            async Task BoundTheReadAsync()
+            {
+                await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
+                }
+
+                await using (var workMem = new NpgsqlCommand(PlanRegressionWorkMemSql, connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    await workMem.ExecuteNonQueryAsync(context.CancellationToken);
+                }
+            }
 
             /* #2387: the chunk-exclusion bound, one CLOCK-SKEW MARGIN below the comparison window. Bound as
                its own parameter rather than written as "$2 - INTERVAL '1 day'" so the planner compares
@@ -747,16 +817,13 @@ ORDER BY c.regression_factor DESC";
                not swallowed. */
             var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
             var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
-            var builtDays = new List<DateOnly>();
+            var builtDays = new List<PlanRegressionDaily.BuiltDay>();
             if (readsTable)
             {
                 /* One REPEATABLE READ READ ONLY transaction for the built-days read and the daily read: both see the same
                    built set and the same totals, and the live floor below stays a bound parameter. */
                 snapshot = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, context.CancellationToken);
-                await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
-                {
-                    await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
-                }
+                await BoundTheReadAsync();
 
                 builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
                     connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
@@ -764,7 +831,7 @@ ORDER BY c.regression_factor DESC";
                 if (builtDays.Count == 0)
                 {
                     /* No built day, or the read failed (which leaves this transaction aborted): the exact-bound read runs
-                       outside it, on an ordinary statement. */
+                       outside it, in the short transaction below. */
                     await snapshot.DisposeAsync();
                     snapshot = null;
                 }
@@ -775,6 +842,16 @@ ORDER BY c.regression_factor DESC";
             }
 
             var readsDays = builtDays.Count > 0;
+            if (snapshot is null)
+            {
+                /* #5812 (M2): the exact-bound reads (the table read while no day is built or after a failed built-days read,
+                   and the raw read of a server without coverage) take the same work memory as the daily read, in a short
+                   transaction of their own. They group the whole 14-day window by plan, and at the default work_mem that
+                   grouping went to disk. SET LOCAL ends with this transaction, which is disposed right after the read, so
+                   the plan reads below and the next user of the pooled connection keep the server's own value. */
+                snapshot = await connection.BeginTransactionAsync(context.CancellationToken);
+                await BoundTheReadAsync();
+            }
 
             using var cmd = new NpgsqlCommand(
                 readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)
@@ -787,10 +864,15 @@ ORDER BY c.regression_factor DESC";
                 cmd.Parameters.Add(new NpgsqlParameter
                 {
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
-                    Value = builtDays.ToArray()
+                    Value = builtDays.Select(b => b.Day).ToArray()
                 });
-                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloor(windowFloor, builtDays));
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloorWithWatermarks(windowFloor, builtDays));
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
+                cmd.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp,
+                    Value = builtDays.Select(b => b.ThroughOrDayEnd).ToArray()
+                });
             }
             else
             {
@@ -810,25 +892,59 @@ ORDER BY c.regression_factor DESC";
 
             /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
                and a second command cannot run while this reader is open. */
-            var candidates = new List<PlanRegressionCandidate>();
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than one analysis
+               cadence (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
+               stays as fresh as before. Everything below the read (the input check, the cut, the fact) still runs every time. */
+            var readStartedUtc = DateTime.UtcNow;
+            /* The daily read's leading five parameters stand for the window and the built days; $6, the watermarks, goes in
+               last so a moved watermark is reported as one. An exact-bound read's shape carries its exact window start
+               (rawWindowStart), so a call with a different window length never takes another pass's read (L3). */
+            var shape = context.ReusePlanRegressionCandidates || context.RefreshPlanRegressionCandidates
+                ? PlanRegressionCandidateCache.ShapeOf(
+                    cmd, readsDays ? 5 : readsTable ? 4 : 3, windowFloor, builtDays.Select(b => b.Day).ToList(),
+                    exactWindowStart: readsDays ? null : rawWindowStart, watermarkParameter: readsDays ? 5 : null)
+                : null;
+            var decision = PlanRegressionCandidateCache.ReuseDecision.NoEntry;
+            var reused = shape is null || context.RefreshPlanRegressionCandidates
+                ? null
+                : PlanRegressionCache.TryGet(StoreIdentity, context.ServerId, shape, context.TimeRangeEnd, readStartedUtc, out decision);
+            if (shape is not null && context.RefreshPlanRegressionCandidates)
             {
-                while (await reader.ReadAsync(context.CancellationToken))
+                _logger?.LogDebug("PLAN_REGRESSION candidates for server {ServerId}: the scheduled pass reads live and refills the cache", context.ServerId);
+            }
+            else if (shape is not null)
+            {
+                _logger?.LogDebug("PLAN_REGRESSION candidates for server {ServerId}: {Decision} ({Outcome})",
+                    context.ServerId, decision, reused is null ? "read live" : "reused");
+            }
+
+            var candidates = reused is null ? new List<PlanRegressionCandidate>() : new List<PlanRegressionCandidate>(reused);
+            if (reused is null)
+            {
+                using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
                 {
-                    candidates.Add(new PlanRegressionCandidate(
-                        DatabaseName: reader.GetString(8),
-                        QueryId: ToInt64(reader.GetValue(0)),
-                        LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
-                        LatestIsForced: !reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3)),
-                        ForceFailures: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
-                        BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
-                        Factor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
-                        BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
-                        LatestPlanId: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
-                        BestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
-                        StatementText: reader.IsDBNull(12) ? null : reader.GetString(12),
-                        LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
-                        BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
+                    while (await reader.ReadAsync(context.CancellationToken))
+                    {
+                        candidates.Add(new PlanRegressionCandidate(
+                            DatabaseName: reader.GetString(8),
+                            QueryId: ToInt64(reader.GetValue(0)),
+                            LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
+                            LatestIsForced: !reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3)),
+                            ForceFailures: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
+                            BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
+                            Factor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                            BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
+                            LatestPlanId: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
+                            BestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
+                            StatementText: reader.IsDBNull(12) ? null : reader.GetString(12),
+                            LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                            BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
+                    }
+                }
+
+                if (shape is not null && PlanRegressionCandidateCache.IsCurrent(context.TimeRangeEnd, readStartedUtc))
+                {
+                    PlanRegressionCache.Store(StoreIdentity, context.ServerId, shape, readStartedUtc, candidates);
                 }
             }
 
@@ -1003,6 +1119,8 @@ ORDER BY c.regression_factor DESC";
             {
                 await snapshot.DisposeAsync();
             }
+
+            context.PlanRegressionReadMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(readStarted).TotalMilliseconds;
         }
     }
 
@@ -1010,7 +1128,7 @@ ORDER BY c.regression_factor DESC";
     internal const int PlanRegressionMaxOffenders = 20;
 
     /// <summary>One row of the PLAN_REGRESSION read, with the keys to the two plans and the statement text (#5630).</summary>
-    private sealed record PlanRegressionCandidate(
+    internal sealed record PlanRegressionCandidate(
         string DatabaseName,
         long QueryId,
         double LatestCpu,

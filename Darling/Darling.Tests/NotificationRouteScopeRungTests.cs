@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -180,6 +180,8 @@ public sealed class NotificationRouteScopeRungTests
         try
         {
             /* A store one rung behind: V181's columns gone, a legacy fleet-wide row and a legacy unscoped '*' row stored. */
+            await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);

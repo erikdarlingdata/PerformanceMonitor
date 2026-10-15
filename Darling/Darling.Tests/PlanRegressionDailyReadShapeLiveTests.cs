@@ -264,6 +264,12 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = builtDays.ToArray() });
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionLiveFloor(floor, builtDays));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor.AddDays(-1));
+        /* $6 (#5812): each built day's watermark. These days were built whole (closed days), so each is the day's end. */
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+            Value = builtDays.Select(d => new PlanRegressionDaily.BuiltDay(d, null).ThroughOrDayEnd).ToArray()
+        });
         var json = (string)(await command.ExecuteScalarAsync(ct))!;
         return JsonDocument.Parse(json).RootElement[0].GetProperty("Plan").Clone();
     }

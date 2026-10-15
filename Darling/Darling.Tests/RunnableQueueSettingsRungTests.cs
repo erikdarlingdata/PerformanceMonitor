@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -89,22 +89,27 @@ public sealed class RunnableQueueSettingsRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750) and V182's (#5506) sentinels are next; V183's (#5793) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next, then V184's (#5632); V185's (#5812) is the probe's
+           last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
-        Assert.Equal("hasReadCaller", parameters[^1].Name);
+        Assert.Equal("hasPlanRegressionPartialDays", parameters[^1].Name);
+        Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 7].Name);
+        Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 6].Name);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 5].Name);
         Assert.Equal("hasNotificationRouteScope", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
-        Assert.Equal(ProbeOrdinal + 6, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 8, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
         /* Every sentinel present answers this build's version (V180's). With the later sentinels absent this rung is the answer, 177; with
@@ -116,7 +121,16 @@ public sealed class RunnableQueueSettingsRungTests
         /* With V180's sentinel (the top) absent the answer is V179's, 179; with V179's absent too, V178's, 178; with V178's absent
            too, this rung is the answer. */
         /* With V182's sentinel (#5506) absent too the answer is V181's. */
-        var withoutV183 = (object[])all.Clone();
+        /* With V185's sentinel (#5812) absent the answer is V184's (#5632); with V184's absent too, V183's. */
+        var withoutV185 = (object[])all.Clone();
+        withoutV185[ProbeOrdinal + 8] = false;
+        Assert.Equal(184, (int)method.Invoke(null, withoutV185)!);
+
+        var withoutV184 = (object[])withoutV185.Clone();
+        withoutV184[ProbeOrdinal + 7] = false;
+        Assert.Equal(183, (int)method.Invoke(null, withoutV184)!);
+
+        var withoutV183 = (object[])withoutV184.Clone();
         withoutV183[ProbeOrdinal + 6] = false;
         Assert.Equal(182, (int)method.Invoke(null, withoutV183)!);
 

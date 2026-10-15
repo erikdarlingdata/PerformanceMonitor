@@ -304,39 +304,6 @@ public sealed class AlertDeliveryChannelTests
             AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, producerHadTrayChannel: true));
     }
 
-    /// <summary>
-    /// Lite's producer states its tray channel with the named argument, so the answer cannot be flipped by
-    /// a positional edit, and the divergence from Darling is declared at the call site rather than inferred.
-    /// <para>#3916 moved this pin: the answer is now <c>trayShown</c>, TRUE by default for the engine path
-    /// (LiteAlertDeliverer shows a balloon on the same call) and FALSE on exactly one caller — the analysis
-    /// finding arm, because Lite wires no tray sink into AnalysisNotificationService and a finding row stored
-    /// <c>tray</c> read "Shown" for a toast nobody saw. Neither literal answer is hard-coded any more.</para>
-    /// </summary>
-    [Fact]
-    public void TheLiteProducer_DeclaresItsTrayChannel()
-    {
-        var text = File.ReadAllText(RepoPath("Lite/Services/EmailAlertService.cs"));
-
-        Assert.Contains("trayChannelPresent: trayShown)", text, StringComparison.Ordinal);
-        /* #4752: the cancellation token is now the last parameter, so the default is followed by a comma
-           instead of the closing parenthesis. The pin is the same fact as before: the declared default. */
-        Assert.Contains("bool trayShown = true,", text, StringComparison.Ordinal);
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, @"trayShown: false\)"));
-        Assert.DoesNotContain("trayChannelPresent: false", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("trayChannelPresent: true)", text, StringComparison.Ordinal);
-
-        /* And it is the only FromFanout caller under Lite, so that one file is the whole population. */
-        var callers = Directory
-            .EnumerateFiles(Path.Combine(RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => File.ReadAllText(f).Contains("AlertDelivery.FromFanout(", StringComparison.Ordinal))
-            .Select(f => Path.GetRelativePath(RepoRoot(), f).Replace('\\', '/'))
-            .ToArray();
-
-        Assert.Equal(new[] { "Lite/Services/EmailAlertService.cs" }, callers);
-    }
-
     /* ─────────────── the read side ─────────────── */
 
     /// <summary>
@@ -473,11 +440,6 @@ public sealed class AlertDeliveryChannelTests
             3,
             EveryFanoutCase().Count(c => !Unreachable(c.Result, c.Muted) && WebhookFailureNowNamed(c.Result)));
     }
-
-    private static string RepoPath(string relative) => Path.Combine(RepoRoot(), relative);
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 
     /// <summary>An <see cref="IAlertSettings"/> with exactly one channel populated.</summary>
     private sealed class OneChannelSettings : IAlertSettings

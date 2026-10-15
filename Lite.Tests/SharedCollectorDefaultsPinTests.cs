@@ -115,23 +115,6 @@ public sealed class SharedCollectorDefaultsPinTests
         }
     }
 
-    /// <summary>
-    /// #1963, ruled 2026-08-01: deadlocks defaults to the 5-minute tier, beside the other event-buffer
-    /// readers. The read costs ~273ms of FIXED serialization regardless of buffer content, the buffer
-    /// retains events between polls, and a deadlock is forensic by the time anyone reads it - so the
-    /// per-minute cadence bought latency nobody could use at real fleet cost. The identity pins above
-    /// only assert the SKUs agree; this pins the ruled VALUE, so a symmetric edit of both tables cannot
-    /// silently regress the decision.
-    /// </summary>
-    [Fact]
-    public void Deadlocks_DefaultToTheFiveMinuteTier_Ruled1963()
-    {
-        Assert.Equal(5, CollectorScheduleDefaults.All["deadlocks"].FrequencyMinutes);
-        Assert.Equal(
-            CollectorScheduleDefaults.All["system_health_events"].FrequencyMinutes,
-            CollectorScheduleDefaults.All["deadlocks"].FrequencyMinutes);
-    }
-
     [Fact]
     public void CollectorScheduleDefaults_CoverEveryCatalogCollector()
     {

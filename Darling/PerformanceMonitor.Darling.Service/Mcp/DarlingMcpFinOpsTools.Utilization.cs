@@ -28,7 +28,15 @@ public sealed partial class DarlingMcpFinOpsTools
     internal const string UtilizationViewGuide =
         "utilization reads a fixed 24-hour window and a fixed 7-day trend; hours_back other than 24 and limit other than 10 are refused. verdict is RIGHT_SIZED, OVER_PROVISIONED, UNDER_PROVISIONED or NOT_APPLICABLE, and null when the window holds no CPU sample. health_score is 0-100: CPU 40%, memory 30%, storage 30% (health_score is null when there is no CPU sample, with health_score_note saying so; cpu.avg_cpu_pct, p95_cpu_pct and max_cpu_pct are null then too, never 0); health_band is good at 80 and above, fair at 60 and above, else poor. stolen_memory_pct is (total server memory - buffer pool) / total server memory; buffer_pool_pct is buffer pool / physical memory. free_space_pct is the latest database-size snapshot's free share, 100 when none exists. monthly_cost_usd comes from the server's registered monthly cost and annual_cost_usd is 12 times it; both are null when no cost is set or it is 0 or less. Percentages are rounded to 0.1. A server with no memory sample answers status empty (or not_collected when its engine cannot supply one) instead of this payload. On engine edition 5 memory_basis is memory_limit and cpu_count is the vCore count (null when the service objective names none). Text numbers use the invariant culture. Times are UTC.";
 
-    private static async Task<string> ReadUtilizationAsync(
+    /// <summary>The days the utilization trend spans; the payload's <c>trend_days</c>.</summary>
+    internal const int UtilizationTrendDays = 7;
+
+    /// <summary>
+    /// The utilization view: a fixed 24-hour verdict window and a fixed <see cref="UtilizationTrendDays"/>-day trend. Its
+    /// rows span the trend's 7 days, the wider of the two, so that is the window it notes on the <see cref="ReadScope"/> for
+    /// its slow-read row (#5814), after its checks and before its first store read.
+    /// </summary>
+    internal static async Task<string> ReadUtilizationAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)
     {
         if (hoursBack != 24)
@@ -37,6 +45,9 @@ public sealed partial class DarlingMcpFinOpsTools
         if (limit != DefaultLimit)
             return McpHelpers.Refusal("limit",
                 $"Invalid limit value '{limit}': view utilization reads a fixed 24-hour window and a 7-day trend; limit does not apply. Omit it or pass {DefaultLimit}.");
+
+        var now = DateTime.UtcNow;
+        ReadScope.NoteWindow(now.AddDays(-UtilizationTrendDays), now);
 
         var dto = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(
             postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, ct);
@@ -66,7 +77,7 @@ public sealed partial class DarlingMcpFinOpsTools
             server = resolved.ServerName,
             view = UtilizationView,
             window_hours = 24,
-            trend_days = 7,
+            trend_days = UtilizationTrendDays,
             engine_edition = dto.EngineEdition > 0 ? dto.EngineEdition : (int?)null,
             verdict = hasCpu ? dto.ProvisioningStatus : null,
             verdict_reason = hasCpu

@@ -324,7 +324,7 @@ ORDER BY
 
         await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, logger: null, ct);
 
-        /* Past 9 days dropped, the 2-day-old row kept — the table floor (MIN(first_execution_time)) moves with it. */
+        /* Past the 10-day horizon dropped, the 2-day-old row kept — the table floor (MIN(first_execution_time)) moves with it. */
         Assert.Equal(1, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_wide WHERE server_id = @server_id", ct));
         Assert.Equal(101, await ScalarLongAsync(connection, "SELECT runtime_stats_interval_id FROM collect.query_store_interval_wide WHERE server_id = @server_id", ct));
         Assert.Equal(1, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_wide_pending WHERE server_id = @server_id AND database_name = 'new'", ct));

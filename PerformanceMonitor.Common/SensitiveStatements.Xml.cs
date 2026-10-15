@@ -31,6 +31,17 @@ public static partial class SensitiveStatements
     private const int XmlCutSlack = 64;
 
     /// <summary>
+    /// The H2 list: the plan attributes that hold a statement's values or text rather than its shape
+    /// (<c>ParameterCompiledValue</c>, <c>ParameterRuntimeValue</c>, <c>ScalarString</c>, <c>ConstValue</c>,
+    /// <c>ParameterizedText</c>, and the nested plan <c>EdcShowplanXml</c>). The statement filter withholds them inside
+    /// a withheld statement; the <c>mcp.dataDetail</c> masker (#5632) masks their values.
+    /// </summary>
+    internal static bool IsPlanValueAttribute(string localName) =>
+        localName == "ParameterCompiledValue" || localName == "ParameterRuntimeValue"
+        || localName == "ScalarString" || localName == "ConstValue" || localName == "ParameterizedText"
+        || localName == "EdcShowplanXml";
+
+    /// <summary>
     /// Judges every attribute value and every text or CDATA node of <paramref name="xml"/> with
     /// <paramref name="isNamed"/> and returns the SAME instance when nothing is named. When something is named the
     /// document is rewritten with the named values replaced by <paramref name="placeholder"/>, and a statement
@@ -273,10 +284,7 @@ public static partial class SensitiveStatements
             localName == "ParameterCompiledValue" || localName == "ParameterRuntimeValue";
 
         /// <summary>The H2 list: withheld whatever the pattern says, inside a withheld statement.</summary>
-        private static bool IsScopeList(string localName) =>
-            localName == "ParameterCompiledValue" || localName == "ParameterRuntimeValue"
-            || localName == "ScalarString" || localName == "ConstValue" || localName == "ParameterizedText"
-            || localName == "EdcShowplanXml";
+        private static bool IsScopeList(string localName) => IsPlanValueAttribute(localName);
 
         private static bool IsNamespaceDeclaration(XmlReader reader) =>
             reader.Prefix == "xmlns" || (reader.Prefix.Length == 0 && reader.LocalName == "xmlns");

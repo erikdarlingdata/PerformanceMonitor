@@ -164,4 +164,11 @@ public sealed record AlertHistoryRecord(
 
     /// <summary>The <c>send_error</c> column.</summary>
     public string? SendError => Delivery.SendError;
+
+    /// <summary>
+    /// The <c>alert_time</c> the row is written with (UTC, microsecond precision), or null for the store's own clock
+    /// (#5632 Phase A). The Darling deliverer and finding sender stamp it so the investigation request's link row carries
+    /// the same instant as the history row it names. Darling's and Lite's stores honor it when set.
+    /// </summary>
+    public DateTime? AlertTimeUtc { get; init; }
 }

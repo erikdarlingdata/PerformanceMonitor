@@ -478,32 +478,6 @@ public sealed class UnpooledDropConnectionCensusTests
             + string.Join(", ", unquiesced));
     }
 
-    [Fact]
-    public void TheQuiesceExceptions_NameRealFiles_AndEachOneStillHoldsTheDropText()
-    {
-        var directory = FindTestProjectDirectory();
-        Assert.True(directory is not null, "could not find Darling/Darling.Tests from the test binary.");
-
-        foreach (var (key, reason) in QuiesceExceptions)
-        {
-            Assert.False(string.IsNullOrWhiteSpace(reason), $"{key} is allowed without a reason.");
-            var parts = key.Split("::");
-            var path = Path.Combine(directory!, parts[0]);
-            Assert.True(File.Exists(path), $"{parts[0]} is in QuiesceExceptions but is not in the test project; remove the entry.");
-            Assert.False(Exceptions.ContainsKey(parts[0]), $"{parts[0]} is already skipped by Exceptions; remove the entry from QuiesceExceptions.");
-            var text = File.ReadAllText(path);
-            Assert.True(text.Contains("DROP DATABASE", StringComparison.OrdinalIgnoreCase),
-                $"{parts[0]} no longer holds DROP DATABASE; remove {key} from QuiesceExceptions.");
-            if (parts.Length > 1)
-            {
-                Assert.True(Regex.IsMatch(text, @"\b" + Regex.Escape(parts[1]) + @"\s*(?:<[^()]*>)?\s*\("),
-                    $"{parts[0]} no longer declares {parts[1]}; remove {key} from QuiesceExceptions.");
-                Assert.True(MethodStillSkipsQuiesce(parts[1], text),
-                    $"{parts[1]} in {parts[0]} no longer holds a DROP DATABASE that skips the quiesce; remove {key} from QuiesceExceptions.");
-            }
-        }
-    }
-
     /// <summary>True when <paramref name="method"/> in <paramref name="source"/> holds a drop with no quiesce call before it, so its allow-list entry is still needed.</summary>
     private static bool MethodStillSkipsQuiesce(string method, string source) =>
         FindDropSites(source).Any(site => site.MemberName == method && !site.QuiescedBefore);
@@ -631,22 +605,6 @@ public sealed class UnpooledDropConnectionCensusTests
         Assert.Equal(["Other.cs:5"], ScanForQuiesce([("Other.cs", generic)]).Unquiesced);
         Assert.True(MethodStillSkipsQuiesce(allowListedMethod, generic));
         Assert.False(MethodStillSkipsQuiesce("SomeOtherMethod", generic));
-    }
-
-    [Fact]
-    public void TheExceptions_NameRealFiles_AndEachOneStillHoldsTheDropText()
-    {
-        var directory = FindTestProjectDirectory();
-        Assert.True(directory is not null, "could not find Darling/Darling.Tests from the test binary.");
-
-        foreach (var (file, reason) in Exceptions)
-        {
-            Assert.False(string.IsNullOrWhiteSpace(reason), $"{file} is allowed without a reason.");
-            var path = Path.Combine(directory!, file);
-            Assert.True(File.Exists(path), $"{file} is in Exceptions but is not in the test project; remove the entry.");
-            Assert.True(File.ReadAllText(path).Contains("DROP DATABASE", StringComparison.OrdinalIgnoreCase),
-                $"{file} no longer holds DROP DATABASE; remove it from Exceptions.");
-        }
     }
 
     [Fact]

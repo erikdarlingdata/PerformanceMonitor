@@ -184,9 +184,13 @@ public static class DarlingRetention
     /// <summary>
     /// #3953 (V145): the WIDE interval table's own horizon, on <c>first_execution_time</c>, kept separately from
     /// <see cref="QueryStoreIntervalLatestRetentionDays"/> because the two tables serve different readers at
-    /// different windows. The table keeps 9 days and deletes row by row on <c>first_execution_time</c>. A Query
+    /// different windows. The table keeps 10 days and deletes row by row on <c>first_execution_time</c>. A Query
     /// Store interval can span a day, so 8 days is exactly the edge for an interval that starts just past the
-    /// horizon and closes inside a 7-day window; 9 days gives a day of margin. Reads use the table below raw's
+    /// horizon and closes inside a 7-day window; 9 days gave a day of margin. #5809 raised it to 10 so
+    /// get_query_store_regressions can read this table: its span is the 7-day baseline plus the window (8 days for
+    /// a 24-hour call), and the wide gate's #5541 edge (span start - 26 h at or above the table floor) needs
+    /// 8 days + 26 h = 9 days 2 hours held, which 9 days never is. Windows up to about 46 hours now take the
+    /// table; longer ones read raw. Reads use the table below raw's
     /// chunk floor, down to L = max(window start, filled_since, table floor + 26 h (the purge-edge margin)), where the table floor is
     /// the oldest <c>first_execution_time</c> the purge has left. Like <see cref="QueryStoreIntervalLatestRetentionDays"/>
     /// this is a named constant, not a knob, and in no collector schedule.
@@ -242,6 +246,28 @@ public static class DarlingRetention
     /// subject fired and a row cleared long after its fire goes with the horizon too.
     /// </summary>
     internal const string ClearedExternalAlertState = "NOT firing";
+
+    /// <summary>
+    /// config.investigation_requests and config.investigation_journal (#5632 Phase A) keep their rows this long: a year, like
+    /// <see cref="PlanForceLedgerRetentionDays"/>, because an investigation records what an agent was asked and answered.
+    /// <para>config.investigation_notes and config.agent_environment_profiles get no retention pass: a person writes or
+    /// approves them, so they are configuration, and a note already carries its own <c>expires_at</c>, past which no brief
+    /// states it.</para>
+    /// </summary>
+    internal const int InvestigationRetentionDays = 365;
+
+    /// <summary>The brief of an investigation request is cleared this long after the request opened (#5632 Phase A); the
+    /// rest of the row keeps <see cref="InvestigationRetentionDays"/>.</summary>
+    internal const int InvestigationBriefRetentionDays = 90;
+
+    /// <summary>The purge filter for investigation requests: a request that is still open or claimed is never deleted.
+    /// Compile-time constant, never user input.</summary>
+    internal const string FinishedInvestigationStates = "state NOT IN ('open', 'claimed')";
+
+    /// <summary>Clears the brief of every request opened before the cutoff (<c>$1</c>). A second run clears nothing, so the
+    /// purge loop stops.</summary>
+    internal const string ClearInvestigationBriefSql =
+        "UPDATE config.investigation_requests SET brief = NULL WHERE brief IS NOT NULL AND opened_at < $1";
 
     /// <summary>
     /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
@@ -861,7 +887,7 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
-            /* #3953 (V145): the WIDE interval table beside V143's, at its own 9-day horizon
+            /* #3953 (V145): the WIDE interval table beside V143's, at its own 10-day horizon
                (QueryStoreIntervalWideRetentionDays) on first_execution_time — a shorter horizon than V143's 15
                days. Same batched-DELETE shape, same pending-replay horizon reasoning, failure-isolated like every
                sibling. The purge deletes row by row on first_execution_time, so the table floor the read gate
@@ -986,6 +1012,40 @@ public static class DarlingRetention
             else
             {
                 tablesFailed++;
+            }
+
+            /* config.investigation_requests and config.investigation_journal (#5632 Phase A): a request and the journal of what
+               happened to it are kept InvestigationRetentionDays (a year, like the plan-force ledger: an investigation is an
+               audit of what an agent was asked and answered). A request that is still open or claimed is never deleted, however
+               old (the sweep expires it first). Its alert rows and its report go with it (ON DELETE CASCADE). The brief, the
+               largest column, is cleared at InvestigationBriefRetentionDays; the rest of the row stays. Each statement is
+               failure-isolated like every sibling, and the cutoff is bound like the external alert purge above. */
+            var investigationsDeleted = await PurgeOneAsync(
+                postgres, "config.investigation_requests",
+                TimeSlicedDeleteSql("config.investigation_requests", "opened_at", FinishedInvestigationStates),
+                utcNow.AddDays(-InvestigationRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            var investigationJournalDeleted = await PurgeOneAsync(
+                postgres, "config.investigation_journal",
+                TimeSlicedDeleteSql("config.investigation_journal", "event_time"),
+                utcNow.AddDays(-InvestigationRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            var investigationBriefsCleared = await PurgeOneAsync(
+                postgres, "config.investigation_requests (brief)",
+                ClearInvestigationBriefSql,
+                utcNow.AddDays(-InvestigationBriefRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            foreach (var investigationResult in new[] { investigationsDeleted, investigationJournalDeleted, investigationBriefsCleared })
+            {
+                if (investigationResult is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += investigationResult.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
             }
 
             /* collect.plan_force_actions (the force-plan bot's decision journal) purges on its own action_time

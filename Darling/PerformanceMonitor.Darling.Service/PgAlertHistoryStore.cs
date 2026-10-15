@@ -69,7 +69,11 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore
 INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
-            command.Parameters.AddWithValue(NaiveUtcNow());
+            /* #5632 Phase A: a stamped AlertTimeUtc is written as is, so the investigation link row that names this alert
+               carries the same instant; otherwise the store's own clock, as before. */
+            command.Parameters.AddWithValue(record.AlertTimeUtc is { } stamped
+                ? DateTime.SpecifyKind(stamped, DateTimeKind.Unspecified)
+                : NaiveUtcNow());
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(record.ServerName);
             command.Parameters.AddWithValue(record.MetricName);

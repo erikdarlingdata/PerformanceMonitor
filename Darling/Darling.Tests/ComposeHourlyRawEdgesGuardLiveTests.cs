@@ -481,7 +481,9 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         Assert.Equal(store.Layout.H1, candidate!.HourStartUtc);
         Assert.Equal(store.Layout.H2, candidate.HourEndUtc);
 
-        var rawContext = new ComposeRunContext(scope is null ? null : new[] { scope }, store.WindowStart, store.WindowEnd, ComposeRunContext.NoVariables, rollups, store.Anchor, coverage);
+        /* #5811: these stores never create collect.module_map, and the runner finds that and compiles the window-wide module CTE, so
+           the raw oracle is compiled for a store without the map too. */
+        var rawContext = new ComposeRunContext(scope is null ? null : new[] { scope }, store.WindowStart, store.WindowEnd, ComposeRunContext.NoVariables, rollups, store.Anchor, coverage, ModuleMapMissing: true);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, rawContext);
         Assert.True(compileError is null, compileError);
         Assert.DoesNotContain("_interval_hourly", compiled!.Sql, StringComparison.Ordinal);

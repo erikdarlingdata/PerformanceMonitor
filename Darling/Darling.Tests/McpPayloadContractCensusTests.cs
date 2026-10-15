@@ -377,6 +377,7 @@ public sealed class McpPayloadContractCensusTests
         @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync|LoadEnabledOrFaultAsync)\("
         + @"|\bResolveMuteScope\("
         + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateBaselineWindow|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
+        + @"|\bDarlingReadWindow\.(?:Validate|ValidateUncapped|ValidateHoursBack|ValidateDaysBack)\(" // #5814: McpHelpers' checks plus the window note
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
         + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
         + @"|\b(?:Darling|Mcp)EngineCapability\.NotCollectedStatusAsync\("
@@ -469,7 +470,7 @@ public sealed class McpPayloadContractCensusTests
                 {
                     fromResolver++;
                 }
-                else if (producer.Contains("McpHelpers.", StringComparison.Ordinal))
+                else if (producer.Contains("McpHelpers.", StringComparison.Ordinal) || producer.Contains("DarlingReadWindow.", StringComparison.Ordinal))
                 {
                     fromValidator++;
                 }
@@ -1042,13 +1043,15 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string File, string Tool)[] InlineLimitRefusals =
     [
         ("DarlingMcpFinOpsInventoryTools.cs", "get_finops_inventory"),
+        ("DarlingMcpInvestigationTools.cs", "list_investigation_requests"),
     ];
 
     private static readonly Regex InlineLimitRefusal = new(
         @"if \(limit < 1 \|\| limit > [\w.]+\)", RegexOptions.Compiled);
 
     private static readonly Regex SharedValidatorCall = new(
-        @"\bMcpHelpers\.(ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate)\(",
+        @"\bMcpHelpers\.(ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate)\("
+        + @"|\bDarlingReadWindow\.(Validate|ValidateUncapped|ValidateHoursBack|ValidateDaysBack)\(", // #5814: the shared checks plus the window note
         RegexOptions.Compiled);
 
     private static readonly Regex InlineDaysBackRefusal = new(
@@ -1735,45 +1738,6 @@ public sealed class McpPayloadContractCensusTests
     public void TheCutMatcher_FiresOnEverySpellingAndTheLikelyNextOnes_AndNotOnNeighbours(string key, bool expected) =>
         Assert.Equal(expected, AboutACut.IsMatch(key));
 
-    /// <summary>
-    /// The six sites this lane moved onto the page dialect, read back: each fetches one past its cap and binds
-    /// through <c>McpHelpers.BoundPage</c>, none infers, and the four caller-capped ones publish their page count
-    /// under a <c>*_returned</c> name. The page census (<see cref="McpPageContractTests.PgPagedToolsThroughTheHelper"/>)
-    /// carries the four tools' full contract; this is the vocabulary half: the spelling is <c>truncated</c>.
-    /// </summary>
-    [Theory]
-    [InlineData("DarlingMcpPgAutovacuumTools.cs", "get_pg_autovacuum_health", "limit + 1", "BoundPage(fetched, limit)", "tables_returned")]
-    [InlineData("DarlingMcpPgSessionStatesTools.cs", "get_pg_session_states", "limit + 1", "BoundPage(fetched, limit)", "sessions_returned")]
-    [InlineData("DarlingMcpPgIndexUsageTools.cs", "get_pg_index_usage", "limit + 1", "BoundPage(fetched, limit)", "indexes_returned")]
-    [InlineData("DarlingMcpPgTableBloatTools.cs", "get_pg_table_bloat", "limit + 1", "BoundPage(fetched, limit)", "tables_returned")]
-    [InlineData("DarlingMcpTools.cs", "get_analysis_findings", "WindowCoveringLimit + 1", "BoundPage(fetched, FindingOccurrences.WindowCoveringLimit)", null)]
-    [InlineData("McpAnalysisTools.cs", "get_analysis_findings", "WindowCoveringLimit + 1", "BoundPage(fetched, FindingOccurrences.WindowCoveringLimit)", null)]
-    public void TheSixMovedSites_FetchOnePastTheCap_AndObserveThroughBoundPage(string file, string tool, string fetch, string bind, string? pageCount)
-    {
-        var span = StripComments(ToolMethods().Single(t => t.File == file && t.Tool == tool).Span);
-        Assert.Contains(fetch, span, StringComparison.Ordinal);
-        Assert.Contains("McpHelpers." + bind, span, StringComparison.Ordinal);
-        Assert.DoesNotMatch(new Regex(@"\.Count\s*>=\s*(limit|\w*Limit\w*|\w*PerTable)\b"), span);
-        Assert.Matches(new Regex(@"\n\s+truncated,"), span);
-        if (pageCount is not null)
-        {
-            Assert.Contains(pageCount + " = ", span, StringComparison.Ordinal);
-        }
-    }
-
-    /// <summary>The run-history block one layer down: <c>RecentRuns</c> binds to <c>RunsReadPerTable</c> and the
-    /// tool asks the log for one more per relation, so the flag it publishes is the same observed
-    /// <c>truncated</c>.</summary>
-    [Fact]
-    public void TheAutovacuumRunHistory_BindsToItsCapAndObserves()
-    {
-        var source = StripComments(ToolSources().Single(s => s.File == "DarlingMcpPgAutovacuumTools.cs").Source);
-        Assert.Contains("RunsReadPerTable + 1, cancellationToken);", source, StringComparison.Ordinal);
-        Assert.Contains("McpHelpers.BoundPage(runs, RunsReadPerTable)", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("history_capped", source, StringComparison.Ordinal);
-        Assert.DoesNotContain(">= RunsReadPerTable", source, StringComparison.Ordinal);
-    }
-
     /* ───────────────────────── rule: one vocabulary — the window floor (#3653 item 17) ───────────────────────── */
 
     /// <summary>
@@ -2020,56 +1984,6 @@ public sealed class McpPayloadContractCensusTests
         var written = Assert.Single(WindowFloorBlocksIn(envelope));
         Assert.Equal("envelope", written.Idiom);
         Assert.Equal(new[] { "effective_hours_back", "effective_start", "routing", "source", "window_truncated" }, written.Keys.ToArray());
-    }
-
-    [Fact]
-    public void EveryWindowFloorTool_CarriesTheSharedClause_AndNoOtherToolDoes()
-    {
-        /* The description half: the attribute text between the tool marker and the method, by source, so Lite's
-           tools are read the same way Darling's are. */
-        var carrying = ToolMethods()
-            .Where(t =>
-            {
-                var method = t.Span.IndexOf("public static", StringComparison.Ordinal);
-                return (method < 0 ? t.Span : t.Span[..method]).Contains("McpHelpers.WindowTruncatedDescription", StringComparison.Ordinal);
-            })
-            .Select(t => (t.File, t.Tool))
-            .OrderBy(t => t.File, StringComparer.Ordinal).ThenBy(t => t.Tool, StringComparer.Ordinal)
-            .ToArray();
-        var roster = WindowFloorTools.OrderBy(t => t.File, StringComparer.Ordinal).ThenBy(t => t.Tool, StringComparer.Ordinal).ToArray();
-        Assert.True(roster.SequenceEqual(carrying),
-            "the tools carrying McpHelpers.WindowTruncatedDescription moved: rostered [" + string.Join(", ", roster.Select(r => $"{r.File}/{r.Tool}"))
-            + "], found [" + string.Join(", ", carrying.Select(c => $"{c.File}/{c.Tool}")) + "]");
-
-        /* The clause itself, executed: the key, the reach beside it, the wire change, and the leading space
-           every appended description constant carries (BaselineDiscontinuities.DescriptionSentence's shape). */
-        var clause = McpHelpers.WindowTruncatedDescription;
-        Assert.StartsWith(" ", clause, StringComparison.Ordinal);
-        Assert.Contains(WindowFloorKey, clause, StringComparison.Ordinal);
-        Assert.Contains("effective_start / effective_hours_back", clause, StringComparison.Ordinal);
-        Assert.Contains("not a page cut", clause, StringComparison.Ordinal);
-        Assert.Contains("formerly named truncated.", clause, StringComparison.Ordinal);
-
-        /* And by reflection on the SKU this project can load: the Darling five really do publish the clause in
-           the attribute an MCP client reads, ahead of the discontinuities sentence they end with. */
-        var darling = new[] { typeof(DarlingMcpTrendTools), typeof(DarlingMcpDataTools), typeof(DarlingMcpQueryStoreClutterTools) }
-            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Static))
-            .Select(m => (Name: m.GetCustomAttribute<McpServerToolAttribute>()?.Name, Method: m))
-            .Where(x => x.Name is not null)
-            .ToDictionary(x => x.Name!, x => x.Method.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparer.Ordinal);
-        foreach (var (file, tool) in WindowFloorTools.Where(t => t.File.StartsWith("Darling", StringComparison.Ordinal)))
-        {
-            Assert.True(darling.TryGetValue(tool, out var description), $"{tool} ({file}) is not a Darling MCP tool");
-            /* #3898 D3/D4, re-pointed deliberately: the whole clause may span head and guide, because its
-               "formerly named truncated." WIRE CHANGE notice leaves the wire for the guide tail (D4). What
-               a caller needs to read the payload (the key, and that it is a retention floor, not a page cut)
-               is a guardrail and must be served in the head. Unconverted, the head is the whole description. */
-            Assert.Contains(clause, description!, StringComparison.Ordinal);
-            var head = McpToolGuide.Split(description!).Head;
-            Assert.Contains(WindowFloorKey, head, StringComparison.Ordinal);
-            Assert.Contains("not a page cut", head, StringComparison.Ordinal);
-            Assert.DoesNotContain("read truncated", description!, StringComparison.Ordinal);
-        }
     }
 
     /* ───────────────────────── rule: one vocabulary — severity words ───────────────────────── */

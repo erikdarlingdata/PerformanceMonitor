@@ -259,6 +259,28 @@ public class AnalysisContext
     public DateTime? PlanRegressionWindowStart { get; set; }
 
     /// <summary>
+    /// Darling only (#5812): true when this pass may reuse the PLAN_REGRESSION candidate rows an earlier current pass on
+    /// the same server read, while they are fresh (<c>PgFactCollector.PlanRegressionCandidateCache</c>). Set by the
+    /// current-time on-demand callers (<c>analyze_server</c> and <c>get_analysis_facts</c> with no <c>as_of</c>). The
+    /// scheduled pass never sets it: it sets <see cref="RefreshPlanRegressionCandidates"/> instead. False everywhere else, so
+    /// a past <c>as_of</c> and every other caller read live, as before.
+    /// </summary>
+    public bool ReusePlanRegressionCandidates { get; set; }
+
+    /// <summary>
+    /// Darling only (#5812): true for the scheduled pass with no <c>as_of</c>. It never reuses PLAN_REGRESSION candidates; it
+    /// always reads and refills the cache, so the scheduled pass stays as fresh as before and the MCP and viewer calls that
+    /// follow within one analysis cadence reuse its read. False everywhere else.
+    /// </summary>
+    public bool RefreshPlanRegressionCandidates { get; set; }
+
+    /// <summary>
+    /// #5824: how long this pass's PLAN_REGRESSION read took, in milliseconds, whatever its outcome. Null when the read did
+    /// not run on this pass (an engine whose collector has no such read, or a pass that ended before it).
+    /// </summary>
+    public long? PlanRegressionReadMs { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose

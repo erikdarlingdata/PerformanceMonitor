@@ -200,7 +200,12 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY r.total_executions * r.avg_duration_ms DESC", sql, StringComparison.Ordinal);
+        /* #5815: the page sorts the candidates before the text lateral, on sort_cost (executions * avg duration),
+           and page_ord ranks on the same projected expression; the rule is unchanged, only the spelling moved. */
+        Assert.Contains("k.total_executions * k.avg_duration_ms AS sort_cost", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY k.total_executions * k.avg_duration_ms DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY r.sort_cost DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY p.sort_cost DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
     }

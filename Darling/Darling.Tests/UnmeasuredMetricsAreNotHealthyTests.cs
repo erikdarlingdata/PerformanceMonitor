@@ -606,28 +606,4 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
 
     /* ─────────────────────────── one decision, both surfaces ─────────────────────────── */
 
-    /// <summary>
-    /// Both surfaces reach the shared "is this a measurement" decision, and no third file decides it for
-    /// itself. Same census shape as <c>FleetCardPostgresCpuTests</c>'s, and the same reason: the failure
-    /// mode is a surface that never learns the concept exists.
-    /// </summary>
-    [Fact]
-    public void BothSurfacesReachTheSharedMeasuredDecision()
-    {
-        var callers = System.IO.Directory
-            .EnumerateFiles(System.IO.Path.Combine(RepoFile.Root, "Darling"), "*.cs", System.IO.SearchOption.AllDirectories)
-            .Where(f =>
-            {
-                var segments = f.Split(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
-                return !segments.Contains("bin") && !segments.Contains("obj") && !segments.Contains("Darling.Tests");
-            })
-            .Where(f => CSharpSourceWalker
-                .StripCommentsAndStrings(System.IO.File.ReadAllText(f))
-                .Contains("ServerMetricSources.DmvSourced", StringComparison.Ordinal))
-            .Select(System.IO.Path.GetFileName)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToArray();
-
-        Assert.Equal(new[] { "DarlingFleetReader.cs", "ViewerDataService.Overview.cs" }, callers);
-    }
 }

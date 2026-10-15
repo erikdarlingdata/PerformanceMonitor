@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -43,7 +43,7 @@ public sealed class ReadLatencyCapacityRungTests
         Assert.Equal("read-latency-capacity-fields", Rung.Name);
         Assert.Single(PgMigrations.Scripts, m => m.Version == RungVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* V183 (#5793) took the top of the ladder; this rung stays registered below it. */
+        /* V183 (#5793) and V184 (#5632) sit above it; this rung stays registered below them. */
         Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
@@ -66,29 +66,34 @@ public sealed class ReadLatencyCapacityRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheSentinel_BelowV183s_AndAStoreStoppedHereMapsToThisRung()
+    public void TheProbeCarriesTheSentinel_BelowV183sAndV184s_AndAStoreStoppedHereMapsToThisRung()
     {
         Assert.Contains("to_regclass('collect.read_latency') AND attname = 'window_band'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        /* V183's sentinel (#5793) is the last parameter; this one is just below it. */
-        Assert.Equal("hasReadCaller", parameters[^1].Name);
-        Assert.Equal("hasReadLatencyCapacityFields", parameters[^2].Name);
-        Assert.Equal("hasNotificationRouteScope", parameters[^3].Name);
+        /* V185's sentinel (#5812) is the last parameter, V184's (#5632) the one before it and V183's (#5793) next; this one is
+           just below them. */
+        Assert.Equal("hasPlanRegressionPartialDays", parameters[^1].Name);
+        Assert.Equal("hasInvestigations", parameters[^2].Name);
+        Assert.Equal("hasReadCaller", parameters[^3].Name);
+        Assert.Equal("hasReadLatencyCapacityFields", parameters[^4].Name);
+        Assert.Equal("hasNotificationRouteScope", parameters[^5].Name);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({parameters.Length - 2})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({parameters.Length - 4})", viewer, StringComparison.Ordinal);
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
         var atThisRung = (object[])all.Clone();
         atThisRung[^1] = false;
+        atThisRung[^2] = false;
+        atThisRung[^3] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var behind = (object[])atThisRung.Clone();
-        behind[^2] = false;
+        behind[^4] = false;
         Assert.Equal(181, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasReadLatencyCapacityFields)", StringComparison.Ordinal);
@@ -124,6 +129,8 @@ public sealed class ReadLatencyCapacityRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V181 shape and the ladder back to 181. */
+        await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
+        await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
         await ExecAsync(connection, @"

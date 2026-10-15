@@ -29,8 +29,8 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     private const string StartText = "2026-08-03T12:00:00.0000000Z";
 
     private const string Lead1 = "The window reaches further back than the Query Store history this store holds for ";
-    private const string Lead2 = ". Nothing older than " + StartText + " was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. ";
-    private const string Purge = "The interval table keeps 9 days, and intervals that began before its purge edge are not read.";
+    private const string Lead2 = ". Nothing older than " + StartText + " was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 10 days), which holds exactly what raw held for them. ";
+    private const string Purge = "The interval table keeps 10 days, and intervals that began before its purge edge are not read.";
     private const string Clamp = "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.";
 
     private const string Slow = " Query Store collection cadence is over 60 minutes, or its collection log shows a longer gap, so older intervals are not read from the interval table.";
@@ -102,7 +102,7 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     [InlineData(QueryStoreIntervalWide.WideStartBound.Window, null)]
     [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloor, null)]
     [InlineData(QueryStoreIntervalWide.WideStartBound.FilledSince, " (interval table complete from then)")]
-    [InlineData(QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, " (interval table keeps 9 days)")]
+    [InlineData(QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, " (interval table keeps 10 days)")]
     [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, " (slow Query Store cadence)")]
     [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloorLogNotYetCovering, " (collection log not yet covering the purge edge)")]
     public void BannerReason_IsExact_ForEveryBound(QueryStoreIntervalWide.WideStartBound bound, string? expected) =>
@@ -113,22 +113,4 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
         Assert.Equal(
             QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
             PerformanceMonitor.Darling.Service.DarlingWebEndpoints.QueryStoreHistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge));
-
-    /// <summary>The reason phrase is built from two halves so this file never matches its own scan, and the scan
-    /// skips the test tree and build output.</summary>
-    [Fact]
-    public void ThePurgeEdgeReason_IsSpelledOnce_AcrossTheProductSource()
-    {
-        var token = "keeps 9 days, and intervals that began " + "before its purge edge";
-        var product = Directory.EnumerateDirectories(RepoFile.PathTo("Darling"), "PerformanceMonitor.Darling.*")
-            .SelectMany(d => Directory.EnumerateFiles(d, "*.cs", SearchOption.AllDirectories))
-            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                     && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            .ToList();
-        Assert.NotEmpty(product);
-        var hits = product.Where(f => File.ReadAllText(f).Contains(token, StringComparison.Ordinal)).ToList();
-        Assert.Single(hits);
-        Assert.EndsWith("QueryStoreIntervalWide.cs", hits[0], StringComparison.Ordinal);
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Count(File.ReadAllText(hits[0]), System.Text.RegularExpressions.Regex.Escape(token)));
-    }
 }

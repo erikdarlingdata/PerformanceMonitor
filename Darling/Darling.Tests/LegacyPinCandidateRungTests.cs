@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -143,15 +143,17 @@ public sealed class LegacyPinCandidateRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 13})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750) and V182's (#5506) sentinels are next; V183's (#5793) is the probe's last ordinal. */
+        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) is next and V185's (#5812) is the probe's last ordinal. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 14})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 15})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 16})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 17})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 17})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 18})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 19})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 16, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 18, parameters.Length - 1);
         Assert.Equal("hasLegacyPinCandidates", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasPagerDutyAutoResolve", parameters[ProbeOrdinal - 1].Name);
 

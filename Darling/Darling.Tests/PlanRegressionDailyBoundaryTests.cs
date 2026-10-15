@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Linq;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -105,6 +107,9 @@ public sealed class PlanRegressionDailyBoundaryTests
 
         Assert.Contains("BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead", fact, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION READ ONLY", fact, StringComparison.Ordinal);
+        /* #5812 bound 2: the work memory is raised for this transaction only (SET LOCAL), inside the snapshot. */
+        Assert.Contains("new NpgsqlCommand(PlanRegressionWorkMemSql, connection, snapshot)", fact, StringComparison.Ordinal);
+        Assert.StartsWith("SET LOCAL work_mem = ", PgFactCollector.PlanRegressionWorkMemSql, StringComparison.Ordinal);
         Assert.Contains("connection, snapshot, context.ServerId, windowFloor", fact, StringComparison.Ordinal);
         Assert.Contains("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)", fact, StringComparison.Ordinal);
 
@@ -112,5 +117,79 @@ public sealed class PlanRegressionDailyBoundaryTests
         Assert.Contains("l.first_execution_time >= $4::timestamp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("live_floor", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("built_days", sql, StringComparison.Ordinal);
+    }
+
+    private static PlanRegressionDaily.BuiltDay Whole(int day) => new(D(day), null);
+
+    private static PlanRegressionDaily.BuiltDay Through(int day, DateTime watermark) => new(D(day), watermark);
+
+    private static DateTime Floor(int windowDay, params PlanRegressionDaily.BuiltDay[] built) =>
+        PgFactCollector.PlanRegressionLiveFloorWithWatermarks(At(windowDay), built);
+
+    [Fact]
+    public void TheWatermarkFloor_WithNothingBuilt_IsADayBelowTheWindow()
+    {
+        /* #5812: the first unbuilt day is the window's own first day, and a row of it may have begun the day before (R1's
+           one-day lookback), so the floor is one day below the window floor, as before V185. */
+        Assert.Equal(At(1).AddDays(-1), Floor(1));
+    }
+
+    [Fact]
+    public void TheWatermarkFloor_OverContiguousWholeDays_IsADayBelowTheFirstUnbuiltDay()
+    {
+        /* Days 1-4 whole (NULL through, a pre-V185 build, reads as the next midnight): day 5 is the first unbuilt day, so
+           the floor is day 4's start, not day 5's (that would drop day 5's rows that began on day 4) nor day 3's. */
+        Assert.Equal(At(4), Floor(1, Whole(1), Whole(2), Whole(3), Whole(4)));
+
+        /* A watermark exactly at the next midnight is a whole day, not a partial one: it does not pull the floor up to the
+           day's end or below the lookback. */
+        Assert.Equal(At(4), Floor(1, Whole(1), Through(2, At(3)), Through(3, At(4)), Whole(4)));
+    }
+
+    [Fact]
+    public void TheWatermarkFloor_WithPartialDays_IsTheLowestPartialWatermark()
+    {
+        /* A current store: days 1-12 whole, today (13) and tomorrow (14) built through three hours before the current hour.
+           The first unbuilt day is 15, whose lookback (day 14's start) is above today's watermark, so the floor is that
+           watermark. No lookback is taken below a partial day's watermark: a row of a built day is live only when its first
+           execution is at or above the day's watermark, so the watermark itself bounds every live row of that day. */
+        var today = At(13, 10);
+        var built = Enumerable.Range(1, 12).Select(Whole).Append(Through(13, today)).Append(Through(14, today)).ToArray();
+        Assert.Equal(today, Floor(1, built));
+
+        /* Two partial days: the lower watermark wins, wherever it sits in the run. */
+        Assert.Equal(At(11, 22), Floor(10, Whole(10), Through(11, At(11, 22)), Whole(12), Through(13, today)));
+
+        /* A partial watermark above the first unbuilt day's lookback does not raise the floor past it. */
+        Assert.Equal(At(11), Floor(10, Whole(10), Through(11, At(11, 23))));
+    }
+
+    [Fact]
+    public void TheWatermarkFloor_StopsAtTheFirstGap_AndIgnoresPartialDaysAfterIt()
+    {
+        /* Days 1-3 whole, 4 missing: the floor is day 3's start. Day 5's partial watermark lies beyond the gap, where every
+           row is read live anyway, so it does not take part. */
+        Assert.Equal(At(3), Floor(1, Whole(1), Whole(2), Whole(3), Through(5, At(5, 6))));
+
+        /* A partial day before the gap still counts: its watermark is below the gap's lookback. */
+        Assert.Equal(At(2, 5), Floor(1, Whole(1), Through(2, At(2, 5)), Whole(3)));
+    }
+
+    [Fact]
+    public void TheWatermarkFloor_NeverFallsMoreThanTheLookbackBelowTheWindow()
+    {
+        /* Built days below the window take no part, even a partial one with an early watermark: the walk starts at the
+           window floor. Window from day 5, days 5-6 whole, so the floor is day 6's start. */
+        Assert.Equal(At(6), Floor(5, Through(1, At(1, 3)), Whole(2), Whole(5), Whole(6)));
+
+        /* The lowest the floor goes for any built set whose watermarks lie in their own days is the window less one day:
+           the unbuilt lookback when the window's first day is not built, and the window's own midnight when its first
+           day is built through that midnight. */
+        Assert.Equal(At(4), Floor(5, Whole(6), Whole(7)));
+        Assert.Equal(At(5), Floor(5, Through(5, At(5)), Whole(6)));
+        foreach (var watermarkHour in new[] { 0, 1, 12, 23 })
+        {
+            Assert.True(Floor(5, Through(5, At(5, watermarkHour))) >= At(5).AddDays(-1));
+        }
     }
 }

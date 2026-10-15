@@ -185,7 +185,7 @@ public static class QueryStoreIntervalPartitions
     /// purge and the wide read's floor (<c>DarlingRetention.QueryStoreIntervalWideRetentionDays</c>), and the compose rollup's floor
     /// (<see cref="QueryStoreComposeStamp.FloorHour"/>, #5582): a rollup hour must not outlive, or start below, what the table keeps.
     /// </summary>
-    public const int WideHorizonDays = 9;
+    public const int WideHorizonDays = 10;
 
     /// <summary>The wide table (<see cref="WideHorizonDays"/> days).</summary>
     public static readonly IntervalTable Wide = new("query_store_interval_wide", WideHorizonDays);

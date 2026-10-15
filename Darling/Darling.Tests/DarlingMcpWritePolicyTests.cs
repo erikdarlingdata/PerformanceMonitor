@@ -40,6 +40,10 @@ public sealed class DarlingMcpWritePolicyTests
     private static readonly DarlingMcpWritePolicy.Effective WritesOnly = new(Writes: true, ServerAdmin: false);
     private static readonly DarlingMcpWritePolicy.Effective Everything = new(Writes: true, ServerAdmin: true);
 
+    /* #5632 Phase A (ruling R2): the investigation pair and the writes exclude each other, so "everything on" serves every
+       tool but those two, and the whole catalog is a policy no start resolves; only the census reference reads it. */
+    private static readonly int InvestigationCount = DarlingMcpWritePolicy.InvestigationTools.Count;
+
     private static readonly McpConfig NoWrites = new();
     private static readonly McpConfig WritesConfig = new() { AllowWrites = true };
     private static readonly McpConfig EverythingConfig = new() { AllowWrites = true, AllowServerAdmin = true };
@@ -65,13 +69,16 @@ public sealed class DarlingMcpWritePolicyTests
         var readOnly = DarlingMcpToolClassification.ReadOnlyTools;
         var writes = DarlingMcpWritePolicy.WriteTools;
 
-        var unclassified = registered.Where(n => !readOnly.Contains(n) && !writes.Contains(n)).ToArray();
-        var both = readOnly.Intersect(writes).ToArray();
-        var stale = readOnly.Concat(writes).Except(registered).ToArray();
+        var investigations = DarlingMcpWritePolicy.InvestigationTools;
+
+        /* #5632 Phase A: claim and submit are a third set, neither read-only nor a configuration write. */
+        var unclassified = registered.Where(n => !readOnly.Contains(n) && !writes.Contains(n) && !investigations.Contains(n)).ToArray();
+        var both = readOnly.Intersect(writes).Concat(investigations.Intersect(readOnly)).Concat(investigations.Intersect(writes)).ToArray();
+        var stale = readOnly.Concat(writes).Concat(investigations).Except(registered).ToArray();
 
         Assert.True(
             unclassified.Length == 0,
-            "a registered tool is on neither the read-only list (DarlingMcpToolClassification) nor DarlingMcpWritePolicy.WriteTools; "
+            "a registered tool is on neither the read-only list (DarlingMcpToolClassification) nor DarlingMcpWritePolicy.WriteTools nor InvestigationTools; "
             + $"decide which it is and add it: [{string.Join(", ", unclassified)}]");
         Assert.True(both.Length == 0, $"a tool is on the read-only list AND in the write set: [{string.Join(", ", both)}]");
         Assert.True(stale.Length == 0, $"a classified name is not a registered tool: [{string.Join(", ", stale)}]");
@@ -105,7 +112,8 @@ public sealed class DarlingMcpWritePolicyTests
 
         var names = Names(served);
         Assert.DoesNotContain(names, DarlingMcpWritePolicy.IsWrite);
-        Assert.Equal(all.Count - DarlingMcpWritePolicy.WriteTools.Count, served.Count);
+        Assert.Equal(all.Count - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount, served.Count);
+        Assert.DoesNotContain(names, DarlingMcpWritePolicy.IsInvestigation);
         Assert.Contains("list_servers", names);
         Assert.Contains("get_tool_guide", names);
     }
@@ -123,13 +131,14 @@ public sealed class DarlingMcpWritePolicyTests
     }
 
     [Fact]
-    public void BothOn_ServesEveryTool()
+    public void BothOn_ServesEveryTool_ButTheInvestigationPair()
     {
         var all = ServedTools();
         var served = DarlingMcpWritePolicy.FilterToolCollection(all, Everything);
 
-        Assert.Equal(all.Count, served.Count);
+        Assert.Equal(all.Count - InvestigationCount, served.Count);
         Assert.Contains("add_servers", Names(served));
+        Assert.DoesNotContain(Names(served), DarlingMcpWritePolicy.IsInvestigation);
     }
 
     [Fact]
@@ -139,7 +148,7 @@ public sealed class DarlingMcpWritePolicyTests
         var before = narrowed.Count;
         DarlingMcpWritePolicy.Apply(narrowed, DarlingMcpWritePolicy.Effective.Off);
 
-        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count, narrowed.Count);
+        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount, narrowed.Count);
         Assert.All(narrowed, tool =>
         {
             Assert.NotNull(tool.ProtocolTool.Annotations);
@@ -149,7 +158,7 @@ public sealed class DarlingMcpWritePolicyTests
 
         var full = ServedTools();
         DarlingMcpWritePolicy.Apply(full, Everything);
-        Assert.Equal(before, full.Count);
+        Assert.Equal(before - InvestigationCount, full.Count);
         foreach (var tool in full.Where(t => DarlingMcpWritePolicy.IsWrite(t.ProtocolTool.Name)))
         {
             Assert.True(tool.ProtocolTool.Annotations!.DestructiveHint, $"{tool.ProtocolTool.Name} should carry destructiveHint");
@@ -218,7 +227,7 @@ public sealed class DarlingMcpWritePolicyTests
         var writesCount = DarlingMcpWritePolicy.FilterToolCollection(all, new DarlingMcpWritePolicy.Effective(true, false)).Count;
         var adminCount = DarlingMcpWritePolicy.FilterToolCollection(all, new DarlingMcpWritePolicy.Effective(true, true)).Count;
 
-        Assert.Equal(total, adminCount);
+        Assert.Equal(total - InvestigationCount, adminCount);
 
         /* The +N figure holds only when a bearer token also resolves: Resolve is AllowWrites && tokenPresent, so
            the switch on with no token serves the default set, which is the state the instructions' "with a token" covers. */
@@ -267,7 +276,9 @@ public sealed class DarlingMcpWritePolicyTests
         var census = System.Text.RegularExpressions.Regex.Match(instructions, @"This server exposes (\d+) ");
         Assert.True(census.Success, "the instructions carry no 'This server exposes N' census");
         Assert.Equal(served, int.Parse(census.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
-        Assert.Equal(everything, !instructions.Contains(" of its ", StringComparison.Ordinal));
+        /* #5632 Phase A: with every switch on, the investigation pair stays off, so the census says so by name. */
+        Assert.Contains(" of its ", instructions, StringComparison.Ordinal);
+        Assert.Equal(everything, instructions.Contains("investigation tools stay off while `mcp.allowWrites` is on", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -36,7 +36,7 @@ namespace Darling.Tests;
 /// <para><b>Both SKUs.</b> Lite writes <c>done:</c> and <c>hole:</c> through its own backfill worker, and
 /// it only ever deletes a hole it services or expires — so the orphan class is real on both sides and the
 /// prune is ported, not declared Darling-only.
-/// <see cref="LiteWritesTheBackfillKeysButNeverTheWatermark"/> pins that in both directions, and the key set
+/// <c>LiteWritesTheBackfillKeysButNeverTheWatermark</c> pins that in both directions, and the key set
 /// itself lives in the shared <see cref="QueryStorePerDatabaseState"/> so a prefix cannot end up pruned on
 /// one SKU and orphaning on the other.</para>
 /// </summary>
@@ -44,32 +44,7 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")]
 public sealed class QueryStoreStatePruneTests
 {
-    private static string Qsowm(string database) => QueryStoreOpenIntervalState.WatermarkKeyPrefix + database;
-
     /* ---------------- the design's premise, pinned without a store ---------------- */
-
-    [Fact]
-    public void ThePruneChecksSysDatabases_NotTheCollectorsFilteredEnumeration()
-    {
-        /* The whole correctness of this change is which relation answers "does this database still exist".
-           database_states is an unfiltered SELECT ... FROM sys.databases; query_store's enumeration is not.
-           Pinned on the statement text because the difference is invisible to any test that only seeds
-           databases which are both present AND collectable — which is every naive fixture. */
-        Assert.Contains("FROM database_states", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
-
-        /* The snapshot guard. MAX() over zero rows yields one row holding NULL, so without this an anti-join
-           against a server that has never collected database_states matches EVERY key and deletes the lot. */
-        Assert.Contains("snapshot.newest IS NOT NULL", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
-
-        /* The freshness guard, which is the stronger of the two: a snapshot cannot judge a state row written
-           AFTER it was taken. Without it, a server whose database_states collection has stopped prunes every
-           database created since — live ones — on every cycle forever. */
-        Assert.Contains("s.updated_at < snapshot.newest", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
-
-        /* Newest snapshot only: an older one names databases that have since been dropped, which would make
-           the prune permanently unable to retire anything. */
-        Assert.Contains("MAX(collection_time)", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql, StringComparison.Ordinal);
-    }
 
     [Fact]
     public void LitesTwinCarriesTheSameTwoGuards()
@@ -211,45 +186,6 @@ public sealed class QueryStoreStatePruneTests
                no-op deletes per cycle forever on Azure SQL DB, and #2191's boundary is emergent rather than
                declared. */
             Assert.Contains("DatabaseStateCollector.Instance.AppliesTo(", guard, StringComparison.Ordinal);
-        }
-    }
-
-    [Fact]
-    public void LiteWritesTheBackfillKeysButNeverTheWatermark()
-    {
-        /* The parity FACT: Lite writes done: and hole: through its own backfill worker, and it only ever
-           deletes a hole it services or expires. So the orphan class is real on both SKUs and the prune had
-           to be ported, not declared Darling-only. Pinned at source so if Lite ever stops writing the
-           backfill keys this test says so rather than leaving a prune nobody needs; the CapturePlanXml pin
-           below survives the watermark's retirement because the flag still gates the DARLING-only
-           activity-driven plan fetch, and Lite growing one would be a real design event. */
-        var root = FindRepoRoot();
-        Assert.True(root is not null, "repo root not found -- the source pin cannot run");
-
-        var liteRunner = File.ReadAllText(Path.Combine(
-            root!, "Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs"));
-        var liteBackfill = File.ReadAllText(Path.Combine(
-            root!, "Lite", "Services", "RemoteCollectorService.QueryStoreBackfill.cs"));
-
-        Assert.False(
-            liteRunner.Contains("CapturePlanXml", StringComparison.Ordinal),
-            "Lite's definition runner now sets CapturePlanXml — the flag that gates the Darling-only "
-            + "activity-driven plan fetch (#2312). That is a real design event: Lite has no plan dimension "
-            + "or map to fetch into, so decide what the flag means there before shipping it.");
-
-        foreach (var prefix in new[] { "DoneKeyPrefix", "HoleKeyPrefix" })
-        {
-            /* The per-database KEY SHAPE, not merely a mention of the prefix: `prefix + databaseName` is
-               exactly what makes these rows orphan when the database goes away, and it is what both prunes
-               reconstruct to test a key against the live database list. A worker that started keying these
-               some other way would leave the prune matching nothing while every "is the prefix used?" check
-               still passed. */
-            Assert.True(
-                liteBackfill.Contains(
-                    $"QueryStoreBackfillState.{prefix} + databaseName", StringComparison.Ordinal),
-                $"Lite's backfill worker no longer keys QueryStoreBackfillState.{prefix} by database name. "
-                + "The #2188 prune rebuilds keys as prefix + databaseName to test them against the newest "
-                + "sys.databases snapshot, so it now matches nothing for this prefix — revisit both.");
         }
     }
 

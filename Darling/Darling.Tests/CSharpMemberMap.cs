@@ -540,9 +540,7 @@ internal static class CSharpMemberMap
     /// the same answer at all 160 T-SQL sites. So containment is hardening, for the one direction the
     /// declaration regex cannot cover — a literal that is inside no member at all (an attribute argument,
     /// or anything below a body the brace walk lost) resolves to <see cref="Unknown"/> here instead of
-    /// borrowing the name of whichever member happens to sit above it. It is pinned by
-    /// <see cref="TheMemberScan_ReadsABodyWhoseLiteralHoldsABrace_AndARawCountDoesNot"/>, which is an
-    /// arranged case rather than a site on the tree, and that is the honest status of it.</para>
+    /// borrowing the name of whichever member happens to sit above it.</para>
     /// </summary>
     internal static string EnclosingMember(MemberMap map, int offset) =>
         Enclosing(map, offset, DeclarationKind.Member);
