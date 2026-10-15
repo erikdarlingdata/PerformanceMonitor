@@ -1865,7 +1865,7 @@ public sealed class DarlingComposeTests
         var purge = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge);
         Assert.Contains(start.ToString("o"), filled, StringComparison.Ordinal);
         Assert.Contains("began keeping complete history", filled, StringComparison.Ordinal);
-        Assert.Contains("keeps 9 days", purge, StringComparison.Ordinal);
+        Assert.Contains("keeps 10 days", purge, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -463,7 +463,8 @@ public partial class ViewerServerTab
            step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
            earlier start and the cap rule does not apply. */
         var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var floorReadTask = _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var floorReadTask = _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter,
+            literalEndUtc: IsCustomRange ? endUtc : null); /* #5809: the interval table gate's clause 4, as the grid passes it (#3953). */
         await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
         var rows = floorReadTask.Result;
         _queryStoreRegressionsFilterMgr!.UpdateData(rows);

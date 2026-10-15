@@ -256,7 +256,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. window_truncated marks a history floor. <<GUIDE>>" +
         "Per-plan averages are execution-weighted (total over executions), so they can differ from get_query_store_top, which averages the interval averages. " +
         "Outcomes (Regular, Aborted, Exception) and replica roles are combined, execution-weighted, into one value per plan and collection time. " +
-        "Reads the raw tier, or the per-interval table (kept 9 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
+        "Reads the raw tier, or the per-interval table (kept 10 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
         "points keeps the newest 150 of the listed plans (points_truncated) and plans the 20 longest by total duration (plans_truncated).")]
     public static async Task<string> GetQueryStoreQueryHistory(
         NpgsqlDataSource postgres,

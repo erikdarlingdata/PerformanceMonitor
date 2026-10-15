@@ -121,6 +121,27 @@ public sealed partial class QueryStoreLoadTestHarnessTests
         }
     }
 
+    /* #5809: measure.ps1's purge-edge warning once held its own AddDays(-9) while the service's horizon moved to 10,
+       so it warned on whole windows and told the operator to restore a newer copy. The script now reads the
+       constant from source: this runs the script's own pattern against that file, and holds no day literal there. */
+    [Fact]
+    public void MeasureScript_PurgeEdge_ReadsTheWideHorizonConstant()
+    {
+        var root = RepoRoot();
+        var script = File.ReadAllText(Path.Combine(root, "Darling/loadtest/measure.ps1"));
+        Assert.DoesNotMatch(@"\$purgeEdge\s*=[^\r\n]*AddDays\(-\d", script);
+
+        var path = Regex.Match(script, @"Join-Path \$here '(?<rel>[^']*QueryStoreIntervalPartitions\.cs)'");
+        Assert.True(path.Success, "measure.ps1 no longer reads QueryStoreIntervalPartitions.cs for the purge edge.");
+        var pattern = Regex.Match(script, @"\[regex\]::Match\(\(Get-Content -LiteralPath \$partitionsSource -Raw\), '(?<p>[^']*)'\)");
+        Assert.True(pattern.Success, "measure.ps1 no longer matches WideHorizonDays with a single-quoted pattern.");
+
+        var source = File.ReadAllText(Path.GetFullPath(Path.Combine(root, "Darling/loadtest", path.Groups["rel"].Value.Replace('\\', '/'))));
+        var horizon = Regex.Match(source, pattern.Groups["p"].Value);
+        Assert.True(horizon.Success, "measure.ps1's WideHorizonDays pattern does not match QueryStoreIntervalPartitions.cs.");
+        Assert.Equal(QueryStoreIntervalPartitions.WideHorizonDays.ToString(System.Globalization.CultureInfo.InvariantCulture), horizon.Groups[1].Value);
+    }
+
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
         var dir = Path.GetDirectoryName(thisFile)!;

@@ -177,8 +177,8 @@ END $$;";
     /// rejects it, 25001). The lock this takes is <c>ShareLock</c> (a plain <c>CREATE INDEX</c>, not a
     /// rewrite of an existing index), which blocks writers to the table for the build's duration but not
     /// readers. At the rig's 4M row size the build itself took low single-digit seconds; a field store's
-    /// two tables are kept to 15 and 9 days respectively by the same purge this index speeds up, so neither
-    /// grows unbounded between upgrades.</para>
+    /// two tables are kept to 15 and 10 days respectively (the wide table's 9 until #5809) by the same purge this
+    /// index speeds up, so neither grows unbounded between upgrades.</para>
     ///
     /// <para><b>Why not <see cref="UnorderedRowCappedDeleteSql"/> instead (the alternative measured for #4608).</b>
     /// That builder exists for the two plain (non-hypertable) tables whose V149 migration deliberately
@@ -3394,9 +3394,11 @@ CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_reconcile_runs_time
     /// ruled issuecomment-5836972848): every outcome (Regular, Aborted, Exception), every raw column the three new
     /// reads need except <c>collection_id</c>, <c>server_name</c> and <c>query_plan_text</c> (57 columns). V143's
     /// own table, coverage and pending tables are untouched — this is three MORE tables, the same shape as V143's
-    /// three, engine-plain, with no backfill. Kept 9 days (F1: the 7-day preset plus a day of margin for an
+    /// three, engine-plain, with no backfill. Kept 9 days at V145 (F1: the 7-day preset plus a day of margin for an
     /// interval that can span a day) by the service's retention sweep, on <c>first_execution_time</c>, not this
-    /// migration's concern.
+    /// migration's concern. Since #5809 the horizon is 10 days, so get_query_store_regressions can read the table:
+    /// its 7-day baseline plus a 24-hour window, with the gate's 26-hour purge-edge margin, needs 9 days 2 hours
+    /// held (<c>DarlingRetention.QueryStoreIntervalWideRetentionDays</c>).
     ///
     /// <para><b><c>collect.query_store_interval_wide</c></b>: identity is V143's identity plus
     /// <c>execution_type_desc</c>, because two outcomes can share every other key. <c>first_execution_time</c>

@@ -304,9 +304,9 @@ public sealed class QueryStoreComposeStampTests
     }
 
     [Fact]
-    public void TheNineDayHorizon_IsOneConstant_SharedByThePartitionsThePurgeTheWideReadAndTheRollupFloor()
+    public void TheTenDayHorizon_IsOneConstant_SharedByThePartitionsThePurgeTheWideReadAndTheRollupFloor()
     {
-        Assert.Equal(9, QueryStoreIntervalPartitions.WideHorizonDays);
+        Assert.Equal(10, QueryStoreIntervalPartitions.WideHorizonDays); /* #5809: 9 -> 10, so get_query_store_regressions' 8-day span plus the gate's 26 h purge-edge margin fits. */
         Assert.Equal(QueryStoreIntervalPartitions.WideHorizonDays, QueryStoreIntervalPartitions.Wide.HorizonDays);
         Assert.Equal(QueryStoreIntervalPartitions.WideHorizonDays, DarlingRetention.QueryStoreIntervalWideRetentionDays);
 

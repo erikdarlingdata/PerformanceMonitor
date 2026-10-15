@@ -357,6 +357,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Equal(ServerName, hit.GetProperty("server").GetString());
             Assert.Equal(1, hit.GetProperty("regression_count").GetInt32());
             Assert.False(hit.GetProperty("truncated").GetBoolean());
+            /* #5809: seeded into query_store_stats only, so raw answered, and the payload says so. */
+            Assert.Equal("raw", hit.GetProperty("history_source").GetString());
 
             var row = hit.GetProperty("regressions")[0];
             Assert.Equal(7, row.GetProperty("query_id").GetInt64());

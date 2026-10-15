@@ -920,6 +920,11 @@ public sealed class DarlingWorker : BackgroundService
        later cycle. */
     private readonly ConcurrentDictionary<int, AnalysisPassState> _analysisInFlight = new();
 
+    /* #5824: how many scheduled analysis passes are running right now inside a sweep body, so inside a fleet collection
+       slot (ProcessServerSweepAsync). A body that waited long for a slot says how many of the slots were held by a pass
+       when it got one. Interlocked. */
+    private int _analysisPassesInSlot;
+
     /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the
        cancellation raised at that budget — wedged inside one of the store reads that still take no
@@ -1610,6 +1615,12 @@ LIMIT 1";
         public string? LastBodySlowestName;
         public long LastBodySlowestMs;
         public long LastGateWaitMs;
+
+        /* #5824: the last finished body's scheduled analysis pass length (0 when no pass ran in it), and how many analysis
+           passes held fleet slots when the current body got its slot. LastBodyMs ends with the collectors, before the
+           analysis pass, so without these a slot held by the pass read as "no single cause". */
+        public long LastAnalysisMs;
+        public int LastGateWaitAnalysisHolders;
 
         /// <summary>#5597: the UTC ticks at which the connect body finished seeding this server's collector due stamps (0 =
         /// never). The stamps are seeded from a clock read before the body's on-load snapshots, so a slot that came due
@@ -4560,6 +4571,7 @@ LIMIT 1";
         var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);
         _fleetGateStats?.RecordQueueWait(gateWaited);
         server.LastGateWaitMs = (long)gateWaited.TotalMilliseconds;
+        server.LastGateWaitAnalysisHolders = Volatile.Read(ref _analysisPassesInSlot);
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
            outer launch loop's watchdog can tell a genuine hang from a body that was merely waiting its turn.
@@ -4630,6 +4642,10 @@ LIMIT 1";
                AND analysis_notifications_enabled (ShouldNotifyAnalysisFindings — #3464; Lite's D0 split
                stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
                range. */
+            /* #5824: the pass runs here, inside this body, so it holds this server's fleet collection slot for its whole
+               length (up to the 120 s budget plus the 5 s unwind grace, then the notify and force-plan steps). The next
+               body reads its length as a candidate cause of any slot this server steps over. */
+            server.LastAnalysisMs = 0;
             var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
             if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
             {
@@ -4646,8 +4662,18 @@ LIMIT 1";
                    no longer knows or cares which engine it is scheduling. The first real pass then
                    overwrites any tombstone row still standing with the honest state (D7 — the lazy
                    overwrite, no migration). */
-                await RunScheduledAnalysisAsync(
-                    server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
+                var analysisStarted = Stopwatch.GetTimestamp();
+                Interlocked.Increment(ref _analysisPassesInSlot);
+                try
+                {
+                    await RunScheduledAnalysisAsync(
+                        server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _analysisPassesInSlot);
+                    server.LastAnalysisMs = (long)Stopwatch.GetElapsedTime(analysisStarted).TotalMilliseconds;
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -11404,15 +11430,79 @@ AND   j.hypertable_name = '{relation}'", connection))
                 ? findings => planForceBot.RunAfterAnalysisAsync(runtime, server.Config, findings, stoppingToken)
                 : null;
 
-        /* The scheduled caller discards the outcome — the analyze_now command maps it to a result. */
-        await RunAnalysisPassAsync(
+        /* #5824: the scheduled pass is recorded as one collection_log row (AnalysisPassRow), the only record of how long it
+           held this server's fleet slot. The analyze_now command maps the outcome to its result instead and writes none. */
+        DarlingAnalysisService? passService = null;
+        Task? passTask = null;
+        var started = Stopwatch.GetTimestamp();
+        var result = await RunAnalysisPassAsync(
             runtime.ServerId, runtime.StorageName, server.Config.DisplayName,
             planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken,
-            AnalysisSeparatelyMonitoredDatabases(runtime));
+            AnalysisSeparatelyMonitoredDatabases(runtime), (service, task) => (passService, passTask) = (service, task));
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        if (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var planRegressionMs = PlanRegressionReadOfFinishedPass(passTask, () => passService?.LastPlanRegressionReadMs);
+        var (status, detail) = DescribeAnalysisPass(
+            result.Status, result.FindingCount, result.Message, elapsedMs, planRegressionMs, insideFleetSlot: true);
+        await DarlingObservability.LogAnalysisPassAsync(
+            _postgres!, runtime, status, result.FindingCount, elapsedMs, detail, _logger, stoppingToken);
     }
 
+    /// <summary>
+    /// #5824: the status word and the detail of a scheduled analysis pass's <c>collection_log</c> row. Never <c>SUCCESS</c>
+    /// (see <see cref="AnalysisPassRow"/>). The detail is one line, read per server through <c>get_collection_log</c>: the
+    /// outcome, the findings count, the PLAN_REGRESSION read's time, and whether the pass ran inside the server's fleet
+    /// collection slot. Pure, so a unit test pins the wording.
+    /// </summary>
+    internal static (string Status, string Detail) DescribeAnalysisPass(
+        AnalysisPassStatus status, int findingCount, string? message, long elapsedMs, long? planRegressionMs, bool insideFleetSlot)
+    {
+        var word = status switch
+        {
+            AnalysisPassStatus.Ran or AnalysisPassStatus.InsufficientData => AnalysisPassRow.Analyzed,
+            AnalysisPassStatus.TimedOut => AnalysisPassRow.Abandoned,
+            AnalysisPassStatus.Error => AnalysisPassRow.Error,
+            _ => AnalysisPassRow.Skipped,
+        };
+        var outcome = status switch
+        {
+            AnalysisPassStatus.Ran => "ran",
+            AnalysisPassStatus.InsufficientData => "ran on too little data",
+            AnalysisPassStatus.TimedOut => "timed out",
+            AnalysisPassStatus.Error => "failed",
+            _ => "did not run",
+        };
+        var planRegression = planRegressionMs is { } ms
+            ? "PLAN_REGRESSION read " + DarlingCycleSkip.Format(ms)
+            : "PLAN_REGRESSION read did not run or was not measured";
+        var slot = insideFleetSlot ? "inside this server's fleet collection slot" : "outside any fleet collection slot";
+        var detail = string.Create(CultureInfo.InvariantCulture,
+            $"Scheduled analysis pass {outcome} in {DarlingCycleSkip.Format(elapsedMs)}, {findingCount} finding(s), {planRegression}, {slot}.");
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            detail += " " + message;
+        }
+
+        return (word, detail);
+    }
+
+    /// <summary>
+    /// #5824: the PLAN_REGRESSION read time of a pass, read only once the pass's task has finished, because the service stamps
+    /// it in <c>AnalyzeAsync</c>'s <c>finally</c>. Keyed on the task, not on the status word: a pass that ran past its budget,
+    /// unwound and came back (status TimedOut, <c>EndedEarlyAs</c> Timeout) has finished and keeps its real figure; a pass the
+    /// sweep stopped waiting for may still be running, so its figure is null rather than whatever the pass has stamped so
+    /// far. A pass that never started (no task) is null too.
+    /// </summary>
+    internal static long? PlanRegressionReadOfFinishedPass(Task? passTask, Func<long?> read) =>
+        passTask is not null && passTask.IsCompleted ? read() : null;
+
     /// <summary>Terminal states of one analysis pass — surfaced to the analyze_now command result.</summary>
-    private enum AnalysisPassStatus { Ran, Skipped, TimedOut, InsufficientData, Error }
+    internal enum AnalysisPassStatus { Ran, Skipped, TimedOut, InsufficientData, Error }
 
     private sealed record AnalysisPassResult(AnalysisPassStatus Status, int FindingCount, string? Message);
 
@@ -11436,7 +11526,8 @@ AND   j.hypertable_name = '{relation}'", connection))
         bool notifyFindings,
         Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook,
         CancellationToken stoppingToken,
-        IReadOnlyList<string>? separatelyMonitoredDatabases = null)
+        IReadOnlyList<string>? separatelyMonitoredDatabases = null,
+        Action<DarlingAnalysisService, Task>? onPassStarted = null)
     {
         if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
         {
@@ -11492,6 +11583,9 @@ AND   j.hypertable_name = '{relation}'", connection))
                ContinueWith nor the call above throws, so there is no window in which the pass exists
                with nothing committed to cleaning up after it. */
             passStarted = true;
+            /* #5824: the scheduled caller reads the pass's PLAN_REGRESSION time off the service, and only once this task has
+               finished (PlanRegressionReadOfFinishedPass). */
+            onPassStarted?.Invoke(analysisService, analyzeTask);
 
             /* Wait the budget PLUS the unwind grace, so a pass that honours its cancellation is seen
                finishing here rather than racing this sweep's own timer. Losing that race now carries
@@ -13827,7 +13921,8 @@ AND   j.hypertable_name = '{relation}'", connection))
             /* #5735: what the PREVIOUS body measured is the cause of any slot this one steps over, so it is read before this
                body overwrites it. */
             var priorCauses = new CycleSkipCauses(
-                server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs);
+                server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs,
+                server.LastAnalysisMs, server.LastGateWaitAnalysisHolders);
             var bodyStarted = Stopwatch.GetTimestamp();
             var bodySlowestName = (string?)null;
             var bodySlowestMs = 0L;
