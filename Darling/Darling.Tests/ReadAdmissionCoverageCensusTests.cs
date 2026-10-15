@@ -133,11 +133,11 @@ public sealed class ReadAdmissionCoverageCensusTests
     }
 
     [Fact]
-    public void TheFilterSkipsOnlyTheComposedPanelTool_AndTheSharedRunnerAdmitsIt()
+    public void TheSharedRunnerAdmitsTheComposedPanelTool()
     {
+        /* #5856 review round 1: which tools the latency filter passes through is no longer counted here by its spelling;
+           McpToolLatencyRecordingTests.TheInvestigationWait_IsNeitherTimedNorAdmitted_WhileAnotherRead_IsBoth calls them. */
         Assert.Equal("run_custom_view_panel", McpToolLatencyFilter.SkippedToolName);
-        var filter = File.ReadAllText(Path.Combine(ServiceDir, "Mcp", "McpToolLatencyFilter.cs"));
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(filter, @"string\.Equals\(toolName, SkippedToolName"));
 
         var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         var runner = web.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);

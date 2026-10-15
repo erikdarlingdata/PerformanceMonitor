@@ -161,7 +161,7 @@ public sealed class DarlingWebEndpointsTests
            so they STAY excluded from the generic mirror for the same reason those do, while
            update_alert_settings remains a write with no web surface at all — and the two server-onboarding
            WRITE tools (add_servers / remove_server). All with no /api/read/{tool} 1:1 mirror, like
-           mute_analysis_finding. get_tool_guide (#3898) reads no data: it serves the MCP tools' reading guides from
+           mute_analysis_finding. wait_for_investigation_requests (#5822) is a long poll, no page read. get_tool_guide (#3898) reads no data: it serves the MCP tools' reading guides from
            the MCP host's registration-time catalog, so there is nothing for a web read to mirror. */
         Assert.Equal(
             new[]
@@ -171,6 +171,7 @@ public sealed class DarlingWebEndpointsTests
                 "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_server_tag", "describe_custom_view_catalog", "edit_server", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
                 "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
                 "set_mute_rule_enabled", "set_notification_route_enabled", "submit_investigation_report", "test_custom_alert_rule", "unassign_server_tag", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
+                "wait_for_investigation_requests",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }

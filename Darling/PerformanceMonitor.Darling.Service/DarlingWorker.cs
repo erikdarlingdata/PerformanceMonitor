@@ -3385,7 +3385,9 @@ LIMIT 1";
             investigationStore, alertSettings, _logger,
             McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail dataDetail)
                 ? dataDetail
-                : McpDataDetail.MetadataOnly);
+                : McpDataDetail.MetadataOnly,
+            /* #5822: the long-poll's wake-up, fired when a request opens. */
+            openSignal: PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared);
 
         /* The shared record-and-send deliverer — hoisted so BOTH the shared alert engine and the Stage 4
            service self-alerts (DarlingSelfAlertEvaluator) fire through the SAME instance: identical

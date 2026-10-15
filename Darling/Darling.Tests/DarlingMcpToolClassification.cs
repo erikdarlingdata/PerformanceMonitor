@@ -62,6 +62,6 @@ internal static class DarlingMcpToolClassification
         "get_top_procedures_by_cpu", "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags",
         "get_wait_stats", "get_wait_trend", "get_wait_types", "get_waiting_tasks", "list_custom_alert_rules",
         "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_servers", "run_custom_view_panel",
-        "test_custom_alert_rule", "validate_custom_alert_rule", "validate_custom_view",
+        "test_custom_alert_rule", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests",
     };
 }

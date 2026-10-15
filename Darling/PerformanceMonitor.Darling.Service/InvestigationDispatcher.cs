@@ -60,6 +60,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>The brief is not composed here.</b> It is built when an agent claims the request
 /// (<see cref="InvestigationRequestStore.SetBriefAsync"/> needs the claim id), so the dispatcher leaves <c>brief</c> NULL.</para>
 ///
+/// <para><b>The long-poll's wake-up (#5822).</b> When the store answers <see cref="InvestigationOpenOutcome.Opened"/>, and only
+/// then (a join is not a new request, and a limit opens nothing), the dispatcher fires <see cref="InvestigationOpenSignal.Opened"/>
+/// for the route, which wakes every <c>wait_for_investigation_requests</c> call waiting on it. The signal carries nothing: the
+/// woken call reads the committed request from the store. With nobody waiting it costs a lock and an empty loop.</para>
+///
 /// <para><b>Never throws.</b> A failure, a cancellation included, is logged and the delivery that called it goes on: the
 /// deliverer's and the finding sender's catch turn a throw into a null delivery, which would misreport a page that was sent.
 /// Its store connections carry a 5-second <c>lock_timeout</c> (<see cref="WithLockTimeout"/>), so a held lock costs an alert
@@ -75,6 +80,7 @@ public sealed class InvestigationDispatcher
     private readonly McpDataDetail _dataDetail;
     private readonly IAlertSettings _settings;
     private readonly ILogger _logger;
+    private readonly InvestigationOpenSignal? _openSignal;
 
     /// <param name="store">The store, over a data source built from <see cref="WithLockTimeout"/>.</param>
     /// <param name="settings">The live alert settings: the route list and the PagerDuty auto-resolve flag are read per call.</param>
@@ -83,10 +89,11 @@ public sealed class InvestigationDispatcher
     /// #5821: the <c>mcp.dataDetail</c> level the webhook token's brief is masked at, the level the MCP tools serve. The
     /// default is the strictest, so a caller that names none never sends more than any level allows.
     /// </param>
+    /// <param name="openSignal">Fired when a request opens (#5822); null fires nothing.</param>
     public InvestigationDispatcher(InvestigationRequestStore store, IAlertSettings settings, ILogger logger,
-        McpDataDetail dataDetail = McpDataDetail.MetadataOnly)
+        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, InvestigationOpenSignal? openSignal = null)
         : this((store ?? throw new ArgumentNullException(nameof(store))).OpenOrJoinAsync, settings, logger,
-            store.ReadRequestAsync, dataDetail)
+            store.ReadRequestAsync, dataDetail, openSignal)
     {
     }
 
@@ -96,13 +103,15 @@ public sealed class InvestigationDispatcher
         IAlertSettings settings,
         ILogger logger,
         Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? readRequest = null,
-        McpDataDetail dataDetail = McpDataDetail.MetadataOnly)
+        McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
+        InvestigationOpenSignal? openSignal = null)
     {
         _openOrJoin = openOrJoin ?? throw new ArgumentNullException(nameof(openOrJoin));
         _readRequest = readRequest;
         _dataDetail = dataDetail;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _openSignal = openSignal;
     }
 
     /// <summary>
@@ -262,6 +271,7 @@ public sealed class InvestigationDispatcher
                     _logger.LogInformation(
                         "Investigation request {RequestId} opened for {Metric} on {Server} (family {Family}, route {RouteId})",
                         result.RequestId, metricName, serverName, family, route.RouteId);
+                    _openSignal?.Opened(route.RouteId);
                     break;
                 case InvestigationOpenOutcome.LimitReached:
                     _logger.LogWarning(

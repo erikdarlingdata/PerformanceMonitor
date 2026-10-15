@@ -218,6 +218,40 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#5822: the long poll's catch-up read answers the requests opened after a time, on the named routes, oldest
+    /// first, and the wait tool answers a request opened after its cursor through it.</summary>
+    [Fact]
+    public async Task OpenedSince_AnswersRequestsOpenedAfterATime_OnTheNamedRoutes_AndTheWaitToolAnswersThroughIt()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var signal = new InvestigationOpenSignal();
+            var start = _now;
+            var cursor = Root(await DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, null, null, 0, ct))
+                .GetProperty("cursor").GetString();
+
+            _now = _now.AddSeconds(1);
+            var first = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            _now = _now.AddSeconds(1);
+            var second = (await store.OpenOrJoinAsync(
+                new InvestigationAlert(2, 8, "srv-8", "resources", "High CPU", _now, new[] { "key-cpu" }, null, 20, 100,
+                    LeaseMinutes: 15, ExpiryMinutes: 240), ct)).RequestId!.Value;
+
+            var all = await store.OpenedSinceAsync(start, null, 10, ct);
+            Assert.Equal(new[] { first, second }, all.Select(r => r.RequestId));
+            var routeTwo = Assert.Single(await store.OpenedSinceAsync(start, new[] { 2 }, 10, ct));
+            Assert.Equal((second, 2, "srv-8", "resources"), (routeTwo.RequestId, routeTwo.RouteId, routeTwo.ServerName, routeTwo.Family));
+            Assert.Empty(await store.OpenedSinceAsync(all[1].OpenedAtUtc, null, 10, ct));
+            Assert.Single(await store.OpenedSinceAsync(start, null, 1, ct));
+
+            var answer = Root(await DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, new[] { 1 }, cursor, 0, ct));
+            Assert.Equal("ok", answer.GetProperty("status").GetString());
+            var row = Assert.Single(answer.GetProperty("requests").EnumerateArray().ToArray());
+            Assert.Equal(first, row.GetProperty("request_id").GetGuid());
+            Assert.Equal("srv-7", row.GetProperty("server_name").GetString());
+        });
+    }
+
     /* #5834: both reads are pages, and each says when the window held more than the page (the #3699 shape). At the bound:
        101 requests answer 100 returned and truncated; 100 answer 100 and not truncated, on the reports read and the list
        alike; and 201 journal rows on the page's requests answer 200 and journal_truncated, 200 answer 200 and not. */
