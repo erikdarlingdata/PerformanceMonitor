@@ -58,21 +58,21 @@ public static class ComposeLimits
 
     /// <summary>
     /// The most raw <c>collect.query_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811),
-    /// judged from the collection log before the statement runs. DERIVED, not measured: no field read of this table has a row count.
-    /// The #5582 cold cost of a Query Store wide row, 6.53 us for 1,088 bytes (8,457,483 rows, 9.2 GB), scaled by row width to a
-    /// query_stats row of 740 bytes (a field store's heap, see <c>PgTableTuning</c>) is 4.44 us; the same 45 s budget over it is 10.13
-    /// million, rounded down to 10.1 million. Deliberately permissive: a false refusal breaks a panel that would have finished, while a
-    /// panel over the real limit only reaches the 60 s timeout it reached before. So there is no tighter two-scan limit for a
-    /// RankedTimeSeries panel, as there is for the wide table. Replace it from a field measurement when one exists.
+    /// judged from the collection log before the statement runs. MEASURED in the field (#5811): a 24 h fleet query_stats panel reads
+    /// 12.2 M rows (12.2 M to 12.4 M a day over a week) and finishes today in at most 35.9 s, about 2.9 us per row; the 45 s budget over
+    /// that is about 15 million. The rule: a false refusal is user-visible breakage, so the limit sits at the worst observed cost per row,
+    /// and the refusal is only for windows that would have run to the statement timeout.
     /// </summary>
-    public const long MaxRawQueryStatsRows = 10_100_000;
+    public const long MaxRawQueryStatsRows = 15_000_000;
 
     /// <summary>
     /// The most raw <c>collect.procedure_stats</c> rows one composed panel read raw for its whole window may be expected to read (#5811).
-    /// DERIVED like <see cref="MaxRawQueryStatsRows"/>: 6.53 us per 1,088-byte wide row scaled to a 386-byte procedure_stats row is
-    /// 2.32 us, and 45 s over it is 19.4 million. Permissive for the same reason, with no two-scan limit.
+    /// MEASURED in the field like <see cref="MaxRawQueryStatsRows"/>: a 24 h fleet procedure_stats panel reads 17.3 M to 20.5 M rows a
+    /// day (19.7 M on the last full day) and finishes today in at most 20.8 s, about 1.1 us per row (20.8 s over 19.7 M); the 45 s
+    /// budget over that is about 40 million. Same rule: a false refusal is user-visible breakage, and the refusal is only for windows
+    /// that would have run to the statement timeout.
     /// </summary>
-    public const long MaxRawProcedureStatsRows = 19_400_000;
+    public const long MaxRawProcedureStatsRows = 40_000_000;
 
     /// <summary>
     /// The weight of an hour served from the rollup of the wide table (<c>collect.query_store_compose_stamp</c>), against 1.0

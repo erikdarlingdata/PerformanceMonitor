@@ -644,13 +644,18 @@ public sealed class DarlingComposeTests
         var sql = Compile(ValidPlan(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}"), new[] { "PROD-01" });
         Assert.Contains("procedure_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER()", sql, StringComparison.Ordinal);
+        /* #5811: the window's procedure_stats overlay plus collect.module_map for older handles, never a ranking of the window. */
+        Assert.Contains("FROM collect.module_map AS mm", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", sql, StringComparison.Ordinal);
         /* Per-server attribution — a handle reused across servers attributes per server, not globally. */
-        Assert.Contains("PARTITION BY server_name, sql_handle", sql, StringComparison.Ordinal);
-        /* The #1568 stitch is bounded by the SAME window ($1/$2) and scoped to the same server set ($3). */
-        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("server_name = ANY($3)", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT DISTINCT ON (rows_ps.server_name, rows_ps.sql_handle)", sql, StringComparison.Ordinal);
+        Assert.Contains("r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle", sql, StringComparison.Ordinal);
+        /* The #1568 stitch is bounded by the SAME window ($1/$2) and scoped to the same server set ($3): the overlay by id, the map by name. */
+        Assert.Contains("ps.collection_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("ps.collection_time <= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("mm.last_seen >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("    WHERE srv." + ServerIdScope3 + "\n", sql, StringComparison.Ordinal);
+        Assert.Contains("mm.server_name = ANY($3)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -715,7 +720,8 @@ public sealed class DarlingComposeTests
         var sql = Compile(ValidPlan(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}"));
         Assert.Contains("COALESCE(m.object_name, f.query_hash) AS statement", sql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER()", sql, StringComparison.Ordinal);
+        Assert.StartsWith("WITH m_last AS MATERIALIZED (\n", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.module_map AS mm", sql, StringComparison.Ordinal);
         Assert.Contains("procedure_stats", sql, StringComparison.Ordinal);
     }
 
@@ -893,7 +899,11 @@ public sealed class DarlingComposeTests
            bucket ranks and charts as an ordinary member, never a NULL that membership would drop. */
         var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"line\"}"));
 
-        Assert.StartsWith("WITH m AS (", sql, StringComparison.Ordinal);
+        Assert.StartsWith("WITH m_last AS MATERIALIZED (", sql, StringComparison.Ordinal);
+        Assert.Contains("),\nm AS (\n", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("),\nm AS (\n", StringComparison.Ordinal) < sql.IndexOf(", topn AS (", StringComparison.Ordinal),
+            "the module CTE (m) comes first, before the rank CTE that joins it");
         Assert.Contains(", topn AS (", sql, StringComparison.Ordinal);
         Assert.Equal(2, CountOccurrences(sql, "LEFT JOIN m ON m.sql_handle = f.sql_handle"));
         Assert.Contains(
@@ -3525,19 +3535,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan(EdgePanelJson);
         var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true));
 
-        Assert.Equal("WITH m AS (\n"
-            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name\n"
-            + "    FROM (\n"
-            + "        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n"
-            + "               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n"
-            + "        FROM collect.procedure_stats\n"
-            + "        WHERE collection_time >= $1\n"
-            + "          AND collection_time <= $2\n"
-            + "          AND sql_handle IS NOT NULL\n"
-            + "          AND sql_handle <> ''\n"
-            + "    ) ranked_modules\n"
-            + "    WHERE rn = 1\n"
-            + ")\n"
+        Assert.Equal(ModuleCte("$1")
             + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
             + "FROM " + EdgeFrom("sum") + " AS f\n"
             + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
@@ -3547,8 +3545,48 @@ public sealed class DarlingComposeTests
             + "ORDER BY value DESC NULLS LAST\n"
             + "LIMIT $5", compiled.Sql);
         Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", compiled.Sql, StringComparison.Ordinal);
     }
+
+    /// <summary>The #5811 module CTE (ruling C) as the compiler emits it, with the overlay floor parameter <paramref name="floor"/>
+    /// (the window start, $1, when there is no usable watermark) and an optional server scope.</summary>
+    private static string ModuleCte(string floor, string? scopeParam = null) =>
+        "WITH m_last AS MATERIALIZED (\n"
+        + "    SELECT DISTINCT ON (rows_ps.server_name, rows_ps.sql_handle)\n"
+        + "           rows_ps.server_name, rows_ps.sql_handle, rows_ps.object_name, rows_ps.schema_name, rows_ps.database_name\n"
+        + "    FROM collect.servers AS srv\n"
+        + "    CROSS JOIN LATERAL (\n"
+        + "        SELECT p.collection_time\n"
+        + "        FROM collect.procedure_stats AS p\n"
+        + "        WHERE p.server_id = srv.server_id\n"
+        + "          AND p.collection_time >= $1\n"
+        + "          AND p.collection_time <= $2\n"
+        + "        ORDER BY p.collection_time DESC\n"
+        + "        LIMIT 1\n"
+        + "    ) AS last_ps\n"
+        + "    CROSS JOIN LATERAL (\n"
+        + "        SELECT ps.server_name, ps.sql_handle, ps.object_name, ps.schema_name, ps.database_name, ps.collection_time\n"
+        + "        FROM collect.procedure_stats AS ps\n"
+        + "        WHERE ps.server_id = srv.server_id\n"
+        + $"          AND ps.collection_time >= LEAST(last_ps.collection_time, {floor})\n"
+        + "          AND ps.collection_time >= $1\n"
+        + "          AND ps.collection_time <= $2\n"
+        + "          AND ps.sql_handle IS NOT NULL\n"
+        + "          AND ps.sql_handle <> ''\n"
+        + "        OFFSET 0\n"
+        + "    ) AS rows_ps\n"
+        + (scopeParam is null ? string.Empty : $"    WHERE srv.server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY({scopeParam})))\n")
+        + "    ORDER BY rows_ps.server_name, rows_ps.sql_handle, rows_ps.collection_time DESC\n"
+        + "),\n"
+        + "m AS (\n"
+        + "    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_last\n"
+        + "    UNION ALL\n"
+        + "    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n"
+        + "    FROM collect.module_map AS mm\n"
+        + "    WHERE mm.last_seen >= $1\n"
+        + (scopeParam is null ? string.Empty : $"      AND mm.server_name = ANY({scopeParam})\n")
+        + "      AND NOT EXISTS (SELECT 1 FROM m_last AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n"
+        + ")\n";
 
     [Fact]
     public void Compile_HourlyRawEdges_WithAModuleMapWatermark_EmitsTheMapPlusRecentOverlaySql()
@@ -3556,27 +3594,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan(EdgePanelJson);
         var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true, moduleMapThrough: EdgeNow.AddMinutes(-30)));
 
-        Assert.Equal("WITH m_recent AS (\n"
-            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name\n"
-            + "    FROM (\n"
-            + "        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n"
-            + "               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n"
-            + "        FROM collect.procedure_stats\n"
-            + "        WHERE collection_time >= $5\n"
-            + "          AND collection_time <= $2\n"
-            + "          AND sql_handle IS NOT NULL\n"
-            + "          AND sql_handle <> ''\n"
-            + "    ) ranked_modules\n"
-            + "    WHERE rn = 1\n"
-            + "),\n"
-            + "m AS (\n"
-            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_recent\n"
-            + "    UNION ALL\n"
-            + "    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n"
-            + "    FROM collect.module_map AS mm\n"
-            + "    WHERE mm.last_seen >= $1\n"
-            + "      AND NOT EXISTS (SELECT 1 FROM m_recent AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n"
-            + ")\n"
+        Assert.Equal(ModuleCte("$5")
             + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
             + "FROM " + EdgeFrom("sum") + " AS f\n"
             + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
@@ -3586,7 +3604,7 @@ public sealed class DarlingComposeTests
             + "ORDER BY value DESC NULLS LAST\n"
             + "LIMIT $6", compiled.Sql);
         Assert.Contains("collect.module_map AS mm", compiled.Sql, StringComparison.Ordinal);
-        Assert.Contains("m_recent", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEAST(last_ps.collection_time, $5)", compiled.Sql, StringComparison.Ordinal);
         Assert.Contains("NOT EXISTS", compiled.Sql, StringComparison.Ordinal);
         Assert.Equal(6, compiled.Parameters.Count);
     }
@@ -3608,10 +3626,14 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan(EdgePanelJson);
         var start = EdgeNow.AddHours(-24);
         var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: start.AddHours(-5)));
+        var without = CompileEdge(plan, EdgeContext(plan, true));
 
-        Assert.Equal(start, (DateTime)compiled.Parameters[4].Value!);
+        /* #5811 ruling C: a watermark older than the window binds no floor; the overlay reads from the window start ($1), the
+           whole window, exactly as with no watermark. */
+        Assert.Equal(without.Sql, compiled.Sql);
+        Assert.Equal(without.Parameters.Count, compiled.Parameters.Count);
         Assert.Equal(start, (DateTime)compiled.Parameters[0].Value!);
-        Assert.Contains("WHERE collection_time >= $5\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEAST(last_ps.collection_time, $1)\n", compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3621,8 +3643,8 @@ public sealed class DarlingComposeTests
         var servers = new[] { "PROD-01" };
         var compiled = CompileEdge(plan, EdgeContext(plan, true, servers, EdgeNow.AddMinutes(-30)));
 
-        /* $3 is the scope: the overlay's procedure_stats scan, the map arm and the fact each carry it. */
-        Assert.Contains("          AND " + ServerIdScope3 + "\n", compiled.Sql, StringComparison.Ordinal);
+        /* $3 is the scope: the overlay's registry rows (by id), the map arm and the fact each carry it. */
+        Assert.Contains("    WHERE srv." + ServerIdScope3 + "\n", compiled.Sql, StringComparison.Ordinal);
         /* module_map has no server_id (keyed server_name, sql_handle) and is small, so its arm keeps the names (#5525). */
         Assert.Contains("      AND mm.server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
         Assert.Contains("  AND f." + ServerIdScope3 + "\n", compiled.Sql, StringComparison.Ordinal);
@@ -3643,8 +3665,8 @@ public sealed class DarlingComposeTests
 
             Assert.Equal(without.Sql, withNull.Sql);
             Assert.Equal(without.Parameters.Count, withNull.Parameters.Count);
-            Assert.StartsWith("WITH m AS (\n", withNull.Sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("module_map", withNull.Sql, StringComparison.Ordinal);
+            Assert.StartsWith("WITH m_last AS MATERIALIZED (\n", withNull.Sql, StringComparison.Ordinal);
+            Assert.Contains("LEAST(last_ps.collection_time, $1)\n", withNull.Sql, StringComparison.Ordinal);
         }
     }
 
@@ -3659,29 +3681,31 @@ public sealed class DarlingComposeTests
 
             Assert.Equal(without.Sql, compiled.Sql);
             Assert.Equal(without.Parameters.Count, compiled.Parameters.Count);
-            Assert.StartsWith("WITH m AS (\n", compiled.Sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("module_map AS mm", compiled.Sql, StringComparison.Ordinal);
+            Assert.Contains("LEAST(last_ps.collection_time, $1)\n", compiled.Sql, StringComparison.Ordinal);
         }
 
         /* A watermark exactly at now still serves the overlay. */
         var atNow = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: EdgeNow));
-        Assert.StartsWith("WITH m_recent AS (\n", atNow.Sql, StringComparison.Ordinal);
-        Assert.Contains("module_map AS mm", atNow.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEAST(last_ps.collection_time, $5)\n", atNow.Sql, StringComparison.Ordinal);
+        Assert.Equal(EdgeNow - DarlingModuleMap.WatermarkSlack, (DateTime)atNow.Parameters[4].Value!);
     }
 
     [Fact]
-    public void Compile_AWatermark_ChangesNothingOnTheRawRoute_NorOnACaggRoute()
+    public void Compile_AWatermark_BoundsTheRawRouteOverlay_AndChangesNothingOnACaggRoute()
     {
         var plan = ValidPlan(EdgePanelJson);
         var start = EdgeNow.AddHours(-24);
         var watermark = EdgeNow.AddMinutes(-30);
 
-        /* Raw: no verdict, so the hourly-raw-edges route is not taken. */
+        /* Raw: no verdict, so the hourly-raw-edges route is not taken. Since #5811 (ruling C) the watermark bounds the raw route's
+           overlay too: one floor parameter more, read in the LEAST, and nothing else differs. */
         var rawWith = CompileEdge(plan, EdgeContext(plan, false, moduleMapThrough: watermark));
         var rawWithout = CompileEdge(plan, EdgeContext(plan, false));
-        Assert.Equal(rawWithout.Sql, rawWith.Sql);
-        Assert.Equal(rawWithout.Parameters.Count, rawWith.Parameters.Count);
-        Assert.StartsWith("WITH m AS (\n", rawWith.Sql, StringComparison.Ordinal);
+        Assert.Equal(rawWithout.Sql.Replace("LEAST(last_ps.collection_time, $1)", "LEAST(last_ps.collection_time, $3)", StringComparison.Ordinal).Replace("LIMIT $3", "LIMIT $4", StringComparison.Ordinal), rawWith.Sql);
+        Assert.Equal(rawWithout.Parameters.Count + 1, rawWith.Parameters.Count);
+        Assert.Equal(watermark - DarlingModuleMap.WatermarkSlack, (DateTime)rawWith.Parameters[2].Value!);
+        Assert.StartsWith(ModuleCte("$1"), rawWithout.Sql, StringComparison.Ordinal);
+        Assert.StartsWith(ModuleCte("$3"), rawWith.Sql, StringComparison.Ordinal);
 
         /* CAGG: a window old enough for the daily tier joins collect.module_map directly, with or without a watermark. */
         var caggStart = EdgeNow.AddDays(-20);
@@ -3697,7 +3721,7 @@ public sealed class DarlingComposeTests
         Assert.Equal(caggWithout.Sql, caggWith.Sql);
         Assert.Equal(caggWithout.Parameters.Count, caggWith.Parameters.Count);
         Assert.Contains("LEFT JOIN collect.module_map AS m ON", caggWith.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("m_recent", caggWith.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("m_last", caggWith.Sql, StringComparison.Ordinal);
         Assert.True(start < EdgeNow);
     }
 
@@ -3757,7 +3781,7 @@ public sealed class DarlingComposeTests
         Assert.Equal(raw!.Sql, withNone.Sql);
         Assert.Equal(3, withNone.Parameters.Count);
         Assert.Contains("FROM collect.query_stats AS f\n", withNone.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("UNION ALL", withNone.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats_interval_hourly AS mid", withNone.Sql, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -3798,7 +3822,7 @@ public sealed class DarlingComposeTests
         Assert.Equal(expectedError, actualError);
         Assert.Equal(expected!.Sql, actual!.Sql);
         Assert.Equal(expected.Parameters.Count, actual.Parameters.Count);
-        Assert.DoesNotContain("UNION ALL", actual.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats_interval_hourly AS mid", actual.Sql, StringComparison.Ordinal);
     }
 
     private static ComposeHourlyEdgesVerdict EdgeVerdict(IReadOnlyList<string>? servers)
@@ -3823,7 +3847,7 @@ public sealed class DarlingComposeTests
     {
         var (plain, given) = EdgeSqlPair(new[] { "A" }, EdgeVerdict(null));
         Assert.Equal(plain, given);
-        Assert.DoesNotContain("UNION ALL", given, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats_interval_hourly AS mid", given, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3831,7 +3855,7 @@ public sealed class DarlingComposeTests
     {
         var (plain, given) = EdgeSqlPair(null, EdgeVerdict(new[] { "A" }));
         Assert.Equal(plain, given);
-        Assert.DoesNotContain("UNION ALL", given, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats_interval_hourly AS mid", given, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3839,11 +3863,11 @@ public sealed class DarlingComposeTests
     {
         var (plainFleet, givenFleet) = EdgeSqlPair(null, EdgeVerdict(Array.Empty<string>()));
         Assert.NotEqual(plainFleet, givenFleet);
-        Assert.Contains("UNION ALL", givenFleet, StringComparison.Ordinal);
+        Assert.Contains("query_stats_interval_hourly AS mid", givenFleet, StringComparison.Ordinal);
 
         var (plainScoped, givenScoped) = EdgeSqlPair(new[] { "A", "B" }, EdgeVerdict(new[] { "A" }));
         Assert.Equal(plainScoped, givenScoped);
-        Assert.DoesNotContain("UNION ALL", givenScoped, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_stats_interval_hourly AS mid", givenScoped, StringComparison.Ordinal);
     }
 
     [Fact]

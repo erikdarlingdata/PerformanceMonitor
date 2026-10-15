@@ -3490,10 +3490,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var registryLookupFailed = false;
         var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken, logger, () => registryLookupFailed = true);
 
-        /* #5811: a raw-route object_name panel reads module names from collect.module_map, which the worker creates at start. Where that
-           create failed, the compile keeps the window-wide ranking CTE, which needs no map. Asked here, before the hourly-edges snapshot
-           takes its connection, and only for a panel that joins modules. */
-        var moduleMapMissing = plan!.UsesModuleJoin && await ModuleMapMissingAsync(postgres, logger, cancellationToken);
+        /* #5811: a raw-route object_name panel reads module names from collect.module_map, which the worker creates at start, and reads
+           procedure_stats only from the map's watermark less the refresh slack (ruling C). Where that create failed, the compile keeps the
+           window-wide ranking CTE, which needs no map; with no watermark the overlay is the whole window. Asked here, before the
+           hourly-edges snapshot takes its connection, and only for a panel that joins modules. A panel whose hourly-edges guard passes
+           reads the watermark again inside its snapshot and uses that one; a watermark read earlier is never newer, so this one only
+           widens the overlay. */
+        var moduleMap = plan!.UsesModuleJoin ? await ProbeModuleMapAsync(postgres, logger, cancellationToken) : (Missing: false, Through: null);
 
         /* #4605: only a panel the hourly-plus-raw-edges route could serve pays for the count guard. It runs on one
            connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
@@ -3529,7 +3532,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMapMissing);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -3980,21 +3983,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal const string ModuleMapExistsSql = "SELECT to_regclass('collect.module_map') IS NOT NULL";
 
     /// <summary>
-    /// #5811: true when <c>collect.module_map</c> is missing from this store, so a raw-route module join compiles the window-wide
-    /// ranking CTE that needs no map. A lookup that faults also answers true: the old CTE is slower, but it runs on any store.
+    /// #5811: whether <c>collect.module_map</c> is missing from this store, so a raw-route module join compiles the window-wide
+    /// ranking CTE that needs no map, and otherwise the map's watermark (<see cref="DarlingModuleMap.ReadWatermarkAsync"/>, null when
+    /// there is none or its read fails), which bounds the module CTE's procedure_stats overlay (ruling C). A lookup that faults answers
+    /// missing: the old CTE is slower, but it runs on any store.
     /// </summary>
-    private static async Task<bool> ModuleMapMissingAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task<(bool Missing, DateTime? Through)> ProbeModuleMapAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(ModuleMapExistsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
-            return await command.ExecuteScalarAsync(cancellationToken) is not true;
+            if (await command.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return (true, null);
+            }
+
+            return (false, await DarlingModuleMap.ReadWatermarkAsync(connection, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug(ex, "The #5811 module map lookup failed; the panel ranks procedure_stats over its window instead.");
-            return true;
+            return (true, null);
         }
     }
 

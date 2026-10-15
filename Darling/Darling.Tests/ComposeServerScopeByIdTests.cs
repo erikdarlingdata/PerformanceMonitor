@@ -130,12 +130,12 @@ public sealed class ComposeServerScopeByIdTests
     }
 
     /// <summary>The hourly-raw-edges statement scopes its fact alias once, outside the union, and the planner pushes the id list into
-    /// each arm; the procedure_stats overlay CTE carries its own scope.</summary>
+    /// each arm; the procedure_stats overlay CTE carries its own scope, on the registry rows it reads per server (#5811).</summary>
     [Fact]
     public void HourlyRawEdges_ScopeTheFactAndTheModuleOverlay_ByIdAndTheMapByName()
     {
         var sql = ScopedStatements(null).Single(s => s.Label.StartsWith("hourly raw edges", StringComparison.Ordinal)).Sql;
-        Assert.Contains("          AND " + ByIdScope(3) + "\n", sql, StringComparison.Ordinal);
+        Assert.Contains("    WHERE srv." + ByIdScope(3) + "\n", sql, StringComparison.Ordinal);
         Assert.Contains("  AND f." + ByIdScope(3) + "\n", sql, StringComparison.Ordinal);
         Assert.Contains("      AND mm.server_name = ANY($3)\n", sql, StringComparison.Ordinal);
     }
