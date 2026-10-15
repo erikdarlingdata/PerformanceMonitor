@@ -160,12 +160,16 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                    context the channels already render, so delivering both prints the Diagnosis facts
                    twice. The persisted value below is unaffected. */
                 /* #5821: a single page opens or joins its investigation request BEFORE the channels post, so the generic
-                   webhook's {{investigation_json}} can carry it, at the instant its row below is stamped with. */
+                   webhook's {{investigation_json}} can carry it, at the instant its row below is stamped with, and its link rows
+                   carry the values that row will store, so a claim made while the page is in flight reads them. */
                 var investigationJson = _investigations is null
                     ? null
                     : await _investigations.OpenForWebhookAsync(
                         alert.ServerId, alert.ServerName, alert.MetricName, muted: false, alertTimeUtc, context,
-                        alert.StoryPathHash);
+                        alert.StoryPathHash,
+                        InvestigationDispatcher.Facts(
+                            alert.CurrentValue, alert.Severity, alert.ThresholdValue, alert.NotifyThreshold, muted: false,
+                            alert.DetailText, context is not null ? AlertContextSerializer.Serialize(context) : null));
                 var result = await _core.TrySendAsync(
                     alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
                     alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DeliveredProse,

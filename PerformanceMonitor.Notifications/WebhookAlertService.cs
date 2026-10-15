@@ -2400,6 +2400,14 @@ public class WebhookAlertService
     private const string InvestigationToken = "investigation_json";
 
     /// <summary>
+    /// #5821: whether a generic body template places <c>{{investigation_json}}</c>. A blank template is the default, which
+    /// does not, so Darling reads an investigation request back for a page only when its operator asked for it.
+    /// </summary>
+    public static bool TemplateCarriesInvestigationToken(string? bodyTemplate) =>
+        !string.IsNullOrWhiteSpace(bodyTemplate)
+        && bodyTemplate.Contains("{{" + InvestigationToken + "}}", StringComparison.Ordinal);
+
+    /// <summary>
     /// <c>{{investigation_json}}</c>'s text at its place in the template (#5821): inside a string literal the object's
     /// JSON-escaped text (nothing when there is no request); bare, the raw object (<c>""</c> when there is none).
     /// </summary>

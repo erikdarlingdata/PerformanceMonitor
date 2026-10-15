@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using NpgsqlTypes;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -20,6 +21,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>One alert handed to the investigation store by the dispatcher (#5632 Phase A). Every time is UTC.</summary>
 /// <param name="RouteId">The route whose agent level answered 1; its limits are the next four members.</param>
 /// <param name="DedupKeys">Every incident dedup key of the alert (a row is recorded per key); empty when it has none.</param>
+/// <param name="Facts">
+/// #5821: what the alert's history row will hold, written on its link rows (V186) so the brief's alerts section reads them
+/// even when an agent claims the request before that row exists. Null writes NULLs, and the brief then reads the history row.
+/// </param>
 public sealed record InvestigationAlert(
     int RouteId,
     int ServerId,
@@ -32,7 +37,20 @@ public sealed record InvestigationAlert(
     int MaxPerHour,
     int MaxPerDay,
     int LeaseMinutes,
-    int ExpiryMinutes);
+    int ExpiryMinutes,
+    InvestigationAlertFacts? Facts = null);
+
+/// <summary>
+/// #5821: the alert's values as its <c>config_alert_log</c> row stores them: <c>current_value</c> and
+/// <c>threshold_value</c> as that row's doubles, <c>muted</c>, <c>detail_text</c> and <c>context_json</c>. The two texts are
+/// scrubbed where they are written, as the history row's are.
+/// </summary>
+public sealed record InvestigationAlertFacts(
+    double CurrentValue,
+    double ThresholdValue,
+    bool Muted,
+    string? DetailText,
+    string? ContextJson);
 
 /// <summary>What <see cref="InvestigationRequestStore.OpenOrJoinAsync"/> did with an alert.</summary>
 public enum InvestigationOpenOutcome
@@ -269,8 +287,9 @@ INSERT INTO config.investigation_requests
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + interval '30 minutes', $10, $10 + make_interval(mins => $11), $12)";
 
     internal const string AlertRowsSql = @"
-INSERT INTO config.investigation_request_alerts (request_id, alert_time, server_id, metric_name, dedup_key)
-SELECT $1, $2, $3, $4, k
+INSERT INTO config.investigation_request_alerts
+    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+SELECT $1, $2, $3, $4, k, $6, $7, $8, $9, $10
 FROM unnest($5::text[]) AS k";
 
     internal const string JournalSql = @"
@@ -975,9 +994,16 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     {
         /* A row per incident dedup key; an alert with no key still gets its one row. */
         var rowKeys = keys.Length == 0 ? new string?[] { null } : keys.Cast<string?>().ToArray();
+        var facts = alert.Facts;
         return ExecAsync(connection, transaction, AlertRowsSql, cancellationToken,
             P(requestId), P(alertTime), P(alert.ServerId), P(alert.MetricName),
-            new NpgsqlParameter<string?[]> { TypedValue = rowKeys, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            new NpgsqlParameter<string?[]> { TypedValue = rowKeys, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text },
+            /* #5821: the history row's values, so a brief composed before that row exists still reads them. */
+            new NpgsqlParameter<double?> { TypedValue = facts?.CurrentValue, NpgsqlDbType = NpgsqlDbType.Double },
+            new NpgsqlParameter<double?> { TypedValue = facts?.ThresholdValue, NpgsqlDbType = NpgsqlDbType.Double },
+            new NpgsqlParameter<bool?> { TypedValue = facts?.Muted, NpgsqlDbType = NpgsqlDbType.Boolean },
+            new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Text(facts?.DetailText), NpgsqlDbType = NpgsqlDbType.Text },
+            new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Json(facts?.ContextJson), NpgsqlDbType = NpgsqlDbType.Text });
     }
 
     /// <summary>

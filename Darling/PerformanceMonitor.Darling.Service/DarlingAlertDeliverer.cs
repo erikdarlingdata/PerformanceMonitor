@@ -223,12 +223,17 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         /* #5632 Phase A: the row's time is stamped once, here, so the investigation link names this exact row.
            #5821: the request is opened or joined BEFORE the channels post, so the generic webhook's {{investigation_json}}
            can carry it; per row (a Per-event split comes through here once per incident). A muted alert, a report, a
-           recovery or an alert with no agent route opens nothing and waits on no store call; the dispatcher never throws. */
+           recovery or an alert with no agent route opens nothing and waits on no store call; the dispatcher never throws.
+           The history row is written after the send, so the link rows carry the values it will store: an agent that claims
+           while the page is in flight reads them in its brief. */
         var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
         var investigationJson = _investigations is null
             ? null
             : await _investigations.OpenForWebhookAsync(
                 outcome.ServerKey, outcome.ServerName, outcome.MetricName, outcome.Muted, alertTimeUtc, context,
+                facts: InvestigationDispatcher.Facts(
+                    currentValue, numericCurrentValue, outcome.ThresholdValue, numericThresholdValue, outcome.Muted, detailText,
+                    context is not null ? AlertContextSerializer.Serialize(context) : null),
                 cancellationToken: cancellationToken);
 
         /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below.

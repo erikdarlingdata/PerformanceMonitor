@@ -55,7 +55,7 @@ public sealed class InvestigationWebhookTokenTests
 
     private static async Task<(string? Body, List<InvestigationAlert> Asked)> DeliverAsync(
         string template, AlertOutcome outcome, NotificationRoute[] routes, InvestigationOpenResult? open = null,
-        string? brief = null, McpDataDetail mode = McpDataDetail.MetadataOnly)
+        string? brief = null, McpDataDetail mode = McpDataDetail.MetadataOnly, List<Guid>? reads = null)
     {
         using var generic = new CapturingWebhookEndpoint();
         var config = new DarlingConfig();
@@ -74,7 +74,11 @@ public sealed class InvestigationWebhookTokenTests
                 return Task.FromResult(result);
             },
             settings, NullLogger.Instance,
-            (id, _) => Task.FromResult<(InvestigationRequestRow Row, string? Brief)?>((Row(id), brief)),
+            (id, _) =>
+            {
+                reads?.Add(id);
+                return Task.FromResult<(InvestigationRequestRow Row, string? Brief)?>((Row(id), brief));
+            },
             mode);
         var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance, investigationDispatcher: dispatcher);
 
@@ -110,6 +114,50 @@ public sealed class InvestigationWebhookTokenTests
         Assert.Equal(JsonValueKind.Object, brief.ValueKind);
         Assert.DoesNotContain("Alice Liddell", body!, StringComparison.Ordinal);
         Assert.Equal("blocking", brief.GetProperty("findings")[0].GetProperty("category").GetString());
+    }
+
+    /// <summary>
+    /// #5821 review round 1: the request is read back only for a page whose generic body template places the token. The
+    /// token is in no shipped template, so an agent-routed alert on the default template opens its request and makes no
+    /// second store call in front of its page.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"metric\": \"{{metric}}\"}")]
+    [InlineData("")]
+    public async Task ATemplateWithoutTheToken_OpensTheRequest_AndReadsNothingBack(string template)
+    {
+        var reads = new List<Guid>();
+        var (body, asked) = await DeliverAsync(
+            template, Outcome("Deadlocks Detected"), [Route(5, "Deadlocks Detected")], brief: StoredBrief(), reads: reads);
+
+        Assert.NotNull(body);
+        Assert.Single(asked);
+        Assert.Empty(reads);
+    }
+
+    [Fact]
+    public async Task ATemplateWithTheToken_ReadsTheRequestBackOnce()
+    {
+        var reads = new List<Guid>();
+        await DeliverAsync(BareTemplate, Outcome("Deadlocks Detected"), [Route(5, "Deadlocks Detected")], reads: reads);
+
+        Assert.Equal(RequestId, Assert.Single(reads));
+    }
+
+    /// <summary>
+    /// #5821 review round 1: a stored brief the token cannot parse or mask does not stop the page. It still posts, carrying
+    /// the request id, and the brief goes as null.
+    /// </summary>
+    [Fact]
+    public async Task ABriefThatCannotBeRendered_StillPostsTheRequestId()
+    {
+        var (body, asked) = await DeliverAsync(
+            BareTemplate, Outcome("Deadlocks Detected"), [Route(5, "Deadlocks Detected")], brief: "{\"findings\": [");
+
+        Assert.Single(asked);
+        var investigation = Investigation(body);
+        Assert.Equal(RequestId.ToString(), investigation.GetProperty("request_id").GetString());
+        Assert.Equal(JsonValueKind.Null, investigation.GetProperty("brief").ValueKind);
     }
 
     [Fact]

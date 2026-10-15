@@ -155,7 +155,7 @@ ALTER TABLE IF EXISTS config.config_notification_routes
 
     /// <summary>
     /// V185 (#5812): the partial-day columns of <c>collect.plan_regression_daily_built</c>, <c>built_through</c> (the probe's
-    /// newest sentinel) and <c>partial_seq</c>. Safe on a store that never had them. A whole build made under V185 keeps
+    /// V185 sentinel) and <c>partial_seq</c>. Safe on a store that never had them. A whole build made under V185 keeps
     /// <c>built_seq = late_seq</c> and reads as a whole-day build, as every day built before V185 does. A partial build already
     /// has <c>built_seq</c> NULL, so V184 reads it as not built, and its V184 builder rebuilds it whole.
     /// </summary>
@@ -165,6 +165,23 @@ ALTER TABLE IF EXISTS config.config_notification_routes
 ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     DROP COLUMN IF EXISTS built_through,
     DROP COLUMN IF EXISTS partial_seq;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V186 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
+    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
+    /// below V186 reads every alert value from the history row, as it did before.
+    /// </summary>
+    internal static async Task DropV186SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+ALTER TABLE IF EXISTS config.investigation_request_alerts
+    DROP COLUMN IF EXISTS current_value,
+    DROP COLUMN IF EXISTS threshold_value,
+    DROP COLUMN IF EXISTS muted,
+    DROP COLUMN IF EXISTS detail_text,
+    DROP COLUMN IF EXISTS context_json;", connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

@@ -1234,6 +1234,25 @@ ALTER TABLE collect.read_latency
     private static readonly string V184Sql = InvestigationTables.CreateSql;
 
     /// <summary>
+    /// V186 (#5821): <c>config.investigation_request_alerts</c> gains the five values the brief's alerts section reads from
+    /// the alert's history row: <c>current_value</c>, <c>threshold_value</c>, <c>muted</c>, <c>detail_text</c> and
+    /// <c>context_json</c>. An alert with an agent route now opens or joins its request before its page is sent, so the
+    /// generic webhook can name the request, and its history row is written after the send: an agent that claims while the
+    /// page is in flight would compose a brief with no history row to read. The link rows carry the values instead.
+    ///
+    /// <para>Every column is nullable with no default, so each <c>ADD COLUMN</c> is catalog-only and rewrites nothing; a link
+    /// row written before this rung keeps NULLs and its brief reads the history row as before. IF NOT EXISTS, so a second run
+    /// does nothing. No GRANT: the table's grants are table-level. <b>No Lite twin:</b> Lite has no investigation store.</para>
+    /// </summary>
+    private const string V186Sql = @"
+ALTER TABLE config.investigation_request_alerts
+    ADD COLUMN IF NOT EXISTS current_value double precision,
+    ADD COLUMN IF NOT EXISTS threshold_value double precision,
+    ADD COLUMN IF NOT EXISTS muted boolean,
+    ADD COLUMN IF NOT EXISTS detail_text text,
+    ADD COLUMN IF NOT EXISTS context_json text;";
+
+    /// <summary>
     /// V185 (#5812): the open days of <c>collect.plan_regression_daily</c> are built too, as partial days.
     /// <c>collect.plan_regression_daily_built</c> gains <c>built_through</c>, the <c>first_execution_time</c> the build covered
     /// (exclusive) by a partial build: a day's totals are its rows (by <c>last_execution_time</c>) whose first execution is
@@ -1568,6 +1587,7 @@ $rung$;";
         new Migration(183, "read-caller", V183Sql),
         new Migration(184, "agent-investigations", V184Sql),
         new Migration(185, "plan-regression-partial-days", V185Sql),
+        new Migration(186, "investigation-alert-facts", V186Sql),
     };
 
     /// <summary>

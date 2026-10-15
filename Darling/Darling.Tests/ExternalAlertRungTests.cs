@@ -116,15 +116,15 @@ public sealed class ExternalAlertRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 5, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 6, parameters.Length - 1);
         Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 2].Name);
         Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasPlanRegressionPartialDays", parameters[ProbeOrdinal + 5].Name);
+        Assert.Equal("hasInvestigationAlertFacts", parameters[ProbeOrdinal + 6].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal - 1].Name);
 
@@ -137,7 +137,12 @@ public sealed class ExternalAlertRungTests
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
 
-        var withoutV185 = (object[])allPresent.Clone();
+        /* V186's sentinel (#5821) is the top: with it absent the answer is V185's (#5812). */
+        var withoutV186 = (object[])allPresent.Clone();
+        withoutV186[^1] = false;
+        Assert.Equal(185, (int)method.Invoke(null, withoutV186)!);
+
+        var withoutV185 = (object[])withoutV186.Clone();
         withoutV185[ProbeOrdinal + 5] = false;
         Assert.Equal(184, (int)method.Invoke(null, withoutV185)!);
 
@@ -240,6 +245,7 @@ public sealed class ExternalAlertRungTests
             await ExecAsync(connection, "DROP TABLE config.external_alert_state; DROP TABLE config.external_alert_pending; DROP TABLE config.external_alert_source; ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ExternalAlertTables.RungVersion, ct);
             await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);

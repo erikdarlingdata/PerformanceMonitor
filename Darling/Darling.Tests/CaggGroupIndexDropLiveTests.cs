@@ -322,6 +322,7 @@ public sealed class CaggGroupIndexDropLiveTests
         {
             /* V185 (#5812) - the plan regression partial-day watermark column is the probe's newest sentinel. */
             await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
         }
 
         if (simulatedVersion < 184)
