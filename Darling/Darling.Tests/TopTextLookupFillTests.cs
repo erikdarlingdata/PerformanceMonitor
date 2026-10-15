@@ -179,7 +179,11 @@ public sealed class TopTextLookupFillTests
         foreach (var sql in new[] { DarlingDataReader.QueryStoreTopSql, DarlingDataReader.QueryStoreTopTableSql, DarlingDataReader.QueryStoreTopDailyTableSql, ViewerDataService.QueryStoreTopSql })
         {
             Assert.Contains("DESC, " + queryStoreKey + "\n", sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
-            Assert.Contains("DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord", sql, StringComparison.Ordinal);
+            /* #5815: the page numbers the rows it kept from p, and keeps the candidates in that same order through the text
+               lateral (r.sort_cost is the page_ord sort expression), so LIMIT $4 stops the text lookups at a full page. */
+            Assert.Contains("DESC, p.database_name, p.query_id, p.plan_id, p.query_hash, p.execution_type_desc, p.replica_role) AS page_ord", sql, StringComparison.Ordinal);
+            Assert.Contains("ORDER BY k.total_executions * k.avg_duration_ms DESC, k.database_name, k.query_id, k.plan_id, k.query_hash, k.execution_type_desc, k.replica_role\n", sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+            Assert.Contains("ORDER BY r.sort_cost DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role\n", sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
         }
 
         var viewer = ViewerDataService.TopQueriesSql.ReplaceLineEndings("\n");
@@ -219,11 +223,14 @@ public sealed class TopTextLookupFillTests
     public void TheCallersRunTheStatementsThroughTopFill()
     {
         var reader = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs"));
-        Assert.Equal(4, Regex.Matches(reader, @"TopFill\.RunAsync\(top,").Count);   /* raw and hourly Top Queries, then the Query Store raw read and its table read (daily shares the table call site) */
+        /* #5815: the Query Store raw and table reads run once at TopFill.FinalCandidates instead of through the rounds. */
+        Assert.Equal(2, Regex.Matches(reader, @"TopFill\.FinalCandidates\(top\)").Count);
+        Assert.Equal(2, Regex.Matches(reader, @"TopFill\.RunAsync\(top,").Count);   /* raw and hourly Top Queries */
         var viewer = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStats.cs"));
         Assert.Single(Regex.Matches(viewer, @"TopFill\.RunAsync\(top,"));
         var viewerQs = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStore.cs"));
-        Assert.Equal(2, Regex.Matches(viewerQs, @"TopFill\.RunAsync\(top,").Count);   /* raw and interval table */
+        Assert.Empty(Regex.Matches(viewerQs, @"TopFill\.RunAsync\(top,"));
+        Assert.Equal(2, Regex.Matches(viewerQs, @"TopFill\.FinalCandidates\(top\)").Count);   /* #5815: raw and interval table, one run each */
     }
 
     private static string FindSource(string relative)
