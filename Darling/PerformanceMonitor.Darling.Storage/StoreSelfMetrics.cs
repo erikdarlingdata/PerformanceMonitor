@@ -136,8 +136,9 @@ public static class StoreSelfMetrics
     /// Per-statement command timeout for the sweep (#2317) — and, at the worker's call site, the
     /// budget for the WHOLE sweep via a linked CTS (see SweepStoreSelfMetricsAsync: this sweep is
     /// awaited on the main loop, so the sequential per-statement timeouts must not stack). The
-    /// sizing queries call <c>hypertable_detailed_size</c> across every hypertable (whose inner
-    /// <c>hypertable_local_size</c> is the frame the server log names when it cancels) and
+    /// sizing queries called <c>hypertable_detailed_size</c> across every hypertable (whose inner
+    /// <c>hypertable_local_size</c> is the frame the server log names when it cancels; they now size every
+    /// chunk in one pass, #5857, which is cheaper but still a file call per relation) and
     /// <c>pg_database_size</c> over the whole
     /// store, and on the dogfood fleet (141 objects, a 100+ GB dimension) they outgrew Npgsql's default
     /// 30 seconds ~5x/day under load — surfacing as "Exception while reading from stream" (Npgsql
@@ -165,10 +166,87 @@ public static class StoreSelfMetrics
     public const string BackgroundJobObjectKind = "background_job";
 
     /// <summary>
+    /// The sizing CTEs the hypertable and continuous-aggregate size statements share (#5857). The caller
+    /// puts a <c>targets(hypertable_schema, hypertable_name)</c> CTE in front of them: the hypertables, or
+    /// the aggregates' materialization hypertables. They then read every target's sizes in ONE pass over
+    /// the catalogs, where each statement used to call <c>hypertable_detailed_size</c> and
+    /// <c>chunk_compression_stats</c> once per hypertable.
+    ///
+    /// <para><b>Why.</b> On a store with 1,904 chunks, <c>hypertable_detailed_size</c> took 5.3 s across 72
+    /// hypertables a sweep, and <c>chunk_compression_stats</c> 0.1 s, so the cost is the size function:
+    /// one <c>relation_size</c> (file opens, one per fork of the table, its TOAST and each index) per chunk
+    /// and per compressed relation, plus one function call and one catalog walk per hypertable. This is
+    /// the same population <c>hypertable_detailed_size</c> adds up, taken in one pass and sized with
+    /// <c>pg_total_relation_size</c>: the root, each chunk the public <c>chunks</c> view lists, and each
+    /// chunk's compressed relation named by <c>compression_settings.compress_relid</c> (the join
+    /// <see cref="TimescaleInventoriedPredicateSql"/> documents, identical on 2.28.1 and 2.30.1). The
+    /// chunks come from the public <c>chunks</c> view and the relations from a name join to
+    /// <c>pg_class</c>, because the chunk catalog was rebuilt in 2.29.0 (#3918) and a join on its columns
+    /// fails on one side of it. The pre- and post-compression bytes read
+    /// <c>_timescaledb_internal.compressed_chunk_stats</c>, the view <c>chunk_compression_stats</c> itself
+    /// reads (same name and columns on 2.28.1 and 2.30.1): it holds stored catalog sizes and makes no file
+    /// call, and it has zero rows for a hypertable whose compression is off, as the function had.</para>
+    ///
+    /// <para><b>What stays exact, and what could not be made cheaper.</b> Totals equal
+    /// <c>hypertable_detailed_size</c> byte for byte (the equality test in StoreSelfMetricsTests). An
+    /// estimate from <c>pg_class.relpages</c> costs no file calls (13 ms for 1,000 chunks) but is not the
+    /// bytes: relpages is 0 until a relation is vacuumed or analysed, and a gap that size is not a size
+    /// column's meaning. So the file calls remain, and the cost still grows with chunk count, about 1.6 times
+    /// lower than the function's. <c>chunk_counts</c> counts the <c>chunks</c> view's rows, the way the
+    /// aggregate arm always did.</para>
+    /// </summary>
+    public const string HypertableSizingCtesSql = @"all_chunks AS MATERIALIZED (
+    SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name
+    FROM timescaledb_information.chunks
+),
+chunk_rels AS (
+    SELECT t.hypertable_schema, t.hypertable_name, pc.oid
+    FROM targets t
+    JOIN all_chunks ch
+        ON  ch.hypertable_schema = t.hypertable_schema
+        AND ch.hypertable_name = t.hypertable_name
+    LEFT JOIN pg_namespace pn ON pn.nspname = ch.chunk_schema
+    LEFT JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = ch.chunk_name
+),
+chunk_counts AS (
+    SELECT hypertable_schema, hypertable_name, count(*)::integer AS chunk_count
+    FROM chunk_rels
+    GROUP BY hypertable_schema, hypertable_name
+),
+sizes AS (
+    SELECT hypertable_schema, hypertable_name, sum(pg_total_relation_size(oid))::bigint AS total_bytes
+    FROM (
+        SELECT t.hypertable_schema, t.hypertable_name, pc.oid
+        FROM targets t
+        JOIN pg_namespace pn ON pn.nspname = t.hypertable_schema
+        JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = t.hypertable_name
+        UNION ALL
+        SELECT hypertable_schema, hypertable_name, oid
+        FROM chunk_rels
+        UNION ALL
+        SELECT r.hypertable_schema, r.hypertable_name, cs.compress_relid::oid
+        FROM chunk_rels r
+        JOIN _timescaledb_catalog.compression_settings cs ON cs.relid::oid = r.oid
+        WHERE cs.compress_relid IS NOT NULL
+    ) x
+    GROUP BY hypertable_schema, hypertable_name
+),
+compression AS (
+    SELECT t.hypertable_schema, t.hypertable_name,
+           sum(s.uncompressed_total_size)::bigint AS before_bytes,
+           sum(s.compressed_total_size)::bigint AS after_bytes
+    FROM targets t
+    JOIN _timescaledb_internal.compressed_chunk_stats s
+        ON  s.hypertable_schema = t.hypertable_schema
+        AND s.hypertable_name = t.hypertable_name
+    GROUP BY t.hypertable_schema, t.hypertable_name
+)";
+
+    /// <summary>
     /// The per-hypertable rows — TimescaleDB stores only (the caller gates on the detected flag; the
     /// timescaledb_information views referenced here do not exist on plain PostgreSQL).
-    /// <c>hypertable_detailed_size</c> / <c>chunk_compression_stats</c> take a regclass, built with
-    /// <c>format('%I.%I', ...)</c> from the catalog view's own rows — never user input.
+    /// Sized in one pass over the catalogs (<see cref="HypertableSizingCtesSql"/>, #5857), not by a
+    /// <c>hypertable_detailed_size</c> / <c>chunk_compression_stats</c> call per hypertable.
     /// <c>compressed_*_bytes</c> are NULL for a hypertable with no compressed chunks yet. $1 metric_time
     /// (naive UTC, one value per run).
     ///
@@ -186,6 +264,11 @@ public static class StoreSelfMetrics
     public const string HypertableInsertSql = $@"
 INSERT INTO collect.store_metrics
     (metric_time, object_name, object_kind, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count)
+WITH targets AS (
+    SELECT hypertable_schema, hypertable_name
+    FROM timescaledb_information.hypertables
+),
+{HypertableSizingCtesSql}
 SELECT
     $1,
     h.hypertable_name,
@@ -195,16 +278,12 @@ SELECT
     c.after_bytes,
     h.num_chunks
 FROM timescaledb_information.hypertables h
-LEFT JOIN LATERAL (
-    SELECT sum(total_bytes)::bigint AS total_bytes
-    FROM hypertable_detailed_size(format('%I.%I', h.hypertable_schema, h.hypertable_name)::regclass)
-) s ON true
-LEFT JOIN LATERAL (
-    SELECT
-        sum(before_compression_total_bytes)::bigint AS before_bytes,
-        sum(after_compression_total_bytes)::bigint AS after_bytes
-    FROM chunk_compression_stats(format('%I.%I', h.hypertable_schema, h.hypertable_name)::regclass)
-) c ON true";
+LEFT JOIN sizes s
+    ON  s.hypertable_schema = h.hypertable_schema
+    AND s.hypertable_name = h.hypertable_name
+LEFT JOIN compression c
+    ON  c.hypertable_schema = h.hypertable_schema
+    AND c.hypertable_name = h.hypertable_name";
 
     /// <summary>The <c>object_kind</c> of the per-continuous-aggregate rows (#3582). See
     /// <see cref="HypertableObjectKind"/> for why it is a const.</summary>
@@ -214,15 +293,13 @@ LEFT JOIN LATERAL (
     /// The per-continuous-aggregate rows (#3582) — TimescaleDB stores only, like the hypertable arm. One
     /// row per aggregate in <c>timescaledb_information.continuous_aggregates</c>, under the aggregate's
     /// USER-FACING view name (<c>view_name</c>, bare, the way hypertable rows carry <c>hypertable_name</c>),
-    /// sized through its materialization hypertable: <c>hypertable_detailed_size</c> on
-    /// <c>materialization_hypertable_schema.materialization_hypertable_name</c> for the total,
-    /// <c>chunk_compression_stats</c> on the same regclass for the pre/post-compression bytes, and the
-    /// materialization's chunk count from <c>timescaledb_information.chunks</c>.
+    /// sized through its materialization hypertable by <see cref="HypertableSizingCtesSql"/> (#5857): the
+    /// total, the pre/post-compression bytes, and the chunk count from <c>timescaledb_information.chunks</c>.
     ///
-    /// <para><b>Why the chunk count is a third lateral and not a column of the second.</b>
-    /// <c>chunk_compression_stats</c> returns ZERO rows for a hypertable whose compression is not enabled
+    /// <para><b>Why the chunk count is its own CTE and not a column of the compression one.</b>
+    /// The compression stats have ZERO rows for a hypertable whose compression is not enabled
     /// (measured on 2.28.1: a two-chunk materialization with compression off yields no rows at all, and
-    /// two rows the moment it is enabled), so a <c>count(*)</c> over it would report every uncompressed
+    /// two rows the moment it is enabled), so a <c>count(*)</c> over them would report every uncompressed
     /// aggregate as chunkless. The <c>chunks</c> view lists every non-OSM chunk of every hypertable,
     /// materializations included, which is also how the <c>hypertables</c> view computes
     /// <c>num_chunks</c> for the sibling rows — so the two kinds count chunks the same way.</para>
@@ -243,6 +320,11 @@ LEFT JOIN LATERAL (
     public const string ContinuousAggregateInsertSql = $@"
 INSERT INTO collect.store_metrics
     (metric_time, object_name, object_kind, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count)
+WITH targets AS (
+    SELECT materialization_hypertable_schema AS hypertable_schema, materialization_hypertable_name AS hypertable_name
+    FROM timescaledb_information.continuous_aggregates
+),
+{HypertableSizingCtesSql}
 SELECT
     $1,
     ca.view_name,
@@ -250,24 +332,17 @@ SELECT
     s.total_bytes,
     c.before_bytes,
     c.after_bytes,
-    n.chunk_count
+    coalesce(n.chunk_count, 0)
 FROM timescaledb_information.continuous_aggregates ca
-LEFT JOIN LATERAL (
-    SELECT sum(total_bytes)::bigint AS total_bytes
-    FROM hypertable_detailed_size(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass)
-) s ON true
-LEFT JOIN LATERAL (
-    SELECT
-        sum(before_compression_total_bytes)::bigint AS before_bytes,
-        sum(after_compression_total_bytes)::bigint AS after_bytes
-    FROM chunk_compression_stats(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass)
-) c ON true
-LEFT JOIN LATERAL (
-    SELECT count(*)::integer AS chunk_count
-    FROM timescaledb_information.chunks ch
-    WHERE ch.hypertable_schema = ca.materialization_hypertable_schema
-    AND   ch.hypertable_name = ca.materialization_hypertable_name
-) n ON true";
+LEFT JOIN sizes s
+    ON  s.hypertable_schema = ca.materialization_hypertable_schema
+    AND s.hypertable_name = ca.materialization_hypertable_name
+LEFT JOIN compression c
+    ON  c.hypertable_schema = ca.materialization_hypertable_schema
+    AND c.hypertable_name = ca.materialization_hypertable_name
+LEFT JOIN chunk_counts n
+    ON  n.hypertable_schema = ca.materialization_hypertable_schema
+    AND n.hypertable_name = ca.materialization_hypertable_name";
 
     /// <summary>
     /// The <c>object_name</c> a <see cref="BackgroundJobObjectKind"/> row carries, over a
