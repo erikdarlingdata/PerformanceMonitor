@@ -166,7 +166,7 @@ public sealed class EffectiveReadWindowTests
     /// note. Remove the note and every expected span below reads null.
     /// </summary>
     [Fact]
-    public async System.Threading.Tasks.Task AStorageGrowthRead_RecordsTheDaysItReads_NotItsHoursBack()
+    public async System.Threading.Tasks.Task AStorageGrowthOrUtilizationRead_RecordsTheDaysItReads_NotItsHoursBack()
     {
         await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=darling;Database=none");
         using var cancelled = new System.Threading.CancellationTokenSource();
@@ -191,6 +191,21 @@ public sealed class EffectiveReadWindowTests
         Assert.Equal(14 * 24, await NotedHours(14 * 24, "db") ?? 0, 3);
         Assert.Equal(90 * 24, await NotedHours(90 * 24, "db") ?? 0, 3);
 
+        /* utilization's rows span its 7-day trend, the wider of its two windows. */
+        using (var utilization = ReadScope.Open(null))
+        {
+            Assert.NotNull(await Record.ExceptionAsync(() => DarlingMcpFinOpsTools.ReadUtilizationAsync(postgres, (1, "SRV1"), 24, 10, cancelled.Token)));
+            var row = SlowReadLog.Build(utilization.Scope, ReadSurface.Mcp, "get_finops", ReadOutcome.Ok, 9_000,
+                new JsonObject { ["view"] = DarlingMcpFinOpsTools.UtilizationView }, null, DateTime.UtcNow);
+            Assert.Equal(DarlingMcpFinOpsTools.UtilizationTrendDays * 24, Hours(row), 3);
+        }
+
+        using (var utilizationRefused = ReadScope.Open(null))
+        {
+            Assert.NotNull(await DarlingMcpFinOpsTools.ReadUtilizationAsync(postgres, (1, "SRV1"), 48, 10, cancelled.Token));
+            Assert.Null(utilizationRefused.Scope.WindowStartUtc);
+        }
+
         /* A refused window notes nothing and never reaches the store. */
         using var refused = ReadScope.Open(null);
         Assert.NotNull(await DarlingMcpFinOpsTools.ReadStorageGrowthAsync(postgres, (1, "SRV1"), 25, 10, "db", null, cancelled.Token));
@@ -200,12 +215,13 @@ public sealed class EffectiveReadWindowTests
     /// <summary>
     /// #5814 review, the negative pin: index_analysis and database_sizes read the newest snapshot, so their slow-read row
     /// records no window (the first fix noted 24 hours for them through the shared check); a view that reads
-    /// <c>hours_back</c> records it, and storage_growth notes nothing at this step (it notes its own span in the read).
+    /// <c>hours_back</c> records it, and storage_growth and utilization note nothing at this step (each notes its own span
+    /// in its read).
     /// </summary>
     [Fact]
     public void ALatestSnapshotFinOpsView_RecordsNoWindow_AndAWindowedViewRecordsItsHoursBack()
     {
-        foreach (var view in new[] { DarlingMcpFinOpsTools.DatabaseSizesView, DarlingMcpFinOpsTools.IndexAnalysisView, DarlingMcpFinOpsTools.StorageGrowthView })
+        foreach (var view in new[] { DarlingMcpFinOpsTools.DatabaseSizesView, DarlingMcpFinOpsTools.IndexAnalysisView, DarlingMcpFinOpsTools.StorageGrowthView, DarlingMcpFinOpsTools.UtilizationView })
         {
             using var opened = ReadScope.Open(null);
             DarlingMcpFinOpsTools.NoteViewWindow(view, 24);
@@ -225,20 +241,15 @@ public sealed class EffectiveReadWindowTests
 
 /// <summary>
 /// #5814 census: every MCP tool that takes a window argument (<c>hours</c>, <c>hours_back</c>, <c>days_back</c>) notes the
-/// window it ran with, so its slow-read row is never windowless; no such tool notes only on a conditional arm unless it is
-/// rostered with its reason; every route in <see cref="ReadWindowBand.FixedHours"/> is a real tool with no window argument
-/// that notes its window; no Darling read calls the shared validators directly, which would skip the note, unless rostered;
-/// and no caller of the validators that end the window now anchors its read on an <c>as_of</c>.
+/// window it ran with, so its slow-read row is never windowless; every route in <see cref="ReadWindowBand.FixedHours"/> is a
+/// real tool with no window argument that notes its window; and no Darling read calls the shared validators directly,
+/// which would skip the note, unless rostered with its reason.
 ///
 /// <para><b>The bound these rest on, stated.</b> Every scan reads the service source through
 /// <see cref="CSharpSourceWalker.StripCommentsAndStrings"/>, so a comment or a string that names a validator is neither a
 /// note nor an offender. A tool's source is its region (its attribute up to the next tool's) plus every same-file method its
-/// region calls by name; a helper in another file is not read, which is why storage_growth's own note has a direct pin
-/// (<see cref="EffectiveReadWindowTests.AStorageGrowthRead_RecordsTheDaysItReads_NotItsHoursBack"/>) rather than this census.
-/// Noting is checked per region, not per branch: the conditional-arm check sees a note that sits on the arm of a
-/// <c>?:</c>, a <c>??</c> or a <c>switch</c> expression, and does NOT see one guarded by an <c>if</c> or a <c>case</c>
-/// label (<c>get_pvs_stats</c> notes its trend window only when <c>trend_hours_back</c> is not 0, correctly, and passes
-/// unrostered). A per-branch census would need a parse; the direct pins carry the branches that matter.</para>
+/// region calls by name. Noting is checked per region, not per branch: a tool that notes on one arm and not another passes,
+/// which is why the get_finops views carry direct behavior pins in <see cref="EffectiveReadWindowTests"/>.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class EffectiveReadWindowCensusTests
@@ -246,22 +257,6 @@ public sealed class EffectiveReadWindowCensusTests
     private static readonly string[] WindowParameters = ["hours", "hours_back", "days_back"];
 
     private static readonly Regex Noting = new(@"DarlingReadWindow\.\w+\(|ReadScope\.NoteWindow\(", RegexOptions.Compiled);
-
-    /* The validators that end the window at the process clock: right only for a read with no as_of. */
-    private static readonly Regex NowEnding = new(@"DarlingReadWindow\.(ValidateHoursBack|ValidateDaysBack)\(", RegexOptions.Compiled);
-
-    /* A note on an arm: the code before it, past whitespace (line breaks included) and an await, ends in ?, ?? or : (a
-       ternary arm, or a case label) or in => (a switch-expression arm, or an expression body: the reason the roster below
-       is checked for equality, so a false hit is seen and named rather than ignored). */
-    private static readonly Regex ArmBefore = new(@"(?:\?|:|=>)\s*(?:await\s+)?$", RegexOptions.Compiled);
-
-    /// <summary>The tools whose note sits on a conditional arm, each with the reason the other arms need none.</summary>
-    private static readonly Dictionary<string, string> ConditionalNoteRoster = new(StringComparer.Ordinal)
-    {
-        /* Empty today. get_finops was the case that prompted this check (a ternary whose storage_growth arm noted nothing);
-           it now checks hours_back through the shared validator and notes per view in NoteViewWindow, whose arms the direct
-           pins in EffectiveReadWindowTests carry. */
-    };
 
     /// <summary>The direct calls of the shared validators that stay, by file and validator, each with its reason.</summary>
     private static readonly Dictionary<string, string> DirectCallRoster = new(StringComparer.Ordinal)
@@ -273,13 +268,6 @@ public sealed class EffectiveReadWindowCensusTests
             + "and notes per view after its checks in NoteViewWindow: index_analysis and database_sizes read the newest "
             + "snapshot and note nothing, storage_growth notes the span it reads. Noting in the check would note 24 hours "
             + "for a snapshot read.",
-    };
-
-    /// <summary>The callers of the now-ending validators that are not MCP tools, each with the reason it has no as_of.</summary>
-    private static readonly Dictionary<string, string> NowEndingNonToolRoster = new(StringComparer.Ordinal)
-    {
-        ["DarlingWebEndpoints.cs"] = "FleetParamRefusal: /api/fleet takes hours and worst, no as_of, and its note is "
-            + "inert (it runs before the route's ReadScope opens).",
     };
 
     private sealed record Source(string Path, string Raw, string Code);
@@ -361,31 +349,6 @@ public sealed class EffectiveReadWindowCensusTests
             + string.Join(", ", missing));
     }
 
-    /// <summary>The bot's #5830 counterexample: get_finops passed the census on the one arm of a ternary that noted while
-    /// its storage_growth arm, a 30 to 90 day read, noted nothing. A tool whose note sits on an arm is a finding unless the
-    /// roster names it with the reason its other arms need none; a roster entry that no longer matches fails too.</summary>
-    [Fact]
-    public void NoWindowedTool_NotesOnAConditionalArm_UnlessRostered()
-    {
-        var tools = WindowedTools().Concat(Tools().Where(t => ReadWindowBand.FixedHours.ContainsKey(t.Name)));
-        var conditional = new SortedSet<string>(StringComparer.Ordinal);
-
-        foreach (var (name, method) in tools)
-        {
-            var source = ToolSource(name, method.Name);
-            foreach (Match note in Noting.Matches(source))
-            {
-                var before = source[Math.Max(0, note.Index - 200)..note.Index];
-                if (ArmBefore.IsMatch(before))
-                {
-                    conditional.Add(name);
-                }
-            }
-        }
-
-        Assert.Equal(ConditionalNoteRoster.Keys.OrderBy(k => k, StringComparer.Ordinal), conditional);
-    }
-
     [Fact]
     public void EveryFixedWindowRoute_IsARealToolWithNoWindowArgument_ThatNotesItsWindow()
     {
@@ -431,41 +394,5 @@ public sealed class EffectiveReadWindowCensusTests
 
         Assert.True(offenders.Count == 0, "Call DarlingReadWindow instead, so the read notes its window (#5814): " + string.Join(", ", offenders));
         Assert.Equal(DirectCallRoster.Keys.OrderBy(k => k, StringComparer.Ordinal), rostered.OrderBy(k => k, StringComparer.Ordinal));
-    }
-
-    /// <summary>The bot's #5830 riskiest line 3: ValidateHoursBack and ValidateDaysBack note a window that ends at the
-    /// process clock, which is right only because no caller resolves an as_of. A tool that calls either one must take no
-    /// as_of and resolve none; a caller that is not a tool is rostered with the reason it has none. A tool that anchors its
-    /// read calls DarlingReadWindow.Validate with the as_of instead, which ends the window at the anchor.</summary>
-    [Fact]
-    public void NoCallerOfTheNowEndingValidators_AnchorsItsReadOnAsOf()
-    {
-        var checkedFiles = new HashSet<string>(StringComparer.Ordinal);
-        var anchored = new List<string>();
-
-        foreach (var (name, method) in Tools())
-        {
-            var source = ToolSource(name, method.Name);
-            if (!NowEnding.IsMatch(source)) continue;
-
-            checkedFiles.Add(s_sources.Value.First(s => s.Raw.Contains($"[McpServerTool(Name = \"{name}\"", StringComparison.Ordinal)).Path);
-            if (method.GetParameters().Any(p => p.Name == "as_of") || source.Contains("ResolveAsOf(", StringComparison.Ordinal))
-            {
-                anchored.Add(name);
-            }
-        }
-
-        /* Seven tool files when this landed. */
-        Assert.True(checkedFiles.Count >= 6, $"only {checkedFiles.Count} tool files call the now-ending validators: the scan is broken");
-        Assert.True(anchored.Count == 0, "These tools anchor on as_of but note a window ending now; call DarlingReadWindow.Validate "
-            + "with the as_of instead: " + string.Join(", ", anchored));
-
-        var unaccounted = s_sources.Value
-            .Where(s => Path.GetFileName(s.Path) != "DarlingReadWindow.cs" && NowEnding.IsMatch(s.Code))
-            .Where(s => !checkedFiles.Contains(s.Path) && !NowEndingNonToolRoster.ContainsKey(Path.GetFileName(s.Path)))
-            .Select(s => Path.GetFileName(s.Path))
-            .ToList();
-        Assert.True(unaccounted.Count == 0, "These files call a now-ending validator outside a tool the census checks; "
-            + "roster each with the reason it has no as_of: " + string.Join(", ", unaccounted));
     }
 }

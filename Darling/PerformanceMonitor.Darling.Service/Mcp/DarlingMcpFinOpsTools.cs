@@ -93,12 +93,13 @@ public sealed partial class DarlingMcpFinOpsTools
     /// Notes the window <paramref name="normalizedView"/> reads on the <see cref="ReadScope"/>, for its slow-read row
     /// (#5814): the <paramref name="hoursBack"/> hours ending now, after the check passed. Only a view that reads that window
     /// notes it. index_analysis and database_sizes read the newest snapshot, so a noted window would record a span the read
-    /// never touched; storage_growth's window is not its <c>hours_back</c> (30 days at the default), so it notes the span it
-    /// reads itself, in <see cref="ReadStorageGrowthAsync"/>.
+    /// never touched. storage_growth and utilization read a span their <c>hours_back</c> does not name (storage_growth 30 days at
+    /// the default, utilization a 7-day trend beside its 24 hours), so each notes the span it reads itself, in
+    /// <see cref="ReadStorageGrowthAsync"/> and <see cref="ReadUtilizationAsync"/>.
     /// </summary>
     internal static void NoteViewWindow(string normalizedView, int hoursBack)
     {
-        if (normalizedView is StorageGrowthView or IndexAnalysisView or DatabaseSizesView)
+        if (normalizedView is StorageGrowthView or UtilizationView or IndexAnalysisView or DatabaseSizesView)
         {
             return;
         }
