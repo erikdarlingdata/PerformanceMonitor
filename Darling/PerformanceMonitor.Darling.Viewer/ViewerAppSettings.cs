@@ -94,6 +94,18 @@ public sealed class ViewerAppSettings
     /// applied at startup and live-previewed from the Settings window via the shared <c>ThemeManager</c>.</summary>
     public string ColorTheme { get; set; } = "Dark";
 
+    /// <summary>The Alert Details window's last size (#5847), so a window enlarged to read a long blocking alert opens at
+    /// that size next time. 0 = never resized: the window's own default size. <see cref="Normalize"/> bounds it to
+    /// 0..<see cref="MaxAlertDetailWindowSize"/>, Lite's <c>alert_detail_window_width</c> range, so a hand-edited size
+    /// cannot open the window far off-screen.</summary>
+    public double AlertDetailWindowWidth { get; set; }
+
+    /// <summary>The Alert Details window's last height (#5847); see <see cref="AlertDetailWindowWidth"/>.</summary>
+    public double AlertDetailWindowHeight { get; set; }
+
+    /// <summary>The largest Alert Details width or height kept (#5847), the bound Lite's settings loader applies.</summary>
+    internal const double MaxAlertDetailWindowSize = 10000;
+
     /// <summary>
     /// How far a plan operator's actual row count may diverge from its estimate before the plan viewer
     /// colors the edge feeding it (#4579), matching PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c>
@@ -212,6 +224,8 @@ public sealed class ViewerAppSettings
         TimeDisplayMode = (TimeDisplayMode is "ServerTime" or "LocalTime" or "UTC") ? TimeDisplayMode : "ServerTime";
         OverviewSortMode = (OverviewSortMode is "Cpu" or "Name") ? OverviewSortMode : "Cpu";
         ColorTheme = (ColorTheme is "Dark" or "Light" or "CoolBreeze") ? ColorTheme : "Dark";
+        AlertDetailWindowWidth = ClampSize(AlertDetailWindowWidth);
+        AlertDetailWindowHeight = ClampSize(AlertDetailWindowHeight);
         AccuracyRatioDivergenceLimit = AccuracyRatioDivergenceLimit >= PerformanceMonitor.PlanAnalysis.PlanEdgeColour.MinDivergenceLimit
             ? AccuracyRatioDivergenceLimit
             : PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit;
@@ -248,6 +262,11 @@ public sealed class ViewerAppSettings
 
         return this;
     }
+
+    /* #5847: the Alert Details window's stored size, bounded as Lite's loader bounds it (v.Number(0, 0, 10000)). A
+       non-finite value, which no JSON number deserializes to, reads as 0: never resized. */
+    private static double ClampSize(double value) =>
+        double.IsFinite(value) ? Math.Clamp(value, 0, MaxAlertDetailWindowSize) : 0;
 
     private static int Clamp(int value, int min, int max, int fallback)
     {

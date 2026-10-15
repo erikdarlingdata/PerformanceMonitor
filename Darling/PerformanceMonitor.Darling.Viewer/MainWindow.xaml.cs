@@ -469,6 +469,8 @@ public partial class MainWindow : Window
            it surface load/dismiss/mute outcomes on the shared status bar. */
         AlertsHistoryContent.Initialize(_dataService);
         AlertsHistoryContent.StatusChanged += OnServerTabStatusChanged;
+        AlertsHistoryContent.FullChainOpener = FullChainOpenerFor;
+        AlertsHistoryContent.DetailWindowSizeStore = new AlertDetailWindow.SettingsSizeStore(_appSettingsStore);
 
         /* The Job History tab is a self-loading all-servers control (retained SQL Agent job-run history);
            give it the store and surface its load outcomes on the shared status bar. */
@@ -2115,6 +2117,44 @@ public partial class MainWindow : Window
         {
             RecommendationsStatusText.Text = $"Open in Active Queries failed: {ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// #5847: the Alert Details window's "open the full chain" action for a Blocking or Deadlocks alert: open (or focus)
+    /// the alert's server tab and show its Blocked Process Reports or Deadlocks grid over a window around the alert's
+    /// time, through the same open-tab path the Recommendations deep link uses. Null (no link) for any other alert, a
+    /// server no longer registered, or a PostgreSQL server, whose tab has no Blocking tab.
+    /// </summary>
+    private Action? FullChainOpenerFor(ViewerAlertRow row)
+    {
+        var view = AlertChainLink.ViewFor(row.MetricName);
+        if (view == AlertChainView.None)
+        {
+            return null;
+        }
+
+        var server = FindManagedServerById(row.ServerId);
+        if (server is null || server.IsPostgres)
+        {
+            return null;
+        }
+
+        var (fromUtc, toUtc) = AlertChainLink.WindowUtc(row.AlertTime);
+        return async () =>
+        {
+            try
+            {
+                var serverTab = OpenServerTab(server);
+                if (serverTab is not null)
+                {
+                    await serverTab.DeepLinkToIncidentAsync(view, fromUtc, toUtc);
+                }
+            }
+            catch (Exception ex)
+            {
+                OnServerTabStatusChanged($"Opening the {view} view failed: {ex.Message}");
+            }
+        };
     }
 
     /// <summary>Finds a registered server by id in the Recommendations tab's own selector list (populated

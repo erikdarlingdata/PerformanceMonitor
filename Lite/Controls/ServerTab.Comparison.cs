@@ -226,7 +226,7 @@ public partial class ServerTab : UserControl
         return MainTabControl.SelectedIndex switch
         {
             0 => true, // Overview — correlated timeline lanes
-            2 => QueriesSubTabControl.SelectedIndex is 2 or 3 or 4, // Top Queries / Top Procedures / Query Store
+            QueriesTabIndex => QueriesSubTabControl.SelectedIndex is 2 or 3 or 4, // Top Queries / Top Procedures / Query Store
             _ => false
         };
     }

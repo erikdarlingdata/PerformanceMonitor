@@ -6,7 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Windows;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
@@ -22,9 +24,34 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class AlertDetailWindow : Window
 {
-    public AlertDetailWindow(ViewerAlertRow item)
+    private readonly ViewerAlertRow _item;
+    private readonly Action? _openFullChain;
+    private readonly ISizeStore? _sizeStore;
+
+    /// <summary>True once the window has been shown: only a window the user saw stores its size on close.</summary>
+    private bool _shown;
+
+    /// <param name="item">The alert-history row.</param>
+    /// <param name="openFullChain">Opens the server's Blocking or Deadlocks view at the alert's time (#5847); null hides
+    /// the link (an alert with no such view, or an opener that cannot navigate there).</param>
+    /// <param name="sizeStore">Where the window's last size is kept (#5847); null keeps no size.</param>
+    public AlertDetailWindow(ViewerAlertRow item, Action? openFullChain = null, ISizeStore? sizeStore = null)
     {
         InitializeComponent();
+        _item = item;
+        _sizeStore = sizeStore;
+        RestoreSize();
+        ContentRendered += (_, _) => _shown = true;
+        Closing += OnClosingStoreSize;
+
+        /* #5847: the link to the full chain, only for an alert whose view holds more than the shortened fields. */
+        var linkText = AlertChainLink.LinkText(AlertChainLink.ViewFor(item.MetricName));
+        if (openFullChain is not null && linkText is not null)
+        {
+            _openFullChain = openFullChain;
+            FullChainLinkRun.Text = linkText;
+            FullChainLinkText.Visibility = Visibility.Visible;
+        }
 
         TimeText.Text = item.TimeLocal;
         ServerText.Text = item.ServerName;
@@ -70,14 +97,15 @@ public partial class AlertDetailWindow : Window
         /* #5642: the fire-time sample-age line, read from the persisted context and never measured against
            this window's clock. The flat detail_text already carries it for rows persisted with the line, so it
            is shown here only when the structured view (which does not print detail_text) is up or the text
-           lacks it - once either way. No line when the row carries no age. */
+           lacks it - once either way. No line when the row carries no age. A header row, as in Lite (#5847): it no
+           longer opens the Details panel on its own. */
         var ageLine = AlertDetailText.SampleAgeLineFromJson(
             item.ContextJson, DetailItemsScroll.Visibility == Visibility.Visible ? null : item.DetailText);
         if (ageLine is not null)
         {
             SampleAgeText.Text = ageLine;
+            SampleAgeLabel.Visibility = Visibility.Visible;
             SampleAgeText.Visibility = Visibility.Visible;
-            DetailPanel.Visibility = Visibility.Visible;
         }
     }
 
@@ -115,11 +143,89 @@ public partial class AlertDetailWindow : Window
         Close();
     }
 
+    /// <summary>The whole alert as plain text (#5847): what <see cref="CopyAll_Click"/> puts on the clipboard.</summary>
+    internal string BuildCopyText() => AlertDetailCopyText.Build(
+        new AlertDetailCopyHeader(
+            _item.TimeLocal, _item.ServerName, _item.MetricName, _item.CurrentValueDisplay,
+            _item.ThresholdValueDisplay, _item.NotificationType, _item.StatusDisplay, _item.Muted,
+            _item.ResolutionSentAtDisplay, _item.ResolutionChannels ?? "", _item.ResolutionOutcome),
+        _item.ContextJson, _item.DetailText);
+
+    /* #5847: a clipboard another app holds is a status line here, never an exception. */
+    private void CopyAll_Click(object sender, RoutedEventArgs e)
+    {
+        CopyStatusText.Text = ClipboardText.TrySetText(BuildCopyText())
+            ? "Copied the alert details to the clipboard."
+            : "Could not copy: another application is holding the clipboard. Try again.";
+        CopyStatusText.Visibility = Visibility.Visible;
+    }
+
+    /* #5847: close this modal window first, so the server's view it opens is not behind it. */
+    private void FullChainLink_Click(object sender, RoutedEventArgs e)
+    {
+        var open = _openFullChain;
+        Close();
+        open?.Invoke();
+    }
+
+    /* #5847: open at the size the user last left it, never below the window's minimum. */
+    private void RestoreSize()
+    {
+        var size = _sizeStore?.Load();
+        if (size is { } s && s.Width >= MinWidth && s.Height >= MinHeight)
+        {
+            Width = s.Width;
+            Height = s.Height;
+        }
+    }
+
+    private void OnClosingStoreSize(object? sender, CancelEventArgs e)
+    {
+        if (_sizeStore is null || !_shown)
+        {
+            return;
+        }
+
+        /* RestoreBounds is the normal-state size, so a window closed maximized remembers the size it had before. */
+        var bounds = WindowState == WindowState.Normal ? new Size(ActualWidth, ActualHeight) : RestoreBounds.Size;
+        if (bounds.Width >= MinWidth && bounds.Height >= MinHeight)
+        {
+            _sizeStore.Save(new Size(Math.Round(bounds.Width), Math.Round(bounds.Height)));
+        }
+    }
+
+    /// <summary>Where the window's last size is kept (#5847): each product's own settings file.</summary>
+    public interface ISizeStore
+    {
+        Size? Load();
+        void Save(Size size);
+    }
+
     private void CopyTsqlButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: DetailItemView view } && !string.IsNullOrEmpty(view.Body))
         {
             ClipboardText.TrySetText(view.Body);
+        }
+    }
+
+    /// <summary>The viewer's size store (#5847): the two size members of the viewer-local settings file.</summary>
+    internal sealed class SettingsSizeStore(ViewerAppSettingsStore store) : ISizeStore
+    {
+        public Size? Load()
+        {
+            var settings = store.Load();
+            return settings.AlertDetailWindowWidth > 0 && settings.AlertDetailWindowHeight > 0
+                ? new Size(settings.AlertDetailWindowWidth, settings.AlertDetailWindowHeight)
+                : null;
+        }
+
+        public void Save(Size size)
+        {
+            var settings = store.Load();
+            settings.AlertDetailWindowWidth = size.Width;
+            settings.AlertDetailWindowHeight = size.Height;
+            store.Save(settings);
         }
     }
 

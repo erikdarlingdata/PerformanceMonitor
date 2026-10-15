@@ -466,7 +466,9 @@ public sealed class McpHealthTools
                 fanout = r.FanoutDominance is null ? null : new
                 {
                     items = r.FanoutItems,
-                    slowest = r.SlowestItem,
+                    /* #5813: a query_store database whose read the time budget ended is stored under its plain
+                       name (the column is an identity); the words are added here, from its budget-sized cost. */
+                    slowest = QueryStoreReadBudget.RenderSlowestItem(r.CollectorName, r.SlowestItem, r.SlowestItemMs),
                     slowest_ms = r.SlowestItemMs,
                     run_ms = r.SlowestRunDurationMs,
                     slowest_share_pct = Math.Round(r.FanoutSlowestSharePercent!.Value, 2),

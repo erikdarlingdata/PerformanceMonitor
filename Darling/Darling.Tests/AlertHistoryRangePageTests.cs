@@ -193,6 +193,27 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal(0, r.GetProperty("writes").GetArrayLength());
     }
 
+    /// <summary>#5834: the Investigations panel says when the list, the reports read or a request's journal held more
+    /// than the page it returned, and says nothing when none did.</summary>
+    [Fact]
+    public void TheInvestigationsPanel_SaysWhenAReadWasCut_AndNothingWhenNoneWas()
+    {
+        var r = Run("investigationsTruncated");
+        const string ListCut = "Showing the newest 2 requests; older ones are not listed.";
+        const string ReportsCut = "held more requests than one reports read returns";
+        const string JournalCut = "Showing the newest 2 journal rows; older ones are not listed.";
+        var clear = r.GetProperty("clear");
+        var cut = r.GetProperty("cut");
+        foreach (var text in new[] { ListCut, ReportsCut })
+        {
+            Assert.DoesNotContain(text, clear.GetProperty("panel").GetString()!, StringComparison.Ordinal);
+            Assert.Contains(text, cut.GetProperty("panel").GetString()!, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain(JournalCut, clear.GetProperty("journal").GetString()!, StringComparison.Ordinal);
+        Assert.Contains(JournalCut, cut.GetProperty("journal").GetString()!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ATruncatedReplySaysMoreAlertsExistAndAClearOneDoesNot()
     {
