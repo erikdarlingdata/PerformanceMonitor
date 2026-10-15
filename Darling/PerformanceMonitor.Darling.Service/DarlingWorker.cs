@@ -12818,26 +12818,38 @@ AND   j.hypertable_name = '{relation}'", connection))
             _logger.LogWarning("Query Store compose rollup could not run; the next hourly tick retries: {Message}", ex.Message);
         }
 
-        /* #5867: the hours whose build now waits a day between attempts raise the Compose Rollup Hours Stuck self-alert. Its own read
-           after the tick, failure-isolated: an unreadable record leaves the alert's standing state as it was. */
-        if (_selfAlerts is null)
+        /* #5867: the hours whose build now waits a day between attempts raise the Compose Rollup Hours Stuck self-alert, from its own
+           read after the tick. */
+        if (_selfAlerts is not null)
         {
-            return;
+            await EvaluateComposeHoursStuckAsync(stoppingToken);
         }
+    }
 
+    /// <summary>
+    /// #5867: reads the Query Store compose builder's failure record and hands it to
+    /// <see cref="DarlingSelfAlertEvaluator.EvaluateComposeHoursStuckAsync"/>. A failed read is counted on #3013's swallowed-read
+    /// counter and sends no report, so the standing alert is held, never resolved on uncertainty (the #5654 shape).
+    /// </summary>
+    private async Task EvaluateComposeHoursStuckAsync(CancellationToken cancellationToken)
+    {
         IReadOnlyList<QueryStoreComposeStamp.HourFailure> failures;
+        var readClock = Stopwatch.StartNew();
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(stoppingToken);
-            failures = await QueryStoreComposeStamp.ReadFailuresAsync(connection, stoppingToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            failures = await QueryStoreComposeStamp.ReadFailuresAsync(connection, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogDebug("Query Store compose rollup: the failure record could not be read for the self-alert: {Message}", ex.Message);
+            _logger.LogWarning(
+                "Compose rollup self-alert: could not read the failure record after {ElapsedMs} ms - the standing alert is held this tick: {Message}",
+                readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(null, "compose rollup self-alert (failure record)", readClock.ElapsedMilliseconds);
             return;
         }
 
-        await _selfAlerts.EvaluateComposeHoursStuckAsync(failures, stoppingToken);
+        await _selfAlerts!.EvaluateComposeHoursStuckAsync(failures, cancellationToken);
     }
 
     /// <summary>
