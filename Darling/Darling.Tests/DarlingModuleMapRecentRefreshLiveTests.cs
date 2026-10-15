@@ -438,6 +438,89 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
         });
     }
 
+    /// <summary>
+    /// #5824: the refresh's only deterministic lock order is the outer <c>ORDER BY n.server_name, n.sql_handle</c> on the
+    /// conflict key (the <c>NOT EXISTS</c> filter now wraps the DISTINCT ON whose sort used to give it), the #1801 rule for a
+    /// batch upsert. Two refreshes in two connections at once, the hourly shape (ten minutes behind the newest rows) and the
+    /// daily one (thirty hours behind), over overlapping handle sets: the daily one also reads handles the hourly window does
+    /// not reach. Every round gives every shared handle a newer row, so both statements write and lock the same rows. Both
+    /// must complete (a deadlock is 40P01 from one of them; the statement is run directly, because the refresh methods log a
+    /// failure and return 0), and the map must hold the newest row per handle.
+    /// </summary>
+    [Fact]
+    public async Task TwoConcurrentRefreshes_OverOverlappingHandles_BothComplete_AndTheMapHoldsTheNewestRowPerHandle()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            const int Shared = 3000;
+            const int DailyOnly = 500;
+            const int Rounds = 6;
+            const string SeedSql = @"INSERT INTO collect.procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle)
+SELECT $1 + g, $2, 1, $3, 'TestDb', 'dbo', $4 || g::text, $5 || lpad(g::text, 6, '0')
+FROM generate_series(1, $6) AS g";
+
+            async Task SeedAsync(DateTime at, string handlePrefix, string namePrefix, int count)
+            {
+                await using var cmd = new NpgsqlCommand(SeedSql, connection);
+                cmd.Parameters.AddWithValue(Interlocked.Add(ref s_collectionId, count + 1));
+                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = at });
+                cmd.Parameters.AddWithValue(Server);
+                cmd.Parameters.AddWithValue(namePrefix);
+                cmd.Parameters.AddWithValue(handlePrefix);
+                cmd.Parameters.AddWithValue(count);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            async Task RefreshAsync(NpgsqlConnection c, DateTime since, Barrier barrier)
+            {
+                await using var cmd = new NpgsqlCommand(DarlingModuleMap.RefreshSinceSql, c) { CommandTimeout = 120 };
+                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
+                await cmd.PrepareAsync(ct);
+                barrier.SignalAndWait(ct);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await SeedAsync(Anchor.AddHours(-2), "0xDAILY_", "daily_", DailyOnly);
+            await using var hourly = connection.CloneWith(connection.ConnectionString);
+            await using var daily = connection.CloneWith(connection.ConnectionString);
+            await hourly.OpenAsync(ct);
+            await daily.OpenAsync(ct);
+
+            for (var round = 1; round <= Rounds; round++)
+            {
+                var at = Anchor.AddMinutes(round);
+                await SeedAsync(at, "0xSHARED_", "r" + round.ToString(CultureInfo.InvariantCulture) + "_", Shared);
+                using var barrier = new Barrier(2);
+                var hourlyRun = Task.Run(() => RefreshAsync(hourly, at.AddMinutes(-10), barrier), ct);
+                var dailyRun = Task.Run(() => RefreshAsync(daily, at.AddHours(-30), barrier), ct);
+                try
+                {
+                    await Task.WhenAll(hourlyRun, dailyRun);
+                }
+                catch (PostgresException ex)
+                {
+                    Assert.Fail($"round {round}: a concurrent refresh failed with {ex.SqlState} ({ex.MessageText}); a 40P01 is the lock-order regression #1801 describes, and the fix is the order, not a retry.");
+                }
+
+                /* Every shared handle's newest row is this round's; every daily-only handle's is its one seed row. */
+                var wrong = await ScalarAsync(connection, $@"
+SELECT count(*)
+FROM (
+    SELECT DISTINCT ON (sql_handle) sql_handle, object_name, collection_time
+    FROM collect.procedure_stats
+    WHERE server_name = '{Server}'
+    ORDER BY sql_handle, collection_time DESC
+) AS newest
+LEFT JOIN collect.module_map AS m ON m.server_name = '{Server}' AND m.sql_handle = newest.sql_handle
+WHERE (m.object_name, m.last_seen) IS DISTINCT FROM (newest.object_name, newest.collection_time)", ct);
+                Assert.Equal(0L, wrong);
+            }
+
+            Assert.Equal((long)(Shared + DailyOnly), await ScalarAsync(connection, $"SELECT count(*) FROM collect.module_map WHERE server_name = '{Server}'", ct));
+            Assert.Equal(Anchor.AddMinutes(Rounds), await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
+        });
+    }
+
     private static readonly TimeSpan StaleBy = TimeSpan.FromDays(5);
 
     private static async Task SeedStaleWatermarkAsync(NpgsqlConnection c, DateTime watermark, CancellationToken ct)
