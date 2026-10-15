@@ -355,6 +355,14 @@ public partial class RemoteCollectorService
                    iteration so a fault cannot leak this database's staged cursor into a sibling's landing.
                    It lands below, after this database's flush, and nowhere else. Mirrors Darling. */
                 context.DropStagedItemState();
+
+                /* #5813 review: hoisted so the catch arms can fold a failed database's SQL slice into sqlMs, as the
+                   enumerated driver's finally does for every item. The fan-out counts that database (a timed-out one
+                   at the budget's milliseconds), so leaving its SQL time out would put the item count and
+                   sql_duration_ms on different denominators, the #2472 shape. Null means the fault came before the
+                   timed region; sliceFolded means the straight path already added it. Mirrors Darling. */
+                Stopwatch? sqlSlice = null;
+                var sliceFolded = false;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -473,7 +481,7 @@ public partial class RemoteCollectorService
                         }
                     }
 
-                    var sqlSlice = Stopwatch.StartNew();
+                    sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
                     /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
                        budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
@@ -521,6 +529,7 @@ public partial class RemoteCollectorService
                        a ratio against (#2472). */
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
+                    sliceFolded = true;
 
                     /* Flush this database before reading the next — peak memory is one database's rows. */
                     long dbStorageMs = 0;
@@ -622,6 +631,7 @@ public partial class RemoteCollectorService
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' database [{Database}] {Message}",
                         definition.Name, server.DisplayName, databaseName, budgetFailure.Message);
+                    FoldFailedSlice(sqlSlice, sliceFolded, ref sqlMs);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
@@ -647,6 +657,8 @@ public partial class RemoteCollectorService
                     {
                         _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
                     }
+
+                    FoldFailedSlice(sqlSlice, sliceFolded, ref sqlMs);
                 }
             }
 
@@ -945,7 +957,7 @@ public partial class RemoteCollectorService
                             OnQueryStoreItemFailed(serverId, item);
                         }
 
-                        /* #5813: a read that ran out of its budget is the run's slowest item under its marked name,
+                        /* #5813: a read that ran out of its budget is the run's slowest item under its plain name,
                            and warns once per database per UTC day rather than on every pass. */
                         if (NoteQueryStoreReadTimeout(server, serverId, ex, fanout))
                         {
@@ -1174,6 +1186,22 @@ public partial class RemoteCollectorService
     /// (rows_collected = Σ non-empty batch counts). Synchronous (the DuckDB appender API is), returning the
     /// count so the driver can await it as a completed task.
     /// </summary>
+    /// <summary>
+    /// #5813 review: adds a failed database's SQL slice to the run's blended SQL time, on the Azure per-database loop,
+    /// when the fault came before the straight path folded it. Darling's <c>FoldFailedSlice</c> twin. Null means the
+    /// fault came before the timed region began: nothing to add.
+    /// </summary>
+    private static void FoldFailedSlice(Stopwatch? sqlSlice, bool sliceFolded, ref long sqlMs)
+    {
+        if (sqlSlice is null || sliceFolded)
+        {
+            return;
+        }
+
+        sqlSlice.Stop();
+        sqlMs += sqlSlice.ElapsedMilliseconds;
+    }
+
     private static int WriteBatch<TRow>(
         DuckDBConnection duckConnection,
         ICollectorDefinition<TRow> definition,

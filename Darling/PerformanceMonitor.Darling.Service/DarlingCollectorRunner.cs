@@ -532,6 +532,27 @@ public sealed class DarlingCollectorRunner
         _planFetchMsPerPlan.TryGetValue(FetchStateKey(serverId, database, collector), out var ms) ? ms : null;
 
     /// <summary>
+    /// #5813 review: adds a failed database's SQL slice to the run's blended SQL time, on the Azure per-database loop,
+    /// when the fault came before the straight path folded it. Stopped first, so the fault line printed next shows the
+    /// same figure that was added. Null means the fault came before the timed region began: nothing to add.
+    /// </summary>
+    private static void FoldFailedSlice(Stopwatch? sqlSlice, bool sliceFolded, ref long sqlMs)
+    {
+        if (sqlSlice is null || sliceFolded)
+        {
+            return;
+        }
+
+        sqlSlice.Stop();
+        sqlMs += sqlSlice.ElapsedMilliseconds;
+    }
+
+    /// <summary>The plan-size estimate the next plan-fetch pass of one database will size its candidate cap from
+    /// (#5813 review); null before its first pass. For tests.</summary>
+    internal QueryStorePlanXmlState.PlanSizeEstimate? PlanSizeEstimateForTests(int serverId, string database, string collector) =>
+        _observedPlanSize.TryGetValue(FetchStateKey(serverId, database, collector), out var estimate) ? estimate : null;
+
+    /// <summary>
     /// #5813: one database's plan-XML fetch was bounded by <see cref="QueryStorePlanFetchBudgetSpan"/>, by a cut or by a
     /// predicted width that left ids for the next pass. Information once per database per UTC day, Debug for the rest
     /// of that day: it is the budget working, not a fault, and nothing is lost (the ids not received stay in the
@@ -559,7 +580,7 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// #5813: one database's live Query Store read ran out of <see cref="QueryStoreReadBudgetSpan"/>. Counts it in the run's
-    /// fan-out cost under its marked name, so <c>slowest_item</c> names it, and logs it at Warning once per database per UTC
+    /// fan-out cost under its plain name, so <c>slowest_item</c> names it, and logs it at Warning once per database per UTC
     /// day (Debug for the rest of that day). Returns false, doing nothing, for every other exception, so the caller's own
     /// log line stands.
     /// </summary>
@@ -2616,6 +2637,12 @@ public sealed class DarlingCollectorRunner
                    read, the adaptive shrink's store write, or BuildQuery. There is genuinely no parent
                    in that case, and the compiler enforces the check rather than a comment claiming it. */
                 Stopwatch? sqlSlice = null;
+                /* #5813 review: set once this database's slice is in sqlMs. A fault before that point (a read the
+                   budget ended, a login that failed) folds the slice in its catch arm instead, as the enumerated
+                   driver's finally does for every item: the fan-out counts that database (and a timed-out one at the
+                   budget's milliseconds), so leaving its SQL time out would put the item count and sql_duration_ms on
+                   different denominators, the #2472 shape. */
+                var sliceFolded = false;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -2902,6 +2929,7 @@ public sealed class DarlingCollectorRunner
                     sqlSlice.Stop();
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
+                    sliceFolded = true;
 
                     /* query_store's plan XML and statement text, for THIS database, on its own connection. The
                        payload always carries a NULL plan and (FetchQueryTextSeparately) no text, so these two
@@ -3124,6 +3152,7 @@ public sealed class DarlingCollectorRunner
                     /* #2896: and the split behind it, at the arm's own WARNING. This is the case the budget
                        exists to bound, and connect: is the term that says whether the wall clock went on
                        reaching the database or on reading it — which the message above cannot say. */
+                    FoldFailedSlice(sqlSlice, sliceFolded, ref sqlMs);
                     LogPerDatabaseFaultSplit(
                         _logger, LogLevel.Warning, context, sqlSlice,
                         server.Config.DisplayName, definition.Name, databaseName, "budget expired");
@@ -3194,6 +3223,7 @@ public sealed class DarlingCollectorRunner
                        it, which reads as an unexplained slow database rather than a skipped one. At Debug
                        the two lines arrive together, which is the state the issue is about — before this,
                        turning Debug on bought the error string and no timing at all. */
+                    FoldFailedSlice(sqlSlice, sliceFolded, ref sqlMs);
                     LogPerDatabaseFaultSplit(
                         _logger, LogLevel.Debug, context, sqlSlice,
                         server.Config.DisplayName, definition.Name, databaseName, "failed");
@@ -3667,7 +3697,7 @@ public sealed class DarlingCollectorRunner
                             DiscardQueryStoreDatabaseWatermark(server, item, stagedDatabaseWatermarks);
                         }
 
-                        /* #5813: a read that ran out of its budget is the run's slowest item under its marked name,
+                        /* #5813: a read that ran out of its budget is the run's slowest item under its plain name,
                            and warns once per database per UTC day rather than on every pass. */
                         if (NoteQueryStoreReadTimeout(server, ex, fanout))
                         {
@@ -6092,10 +6122,11 @@ public sealed class DarlingCollectorRunner
             }
 
             /* #5813: a pass the time budget ended early stopped short of its cap with ids still owed, which is a
-               backlog, not the drain Learn reads "fewer than the cap" as. Its window is what it received. */
+               backlog, not the drain Learn reads "fewer than the cap" as. Said explicitly rather than through the
+               window: the common cut received nothing, and a ship count of zero cannot say "cut" (review round 1). */
             _observedPlanSize[carryKey] =
                 QueryStorePlanXmlState.Learn(
-                    estimate, shippedBytes, fetched.Count, plansMeasured, timeBound && fetched.Count > 0 ? fetched.Count : cap, budget);
+                    estimate, shippedBytes, fetched.Count, plansMeasured, cap, budget, timeBound);
 
             var returned = new HashSet<long>(fetched.Count);
             if (fetched.Count > 0)

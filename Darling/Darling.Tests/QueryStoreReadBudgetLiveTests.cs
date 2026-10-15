@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -273,9 +274,14 @@ public sealed class QueryStoreReadBudgetLiveTests
 
         /* slowest_item names the timed-out database with its marker, and slowest_item_ms is the budget. */
         Assert.NotNull(cut.Fanout);
-        Assert.Equal(QueryStoreReadBudget.SlowestItemName(Alpha), cut.Fanout!.Value.SlowestItem);
+        Assert.Equal(Alpha, cut.Fanout!.Value.SlowestItem);
         Assert.Equal((int)Budget.TotalMilliseconds, cut.Fanout.Value.SlowestItemMs);
         Assert.Equal(2, cut.Fanout.Value.ItemCount);
+
+        /* #5813 review: the timed-out database's SQL slice is in the run's blended SQL time, as the enumerated driver's
+           finally puts it there. The slice starts before the read's budget, so it is at least the budget; before the fix
+           the catch arm never added it and SqlMs held only zeta's instant read. */
+        Assert.True(cut.SqlMs >= (long)Budget.TotalMilliseconds, $"SqlMs {cut.SqlMs} holds the timed-out slice");
         Assert.Contains("timed out", cut.HostNote ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal(1, rig.Log.TimedOutWarnings(Alpha));
 
@@ -333,7 +339,7 @@ public sealed class QueryStoreReadBudgetLiveTests
         Assert.Equal(Alpha, timeout.Database);
         var carried = CollectorFaultFanout.For(timeout);
         Assert.NotNull(carried);
-        Assert.Equal(QueryStoreReadBudget.SlowestItemName(Alpha), carried!.Value.SlowestItem);
+        Assert.Equal(Alpha, carried!.Value.SlowestItem);
         Assert.Equal((int)Budget.TotalMilliseconds, carried.Value.SlowestItemMs);
         Assert.Equal(1, carried.Value.ItemCount);
 
@@ -344,7 +350,7 @@ public sealed class QueryStoreReadBudgetLiveTests
             fanout: CollectorFaultFanout.For(timeout), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, rig.Log, token);
         var row = await NewestLogRowAsync(rig, token);
         Assert.Equal("ERROR", row.Status);
-        Assert.Equal(QueryStoreReadBudget.SlowestItemName(Alpha), row.SlowestItem);
+        Assert.Equal(Alpha, row.SlowestItem);
         Assert.Equal((int)Budget.TotalMilliseconds, row.SlowestItemMs);
         Assert.Equal(1, row.ItemCount);
 
@@ -355,6 +361,90 @@ public sealed class QueryStoreReadBudgetLiveTests
         await PassAsync(rig, target, token, Alpha);
         Assert.Equal(new Dictionary<long, long> { [1] = 1, [2] = 1 }, await StoredAsync(rig, Alpha, token));
         Assert.Equal(second, await StoreAsync(rig.Runner, Alpha, token));
+    }
+
+    /// <summary>
+    /// #5813 review: <c>collection_log.slowest_item</c> is an identity column. The Query Store clutter reader groups by it
+    /// as the database name and checks it against the server's current databases, so a timed-out database is stored under
+    /// its plain name: one clutter row that counts its timed-out runs, never a phantom name omitted as dropped. The words
+    /// "(timed out)" are rendered by <c>get_collection_health</c> from the budget-sized cost. Two runs are written through
+    /// the real writer (the fan-out <see cref="QueryStoreReadBudget.ObserveTimeout"/> fills, then
+    /// <see cref="DarlingObservability.LogCollectionAsync"/>): one where alpha timed out at the production budget, one
+    /// where alpha completed and was still the slowest.
+    /// </summary>
+    [Fact]
+    public async Task ATimedOutDatabase_IsOneClutterRowUnderItsOwnName_AndCollectionHealthStillSaysItTimedOut()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 slowest-item identity test.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+
+        var timedOut = new FanoutCostAccumulator();
+        timedOut.Observe(Zeta, 40);
+        Assert.True(QueryStoreReadBudget.ObserveTimeout(
+            new QueryStoreReadTimeoutException(Alpha, QueryStoreReadBudget.Budget, null), timedOut));
+        var completed = new FanoutCostAccumulator();
+        completed.Observe(Zeta, 40);
+        completed.Observe(Alpha, 500);
+
+        await DarlingObservability.LogCollectionAsync(
+            rig.Source, server, QueryStoreCollector.Instance.Name, "SUCCESS", 1, 31_000, 30_050, null,
+            fanout: timedOut.Result, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, rig.Log, token);
+        await DarlingObservability.LogCollectionAsync(
+            rig.Source, server, QueryStoreCollector.Instance.Name, "SUCCESS", 2, 700, 560, null,
+            fanout: completed.Result, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, rig.Log, token);
+
+        /* The server's current databases, snapshotted after both runs: alpha and zeta, nothing else. */
+        await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await connection.OpenAsync(token);
+            var at = DateTime.SpecifyKind(DateTime.UtcNow.AddSeconds(1), DateTimeKind.Unspecified);
+            var id = 1;
+            foreach (var database in new[] { Alpha, Zeta })
+            {
+                await using var states = new NpgsqlCommand(
+                    "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) "
+                    + "VALUES ($1, $2, $3, $4, $5, $6, 'ONLINE', FALSE)", connection);
+                states.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                states.Parameters.AddWithValue(at);
+                states.Parameters.AddWithValue(LiveServerId);
+                states.Parameters.AddWithValue(server.StorageName);
+                states.Parameters.AddWithValue(database);
+                states.Parameters.AddWithValue(id++);
+                await states.ExecuteNonQueryAsync(token);
+            }
+
+            await using var register = new NpgsqlCommand(
+                "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) "
+                + "VALUES ($1, $2, $2, TRUE, 15, $3, $3)", connection);
+            register.Parameters.AddWithValue(LiveServerId);
+            register.Parameters.AddWithValue(server.StorageName);
+            register.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+            await register.ExecuteNonQueryAsync(token);
+        }
+
+        /* The clutter reader: one alpha row holding both runs, and nothing omitted as a database the server no longer has. */
+        var omitted = new List<string>();
+        var cost = await DarlingQueryStoreClutterReader.GetReadCostAsync(
+            rig.Source, [LiveServerId], DateTime.UtcNow.AddHours(-1), DateTime.UtcNow.AddHours(1),
+            omittedDatabases: omitted, cancellationToken: token);
+        Assert.Empty(omitted);
+        var alpha = Assert.Single(cost);
+        Assert.Equal(Alpha, alpha.DatabaseName);
+        Assert.Equal(2, alpha.RunsSlowest);
+        Assert.Equal(2, alpha.RunsObserved);
+        Assert.Equal(30_000, alpha.SlowestItemMsP95);
+
+        /* get_collection_health's fan-out names the dearest run's database and says it timed out. */
+        var json = await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpDataTools.GetCollectionHealth(
+            rig.Source, server.StorageName, full_detail: true, cancellationToken: token);
+        using var document = JsonDocument.Parse(json);
+        var queryStore = document.RootElement.GetProperty("collectors").EnumerateArray()
+            .Single(r => r.GetProperty("collector").GetString() == QueryStoreCollector.Instance.Name);
+        var fanout = queryStore.GetProperty("fanout");
+        Assert.Equal(Alpha + QueryStoreReadBudget.TimedOutMarker, fanout.GetProperty("slowest").GetString());
+        Assert.Equal(30_000, fanout.GetProperty("slowest_ms").GetInt32());
     }
 
     /// <summary>
@@ -427,6 +517,12 @@ public sealed class QueryStoreReadBudgetLiveTests
         await PassAsync(rig, target, token, Alpha);
         Assert.Equal([8], target.WidthsFor(Alpha));
         Assert.Empty(target.ShippedPlans);
+
+        /* #5813 review: the empty cut is a backlog, not a drain. Catch-up stays set, so the next pass's candidate cap
+           keeps the first-contact floor instead of trusting a backlog-biased average. */
+        var estimate = rig.Runner.PlanSizeEstimateForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name);
+        Assert.NotNull(estimate);
+        Assert.True(estimate!.Value.CatchUpInProgress, "a pass the time budget cut with nothing received keeps catch-up in progress");
         Assert.Empty(await StoredPlansAsync(rig, Alpha, token));
         Assert.True(rig.Runner.PlanFetchMsPerPlanForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name) >= 2.0 * 2000 / 8);
         Assert.Equal(1, rig.Log.PlanFetchBudgetLines(Alpha));

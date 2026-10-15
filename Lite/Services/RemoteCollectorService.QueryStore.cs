@@ -32,7 +32,7 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// #5813, Darling's <c>NoteQueryStoreReadTimeout</c> twin: one database's live Query Store read ran out of
-    /// <see cref="QueryStoreReadBudgetSpan"/>. Counts it in the run's fan-out cost under its marked name, so
+    /// <see cref="QueryStoreReadBudgetSpan"/>. Counts it in the run's fan-out cost under its plain name, so
     /// <c>slowest_item</c> names it, and logs it at Warning once per database per UTC day (Debug for the rest of that
     /// day). Returns false, doing nothing, for every other exception, so the caller's own log line stands.
     /// </summary>

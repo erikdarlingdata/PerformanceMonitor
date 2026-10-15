@@ -55,9 +55,25 @@ public sealed class QueryStoreReadBudgetWiringPinTests
             new QueryStoreReadTimeoutException("slow", QueryStoreReadBudget.Budget, null), fanout));
 
         var result = fanout.Result!.Value;
-        Assert.Equal("slow (timed out)", result.SlowestItem);
+        Assert.Equal("slow", result.SlowestItem);
         Assert.Equal(30_000, result.SlowestItemMs);
         Assert.Equal(2, result.ItemCount);
+    }
+
+    /// <summary>
+    /// #5813 review: the stored name is plain, and get_collection_health adds the words from the cost. A query_store
+    /// item at exactly the budget timed out; one that completed past 30 s (read, plan and text fetches and the write
+    /// together) did not, and another collector's item is never a Query Store read.
+    /// </summary>
+    [Fact]
+    public void TheTimedOutWords_AreRenderedFromTheBudgetSizedCost_NotStored()
+    {
+        var queryStore = QueryStoreCollector.Instance.Name;
+        Assert.Equal("slow (timed out)", QueryStoreReadBudget.RenderSlowestItem(queryStore, "slow", 30_000));
+        Assert.Equal("slow", QueryStoreReadBudget.RenderSlowestItem(queryStore, "slow", 31_250));
+        Assert.Equal("slow", QueryStoreReadBudget.RenderSlowestItem(queryStore, "slow", 900));
+        Assert.Equal("slow", QueryStoreReadBudget.RenderSlowestItem("index_usage_stats", "slow", 30_000));
+        Assert.Null(QueryStoreReadBudget.RenderSlowestItem(queryStore, null, 30_000));
     }
 
     [Fact]

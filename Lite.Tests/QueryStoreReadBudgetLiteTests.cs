@@ -86,7 +86,7 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         var cut = await NewestLogRowAsync(fixture);
         Assert.Equal("ERROR", cut.Status);
         Assert.Contains("timed out", cut.Error ?? string.Empty, StringComparison.Ordinal);
-        Assert.Equal(QueryStoreReadBudget.SlowestItemName(Alpha), cut.SlowestItem);
+        Assert.Equal(Alpha, cut.SlowestItem);
         Assert.Equal((int)Budget.TotalMilliseconds, cut.SlowestItemMs);
         Assert.Equal(1, cut.ItemCount);
 
@@ -109,9 +109,13 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         await fixture.Service.RunCollectorAsync(fixture.Server, QueryStoreCollector.Instance.Name, CancellationToken.None);
         var row = await NewestLogRowAsync(fixture);
         Assert.Equal("SUCCESS", row.Status);
-        Assert.Equal(QueryStoreReadBudget.SlowestItemName(Alpha), row.SlowestItem);
+        Assert.Equal(Alpha, row.SlowestItem);
         Assert.Equal((int)Budget.TotalMilliseconds, row.SlowestItemMs);
         Assert.Equal(2, row.ItemCount);
+
+        /* #5813 review: the timed-out database's SQL slice is in the run's sql_duration_ms. The slice starts before the
+           read's budget, so it is at least the budget; before the fix the catch arm never added it. */
+        Assert.True(row.SqlMs >= (int)Budget.TotalMilliseconds, $"sql_duration_ms {row.SqlMs} holds the timed-out slice");
         Assert.Contains("timed out", fixture.Service.TelemetryFor(fixture.ServerId).Note ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal(1, await CountAsync(fixture, Alpha));
         Assert.Equal(watermark, reads.Single(r => r.Database == Alpha).Cutoff);
@@ -172,13 +176,13 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
         return Convert.ToInt64(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
-    private static async Task<(string Status, string? Error, string? SlowestItem, int? SlowestItemMs, int? ItemCount)> NewestLogRowAsync(Fixture fixture)
+    private static async Task<(string Status, string? Error, string? SlowestItem, int? SlowestItemMs, int? ItemCount, int? SqlMs)> NewestLogRowAsync(Fixture fixture)
     {
         using var connection = fixture.DuckDb.CreateConnection();
         await connection.OpenAsync();
         using var command = connection.CreateCommand();
         command.CommandText =
-            "SELECT status, error_message, slowest_item, slowest_item_ms, fanout_item_count FROM collection_log "
+            "SELECT status, error_message, slowest_item, slowest_item_ms, fanout_item_count, sql_duration_ms FROM collection_log "
             + "WHERE server_id = $1 AND collector_name = 'query_store' ORDER BY collection_time DESC LIMIT 1";
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = fixture.ServerId });
         using var reader = await command.ExecuteReaderAsync();
@@ -187,7 +191,8 @@ public sealed class QueryStoreReadBudgetLiteTests : IDisposable
             reader.IsDBNull(1) ? null : reader.GetString(1),
             reader.IsDBNull(2) ? null : reader.GetString(2),
             reader.IsDBNull(3) ? null : Convert.ToInt32(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture),
-            reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture));
+            reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+            reader.IsDBNull(5) ? null : Convert.ToInt32(reader.GetValue(5), System.Globalization.CultureInfo.InvariantCulture));
     }
 
     /// <summary>A logical-server registration on the Azure SQL Database engine edition, so query_store takes the

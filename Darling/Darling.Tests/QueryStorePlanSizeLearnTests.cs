@@ -35,6 +35,30 @@ public sealed class QueryStorePlanSizeLearnTests
         Assert.False(next.CatchUpInProgress);
     }
 
+    /// <summary>
+    /// #5813 review: a pass the time budget cut is a backlog whatever it shipped, and the common cut ships nothing.
+    /// Catch-up stays set, so the next candidate cap keeps the first-contact floor (here the 15 KB backlog-biased
+    /// average would otherwise size the cap three times wider). The same empty pass, uncut, is a drain and clears it.
+    /// </summary>
+    [Fact]
+    public void AnEmptyPassTheTimeBudgetCut_KeepsCatchUpAndTheFloor_AndAnUncutOneStillClearsIt()
+    {
+        const long budget = 12_582_912;
+        var previous = new QueryStorePlanXmlState.PlanSizeEstimate(15_000, CatchUpInProgress: true);
+
+        var cut = QueryStorePlanXmlState.Learn(
+            previous, bytesShipped: 0, plansShipped: 0, plansMeasured: 0, candidateWindow: 118, budgetBytes: budget, timeBound: true);
+        Assert.True(cut.CatchUpInProgress);
+        Assert.Equal(15_000, cut.AvgBytes);
+        var floored = QueryStorePlanXmlState.CandidatePlanCount(cut.AvgBytes, budget, cut.CatchUpInProgress, out _);
+        Assert.Equal(QueryStorePlanXmlState.CandidatePlanCount(QueryStorePlanXmlState.FirstContactAvgPlanBytes, budget, out _), floored);
+
+        var drained = QueryStorePlanXmlState.Learn(
+            previous, bytesShipped: 0, plansShipped: 0, plansMeasured: 0, candidateWindow: 118, budgetBytes: budget, timeBound: false);
+        Assert.False(drained.CatchUpInProgress);
+        Assert.True(QueryStorePlanXmlState.CandidatePlanCount(drained.AvgBytes, budget, drained.CatchUpInProgress, out _) > floored);
+    }
+
     /// <summary>A pass that consumed its whole candidate window proves a backlog remains.</summary>
     [Fact]
     public void AFullWindowPassSetsCatchUp()

@@ -130,11 +130,27 @@ public static class QueryStoreReadBudget
     }
 
     /// <summary>
-    /// Appended to the database name in <c>collection_log.slowest_item</c> when the slowest item is a read that timed
-    /// out, so <c>get_collection_health</c> can name the database and say it timed out without a new column. The ms
-    /// value beside it is the budget, the time the read was allowed.
+    /// The words <c>get_collection_health</c> appends to a timed-out database's name (#5813). Rendered, never stored:
+    /// <c>collection_log.slowest_item</c> is an identity column (the Query Store clutter reader groups by it as the
+    /// database name and checks it against the server's current databases), so it carries the plain database name and
+    /// the timeout is read off the value beside it. See <see cref="RenderSlowestItem"/>.
     /// </summary>
     public const string TimedOutMarker = " (timed out)";
+
+    /// <summary>
+    /// The <c>slowest</c> name <c>get_collection_health</c> shows (#5813 review): the stored name, plus
+    /// <see cref="TimedOutMarker"/> when the item is a query_store database whose cost is exactly <see cref="Budget"/>,
+    /// the milliseconds <see cref="ObserveTimeout"/> records for a read the budget ended. Exactly, not at least: a
+    /// database that completed observes its read, plan and text fetches and its store write together, which can pass
+    /// 30 s with no timeout in it. A completed database whose total lands on 30,000 ms to the millisecond reads as
+    /// timed out; that is the price of no new column.
+    /// </summary>
+    public static string? RenderSlowestItem(string? collectorName, string? slowestItem, int? slowestItemMs) =>
+        slowestItem is not null
+        && slowestItemMs == (int)Budget.TotalMilliseconds
+        && string.Equals(collectorName, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+            ? slowestItem + TimedOutMarker
+            : slowestItem;
 
     /// <summary>
     /// Starts the read budget for one database: a linked source, so host shutdown still cancels the read, that also
@@ -150,14 +166,13 @@ public static class QueryStoreReadBudget
     public static bool Expired(CancellationTokenSource? readBudget, CancellationToken outer) =>
         EnumeratedCollectorDriver.ItemBudgetExpired(readBudget, outer);
 
-    /// <summary>The <c>slowest_item</c> value for a database whose read timed out.</summary>
-    public static string SlowestItemName(string database) => database + TimedOutMarker;
-
     /// <summary>
-    /// Counts a timed-out read in the run's fan-out cost, with the budget as its milliseconds and the marked name, so
-    /// the timed-out database is the run's slowest item unless a completed one cost more. Returns false, and observes
-    /// nothing, for any other exception. The item's SQL time is already in the run's blended total (both loops add it
-    /// in their finally), so counting it here keeps the item count on the same denominator.
+    /// Counts a timed-out read in the run's fan-out cost, with the budget as its milliseconds and the plain database
+    /// name, so the timed-out database is the run's slowest item unless a completed one cost more. Returns false, and
+    /// observes nothing, for any other exception. The item's SQL time is already in the run's blended total: the
+    /// enumerated driver adds every item's slice in its finally, and both products' Azure per-database loops add a
+    /// failed database's slice in their catch arms (#5813 review), so counting it here keeps the item count on the same
+    /// denominator.
     /// </summary>
     public static bool ObserveTimeout(Exception exception, FanoutCostAccumulator fanout)
     {
@@ -167,7 +182,7 @@ public static class QueryStoreReadBudget
             return false;
         }
 
-        fanout.Observe(SlowestItemName(timeout.Database), (long)timeout.Budget.TotalMilliseconds);
+        fanout.Observe(timeout.Database, (long)timeout.Budget.TotalMilliseconds);
         return true;
     }
 }
