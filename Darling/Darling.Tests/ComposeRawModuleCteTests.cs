@@ -35,13 +35,13 @@ public sealed class ComposeRawModuleCteTests
     /// <summary>The ranking that #5811 took off the raw route.</summary>
     private const string WindowRanking = "ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle";
 
-    private static ComposeCompiled Compile(DateTime? through = null, bool mapMissing = false, string[]? servers = null)
+    private static ComposeCompiled Compile(DateTime? through = null, bool mapMissing = false, string[]? servers = null, string[]? unregistered = null)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(ObjectPanel)!, Array.Empty<string>());
         Assert.True(parseError is null, parseError);
         var context = new ComposeRunContext(
             servers, Now.AddHours(-24), Now, ComposeRunContext.NoVariables, RollupAvailability.None, Now, RollupCoverage.Unknown,
-            ModuleMapThrough: through, ModuleMapMissing: mapMissing);
+            UnregisteredServers: unregistered, ModuleMapThrough: through, ModuleMapMissing: mapMissing);
         var (compiled, error) = ComposeCompiler.Compile(plan!, context);
         Assert.True(error is null, error);
         Assert.Equal(ComposeSourceTier.Raw, compiled!.Route.Tier);
@@ -51,7 +51,7 @@ public sealed class ComposeRawModuleCteTests
     [Fact]
     public void TheRawRoute_NamesTheMap_AndRanksNoWindowOfProcedureStats()
     {
-        foreach (var compiled in new[] { Compile(), Compile(Now.AddMinutes(-30)), Compile(Now.AddMinutes(-30), servers: ["A"]) })
+        foreach (var compiled in new[] { Compile(Now.AddMinutes(-30)), Compile(Now.AddMinutes(-30), servers: ["A"]) })
         {
             Assert.StartsWith("WITH m_last AS MATERIALIZED (\n", compiled.Sql, StringComparison.Ordinal);
             Assert.Contains("FROM collect.module_map AS mm\n", compiled.Sql, StringComparison.Ordinal);
@@ -80,10 +80,13 @@ public sealed class ComposeRawModuleCteTests
     }
 
     [Fact]
-    public void NoWatermark_AStaleOne_OrOneAheadOfNow_ReadsTheWholeWindow_AndBindsNothingNew()
+    public void NoWatermark_AStaleOne_OrOneAheadOfNow_CompilesTheWindowRanking_AndBindsNothingNew()
     {
+        /* The whole window either way: the map-first shape sorted it serially through its per-server LATERAL (12 to 16 s on the plant),
+           where the ranking sorts in parallel (5 to 14 s), so the ranking itself is the stale path and costs what it did before #5811. */
         var none = Compile();
-        Assert.Contains("          AND ps.collection_time >= LEAST(last_ps.collection_time, $1)\n", none.Sql, StringComparison.Ordinal);
+        Assert.StartsWith(ComposeRawModuleCteOracleLiveTests.OldModuleCte, none.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("module_map", none.Sql, StringComparison.Ordinal);
         Assert.Equal(3, none.Parameters.Count);
 
         /* A watermark whose floor is at or before the window start, or one later than now, is no watermark. */
@@ -106,6 +109,53 @@ public sealed class ComposeRawModuleCteTests
             Assert.DoesNotContain("m_last", compiled.Sql, StringComparison.Ordinal);
             Assert.Equal(3, compiled.Parameters.Count);
         }
+    }
+
+    /// <summary>A removed server keeps its registry row, so its history reads the overlay by id. A scoped name with NO registry row
+    /// (a renamed server's old name) has no srv row; the map lacks whatever arrived after its last refresh, so that name reads its
+    /// stored rows over the whole window by name (window start, never the floor), and the map skips the pairs that arm carries.</summary>
+    [Fact]
+    public void AScopedNameWithNoRegistryRow_ReadsItsStoredRows_FromTheWindowStart_AndOnlyThen()
+    {
+        var through = Now.AddMinutes(-30);
+        Assert.DoesNotContain("m_unreg", Compile(through, servers: ["A", "Old"]).Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("m_unreg", Compile(through).Sql, StringComparison.Ordinal);
+
+        var compiled = Compile(through, servers: ["A", "Old"], unregistered: ["Old"]);
+        var unregisteredOrdinal = 0;
+        for (var i = 0; i < compiled.Parameters.Count; i++)
+        {
+            if (compiled.Parameters[i].Value is string[] { Length: 1 } names && names[0] == "Old")
+            {
+                unregisteredOrdinal = i + 1;
+            }
+        }
+
+        Assert.True(unregisteredOrdinal > 0);
+        var unreg = "m_unreg AS MATERIALIZED (\n"
+            + "    SELECT DISTINCT ON (pu.server_name, pu.sql_handle)\n"
+            + "           pu.server_name, pu.sql_handle, pu.object_name, pu.schema_name, pu.database_name\n"
+            + "    FROM collect.procedure_stats AS pu\n"
+            + "    WHERE pu.server_name = ANY($" + unregisteredOrdinal.ToString(CultureInfo.InvariantCulture) + ")\n"
+            + "      AND pu.collection_time >= $1\n"
+            + "      AND pu.collection_time <= $2\n"
+            + "      AND pu.sql_handle IS NOT NULL\n"
+            + "      AND pu.sql_handle <> ''\n"
+            + "      AND NOT EXISTS (SELECT 1 FROM m_last AS r WHERE r.server_name = pu.server_name AND r.sql_handle = pu.sql_handle)\n"
+            + "    ORDER BY pu.server_name, pu.sql_handle, pu.collection_time DESC\n"
+            + "),\n"
+            + "m AS (\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_last\n"
+            + "    UNION ALL\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_unreg\n"
+            + "    UNION ALL\n";
+        Assert.Contains(unreg, compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("      AND NOT EXISTS (SELECT 1 FROM m_unreg AS u WHERE u.server_name = mm.server_name AND u.sql_handle = mm.sql_handle)\n)\n",
+            compiled.Sql, StringComparison.Ordinal);
+        /* The registered servers keep the bounded overlay. */
+        Assert.Matches(@"AND ps\.collection_time >= LEAST\(last_ps\.collection_time, \$\d+\)\n", compiled.Sql);
+        Assert.DoesNotContain("LEAST(last_ps.collection_time, $1)", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(WindowRanking, compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -156,8 +206,9 @@ internal static class HourlyRawEdgesModuleCompile
 /// #5811: the raw route's module CTE against the old window-wide ranking, kept here as the oracle, on one store: three servers that
 /// reuse one set of handles for different modules, renames inside the window, handles seen only early in the window, and ad hoc
 /// statements. The panel runs through the runner, which reads the map's watermark itself, and the oracle runs the same statement
-/// with the old CTE in front. The rows must be the same with a stale map (the overlay is the whole window) and with a fresh one (the
-/// overlay is the last collection, and the map names every older handle).
+/// with the old CTE in front. The rows must be the same with a stale map (the runner compiles that ranking itself) and with a fresh one (the
+/// overlay is the last collection, and the map names every older handle). A fourth server was renamed, so a scope over its old name
+/// has no registry row; that scope must match the oracle with both maps too.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The test reaches DARLING_TEST_PG only to CREATE and
    DROP its own database through ScratchPostgres and works entirely inside it. */
@@ -181,6 +232,12 @@ public sealed class ComposeRawModuleCteOracleLiveTests
 
     private const string Panel =
         "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":200,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
+
+    /// <summary>The renamed server's old name, which only its stored rows carry.</summary>
+    private const string UnregisteredName = "Oracle3";
+
+    /// <summary>A scope over the renamed server's old name and one registered server.</summary>
+    private static readonly string[] ScopedNames = [UnregisteredName, "Oracle1"];
 
     private static readonly DateTime Anchor = new(2026, 1, 5, 12, 37, 21, DateTimeKind.Utc);
     private static readonly DateTime WindowStart = DateTime.SpecifyKind(Anchor.AddHours(-24), DateTimeKind.Unspecified);
@@ -207,6 +264,10 @@ public sealed class ComposeRawModuleCteOracleLiveTests
                 await DarlingMcpTestData.RegisterServerAsync(connection, -5811100 - i, "Oracle" + i.ToString(CultureInfo.InvariantCulture), ct);
             }
 
+            /* The fourth server was renamed: the registry holds its current name, and its rows keep the old one, Oracle3, which
+               therefore has no registry row. */
+            await DarlingMcpTestData.RegisterServerAsync(connection, -5811103, "Oracle3Renamed", ct);
+
             /* The stale map: its only refresh read one row from before the window. */
             await ExecAsync(connection, @"
 INSERT INTO collect.procedure_stats
@@ -216,15 +277,21 @@ VALUES (58110000, $1, -5811100, 'Oracle0', 'Db0', 'dbo', 'usp_Before', '0xOLD', 
             Assert.Equal(1, await DarlingModuleMap.RefreshRecentAsync(connection, null, Anchor, ct));
             Assert.Equal(WindowStart.AddHours(-6), await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
 
-            for (var i = 0; i < 3; i++)
+            for (var i = 0; i < 4; i++)
             {
                 await SeedServerAsync(connection, i, ct);
             }
 
             var stale = await RunAsync(postgres, ct);
-            Assert.Contains("LEAST(last_ps.collection_time, $1)", (string)stale["sql"]!, StringComparison.Ordinal);
+            Assert.StartsWith(OldModuleCte, (string)stale["sql"]!, StringComparison.Ordinal);
             var oracle = await OracleRowsAsync(postgres, ct);
             Assert.Equal(oracle, stale["rows"]!.ToJsonString());
+
+            /* A scope over the old name, which has no registry row. With the stale map the ranking matches it by its stored name. */
+            var staleScoped = await RunAsync(postgres, ct, ScopedNames);
+            Assert.StartsWith("WITH m AS (", (string)staleScoped["sql"]!, StringComparison.Ordinal);
+            var scopedOracle = await OracleRowsAsync(postgres, ct, ScopedNames);
+            Assert.Equal(scopedOracle, staleScoped["rows"]!.ToJsonString());
 
             /* The fresh map: refreshed through the last collection, so the overlay is that collection and the map names the rest. */
             Assert.True(await DarlingModuleMap.RefreshRecentAsync(connection, null, Anchor, ct) > 0);
@@ -232,11 +299,35 @@ VALUES (58110000, $1, -5811100, 'Oracle0', 'Db0', 'dbo', 'usp_Before', '0xOLD', 
             var fresh = await RunAsync(postgres, ct);
             Assert.Contains("LEAST(last_ps.collection_time, $3)", (string)fresh["sql"]!, StringComparison.Ordinal);
             Assert.Equal(oracle, fresh["rows"]!.ToJsonString());
+            var freshScoped = await RunAsync(postgres, ct, ScopedNames);
+            Assert.Contains("m_unreg AS MATERIALIZED (", (string)freshScoped["sql"]!, StringComparison.Ordinal);
+            Assert.Equal(scopedOracle, freshScoped["rows"]!.ToJsonString());
+
+            /* With the fresh map the old name reads its stored rows over the whole window (m_unreg): a handle that arrived after the
+               map's last refresh is in no map row and no registered server's overlay, so the map alone would read it '(ad hoc)'. */
+            await ExecAsync(connection, @"
+INSERT INTO collect.procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES (58190000, $1, -5811103, 'Oracle3', 'Db3', 'dbo', 'usp_Late', '0xLATE', 1, 1, 1, 300)", ct, WindowStart.AddHours(23.5));
+            await ExecAsync(connection, @"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES (58190001, $1, -5811103, 'Oracle3', 'Db3', 'QHLATE', '0xLATE', 987654, 987654, 1, 300)", ct, WindowStart.AddHours(23.5));
+            var lateOracle = await OracleRowsAsync(postgres, ct, ScopedNames);
+            Assert.Contains(JsonNode.Parse(lateOracle)!.AsArray(), r => (string?)r!["object_name"] == "usp_Late");
+            Assert.Equal(lateOracle, (await RunAsync(postgres, ct, ScopedNames))["rows"]!.ToJsonString());
+
+            var scopedRows = JsonNode.Parse(scopedOracle)!.AsArray();
+            Assert.Equal(2 * 21, scopedRows.Count);
+            Assert.Contains(scopedRows, r => (string?)r!["database_name"] == "Db3" && (string?)r["object_name"] == "usp_Oracle3_5_v2");
+            Assert.Contains(scopedRows, r => (string?)r!["database_name"] == "Db3" && (string?)r["object_name"] == "usp_Oracle3_17");
 
             /* The rows are what the seed says: a rename reads its newest name, an early-only handle its own, and a handle reused on
                another server that server's module. */
             var rows = JsonNode.Parse(oracle)!.AsArray();
-            Assert.Equal(3 * 21, rows.Count);
+            Assert.Equal(4 * 21, rows.Count);
             Assert.Contains(rows, r => (string?)r!["database_name"] == "Db1" && (string?)r["object_name"] == "usp_Oracle1_5_v2");
             Assert.Contains(rows, r => (string?)r!["database_name"] == "Db2" && (string?)r["object_name"] == "usp_Oracle2_17");
             Assert.Contains(rows, r => (string?)r!["database_name"] == "Db0" && (string?)r["object_name"] == "(ad hoc)");
@@ -278,7 +369,7 @@ FROM generate_series(0, 1) AS t
 CROSS JOIN generate_series(0, 20) AS p", ct, WindowStart, 58160000L + (i * 10000L), id, name, db, (long)i * 100_000L);
     }
 
-    private static async Task<JsonObject> RunAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    private static async Task<JsonObject> RunAsync(NpgsqlDataSource postgres, CancellationToken ct, string[]? scope = null)
     {
         var body = new JsonObject
         {
@@ -286,21 +377,32 @@ CROSS JOIN generate_series(0, 20) AS p", ct, WindowStart, 58160000L + (i * 10000
             ["windowStart"] = WindowStart.ToString("o", CultureInfo.InvariantCulture),
             ["windowEnd"] = WindowEnd.ToString("o", CultureInfo.InvariantCulture),
         };
+        if (scope is not null)
+        {
+            var names = new JsonArray();
+            foreach (var name in scope)
+            {
+                names.Add(name);
+            }
+
+            body["server"] = names;
+        }
         var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct, nowUtc: Anchor);
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
         var sql = (string)outcome.Payload!["sql"]!;
-        Assert.StartsWith("WITH m_last AS MATERIALIZED (", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ROW_NUMBER()", sql, StringComparison.Ordinal);
         return outcome.Payload;
     }
 
     /// <summary>The same panel with the pre-#5811 module CTE in front: the statement compiled for no watermark, its module CTE
     /// replaced by <see cref="OldModuleCte"/>, which binds the same window parameters ($1, $2).</summary>
-    private static async Task<string> OracleRowsAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    private static async Task<string> OracleRowsAsync(NpgsqlDataSource postgres, CancellationToken ct, string[]? scope = null)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(Panel)!, Array.Empty<string>());
         Assert.True(parseError is null, parseError);
-        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.None, Anchor, RollupCoverage.Unknown);
+        /* The old CTE ranked every server's rows; the statement after it applies the scope, with the old name matched by its stored
+           server_name exactly as the runner finds it. */
+        var context = new ComposeRunContext(scope, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.None, Anchor, RollupCoverage.Unknown,
+            UnregisteredServers: scope is null ? null : [UnregisteredName]);
         var (compiled, error) = ComposeCompiler.Compile(plan!, context);
         Assert.True(error is null, error);
         var cut = compiled!.Sql.IndexOf(")\nSELECT ", StringComparison.Ordinal);

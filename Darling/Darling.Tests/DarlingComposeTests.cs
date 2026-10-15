@@ -644,18 +644,15 @@ public sealed class DarlingComposeTests
         var sql = Compile(ValidPlan(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}"), new[] { "PROD-01" });
         Assert.Contains("procedure_stats", sql, StringComparison.Ordinal);
-        /* #5811: the window's procedure_stats overlay plus collect.module_map for older handles, never a ranking of the window. */
-        Assert.Contains("FROM collect.module_map AS mm", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ROW_NUMBER()", sql, StringComparison.Ordinal);
+        /* #5811: with no map watermark the module CTE is the window ranking, as before #5811 (ComposeRawModuleCteTests pins the
+           map-first shape a fresh watermark compiles). */
+        Assert.Contains("ROW_NUMBER()", sql, StringComparison.Ordinal);
         /* Per-server attribution — a handle reused across servers attributes per server, not globally. */
-        Assert.Contains("SELECT DISTINCT ON (rows_ps.server_name, rows_ps.sql_handle)", sql, StringComparison.Ordinal);
-        Assert.Contains("r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle", sql, StringComparison.Ordinal);
-        /* The #1568 stitch is bounded by the SAME window ($1/$2) and scoped to the same server set ($3): the overlay by id, the map by name. */
-        Assert.Contains("ps.collection_time >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ps.collection_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("mm.last_seen >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains("    WHERE srv." + ServerIdScope3 + "\n", sql, StringComparison.Ordinal);
-        Assert.Contains("mm.server_name = ANY($3)", sql, StringComparison.Ordinal);
+        Assert.Contains("PARTITION BY server_name, sql_handle", sql, StringComparison.Ordinal);
+        /* The #1568 stitch is bounded by the SAME window ($1/$2) and scoped to the same server set ($3). */
+        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("server_name = ANY($3)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -720,8 +717,7 @@ public sealed class DarlingComposeTests
         var sql = Compile(ValidPlan(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}"));
         Assert.Contains("COALESCE(m.object_name, f.query_hash) AS statement", sql, StringComparison.Ordinal);
-        Assert.StartsWith("WITH m_last AS MATERIALIZED (\n", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM collect.module_map AS mm", sql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER()", sql, StringComparison.Ordinal);
         Assert.Contains("procedure_stats", sql, StringComparison.Ordinal);
     }
 
@@ -899,11 +895,7 @@ public sealed class DarlingComposeTests
            bucket ranks and charts as an ordinary member, never a NULL that membership would drop. */
         var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"line\"}"));
 
-        Assert.StartsWith("WITH m_last AS MATERIALIZED (", sql, StringComparison.Ordinal);
-        Assert.Contains("),\nm AS (\n", sql, StringComparison.Ordinal);
-        Assert.True(
-            sql.IndexOf("),\nm AS (\n", StringComparison.Ordinal) < sql.IndexOf(", topn AS (", StringComparison.Ordinal),
-            "the module CTE (m) comes first, before the rank CTE that joins it");
+        Assert.StartsWith("WITH m AS (", sql, StringComparison.Ordinal);
         Assert.Contains(", topn AS (", sql, StringComparison.Ordinal);
         Assert.Equal(2, CountOccurrences(sql, "LEFT JOIN m ON m.sql_handle = f.sql_handle"));
         Assert.Contains(
@@ -3535,7 +3527,7 @@ public sealed class DarlingComposeTests
         var plan = ValidPlan(EdgePanelJson);
         var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true));
 
-        Assert.Equal(ModuleCte("$1")
+        Assert.Equal(ComposeRawModuleCteOracleLiveTests.OldModuleCte
             + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
             + "FROM " + EdgeFrom("sum") + " AS f\n"
             + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
@@ -3545,11 +3537,12 @@ public sealed class DarlingComposeTests
             + "ORDER BY value DESC NULLS LAST\n"
             + "LIMIT $5", compiled.Sql);
         Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ROW_NUMBER()", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
     }
 
-    /// <summary>The #5811 module CTE (ruling C) as the compiler emits it, with the overlay floor parameter <paramref name="floor"/>
-    /// (the window start, $1, when there is no usable watermark) and an optional server scope.</summary>
+    /// <summary>The #5811 module CTE (ruling C) as the compiler emits it for a usable map watermark, with the overlay floor parameter
+    /// <paramref name="floor"/> and an optional server scope. With no usable watermark the compiler emits the window ranking
+    /// (<see cref="ComposeRawModuleCteOracleLiveTests.OldModuleCte"/>) instead.</summary>
     private static string ModuleCte(string floor, string? scopeParam = null) =>
         "WITH m_last AS MATERIALIZED (\n"
         + "    SELECT DISTINCT ON (rows_ps.server_name, rows_ps.sql_handle)\n"
@@ -3628,12 +3621,12 @@ public sealed class DarlingComposeTests
         var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: start.AddHours(-5)));
         var without = CompileEdge(plan, EdgeContext(plan, true));
 
-        /* #5811 ruling C: a watermark older than the window binds no floor; the overlay reads from the window start ($1), the
-           whole window, exactly as with no watermark. */
+        /* #5811: a watermark older than the window binds no floor, so the module CTE is the window ranking, exactly as with no
+           watermark (the whole window at the old cost, sorted in parallel). */
         Assert.Equal(without.Sql, compiled.Sql);
         Assert.Equal(without.Parameters.Count, compiled.Parameters.Count);
         Assert.Equal(start, (DateTime)compiled.Parameters[0].Value!);
-        Assert.Contains("LEAST(last_ps.collection_time, $1)\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.StartsWith(ComposeRawModuleCteOracleLiveTests.OldModuleCte, compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3665,8 +3658,9 @@ public sealed class DarlingComposeTests
 
             Assert.Equal(without.Sql, withNull.Sql);
             Assert.Equal(without.Parameters.Count, withNull.Parameters.Count);
-            Assert.StartsWith("WITH m_last AS MATERIALIZED (\n", withNull.Sql, StringComparison.Ordinal);
-            Assert.Contains("LEAST(last_ps.collection_time, $1)\n", withNull.Sql, StringComparison.Ordinal);
+            Assert.StartsWith("WITH m AS (\n", withNull.Sql, StringComparison.Ordinal);
+            Assert.Contains("ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC)", withNull.Sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("module_map", withNull.Sql, StringComparison.Ordinal);
         }
     }
 
@@ -3681,7 +3675,7 @@ public sealed class DarlingComposeTests
 
             Assert.Equal(without.Sql, compiled.Sql);
             Assert.Equal(without.Parameters.Count, compiled.Parameters.Count);
-            Assert.Contains("LEAST(last_ps.collection_time, $1)\n", compiled.Sql, StringComparison.Ordinal);
+            Assert.StartsWith(ComposeRawModuleCteOracleLiveTests.OldModuleCte, compiled.Sql, StringComparison.Ordinal);
         }
 
         /* A watermark exactly at now still serves the overlay. */
@@ -3698,14 +3692,17 @@ public sealed class DarlingComposeTests
         var watermark = EdgeNow.AddMinutes(-30);
 
         /* Raw: no verdict, so the hourly-raw-edges route is not taken. Since #5811 (ruling C) the watermark bounds the raw route's
-           overlay too: one floor parameter more, read in the LEAST, and nothing else differs. */
+           overlay too: the module CTE is the map-first shape with one floor parameter more ($3), where no watermark compiles the
+           window ranking; the statement after the CTE differs only in the LIMIT's parameter number. */
         var rawWith = CompileEdge(plan, EdgeContext(plan, false, moduleMapThrough: watermark));
         var rawWithout = CompileEdge(plan, EdgeContext(plan, false));
-        Assert.Equal(rawWithout.Sql.Replace("LEAST(last_ps.collection_time, $1)", "LEAST(last_ps.collection_time, $3)", StringComparison.Ordinal).Replace("LIMIT $3", "LIMIT $4", StringComparison.Ordinal), rawWith.Sql);
         Assert.Equal(rawWithout.Parameters.Count + 1, rawWith.Parameters.Count);
         Assert.Equal(watermark - DarlingModuleMap.WatermarkSlack, (DateTime)rawWith.Parameters[2].Value!);
-        Assert.StartsWith(ModuleCte("$1"), rawWithout.Sql, StringComparison.Ordinal);
+        Assert.StartsWith(ComposeRawModuleCteOracleLiveTests.OldModuleCte, rawWithout.Sql, StringComparison.Ordinal);
         Assert.StartsWith(ModuleCte("$3"), rawWith.Sql, StringComparison.Ordinal);
+        Assert.Equal(
+            rawWithout.Sql[ComposeRawModuleCteOracleLiveTests.OldModuleCte.Length..].Replace("LIMIT $3", "LIMIT $4", StringComparison.Ordinal),
+            rawWith.Sql[ModuleCte("$3").Length..]);
 
         /* CAGG: a window old enough for the daily tier joins collect.module_map directly, with or without a watermark. */
         var caggStart = EdgeNow.AddDays(-20);

@@ -198,9 +198,9 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
 
             var (hybrid, raw) = await RunBothAsync(store, PanelByDatabaseAndObject);
             Assert.Contains(Hybrid, (string)hybrid["sql"]!, StringComparison.Ordinal);
-            /* #5811 ruling C: with no watermark the overlay is the whole window, read from the window start ($1), as raw reads it */
-            Assert.StartsWith("WITH m_last AS MATERIALIZED (", (string)hybrid["sql"]!, StringComparison.Ordinal);
-            Assert.Contains("LEAST(last_ps.collection_time, $1)", (string)hybrid["sql"]!, StringComparison.Ordinal);
+            /* #5811: with no watermark the module CTE is the window ranking, as raw reads it, at the cost it had before #5811 */
+            Assert.StartsWith("WITH m AS (", (string)hybrid["sql"]!, StringComparison.Ordinal);
+            Assert.Contains("ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle", (string)hybrid["sql"]!, StringComparison.Ordinal);
             Assert.Equal(raw.ToJsonString(), HybridRows(hybrid));
             Assert.Equal(100 + 1000, ValueOf(raw, Database, "usp_Renamed"), 6);
         });
@@ -227,7 +227,9 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
             await store.RefreshAggregateAsync();
 
             var (hybrid, raw) = await RunBothAsync(store, PanelByDatabaseAndObject);
-            AssertOverlayTaken(hybrid);
+            /* #5811: a stale watermark binds no floor, so the module CTE is the window ranking, at the cost it had before #5811 */
+            Assert.StartsWith("WITH m AS (", (string)hybrid["sql"]!, StringComparison.Ordinal);
+            Assert.DoesNotContain("module_map", (string)hybrid["sql"]!, StringComparison.Ordinal);
             Assert.Equal(raw.ToJsonString(), HybridRows(hybrid));
             Assert.Equal(100 + 1000, ValueOf(raw, Database, "usp_Renamed"), 6);
             Assert.Equal(10000, ValueOf(raw, Database, "usp_Fresh"), 6);

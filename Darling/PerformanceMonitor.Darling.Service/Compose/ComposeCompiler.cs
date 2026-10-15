@@ -518,9 +518,8 @@ public static class ComposeCompiler
 
         /* The overlay floor of the #5811 module CTE (ruling C), on every raw route that joins modules (raw and hourly-raw-edges): the later
            of the window start and the map's watermark less the refresh slack. Bound only when that is later than the start, so a compile
-           with no watermark (or a stale one, older than the window) binds nothing new and its overlay is the whole window, read with the
-           window-start parameter. A watermark later than the run's now (written ahead of the clock by an older build) counts as no
-           watermark. */
+           with no watermark (or a stale one, older than the window) binds nothing new and compiles the window ranking (see the module
+           CTE below). A watermark later than the run's now (written ahead of the clock by an older build) counts as no watermark. */
         string? moduleOverlayFloorParam = null;
         if (!route.IsCagg && plan.UsesModuleJoin && !context.ModuleMapMissing
             && context.ModuleMapThrough is DateTime moduleMapThrough && moduleMapThrough <= context.NowUtc
@@ -659,7 +658,7 @@ public static class ComposeCompiler
             /* #5811, ruling C: one module CTE on both raw routes (raw, hourly-raw-edges). Each server's overlay is its procedure_stats rows
                from min(its last collection in the window, the overlay floor) to the window end, one row per (server_name, sql_handle), and
                collect.module_map covers every other handle (AppendMapFirstModuleCte). With a fresh map the overlay is about the last
-               refresh's slack; with a stale or missing watermark it is the whole window, with the window-wide ranking's names at its cost.
+               refresh's slack.
                A store without the map (ModuleMapMissing) ranks the whole window with ROW_NUMBER, as every raw route did before #5811,
                because the map CTE would fail on the missing relation.
 
@@ -669,10 +668,16 @@ public static class ComposeCompiler
                window still reads '(ad hoc)'. The map is forward-only, so a handle renamed before the floor reads its newest name from the
                map and one renamed after it reads the overlay's. A rename inside the last minute (the gap between the window end and now)
                can show the newer name, and so can a handle whose only procedure_stats row is in that minute (it can show a name where
-               the window-wide ranking shows (ad hoc)). */
-            if (!context.ModuleMapMissing)
+               the window-wide ranking shows (ad hoc)).
+
+               With no floor bound (a stale, missing or future watermark) the overlay would be the whole window, and the map-first
+               shape reads it through a per-server LATERAL that the planner sorts serially for the DISTINCT ON: on the plant (10
+               servers, 2.88 million rows) that was 12 to 16 s against the window ranking's 5 to 14 s, which sorts in parallel. So that
+               case compiles the window ranking itself, the same text a store without the map compiles, and costs what it cost before
+               #5811. */
+            if (!context.ModuleMapMissing && moduleOverlayFloorParam is not null)
             {
-                AppendMapFirstModuleCte(sql, startParam, endParam, moduleOverlayFloorParam ?? startParam, hasServerScope ? serverScopeParam : null, unregisteredParam);
+                AppendMapFirstModuleCte(sql, startParam, endParam, moduleOverlayFloorParam, hasServerScope ? serverScopeParam : null, unregisteredParam);
             }
             else
             {
@@ -924,14 +929,13 @@ public static class ComposeCompiler
     /// The #5811 module CTE of a raw-route <c>object_name</c> join (the raw and hourly-raw-edges routes, ruling C): an overlay of each
     /// server's procedure_stats rows from <c>LEAST(its last collection in the window, the overlay floor)</c> to the window end, and
     /// <c>collect.module_map</c> for every other handle. The floor is the later of the window start and the map's watermark less
-    /// <see cref="DarlingModuleMap.WatermarkSlack"/>, or the window start when there is no usable watermark. Before #5811 the CTE ranked
+    /// <see cref="DarlingModuleMap.WatermarkSlack"/>; with no usable watermark the caller compiles the window ranking instead. Before #5811 the CTE ranked
     /// every procedure_stats row of the window per (server, handle) with <c>ROW_NUMBER</c>, a sort of the whole wide table before the
     /// fact scan started (on a 10-server plant of 2.88 million rows: an external merge of about 120 MB, 2.5 to 5.6 s of a 6.8 to 15.5 s
     /// panel).
     ///
     /// <para>With a fresh map the overlay is the rows since the map's last refresh, less the slack (about an hour of rows at most), or
-    /// the server's last collection when that is older, so a server that stopped collecting still reads the names it last had. With a
-    /// stale or missing watermark the overlay is the whole window: the names are those the window-wide ranking gave, at about its cost.
+    /// the server's last collection when that is older, so a server that stopped collecting still reads the names it last had.
     /// The overlay is deduplicated per (server_name, sql_handle), newest row first, the map's primary key is that pair, and the NOT
     /// EXISTS drops a map row the overlay already carries, so each pair appears once and the outer LEFT JOIN and the group references are
     /// unchanged. A map row with <c>last_seen</c> before the window start is skipped, so a handle with no procedure_stats row in the window
@@ -939,8 +943,12 @@ public static class ComposeCompiler
     ///
     /// <para>What can read differently from the window-wide ranking with a fresh map: a handle older than the overlay reads the map's
     /// name, its newest, which can be newer than the window's end (a rename the map has seen). The overlay is read per registered server,
-    /// by id, so a scoped name with no registry row (a removed server's history) resolves its handles from the map only, and a scope over
-    /// a renamed server reads its old-name handles from the overlay, but from the map only when the map row carries a scoped name.</para>
+    /// by id. A removed or disabled server keeps its registry row (removal flips <c>is_enabled</c> and never deletes the row, see
+    /// <c>DarlingObservability.DisableOrphanedServersSql</c>), so its history reads the overlay like any other server's. A scoped name
+    /// with no registry row (a renamed server's old name, or a name never registered) reads <c>m_unreg</c>: its stored rows over the
+    /// whole window by name, as before #5811, because the map (never purged) still lacks whatever arrived after its last refresh. A
+    /// scope over a renamed server's current name reads its old-name handles from the overlay, but from the map only when the map row
+    /// carries a scoped name.</para>
     /// </summary>
     private static void AppendMapFirstModuleCte(StringBuilder sql, string startParam, string endParam, string overlayFloorParam, string? serverScopeParam,
         string? unregisteredParam)
@@ -981,15 +989,42 @@ public static class ComposeCompiler
         if (serverScopeParam is not null)
         {
             /* The registry rows in scope, by id like every fact read (#5525), so an out-of-scope server gets no per-server read. A scoped
-               name with no registry row matches no srv row; its handles resolve from the map, which is scoped by name below. */
+               name with no registry row matches no srv row; its handles resolve from m_unreg and the map, both scoped by name below. */
             sql.Append("    WHERE ").Append(ServerScope("srv.", serverScopeParam, unregisteredParam)).Append('\n');
         }
 
         sql.Append("    ORDER BY rows_ps.server_name, rows_ps.sql_handle, rows_ps.collection_time DESC\n");
         sql.Append("),\n");
+        if (unregisteredParam is not null)
+        {
+            /* A scoped name with no registry row (a renamed server's old name, or a name never registered; a removed server keeps its
+               row, see DarlingObservability.DisableOrphanedServersSql) has no srv row, so m_last never reads its rows. The map holds
+               its handles only up to the map's last refresh, so with a stale map they would read '(ad hoc)' where the window-wide
+               ranking named them. These names read the whole window by their stored server_name, newest row per pair, as before
+               #5811. The arm exists only when the run's scope names such a server. */
+            sql.Append("m_unreg AS MATERIALIZED (\n");
+            sql.Append("    SELECT DISTINCT ON (pu.server_name, pu.sql_handle)\n");
+            sql.Append("           pu.server_name, pu.sql_handle, pu.object_name, pu.schema_name, pu.database_name\n");
+            sql.Append("    FROM ").Append(schema).Append(".procedure_stats AS pu\n");
+            sql.Append("    WHERE pu.server_name = ANY(").Append(unregisteredParam).Append(")\n");
+            sql.Append("      AND pu.collection_time >= ").Append(startParam).Append('\n');
+            sql.Append("      AND pu.collection_time <= ").Append(endParam).Append('\n');
+            sql.Append("      AND pu.sql_handle IS NOT NULL\n");
+            sql.Append("      AND pu.sql_handle <> ''\n");
+            sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_last AS r WHERE r.server_name = pu.server_name AND r.sql_handle = pu.sql_handle)\n");
+            sql.Append("    ORDER BY pu.server_name, pu.sql_handle, pu.collection_time DESC\n");
+            sql.Append("),\n");
+        }
+
         sql.Append(ModuleAlias).Append(" AS (\n");
         sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_last\n");
         sql.Append("    UNION ALL\n");
+        if (unregisteredParam is not null)
+        {
+            sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_unreg\n");
+            sql.Append("    UNION ALL\n");
+        }
+
         sql.Append("    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n");
         sql.Append("    FROM ").Append(schema).Append(".module_map AS mm\n");
         sql.Append("    WHERE mm.last_seen >= ").Append(startParam).Append('\n');
@@ -999,6 +1034,11 @@ public static class ComposeCompiler
         }
 
         sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_last AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n");
+        if (unregisteredParam is not null)
+        {
+            sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_unreg AS u WHERE u.server_name = mm.server_name AND u.sql_handle = mm.sql_handle)\n");
+        }
+
         sql.Append(")\n");
     }
 
