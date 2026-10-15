@@ -116,6 +116,7 @@ def reconcile(classes, assignment):
 def _lite_pack():
     spec = importlib.util.spec_from_file_location("lite_shard_pack", os.path.join(HERE, "lite-shard-pack.py"))
     mod = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True  # no __pycache__ beside the scripts in a checkout
     spec.loader.exec_module(mod)
     return mod
 
