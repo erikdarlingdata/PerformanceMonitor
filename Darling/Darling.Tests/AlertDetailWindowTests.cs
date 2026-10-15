@@ -1,0 +1,161 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Notifications;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #5847: the viewer's Alert Details window. Its field values are selectable, read-only text boxes that stay out of the
+/// tab order; "Copy all details" carries the header and every item; the full-chain link shows only for a Blocking or
+/// Deadlocks alert whose opener can navigate. Built on the shared STA thread and laid out without being shown, so no
+/// size is stored.
+/// </summary>
+public sealed class AlertDetailWindowTests
+{
+    private static ViewerAlertRow Row(string metric) => new()
+    {
+        AlertTime = new DateTime(2026, 10, 15, 9, 0, 0),
+        ServerName = "SQL01",
+        MetricName = metric,
+        CurrentValue = 98,
+        ThresholdValue = 1,
+        AlertSent = true,
+        NotificationType = "Email",
+        Muted = false,
+        ContextJson = AlertContextSerializer.Serialize(new AlertContext
+        {
+            Details = new List<AlertDetailItem>
+            {
+                new()
+                {
+                    Heading = "Blocking Chain 1",
+                    Fields = new List<(string Label, string Value)> { ("Database", "Tenant1"), ("Blocked Query", "EXEC dbo.Receive") }
+                },
+                new()
+                {
+                    Heading = "Blocking Chain 2",
+                    Fields = new List<(string Label, string Value)> { ("Database", "Tenant2") }
+                }
+            }
+        })
+    };
+
+    private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T match)
+            {
+                yield return match;
+            }
+
+            foreach (var nested in Descendants<T>(child))
+            {
+                yield return nested;
+            }
+        }
+    }
+
+    private static void LayOut(Window window)
+    {
+        var root = (FrameworkElement)window.Content;
+        root.Measure(new Size(800, 900));
+        root.Arrange(new Rect(0, 0, 800, 900));
+        root.UpdateLayout();
+    }
+
+    [Fact]
+    public void FieldValues_AreReadOnlyTextBoxes_OutOfTheTabOrder()
+    {
+        StaTestThread.Run(() =>
+        {
+            var window = new AlertDetailWindow(Row("Blocking Detected"));
+            try
+            {
+                LayOut(window);
+
+                var values = Descendants<TextBox>(window.DetailItems).Where(t => t.Name == "FieldValue").ToList();
+                Assert.Equal(new[] { "Tenant1", "EXEC dbo.Receive", "Tenant2" }, values.Select(v => v.Text));
+                Assert.All(values, v =>
+                {
+                    Assert.True(v.IsReadOnly);
+                    Assert.False(v.IsTabStop);
+                });
+
+                Assert.IsType<TextBox>(window.ServerText);
+                Assert.Equal("SQL01", window.ServerText.Text);
+                Assert.True(window.ServerText.IsReadOnly);
+                Assert.False(window.ServerText.IsTabStop);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+    }
+
+    [Fact]
+    public void CopyText_CarriesTheHeader_AndBothItems()
+    {
+        StaTestThread.Run(() =>
+        {
+            var window = new AlertDetailWindow(Row("Blocking Detected"));
+            try
+            {
+                var text = window.BuildCopyText();
+
+                Assert.StartsWith("Time: ", text);
+                Assert.Contains("Server: SQL01" + Environment.NewLine + "Metric: Blocking Detected", text);
+                Assert.Contains(Environment.NewLine + "Blocking Chain 1" + Environment.NewLine + "Database: Tenant1"
+                    + Environment.NewLine + "Blocked Query: EXEC dbo.Receive" + Environment.NewLine, text);
+                Assert.Contains(Environment.NewLine + "Blocking Chain 2" + Environment.NewLine + "Database: Tenant2", text);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+    }
+
+    [Theory]
+    [InlineData("Blocking Detected", true, true)]
+    [InlineData("Deadlocks Detected", true, true)]
+    [InlineData("Blocking Detected", false, false)]
+    [InlineData("High CPU", true, false)]
+    public void FullChainLink_ShowsOnlyForAViewTheOpenerCanReach(string metric, bool hasOpener, bool shown)
+    {
+        StaTestThread.Run(() =>
+        {
+            var opened = 0;
+            var window = new AlertDetailWindow(Row(metric), hasOpener ? () => opened++ : null);
+            try
+            {
+                Assert.Equal(shown ? Visibility.Visible : Visibility.Collapsed, window.FullChainLinkText.Visibility);
+                if (shown)
+                {
+                    window.FullChainLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+                    Assert.Equal(1, opened);
+                }
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+    }
+}

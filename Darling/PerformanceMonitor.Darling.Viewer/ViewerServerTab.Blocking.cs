@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
 using static PerformanceMonitor.Ui.DataGridHelpers;
 
@@ -300,6 +301,41 @@ public partial class ViewerServerTab
         await ShowEventDataStartAsync(DeadlocksTruncationBanner, dataStartTask, "Deadlocks", startUtc, rows.Select(r => r.DeadlockTime), ViewerDataService.DeadlocksRowCap);
         await ShowSeparatelyMonitoredNotesAsync();
         await LoadDeadlockSlicerAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// #5847: the Alert Details window's "open the full chain" link: show the Blocked Process Reports or Deadlocks grid over a
+    /// window around the alert's time, where the full statements and the reports are. The day drill's mechanism: hold the
+    /// window on the toolbar and switch the tabs before the first await, under <see cref="_suppressDrillDownAutoRefresh"/>,
+    /// so any refresh that sees the Blocking tab also reads this window; then load the grid over it.
+    /// </summary>
+    internal async Task DeepLinkToIncidentAsync(AlertChainView view, DateTime fromUtc, DateTime toUtc)
+    {
+        SetToolbarWindowUtc(fromUtc, toUtc);
+        _suppressDrillDownAutoRefresh = true;
+        try
+        {
+            InnerTabs.SelectedIndex = BlockingInnerTabIndex;
+            BlockingSubTabs.SelectedIndex = view == AlertChainView.Deadlocks ? DeadlocksSubTabIndex : BlockedProcessReportsSubTabIndex;
+        }
+        finally
+        {
+            _suppressDrillDownAutoRefresh = false;
+        }
+
+        /* This server's clock, so the picker draws the held window in the tab's display zone. */
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
+        RefreshRangePicker();
+
+        if (view == AlertChainView.Deadlocks)
+        {
+            await LoadDeadlocksAsync(fromUtc, toUtc);
+        }
+        else
+        {
+            await LoadBlockedProcessReportsAsync(fromUtc, toUtc);
+        }
     }
 
     // ── Blocking / Deadlock slicers (W1e) ──

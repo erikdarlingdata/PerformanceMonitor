@@ -94,6 +94,13 @@ public sealed class ViewerAppSettings
     /// applied at startup and live-previewed from the Settings window via the shared <c>ThemeManager</c>.</summary>
     public string ColorTheme { get; set; } = "Dark";
 
+    /// <summary>The Alert Details window's last size (#5847), so a window enlarged to read a long blocking alert opens at
+    /// that size next time. 0 = never resized: the window's own default size.</summary>
+    public double AlertDetailWindowWidth { get; set; }
+
+    /// <summary>The Alert Details window's last height (#5847); see <see cref="AlertDetailWindowWidth"/>.</summary>
+    public double AlertDetailWindowHeight { get; set; }
+
     /// <summary>
     /// How far a plan operator's actual row count may diverge from its estimate before the plan viewer
     /// colors the edge feeding it (#4579), matching PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c>

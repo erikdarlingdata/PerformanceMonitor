@@ -59,6 +59,13 @@ public partial class AlertsHistoryTab : UserControl
     /// </summary>
     public event Action<int?>? AlertsDismissed;
 
+    /// <summary>#5847: builds the Alert Details window's "open the full chain" action for a row, or null when the row has
+    /// no Blocking or Deadlocks view to open (set by the shell, which owns the server tabs).</summary>
+    public Func<AlertHistoryRow, Action?>? FullChainOpener { get; set; }
+
+    /// <summary>#5847: where the Alert Details window keeps its last size (set by the shell).</summary>
+    public Windows.AlertDetailWindow.ISizeStore? DetailWindowSizeStore { get; set; }
+
     public AlertsHistoryTab()
     {
         InitializeComponent();
@@ -585,7 +592,7 @@ public partial class AlertsHistoryTab : UserControl
         if (row.DataContext is not AlertHistoryRow item) return;
 
         var owner = Window.GetWindow(this);
-        var detailWindow = new Windows.AlertDetailWindow(item);
+        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
         if (owner != null) detailWindow.Owner = owner;
         detailWindow.ShowDialog();
     }
@@ -597,7 +604,7 @@ public partial class AlertsHistoryTab : UserControl
         if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
 
         var owner = Window.GetWindow(this);
-        var detailWindow = new Windows.AlertDetailWindow(item);
+        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
         if (owner != null) detailWindow.Owner = owner;
         detailWindow.ShowDialog();
     }

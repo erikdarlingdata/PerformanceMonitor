@@ -13,6 +13,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -201,6 +202,34 @@ public partial class ServerTab : UserControl
         /* The heatmap drill's window is the same naive-UTC pair the grid read took (see OnActiveQueriesDrillDown):
            the banner follows it, so it stops describing the last range read (#4953). */
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, fromDate, toDate);
+    }
+
+    /// <summary>
+    /// #5847: the Alert Details window's "open the full chain" link: show the Blocked Process Reports or Deadlocks grid over a
+    /// window around the alert's time, where the full statements and the reports are. The day drill's mechanism: hold the
+    /// window on the toolbar, switch the tabs under <see cref="_suppressActiveQueriesAutoRefresh"/>, then one load of the
+    /// visible tab through the refresh coordinator. A tab the shell has just created passes <paramref name="reload"/> false:
+    /// its first refresh, which runs next, reads the held window.
+    /// </summary>
+    internal async Task ShowIncidentAsync(AlertChainView view, DateTime fromUtc, DateTime toUtc, bool reload)
+    {
+        SetDrillDownTimeRange(fromUtc, toUtc);
+
+        _suppressActiveQueriesAutoRefresh = true;
+        try
+        {
+            MainTabControl.SelectedIndex = 8;                                              // Blocking
+            BlockingSubTabControl.SelectedIndex = view == AlertChainView.Deadlocks ? 3 : 2; // Deadlocks / Blocked Process Reports
+        }
+        finally
+        {
+            _suppressActiveQueriesAutoRefresh = false;
+        }
+
+        if (reload)
+        {
+            await RefreshVisibleTabOnlyAsync();
+        }
     }
 
     /// <summary>

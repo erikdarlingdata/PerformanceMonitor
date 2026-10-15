@@ -336,6 +336,13 @@ public partial class App : Application
     /* Color theme ("Dark" or "Light") */
     public static string ColorTheme { get; set; } = "Dark";
 
+    /// <summary>The Alert Details window's last size (#5847), so a window enlarged to read a long blocking alert opens at
+    /// that size next time. 0 = never resized: the window's own default size.</summary>
+    public static double AlertDetailWindowWidth { get; set; }
+
+    /// <summary>The Alert Details window's last height (#5847); see <see cref="AlertDetailWindowWidth"/>.</summary>
+    public static double AlertDetailWindowHeight { get; set; }
+
     /* NOC Overview tile sort ("Cpu" = CPU% descending default, or "Name") */
     public static ServerOverviewSortMode OverviewSortMode { get; set; } = ServerOverviewSort.Default;
 
@@ -1466,6 +1473,10 @@ public partial class App : Application
                         Services.ServerTimeHelper.CurrentDisplayMode = tdm;
                 }
             }
+
+            /* Alert Details window size (#5847) */
+            if (read.TryGetProperty("alert_detail_window_width", out v)) AlertDetailWindowWidth = v.Number(0, 0, 10000);
+            if (read.TryGetProperty("alert_detail_window_height", out v)) AlertDetailWindowHeight = v.Number(0, 0, 10000);
 
             /* Color theme */
             if (read.TryGetProperty("color_theme", out v))

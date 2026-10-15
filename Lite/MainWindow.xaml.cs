@@ -405,6 +405,8 @@ public partial class MainWindow : Window
             AlertsHistoryContent.Initialize(_dataService, OpenTabClockFor);
             AlertsHistoryContent.MuteRuleService = _muteRuleService;
             AlertsHistoryContent.AlertsDismissed += OnAlertHistoryDismissed;
+            AlertsHistoryContent.FullChainOpener = FullChainOpenerFor;
+            AlertsHistoryContent.DetailWindowSizeStore = new Windows.AlertDetailWindow.SettingsSizeStore();
 
             /* Initialize job history tab. The display-name snapshot resolves each row's stored
                server_id back to the operator's alias (#2126's Lite half) — the config layer owns
@@ -1167,12 +1169,53 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void ConnectToServer(ServerConnection server)
+    private async void ConnectToServer(ServerConnection server) => await ConnectToServerAsync(server, null);
+
+    /// <summary>
+    /// #5847: the Alert Details window's "open the full chain" action for a Blocking or Deadlocks alert: open (or focus) the
+    /// alert's server tab and show its Blocked Process Reports or Deadlocks grid over a window around the alert's time.
+    /// Null (no link) for any other alert, or a server no longer in the list.
+    /// </summary>
+    private Action? FullChainOpenerFor(AlertHistoryRow row)
+    {
+        var view = AlertChainLink.ViewFor(row.MetricName);
+        if (view == AlertChainView.None)
+        {
+            return null;
+        }
+
+        var server = _serverManager.GetAllServers().FirstOrDefault(s => RemoteCollectorService.GetServerId(s) == row.ServerId);
+        if (server is null)
+        {
+            return null;
+        }
+
+        var (fromUtc, toUtc) = AlertChainLink.WindowUtc(row.AlertTime);
+        return async () =>
+        {
+            try
+            {
+                await ConnectToServerAsync(server, (view, fromUtc, toUtc));
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = $"Opening the {view} view failed: {ex.Message}";
+            }
+        };
+    }
+
+    /// <param name="server">The server to open or focus.</param>
+    /// <param name="incident">#5847: when set, the tab opens on its Blocking or Deadlocks grid over this window.</param>
+    private async Task ConnectToServerAsync(ServerConnection server, (AlertChainView View, DateTime FromUtc, DateTime ToUtc)? incident)
     {
         // Check if tab already open
         if (_openServerTabs.TryGetValue(server.Id, out var existingTab))
         {
             ServerTabControl.SelectedItem = existingTab;
+            if (incident is { } shown && existingTab.Content is ServerTab openTab)
+            {
+                await openTab.ShowIncidentAsync(shown.View, shown.FromUtc, shown.ToUtc, reload: true);
+            }
             return;
         }
 
@@ -1276,6 +1319,12 @@ public partial class MainWindow : Window
         ServerTabControl.Visibility = Visibility.Visible;
 
         _serverManager.UpdateLastConnected(server.Id);
+
+        // #5847: a tab opened from an alert's link starts on that alert's view; the first refresh below reads it.
+        if (incident is { } first)
+        {
+            await serverTab.ShowIncidentAsync(first.View, first.FromUtc, first.ToUtc, reload: false);
+        }
 
         // Show existing historical data immediately
         serverTab.RefreshData();
