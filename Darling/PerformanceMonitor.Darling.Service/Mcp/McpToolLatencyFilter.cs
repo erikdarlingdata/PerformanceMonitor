@@ -86,6 +86,14 @@ public sealed class McpToolLatencyFilter
                 return await next(request, cancellationToken);
             }
 
+            /* #5822: the investigation long poll is not a read to time or admit. It waits up to 25 seconds by design, so
+               timing it would fill the read-latency percentiles and the slow-read record with its waits, and admitting it
+               would hold a read slot for the whole wait. Its catch-up reads are small and keyed on opened_at. */
+            if (string.Equals(toolName, DarlingMcpInvestigationTools.WaitToolName, StringComparison.Ordinal))
+            {
+                return await next(request, cancellationToken);
+            }
+
             /* #5793: who made the call, worked out once here so the recorder only ever sees the finished string. The
                composed-panel tool records itself through the shared runner, which reads it from the ambient value. */
             var caller = CallerOf(request);

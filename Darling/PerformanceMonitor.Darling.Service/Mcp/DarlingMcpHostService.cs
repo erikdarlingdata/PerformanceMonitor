@@ -1168,6 +1168,11 @@ public sealed class DarlingMcpHostService : BackgroundService
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full)));
 
+        /* #5822: wait_for_investigation_requests waits on the signal the worker's dispatcher fires when a request opens, a
+           service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
+           host share it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<InvestigationOpenSignal>(InvestigationOpenSignal.Shared);
+
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
            annotation hints. PostConfigure runs after the SDK's own options setup, so it sees the full set, and
