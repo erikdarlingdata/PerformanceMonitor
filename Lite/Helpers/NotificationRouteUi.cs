@@ -181,6 +181,15 @@ internal static class NotificationRouteUi
         return route.Enabled ? "OK" : "Disabled";
     }
 
+    /// <summary>The list's Agent column (#5820): Inherit, Off, or Investigate with its hourly and daily limits. The same words as
+    /// Darling's viewer.</summary>
+    internal static string AgentDisplay(NotificationRoute route) => route.AgentLevel switch
+    {
+        null => "Inherit",
+        NotificationRoute.AgentLevelInvestigate => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Investigate ({route.AgentMaxPerHour}/h, {route.AgentMaxPerDay}/day)"),
+        _ => "Off",
+    };
+
     /// <summary>The set/not-set marker for one channel (a <see cref="NotificationRouter"/> channel name). Never the value.</summary>
     internal static string ChannelMarker(NotificationRoute route, string channel)
     {
@@ -287,6 +296,7 @@ internal sealed class NotificationRouteRow
         GenericMarker = NotificationRouteUi.ChannelMarker(route, NotificationRouter.GenericChannel);
         PagerDutyMarker = NotificationRouteUi.ChannelMarker(route, NotificationRouter.PagerDutyChannel);
         EmailMarker = NotificationRouteUi.ChannelMarker(route, NotificationRouter.EmailChannel);
+        AgentDisplay = NotificationRouteUi.AgentDisplay(route);
         Status = NotificationRouteUi.StatusText(route);
     }
 
@@ -299,6 +309,7 @@ internal sealed class NotificationRouteRow
     public string GenericMarker { get; }
     public string PagerDutyMarker { get; }
     public string EmailMarker { get; }
+    public string AgentDisplay { get; }
     public string Status { get; }
 
     /// <summary>Two-way bound to the grid's checkbox; put back by the window when a write is refused or fails.</summary>

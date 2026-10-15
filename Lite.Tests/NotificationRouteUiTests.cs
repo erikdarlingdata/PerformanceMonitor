@@ -68,6 +68,18 @@ public sealed class NotificationRouteUiTests : IDisposable
 
     // ---- scope picker -------------------------------------------------------------------------
 
+    /* #5820: the list's Agent column says the level in Darling's words. */
+    [Theory]
+    [InlineData(null, "Inherit")]
+    [InlineData(0, "Off")]
+    [InlineData(1, "Investigate (7/h, 70/day)")]
+    public void TheAgentColumn_SaysInheritOffOrInvestigateWithItsLimits(int? level, string expected)
+    {
+        var route = new NotificationRoute(1, "High CPU", "", "", "", "", "", true) { AgentLevel = level, AgentMaxPerHour = 7, AgentMaxPerDay = 70 };
+
+        Assert.Equal(expected, NotificationRouteUi.AgentDisplay(route));
+    }
+
     [Fact]
     public void ScopeOptions_AreAllServers_ThenServersByDisplayName_ThenTagPaths()
     {

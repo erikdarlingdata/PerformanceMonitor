@@ -24,6 +24,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add Notification Route" FontSize="18" FontWeight="Bold"
@@ -91,11 +92,47 @@
         <TextBlock Grid.Row="10" Foreground="{DynamicResource ForegroundDimBrush}" TextWrapping="Wrap" Margin="0,0,0,8"
                    Text="A saved destination is never shown. Leave the dots to keep it, type to replace it, or clear the box to remove it. Generic webhook headers, the generic body template, and the proxy and region settings stay app-wide."/>
 
-        <CheckBox Grid.Row="11" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
+        <!-- #5820: the agent channel. Not a destination: it says whether a matching alert also opens an investigation
+             request for your own agent, and within which limits. -->
+        <Grid Grid.Row="11" Margin="0,4,0,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="170"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Agent investigation" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="AgentLevelCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
+                      SelectionChanged="AgentLevelCombo_SelectionChanged"
+                      ToolTip="Investigate: a matching alert also opens an investigation request your own agent can take over MCP. Off: no request, and no broader route is asked. Inherit: a broader route decides."/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Requests per hour / day" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="AgentMaxPerHourBox" Width="60" ToolTip="New requests this route opens in an hour, 1 to 60. Alerts that join an open request do not count."/>
+                <TextBlock Text="/" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" Margin="6,0,6,0"/>
+                <TextBox x:Name="AgentMaxPerDayBox" Width="60" ToolTip="New requests this route opens in a day, 1 to 500."/>
+            </StackPanel>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Lease / expiry (minutes)" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="AgentLeaseMinutesBox" Width="60" ToolTip="How long an agent's claim lasts before the request opens again, 5 to 120 minutes."/>
+                <TextBlock Text="/" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" Margin="6,0,6,0"/>
+                <TextBox x:Name="AgentExpiryMinutesBox" Width="60" ToolTip="How long a request nobody claims stays open, 15 to 1440 minutes."/>
+            </StackPanel>
+        </Grid>
+
+        <CheckBox Grid.Row="12" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
                   Foreground="{DynamicResource ForegroundBrush}"
                   ToolTip="A disabled route is skipped as if it did not exist; its alerts fall to the next less specific route."/>
 
-        <Grid Grid.Row="12" Margin="0,4,0,0">
+        <Grid Grid.Row="13" Margin="0,4,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
