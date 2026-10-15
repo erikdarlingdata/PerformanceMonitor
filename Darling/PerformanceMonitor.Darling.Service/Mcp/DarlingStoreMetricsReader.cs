@@ -2003,18 +2003,24 @@ SELECT DISTINCT ON (object_kind, object_name)
 FROM collect.store_metrics
 ORDER BY object_kind, object_name, metric_time DESC";
 
-    public static async Task<List<StoreMetricRow>> GetLatestAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    public static Task<List<StoreMetricRow>> GetLatestAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>
+        ReadStoreMetricRowsAsync(postgres, null, cancellationToken);
+
+    private static async Task<List<StoreMetricRow>> ReadStoreMetricRowsAsync(
+        NpgsqlDataSource postgres, string? statement, CancellationToken cancellationToken)
     {
-        bool indexed;
-        await using (var probe = postgres.CreateCommand(StoreMetricsLatestIndexProbeSql))
+        /* statement: another read with the same sixteen columns (the exact-sweep read, #5857), which needs no index probe. */
+        var indexed = false;
+        if (statement is null)
         {
+            await using var probe = postgres.CreateCommand(StoreMetricsLatestIndexProbeSql);
             probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             indexed = await probe.ExecuteScalarAsync(cancellationToken) is true;
         }
 
         var rows = new List<StoreMetricRow>();
-        await using var command = postgres.CreateCommand(indexed ? StoreMetricsLatestSql : StoreMetricsLatestWithoutIndexSql);
+        await using var command = postgres.CreateCommand(statement ?? (indexed ? StoreMetricsLatestSql : StoreMetricsLatestWithoutIndexSql));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -2043,38 +2049,10 @@ ORDER BY object_kind, object_name, metric_time DESC";
     }
 
     /// <summary>The newest exactly-sized sweep's rows (<see cref="StoreMetricsExactSweepSql"/>); empty when the store
-    /// has none (#5857).</summary>
-    public static async Task<List<StoreMetricRow>> GetExactSweepAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
-    {
-        var rows = new List<StoreMetricRow>();
-        await using var command = postgres.CreateCommand(StoreMetricsExactSweepSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(new StoreMetricRow(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetDateTime(2),
-                reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : reader.GetInt64(4),
-                reader.IsDBNull(5) ? null : reader.GetInt64(5),
-                reader.IsDBNull(6) ? null : reader.GetInt32(6),
-                reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8),
-                reader.IsDBNull(9) ? null : reader.GetInt64(9),
-                reader.IsDBNull(10) ? null : reader.GetInt64(10),
-                reader.IsDBNull(11) ? null : reader.GetInt64(11),
-                reader.IsDBNull(12) ? null : reader.GetInt64(12),
-                reader.IsDBNull(13) ? null : reader.GetInt64(13),
-                reader.IsDBNull(14) ? null : reader.GetInt64(14),
-                reader.IsDBNull(15) ? null : reader.GetBoolean(15)));
-        }
-
-        return rows;
-    }
+    /// has none (#5857). Read through the latest read's row mapping.</summary>
+    public static Task<List<StoreMetricRow>> GetExactSweepAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>
+        ReadStoreMetricRowsAsync(postgres, StoreMetricsExactSweepSql, cancellationToken);
 
     /// <summary>
     /// The rows the inventory is reconciled from (#5857). Pure. The newest sweep sizes hypertables and aggregates from
