@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// enumerated readItem and Azure loop, Lite's twins). <see cref="QueryStoreReadBudgetLiveTests"/> drives one site end to
 /// end; these pins keep the other three from drifting off the same shape.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreReadBudgetWiringPinTests
 {
     [Fact]

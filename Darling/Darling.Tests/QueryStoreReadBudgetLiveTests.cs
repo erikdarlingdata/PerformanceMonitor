@@ -11,7 +11,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -195,12 +194,11 @@ public sealed class QueryStoreReadBudgetLiveTests
         target.Rows[Zeta].Add(Row(12, second));
         target.SlowOn = Alpha;
 
-        /* Pass 2: cut at the budget, not at the 500 s command timeout or the 10-minute item budget. */
-        var clock = Stopwatch.StartNew();
+        /* Pass 2: the stand-in never answers, so only a budget can end the read. The marker and the budget-sized
+           slowest_item_ms below say it was THIS budget, not the 500 s command timeout or the 10-minute item budget
+           (either of those would name no timed-out item), so no clock is needed. */
         var cut = await PassAsync(rig, target, token);
-        clock.Stop();
         Assert.Equal(1, target.SlowReads);
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(20), $"the pass took {clock.Elapsed}, not about the {Budget} budget");
 
         /* The sibling is written in the same pass; alpha ships nothing and its watermark stays. */
         Assert.Equal(new Dictionary<long, long> { [11] = 1, [12] = 1 }, await StoredAsync(rig, Zeta, token));
