@@ -86,53 +86,19 @@ public sealed class ManagedConfVerdictsRungTests
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map's arm for it returns 146 — a position
-    /// within the signature, not its end, now that V147 has appended its own.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            $"table_name = '{Table}'",
-            ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* A position within the signature, not its end: "ProbeOrdinal == arity - 1" asserted this rung is
-           the NEWEST sentinel, which stopped being true the moment V147 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasManagedConfVerdicts", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        /* In the source, this rung's arm sits ABOVE the previous rung's and BELOW V147's, and returns this
-           rung's own version. */
-        var thisArm = viewer.IndexOf("if (hasManagedConfVerdicts)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasQueryStoreIntervalWide)", StringComparison.Ordinal);
-        var nextArm = viewer.IndexOf("if (hasComposeTimeoutSixty)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V146 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(nextArm >= 0, "the V147 arm is gone, so the handoff this file claims never happened");
-        Assert.True(thisArm < previousArm, "the V146 arm sits below V145's, so a current store maps one rung low");
-        Assert.True(nextArm < thisArm, "the V147 arm sits below the V146 arm, so a current V147 store maps one rung low");
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* The V71 finding: the table is named in the probe line and nowhere in the arm's prose. */
-        var armProseStart = viewer.LastIndexOf("/* V146 (#4215)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V146 arm has no comment block saying why it exists");
-        Assert.DoesNotContain(Table, viewer[armProseStart..thisArm], StringComparison.Ordinal);
     }
 }

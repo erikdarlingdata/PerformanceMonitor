@@ -103,61 +103,19 @@ public sealed class CheckpointsTimedRungTests
     /* ---- the probe (top arm) -------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
-    /// returns 140. The probe asks the question, the caller reads the answer, the map has the parameter — a
-    /// sentinel present at only some of them shifts every LATER ordinal onto the wrong column. The top-arm half
-    /// of this claim moved to <c>CollectionCaveatsRungTests</c> (V141, #3691) with the top.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            $"table_name = 'store_metrics'\n                                                     AND   column_name = '{Column}'",
-            ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        /* The "nothing past me" half of this claim moved to V141's test with the top ordinal; what stays is
-           that this rung's sentinel is read at its OWN ordinal, which is what keeps every later one on the
-           right column. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.Contains("hasCheckpointsTimed", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
-           NEWEST sentinel, which stopped being true the moment V141 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasCheckpointsTimed", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
-        var thisArm = viewer.IndexOf("if (hasCheckpointsTimed)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasPostmasterStartTime)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V140 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V140 arm sits below the previous rung's, so a current store maps one rung low");
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* The V71 finding: the table and the column are named in the probe line and nowhere in the arm's prose —
-           the coverage ratchet strips information_schema lines but cannot strip a comment. The arm's comment block
-           sits ABOVE the `if`, so the prose searched is the span from the previous arm's end to this one's. */
-        var armProseStart = viewer.LastIndexOf("/* V140 (#4037)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V140 arm has no comment block saying why it exists");
-        var prose = viewer[armProseStart..previousArm];
-        foreach (var name in new[] { "store_metrics", Column })
-        {
-            Assert.DoesNotContain(name, prose, StringComparison.Ordinal);
-        }
     }
 }

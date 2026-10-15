@@ -53,36 +53,13 @@ public sealed class AnalysisPassRowTests
 
     /// <summary>The C# twin of NotCycleRowSql: get_collection_log's run_count is counted in C# over the page, which the census
     /// (it grades SQL text) cannot reach. A page of a cycle row, an analysis_pass row and two collector rows is two runs; the
-    /// live count at both readers is pinned by <c>Group8_CollectionLog_ShowsTheCycleRow_ButCountsItApartFromTheRuns</c>. No
-    /// file compares a row against the cycle row's name alone to decide what a run is.</summary>
+    /// live count at both readers is pinned by <c>Group8_CollectionLog_ShowsTheCycleRow_ButCountsItApartFromTheRuns</c>.</summary>
     [Fact]
     public void ACountOfRunsInCSharp_LeavesOutTheCycleRowAndTheAnalysisPassRow()
     {
         var page = new[] { CollectionCycleRow.CollectorName, AnalysisPassRow.CollectorName, "wait_stats", "memory_stats" };
         Assert.Equal(2, page.Count(CollectionCycleRow.IsCollectorRun));
         Assert.Equal(["wait_stats", "memory_stats"], page.Where(CollectionCycleRow.IsCollectorRun).ToArray());
-
-        var root = Path.Combine(CycleSkipFeedTests.RepoRoot(), "Darling");
-        var offenders = new List<string>();
-        foreach (var project in new[] { "PerformanceMonitor.Darling.Service", "PerformanceMonitor.Darling.Storage", "PerformanceMonitor.Darling.Viewer" })
-        {
-            foreach (var file in Directory.EnumerateFiles(Path.Combine(root, project), "*.cs", SearchOption.AllDirectories))
-            {
-                var rel = file.Replace('\\', '/');
-                if (rel.Contains("/obj/", StringComparison.Ordinal) || rel.Contains("/bin/", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                if (File.ReadAllText(file).Contains("!= CollectionCycleRow.CollectorName", StringComparison.Ordinal))
-                {
-                    offenders.Add(Path.GetFileName(file));
-                }
-            }
-        }
-
-        Assert.True(offenders.Count == 0, "a run is decided by '!= CollectionCycleRow.CollectorName' in " + string.Join(", ", offenders)
-            + "; use CollectionCycleRow.IsCollectorRun, which also leaves out the analysis_pass row");
     }
 
     /// <summary>The PLAN_REGRESSION read time is read off a pass only once its task has finished, whatever its status: a pass

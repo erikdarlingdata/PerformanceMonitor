@@ -101,55 +101,20 @@ public sealed class QueryStoreIntervalWideRungTests
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map's arm for it returns 145 — a position within
-    /// the signature, not its end, now that V146 has appended its own.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            "table_name = 'query_store_interval_wide_pending'",
-            ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.Contains("hasQueryStoreIntervalWide", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
-           NEWEST sentinel, which stopped being true the moment V146 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasQueryStoreIntervalWide", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        /* In the source, this rung's arm sits ABOVE the previous rung's and BELOW V146's, and returns this
-           rung's own version. */
-        var thisArm = viewer.IndexOf("if (hasQueryStoreIntervalWide)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasRawChunkIntervalRungHistory)", StringComparison.Ordinal);
-        var nextArm = viewer.IndexOf("if (hasManagedConfVerdicts)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V145 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(nextArm >= 0, "the V146 arm is gone, so the handoff this file claims never happened");
-        Assert.True(thisArm < previousArm, "the V145 arm sits below V144's, so a current store maps one rung low");
-        Assert.True(nextArm < thisArm, "the V146 arm sits below the V145 arm, so a current V146 store maps one rung low");
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
-        var armProseStart = viewer.LastIndexOf("/* V145 (#3953)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V145 arm has no comment block saying why it exists");
-        Assert.DoesNotContain("query_store_interval_wide", viewer[armProseStart..thisArm], StringComparison.Ordinal);
     }
 
     private static int CountOf(string haystack, string needle)

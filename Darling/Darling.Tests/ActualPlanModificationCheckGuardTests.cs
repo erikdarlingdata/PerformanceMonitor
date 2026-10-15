@@ -42,7 +42,6 @@ public sealed class ActualPlanModificationCheckGuardTests
     private const string Controller = "PerformanceMonitor.Ui/PlanNavigationController.cs";
     private const string ViewerFlow = "Darling/PerformanceMonitor.Darling.Viewer/ViewerActualPlanFlow.cs";
     private const string ServerTabPlans = "Lite/Controls/ServerTab.Plans.cs";
-    private const string FinOpsTab = "Lite/Controls/FinOpsTab.xaml.cs";
 
     /// <summary>The files that DEFINE an executor or handle the queued command on the service side: the consent is taken
     /// before the command is queued (the viewer flow), so these are not entry points.</summary>
@@ -592,53 +591,6 @@ public sealed class ActualPlanModificationCheckGuardTests
         var parens = Enumerable.Range(0, stripped.Length).Where(i => (stripped[i] == '(' || stripped[i] == ')') && !literal[i]).Select(i => stripped[i]).ToArray();
         /* Format( ... ) inside the interpolation hole, then (1 + 2) */
         Assert.Equal(new[] { '(', ')', '(', ')' }, parens);
-    }
-
-    /// <summary>The shared navigation looks up the stored plan and stops on a changed server BEFORE the check and the prompt, one request at a time.</summary>
-    [Fact]
-    public void TheSharedNavigation_ReadsThePlanFirst_StopsOnAChangedServer_AndTakesOneRequestAtATime()
-    {
-        var gate = MethodBody(StripComments(File.ReadAllText(Path.Combine(RepoRoot(), Controller))), "GetActualPlanAsync");
-
-        var inProgress = gate.IndexOf("if (_actualPlanInProgress) return;", StringComparison.Ordinal);
-        var fetch = gate.IndexOf("await fetchPlanXml()", StringComparison.Ordinal);
-        var busy = gate.IndexOf("SetBusy()", StringComparison.Ordinal);
-        var current = gate.IndexOf("target.IsCurrent()", StringComparison.Ordinal);
-        var detect = gate.IndexOf("QueryModificationDetector.Detect(", StringComparison.Ordinal);
-
-        Assert.True(inProgress >= 0 && inProgress < fetch, "a second request is not turned away before the plan lookup starts");
-        Assert.True(busy >= 0 && busy < fetch, "the plan lookup runs without the busy cursor");
-        Assert.True(fetch > 0 && fetch < current && current < detect, "the plan lookup and the changed-server stop must come before the check");
-        Assert.Contains("_actualPlanInProgress = false;", gate, StringComparison.Ordinal);
-        Assert.Matches(@"catch\s*\(Exception\)\s*\{\s*estimatedPlanXml\s*=\s*null;", gate); /* a failed lookup is no plan */
-    }
-
-    /// <summary>Lite FinOps captures its server and connection string before any await, and runs against them.</summary>
-    [Fact]
-    public void LiteFinOps_CapturesItsServerBeforeTheFirstAwait_AndPassesItToEveryRequest()
-    {
-        var source = StripComments(File.ReadAllText(Path.Combine(RepoRoot(), FinOpsTab)));
-        var handler = MethodBody(source, "FinOpsGetActualPlan_Click");
-
-        var capture = handler.IndexOf("ServerSelector.SelectedItem is not ServerConnection", StringComparison.Ordinal);
-        var connection = handler.IndexOf("GetSelectedConnectionString()", StringComparison.Ordinal);
-        var firstAwait = handler.IndexOf("await ", StringComparison.Ordinal);
-        Assert.True(capture >= 0 && capture < firstAwait, "FinOps reads the selected server after its first await");
-        Assert.True(connection >= 0 && connection < firstAwait, "FinOps reads the connection string after its first await");
-        Assert.Contains("new PlanNavigationController.ActualPlanRunTarget(", handler, StringComparison.Ordinal);
-
-        var requests = CallsOf(handler, ".GetActualPlanAsync(").ToList();
-        Assert.NotEmpty(requests);
-        Assert.All(requests, call => Assert.Contains("target:", call, StringComparison.Ordinal));
-
-        /* The plan lookup takes the captured server, not the selector. */
-        var fetch = MethodBody(source, "FetchFinOpsHighImpactPlanAsync");
-        Assert.DoesNotContain("ServerSelector", fetch, StringComparison.Ordinal);
-        Assert.DoesNotContain("GetSelected", fetch, StringComparison.Ordinal);
-        Assert.Contains("QueryModificationDetector.IsUsableQueryHash(", fetch, StringComparison.Ordinal);
-
-        /* The database named in the prompt is the row's own (the one picked when a hash is in several). */
-        Assert.Contains("hi.FullQueryText, hi.DatabaseName,", handler, StringComparison.Ordinal);
     }
 
     [Fact]

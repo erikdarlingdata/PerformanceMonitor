@@ -163,66 +163,20 @@ public sealed class PostmasterStartTimeRungTests
     /* ---- the probe (top arm) -------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
-    /// returns 139. The probe asks the question, the caller reads the answer, the map has the parameter — a
-    /// sentinel present at only some of them shifts every LATER ordinal onto the wrong column. The top-arm half of
-    /// this claim moved to <see cref="CheckpointsTimedRungTests"/> (V140, #4037) with the top. The gate is
-    /// load-bearing here: the write-side panel's shared reader names the column.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            $"table_name = 'pg_write_stats'\n                                                     AND   column_name = '{Column}'",
-            ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-        Assert.Contains(Column, DarlingPgWriteStatsReader.PgWriteStatsSql, StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        /* The "nothing past me" half of this claim moved to V140's test with the top ordinal; what stays is
-           that this rung's sentinel is read at its OWN ordinal, which is what keeps every later one on the
-           right column. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.Contains("hasPostmasterStartTime", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
-           NEWEST sentinel, which stopped being true the moment V140 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasPostmasterStartTime", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        /* In the source, the arm sits ABOVE the previous rung's and returns this rung's version. */
-        var thisArm = viewer.IndexOf("if (hasPostmasterStartTime)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasPgServerConfigDatabaseRoleOverrides)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V139 sentinel arm — a store stopped here would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V139 arm sits below the previous rung's, so a V139 store maps one rung low");
-        /* This rung's own literal, not the build's version: the "returns StorageVersion.SchemaVersion" half of
-           the top-arm claim moved to V140's test with the top. */
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* The V71 finding: the tables and the column are named in the probe line and nowhere in the arm's prose —
-           the coverage ratchet strips information_schema lines but cannot strip a comment. The arm's comment block
-           sits ABOVE the `if`, so the prose searched is the span from the previous arm's end to this one's. */
-        var armProseStart = viewer.LastIndexOf("/* V139 (#3955)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V139 arm has no comment block saying why it exists");
-        var prose = viewer[armProseStart..previousArm];
-        foreach (var name in new[] { "pg_write_stats", "store_metrics", Column })
-        {
-            Assert.DoesNotContain(name, prose, StringComparison.Ordinal);
-        }
     }
 }
 

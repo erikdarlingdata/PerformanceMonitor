@@ -1206,7 +1206,7 @@ def shadow_row(selection: "dict | None", failed: "dict[str, set[str]]", seen: "d
 # too little to choose by: it is dropped and printed as NOISY. A class declared in a changed test file is listed too.
 #
 # What it cannot see: a class that names no changed symbol at all (it reflects over the whole tool catalog or the
-# collector set); those carry Stage=Guard (GuardStageScanner rule R4) and run in the guard stage, except the few slow ones
+# collector set); those carry Stage=Guard and run in the guard stage, except the few slow ones
 # on its SlowCatalogClasses list, which the shards run. Matching is per test FILE and case-sensitive on
 # whole words, so every class of a file that names the token is listed.
 

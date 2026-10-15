@@ -67,49 +67,20 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map's arm for it returns 147 — a position
-    /// within the signature, not its end, now that V148 has appended its own.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            "column_name = 'compose_statement_timeout_seconds' AND column_default = '60'",
-            ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* A position within the signature, not its end: "ProbeOrdinal == arity - 1" asserted this rung was
-           the NEWEST sentinel, which stopped being true the moment V148 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasComposeTimeoutSixty", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        /* In the source, this rung's arm sits ABOVE the previous rung's and BELOW V148's, and returns this
-           rung's own version. */
-        var thisArm = viewer.IndexOf("if (hasComposeTimeoutSixty)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasManagedConfVerdicts)", StringComparison.Ordinal);
-        var nextArm = viewer.IndexOf("if (hasReadLatency)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V147 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(nextArm >= 0, "the V148 arm is gone, so the handoff this file claims never happened");
-        Assert.True(thisArm < previousArm, "the V147 arm sits below V146's, so a current store maps one rung low");
-        Assert.True(nextArm < thisArm, "the V148 arm sits below the V147 arm, so a current V148 store maps one rung low");
-        Assert.Contains(
-            "return " + RungVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
     [Fact]

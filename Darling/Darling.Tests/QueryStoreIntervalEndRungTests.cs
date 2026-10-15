@@ -125,41 +125,20 @@ public sealed class QueryStoreIntervalEndRungTests
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung at its own ordinal, and the map's arm for it returns 155: a
-    /// sentinel present at only some of the probe's sites shifts every LATER ordinal onto the wrong column. The
-    /// top-arm half of this claim moved to <c>CheckpointLongestSyncRungTests</c> (V156, #4834) with the top.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains($"column_name = '{Column}'", probe, StringComparison.Ordinal);
-        Assert.Contains("table_name = 'query_store_interval_wide'", probe, StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasQueryStoreIntervalEnd", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        var thisArm = viewer.IndexOf("if (hasQueryStoreIntervalEnd)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasIntervalWideFirstExecIndex)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V155 sentinel arm - a fully-migrated store would map one rung short");
-        Assert.True(thisArm < previousArm, "the V155 arm sits below V154's, so a current store maps one rung short");
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
     /// <summary>

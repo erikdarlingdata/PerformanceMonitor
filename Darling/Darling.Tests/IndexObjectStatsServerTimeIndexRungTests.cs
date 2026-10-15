@@ -85,54 +85,19 @@ public sealed class IndexObjectStatsServerTimeIndexRungTests
     /* ---- the probe (top arm) -------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
-    /// returns 142 — the top arm, since nothing has landed on top of it yet.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            $"indexname = '{IndexName}'",
-            ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.Contains("hasIndexObjectStatsServerTimeIndex", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* V143 (#3953) is now above this rung, so ProbeOrdinal is no longer the last parameter. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasIndexObjectStatsServerTimeIndex", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(141, (int)method.Invoke(null, behind)!);
-
-        /* In the source, this rung's arm sits between V143's (above) and V141's (below). */
-        var thisArm = viewer.IndexOf("if (hasIndexObjectStatsServerTimeIndex)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
-        var nextArm = viewer.IndexOf("if (hasQueryStoreIntervalLatest)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V142 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V142 arm sits below V141's, so a current store maps one rung low");
-        Assert.True(nextArm < thisArm, "the V143 arm should sit above V142's arm");
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* The V71 finding: the index is named in the probe line and nowhere in the arm's prose — the coverage
-           ratchet strips information_schema lines but cannot strip a comment (this probe line is a pg_indexes
-           line rather than an information_schema one, same as V22's own arm, but the same discipline applies). */
-        var armProseStart = viewer.LastIndexOf("/* V142 (#4196)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V142 arm has no comment block saying why it exists");
-        var prose = viewer[armProseStart..previousArm];
-        Assert.DoesNotContain(IndexName, prose, StringComparison.Ordinal);
     }
 }

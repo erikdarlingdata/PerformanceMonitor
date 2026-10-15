@@ -69,7 +69,6 @@ lite_linked_shard:
   - 'Darling/Darling.Tests/McpInProcessHost.cs'
   - 'Darling/Darling.Tests/McpArgumentTypeRows.cs'
   - 'Darling/Darling.Tests/StatementScrubCanary.cs'
-  - 'Darling/Darling.Tests/GuardStageScanner.cs'
   - 'Darling/Darling.Tests/StaTestThread.cs'
   - 'Darling/Darling.Tests/TimingTestScanner.cs'
   - 'Darling/Darling.Tests/WpfExitSwitchTests.cs'

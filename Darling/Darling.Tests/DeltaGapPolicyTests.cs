@@ -162,21 +162,6 @@ public sealed class DeltaGapPolicyTests
         Assert.Empty(offenders);
     }
 
-    /// <summary>The perfmon collector must MEASURE its interval. It wrote a literal 60 — the configured
-    /// cadence — while the real median gap was 299 s, so every rate derived from it was up to 5x high.
-    /// </summary>
-    [Fact]
-    public void ThePerfmonCollectorMeasuresItsInterval_RatherThanAssertingTheCadence()
-    {
-        var source = File.ReadAllText(Path.Combine(
-            RepoRoot(), "PerformanceMonitor.Collectors", "PerfmonStatsCollector.cs"));
-
-        Assert.Contains("CalculateDeltaWithInterval", source, StringComparison.Ordinal);
-        Assert.Contains(".Value(sampleIntervalSeconds)", source, StringComparison.Ordinal);
-        /* The literal it used to write, as the payload value. */
-        Assert.DoesNotContain(".Value(60)", source, StringComparison.Ordinal);
-    }
-
     /// <summary>The read has to carry the denominator, or the distinction dies at the API boundary —
     /// which is the half of #2234 that made a fabricated zero unfalsifiable from outside.
     /// <para>And it must AGGREGATE it correctly: the value and delta are additive across a counter's

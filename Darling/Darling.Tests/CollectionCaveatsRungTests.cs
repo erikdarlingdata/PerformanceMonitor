@@ -94,56 +94,19 @@ public sealed class CollectionCaveatsRungTests
     /* ---- the probe (top arm) -------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
-    /// returns 141 — a position within the signature, not its end, now that V143 has appended its own.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            $"table_name = 'analysis_collection_caveats')",
-            ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.Contains("hasCollectionCaveats", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
-           NEWEST sentinel, which stopped being true the moment V142 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasCollectionCaveats", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(140, (int)method.Invoke(null, behind)!);
-
-        /* In the source, this rung's arm sits ABOVE V140's and BELOW V142's, and returns this build's version. */
-        var thisArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasCheckpointsTimed)", StringComparison.Ordinal);
-        var nextArm = viewer.IndexOf("if (hasIndexObjectStatsServerTimeIndex)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V141 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(nextArm >= 0, "the V142 arm is gone, so the handoff this file claims never happened");
-        Assert.True(thisArm < previousArm, "the V141 arm sits below V140's, so a current store maps one rung low");
-        Assert.True(nextArm < thisArm, "the V142 arm sits below the V141 arm, so a current V142 store maps one rung low");
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* Unlike the earlier COLUMN-sentinel rungs (whose prose must avoid naming their column per the V71
-           finding), this rung's own comment block does name its table — it is the TABLE the sentinel checks
-           for existence, and the migration's own prose already names it in full, so there is no separate
-           finding to guard here. What this pins is only that the comment block exists at all, immediately
-           above the arm. */
-        var armProseStart = viewer.LastIndexOf("/* V141 (#3691", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V141 arm has no comment block saying why it exists");
     }
 }

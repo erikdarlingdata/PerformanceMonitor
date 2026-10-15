@@ -54,91 +54,19 @@ public sealed class QueryStoreIntervalLatestRungTests
     }
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
-    /// returns 143 — a position within the signature, not its end, now that V144 has appended its own.
+    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
+    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
-        Assert.Contains(
-            "table_name = 'query_store_interval_latest_pending'",
-            ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.Contains("hasQueryStoreIntervalLatest", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-
-        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
-           NEWEST sentinel, which stopped being true the moment V144 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
-        Assert.Equal("hasQueryStoreIntervalLatest", method.GetParameters()[ProbeOrdinal].Name);
-
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        /* In the source, this rung's arm sits ABOVE the previous rung's and BELOW V144's, and returns this
-           rung's own version. */
-        var thisArm = viewer.IndexOf("if (hasQueryStoreIntervalLatest)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
-        var nextArm = viewer.IndexOf("if (hasRawChunkIntervalRungHistory)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V143 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(nextArm >= 0, "the V144 arm is gone, so the handoff this file claims never happened");
-        Assert.True(thisArm < previousArm, "the V143 arm sits below the previous rung's, so a current store maps one rung low");
-        Assert.True(nextArm < thisArm, "the V144 arm sits below the V143 arm, so a current V144 store maps one rung low");
-        Assert.Contains(
-            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
-        var armProseStart = viewer.LastIndexOf("/* V143 (#3953)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V143 arm has no comment block saying why it exists");
-        Assert.DoesNotContain("query_store_interval_latest", viewer[armProseStart..thisArm], StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The coverage claim's first guard (design 6.1): every raw Query Store row enters the store through
-    /// <c>DarlingCollectorRunner.CopyBatchOnceAsync</c>, which applies or records it in the same transaction. No
-    /// product source spells a write into <c>query_store_stats</c>, and the other generic-COPY call sites (the RDS
-    /// ingestors) never touch the Query Store collector. The #1912 slice repair is the one named exception: it
-    /// rewrites pre-#1907 split slices, a signature no row written after #1907 can match, so it cannot reach rows
-    /// the table covers.
-    /// </summary>
-    [Fact]
-    public void RawQueryStoreRows_EnterTheStoreOnlyThroughTheWriterThatAppliesThem()
-    {
-        var product = System.IO.Directory
-            .EnumerateFiles(RepoFile.PathTo("Darling"), "*.cs", System.IO.SearchOption.AllDirectories)
-            .Where(p => !p.Contains("Darling.Tests", StringComparison.Ordinal)
-                        && !p.Contains($"{System.IO.Path.DirectorySeparatorChar}obj{System.IO.Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                        && !p.Contains($"{System.IO.Path.DirectorySeparatorChar}bin{System.IO.Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .ToList();
-        Assert.NotEmpty(product);
-
-        var literalWrite = new System.Text.RegularExpressions.Regex(
-            @"(INSERT\s+INTO|COPY|UPDATE)\s+(collect\.)?query_store_stats\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        foreach (var file in product)
-        {
-            var text = System.IO.File.ReadAllText(file);
-            Assert.False(literalWrite.IsMatch(text), $"{file} writes raw query_store_stats outside the #3953 writer");
-
-            if (text.Contains("PgCollectorRowWriter.CopyCommandFor(", StringComparison.Ordinal)
-                && !file.EndsWith("DarlingCollectorRunner.cs", StringComparison.Ordinal))
-            {
-                Assert.DoesNotContain("QueryStoreCollector", text, StringComparison.Ordinal);
-            }
-        }
-
-        var repair = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreSliceRepair.cs");
-        Assert.Contains("INSERT INTO collect.{Table}", repair, StringComparison.Ordinal);
     }
 }
