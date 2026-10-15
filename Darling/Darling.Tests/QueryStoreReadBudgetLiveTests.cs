@@ -572,7 +572,14 @@ public sealed class QueryStoreReadBudgetLiveTests
         Assert.NotNull(estimate);
         Assert.True(estimate!.Value.CatchUpInProgress, "a pass the time budget cut with nothing received keeps catch-up in progress");
         Assert.Empty(await StoredPlansAsync(rig, Alpha, token));
-        Assert.True(rig.Runner.PlanFetchMsPerPlanForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name) >= 2.0 * 2000 / 8);
+        /* The time per plan it recorded asks for at most half the cut width (4 of 8) at the full budget. Not
+           `>= 2 x 2000 / 8`: the cut chunk runs under the time LEFT, which is under the budget by whatever the pass did
+           before it, and the cancellation timer can fire a clock tick early, so the chunk's measured share can land a
+           few milliseconds under 2000 / 8. That bound held on a margin of 4 to 14 ms and failed on CI once it ran out. */
+        var cutMsPerPlan = rig.Runner.PlanFetchMsPerPlanForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name);
+        Assert.True(
+            QueryStoreReadBudget.PlanFetchWidth(TimeSpan.FromSeconds(2), cutMsPerPlan, 400, firstChunk: true) <= 8 / 2,
+            $"a cut-empty pass of 8 plans recorded {cutMsPerPlan} ms a plan, which asks for more than half as many next pass");
         Assert.Equal(1, rig.Log.PlanFetchBudgetLines(Alpha));
 
         await PassAsync(rig, target, token, Alpha);
