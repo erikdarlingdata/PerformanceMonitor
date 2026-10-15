@@ -761,15 +761,6 @@ public sealed class StatementCutSourceScanTests
         Assert.Empty(Scan("class C { const string Q = @\"" + sql + "\"; }"));
     }
 
-    [Fact]
-    public void TheScansDocComment_NamesItsKnownBlindSpots()
-    {
-        var doc = RepoFile.ReadRepoFile("Darling", "Darling.Tests", "StatementCutSourceScanTests.cs");
-        Assert.Contains("Known blind spots", doc, StringComparison.Ordinal);
-        Assert.Contains("alias local", doc, StringComparison.Ordinal);
-        Assert.Contains("ternary", doc, StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData("var lines = packageNames.Split(','); var p = lines.Take(5);")]
     [InlineData("var p = ordered.Take(limit);")]

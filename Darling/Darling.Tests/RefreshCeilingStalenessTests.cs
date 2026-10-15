@@ -463,7 +463,7 @@ public sealed class RefreshCeilingStalenessTests
     ///
     /// <para><b>What it does NOT cover, stated because "the file I happened to sweep" is how this got
     /// here.</b> It reads the worker and nothing else — <c>TimescaleSupport.cs</c>' half is
-    /// <see cref="RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement"/>, which forbids
+    /// <c>RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement</c>, which forbids
     /// the expression itself, and every other project is unchecked. And it flags ANY unqualified
     /// <c>rounded up</c> in the worker rather than only one about this width: there is exactly one such
     /// mention today and it is about this width, so the broader rule costs nothing and fails toward

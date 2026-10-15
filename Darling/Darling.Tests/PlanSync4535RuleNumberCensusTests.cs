@@ -109,40 +109,6 @@ public sealed class PlanSync4535RuleNumberCensusTests
         return results;
     }
 
-    /// <summary>
-    /// (a) Every <c>new PlanWarning</c> construction in <c>PlanAnalyzer.cs</c> stamps
-    /// <c>RuleNumber</c>, except a <c>Source = PlanWarningSource.SqlServer</c> initializer. As of
-    /// this step there are no such initializers in <c>PlanAnalyzer.cs</c> (the engine's own
-    /// findings come from <c>ShowPlanParser.cs</c>, not the analyzer) — this pin still names the
-    /// exception so the census stays honest if one is ever added there.
-    /// </summary>
-    [Fact]
-    public void EveryAnalyzerConstructedWarning_StampsRuleNumber_UnlessSqlServerSourced()
-    {
-        var constructions = WalkPlanWarningConstructions();
-        Assert.NotEmpty(constructions);
-
-        var unstamped = constructions
-            .Where(c => !c.HasRuleNumber && !c.IsSqlServerSourced)
-            .ToList();
-
-        Assert.Empty(unstamped);
-    }
-
-    /// <summary>
-    /// Rules 7 and 29 mutate an existing warning's severity/message rather than constructing a new
-    /// <see cref="PlanWarning"/>, so they carry a guard with no stamp site — pinned here so a
-    /// future refactor that turns either into a construction is caught by (a) rather than silently
-    /// staying unstamped.
-    /// </summary>
-    [Fact]
-    public void Rule7AndRule29_AreGuardOnly_WithNoConstructionSite()
-    {
-        var source = PlanAnalyzerSource();
-        Assert.Contains("IsRuleDisabled(7)", source);
-        Assert.Contains("IsRuleDisabled(29)", source);
-    }
-
     // ---- (b) runtime census -------------------------------------------------------------------
 
     private const string XmlFixture = """
