@@ -187,6 +187,11 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
   result lines only and ends in `GATE GREEN` or `GATE RED`. Push only on `GATE GREEN`, and put its two Guard result
   lines and its `classes:` line in the PR body. A `symbols dropped` line means most of the suite names those
   symbols: run your brief's own class list for them. `--dry-run` only lists the classes. CI decides the rest.
+  The map's part (#5872) is the same set a pull request's CI passes run: a test, docs or `.github/` diff gets no
+  drift, so it selects its own classes, their xunit collection mates, the classes that read its files as text and
+  the always-run ones (`Stage=Guard`, whole-tree readers, `Gate=Env`, new test classes): about 330 Darling classes,
+  but a Darling test file still reaches the 685 classes whose map text pattern is `Darling/**`. `selection.json`
+  names each file the map did not know under `unknown`.
 - **Run the classes that name what you changed.** Run `python .github/scripts/ci-select.py local-classes
   --base origin/dev`, then run its `-class` lines, plus `-class "*Census*"`, `-class "*Ratchet*"` and
   `-trait Stage=Guard`. It lists the test classes whose source names a symbol your change declares or edits, most
