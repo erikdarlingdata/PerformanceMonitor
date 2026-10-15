@@ -422,7 +422,7 @@ public sealed class BuiltinAlertPersistenceRungTests
     [Fact]
     public void TheReadmeAlertCatalogStatesTheSampleCountItActuallyUses()
     {
-        var readme = RepoFile.ReadRepoFileLf("README.md");
+        var readme = RepoFile.ReadRepoFileLf("docs", "alerts.md"); // #5860: the alert catalog moved from the root README to this page
 
         var row = readme
             .Split('\n')
