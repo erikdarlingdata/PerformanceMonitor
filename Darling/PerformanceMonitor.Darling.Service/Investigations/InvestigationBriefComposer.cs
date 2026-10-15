@@ -410,14 +410,19 @@ public sealed class InvestigationBriefComposer
     {
         public int Fields { get; private set; }
 
+        /// <summary>The characters the cuts omitted, in the unit the caps count: UTF-16 units of the value.</summary>
         public int Chars { get; private set; }
 
+        /* #5834: the cut lands on a text-element boundary (the #3625 rule), never between the halves of a surrogate pair:
+           a lone high surrogate serializes as U+FFFD, so the agent would read a replacement glyph where an emoji was. An
+           element that straddles the cut is dropped whole, and the omission counts every unit not kept. */
         public string? Cap(string? value)
         {
             if (value is null || value.Length <= FieldCharCap) return value;
             Fields++;
-            Chars += value.Length - (FieldCharCap - CutMarker.Length);
-            return string.Concat(value.AsSpan(0, FieldCharCap - CutMarker.Length), CutMarker);
+            var keep = McpHelpers.TextElementCutLength(value, FieldCharCap - CutMarker.Length);
+            Chars += value.Length - keep;
+            return string.Concat(value.AsSpan(0, keep), CutMarker);
         }
 
         public void CapAll(JsonNode? node)

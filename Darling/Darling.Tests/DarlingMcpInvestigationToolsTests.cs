@@ -276,6 +276,22 @@ public sealed class DarlingMcpInvestigationToolsTests
             brief);
     }
 
+    /* #5834: the answer names its page count requests_returned and carries the read's two truncation flags. */
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void ReportsAnswer_SaysWhenTheWindowOrTheJournalHeldMore(bool requestsTruncated, bool journalTruncated)
+    {
+        var read = StoredRead() with { RequestsTruncated = requestsTruncated, JournalTruncated = journalTruncated };
+        var root = JsonNode.Parse(DarlingMcpInvestigationTools.ReportsAnswer(read, 24, McpDataDetail.Full))!;
+
+        Assert.Equal(read.Requests.Count, (int)root["requests_returned"]!);
+        Assert.Equal(requestsTruncated, (bool)root["truncated"]!);
+        Assert.Equal(journalTruncated, (bool)root["journal_truncated"]!);
+        Assert.Null(root["request_count"]);
+    }
+
     [Fact]
     public void ReportsAnswer_MaskLiterals_ReplacesEveryFieldsLiteral_KeepsTheStructuredFields()
     {

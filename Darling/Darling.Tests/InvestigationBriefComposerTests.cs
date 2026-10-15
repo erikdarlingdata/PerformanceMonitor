@@ -248,6 +248,29 @@ public sealed class InvestigationBriefComposerTests
         Assert.True((int)brief["truncated"]!["chars"]! > 0);
     }
 
+    /* #5834: a field whose cut index lands between the halves of an emoji's surrogate pair. The raw UTF-16 cut kept the
+       lone high surrogate, which serializes as U+FFFD; the text-element cut drops the emoji whole, and an emoji that ends
+       at the cut is kept whole. truncated.chars counts every unit not kept. */
+    [Theory]
+    [InlineData(1, false)] // the emoji straddles the cut index: dropped whole
+    [InlineData(2, true)]  // the emoji ends exactly at the cut index: kept whole
+    public void FieldCut_NeverSplitsASurrogatePair(int emojiStartBeforeCut, bool emojiKept)
+    {
+        const string Emoji = "\U0001F600";
+        var keepAt = InvestigationBriefComposer.FieldCharCap - InvestigationBriefComposer.CutMarker.Length;
+        var head = new string('a', keepAt - emojiStartBeforeCut);
+        var text = head + Emoji + new string('z', 500);
+        var json = InvestigationBriefComposer.Compose(
+            Sources(notes: new[] { new InvestigationBriefNote(LoginCanary, "dba-lead", Now.AddDays(30), text) }), McpDataDetail.Full, Now);
+
+        var brief = JsonNode.Parse(json)!.AsObject();
+        var cut = (string)brief["notes"]![0]!["text"]!;
+        Assert.DoesNotContain('�', cut);
+        Assert.Equal((emojiKept ? head + Emoji : head) + InvestigationBriefComposer.CutMarker, cut);
+        Assert.Equal(1, (int)brief["truncated"]!["fields_cut"]!);
+        Assert.Equal(text.Length - (cut.Length - InvestigationBriefComposer.CutMarker.Length), (int)brief["truncated"]!["chars"]!);
+    }
+
     /* ---- masking under all three levels ---- */
 
     [Fact]
