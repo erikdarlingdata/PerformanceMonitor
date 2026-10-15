@@ -197,7 +197,8 @@ WITH todo AS
                   ELSE EXISTS (SELECT 1
                                FROM collect.collection_log AS x
                                WHERE x.collection_time >= g.hour_start
-                               AND   x.collection_time < g.hour_start + interval '1 hour')
+                               AND   x.collection_time < g.hour_start + interval '1 hour'
+                               AND   x.{CollectionCycleRow.NotCycleRowSql})
               END
         LIMIT {CatchUpHours}
     ) AS m

@@ -3532,6 +3532,12 @@ internal static class DarlingDataReader
             AND   {CollectionCycleRow.NotCycleRowSql}
             GROUP BY collector_name
         )
+        """ + "\n" + CollectionHealthFinalSelectSql;
+
+    /// <summary><see cref="CollectionHealthSql"/>'s final SELECT: the columns, in their positional order, over the CTEs
+    /// <c>health</c> and <c>p95</c>, and the keyed LATERAL lookups on the raw log (#4955). Its own constant so
+    /// <see cref="CollectionHealthComposedSql"/> runs the same text over its own <c>health</c> and <c>p95</c> (#5810).</summary>
+    private const string CollectionHealthFinalSelectSql = $"""
         SELECT
             h.collector_name,
             h.total_runs,
@@ -3753,9 +3759,6 @@ internal static class DarlingDataReader
         ORDER BY h.collector_name
         """;
 
-    /// <summary>The first column of <see cref="CollectionHealthSql"/>'s final SELECT: from that SELECT on (the columns and
-    /// the keyed LATERAL lookups on the raw log), the text is shared by <see cref="CollectionHealthComposedSql"/>.</summary>
-    private const string CollectionHealthFinalSelectAnchor = "h.collector_name,";
 
     /// <summary>
     /// The 7-day health read served from the hourly rollup (V186, #5810): the production statement behind
@@ -3771,7 +3774,7 @@ internal static class DarlingDataReader
     /// slices are aggregated with <see cref="CollectionLogHourly.AggregatesSql"/>, the expressions the writer uses, and the
     /// parts are merged per collector: counts and sums add, maxima and instants take the MAX, and the average is
     /// <c>sum::numeric / count</c>, which is what <c>AVG(integer)</c> computes. The keyed LATERAL lookups (#4955) and
-    /// the final column list are <see cref="CollectionHealthSql"/>'s own text, so they stay on the raw log.</para>
+    /// the final column list are <see cref="CollectionHealthFinalSelectSql"/>, the text <see cref="CollectionHealthSql"/> ends with, so they stay on the raw log.</para>
     ///
     /// <para><b>p95 is bucketed.</b> An exact percentile cannot be rebuilt from hourly rows, so the read sums the
     /// duration histograms and reports the upper bound of the slot that holds the run at position <c>ceil(0.95 n)</c>
@@ -3783,13 +3786,6 @@ internal static class DarlingDataReader
 
     private static string ComposeCollectionHealthSql()
     {
-        var column = CollectionHealthSql.IndexOf(CollectionHealthFinalSelectAnchor, StringComparison.Ordinal);
-        var at = column < 0 ? -1 : CollectionHealthSql.LastIndexOf("SELECT", column, StringComparison.Ordinal);
-        if (at < 0 || CollectionHealthSql.IndexOf(CollectionHealthFinalSelectAnchor, column + 1, StringComparison.Ordinal) >= 0)
-        {
-            throw new InvalidOperationException("CollectionHealthSql's final SELECT anchor is not found exactly once (#5810).");
-        }
-
         var values = CollectionLogHourly.ValueColumns;
         return $"""
         WITH rolled AS MATERIALIZED
@@ -3938,7 +3934,7 @@ internal static class DarlingDataReader
             JOIN health hb
               ON hb.collector_name = ps.collector_name
         )
-        """ + "\n        " + CollectionHealthSql[at..];
+        """ + "\n" + CollectionHealthFinalSelectSql;
     }
 
     /// <summary>How long a completed per-server collection-health read is served from memory before the next
