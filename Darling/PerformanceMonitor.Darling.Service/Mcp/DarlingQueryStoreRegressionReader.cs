@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 
@@ -218,39 +219,10 @@ internal static class DarlingQueryStoreRegressionReader
         LIMIT $5
         """;
 
-    /// <summary>
-    /// The regression read over <c>query_store_interval_wide</c> (#5809): <see cref="QueryStoreRegressionsSql"/> with its
-    /// two deduping arms replaced by reads of the table, which already holds ONE row per interval identity (the raw arms'
-    /// <c>PARTITION BY</c> key, <c>execution_type_desc</c> included), that interval's latest snapshot, kept as raw is
-    /// written. Same parameters; $6 is the gate's clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>,
-    /// <c>max(baseline start, raw's chunk floor)</c>), so the table never reaches below what raw itself still holds.
-    ///
-    /// <para><b>Why not <c>query_store_interval_latest</c>.</b> That table keeps Regular executions only, and the raw arms
-    /// count every outcome (Aborted and Exception too). The wide table keeps every outcome, so the averages and
-    /// exec counts are the same function of the same intervals.</para>
-    ///
-    /// <para><b>Bounds.</b> Each arm keeps the raw arm's own <c>collection_time</c> window (the semantic one) and adds the
-    /// #5533 <c>first_execution_time</c> range, both ends: from the arm's start minus
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> (#4605: no row of the arm has an older first execution) to
-    /// its end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>. That range is what
-    /// <c>ix_query_store_interval_wide_server_first_exec</c> scans, so each arm reads its own days of the server's rows
-    /// and no sort runs to dedupe them. The recent arm also takes <c>collection_time &gt;= $6</c>, which only matters when
-    /// raw's floor is inside the recent window: raw then reads the recent arm from its floor too.</para>
-    ///
-    /// <para><b>The one edge where the two reads differ.</b> An interval collected on both sides of the window start (its
-    /// first snapshots before $2, its latest after) is counted by raw in BOTH arms, the partial snapshot in the baseline and
-    /// the latest in the recent window. The table holds only the latest, so it counts that interval in the recent arm alone.
-    /// That is at most one interval per plan (the one open at $2), its partial counts blended into a 7-day baseline, and the
-    /// table form is the one that does not count the same executions on both sides. The window END is exact: the gate reads
-    /// raw for an end before the table's <c>applied_through</c> (its clause 4), where a latest snapshot could sit past it.</para>
-    ///
-    /// <para><c>1 AS rn</c> keeps <see cref="QueryStoreRegressionsSuffix"/>'s <c>WHERE rn = 1</c> true for every row:
-    /// the table's row IS the raw arm's <c>rn = 1</c> row. A static readonly because the interval literals are derived
-    /// from TimeSpans; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// </summary>
-    public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
-
-    /// <summary>The table read's two arms (#5809), in place of <see cref="QueryStoreRegressionsRawPrefix"/>.</summary>
+    /// <summary>The table read's two arms (#5809), in place of <see cref="QueryStoreRegressionsRawPrefix"/>. Declared
+    /// ABOVE <see cref="QueryStoreRegressionsTableSql"/> on purpose: static field initializers run in textual order, so a
+    /// prefix declared below it was still null when the field read it, and the table SQL began at
+    /// <c>baseline_performance</c> and failed with 42601 on every call.</summary>
     private static readonly string QueryStoreRegressionsTablePrefix = $$"""
         WITH deduped_baseline AS (
             SELECT
@@ -292,6 +264,38 @@ internal static class DarlingQueryStoreRegressionReader
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
         """;
+
+    /// <summary>
+    /// The regression read over <c>query_store_interval_wide</c> (#5809): <see cref="QueryStoreRegressionsSql"/> with its
+    /// two deduping arms replaced by reads of the table, which already holds ONE row per interval identity (the raw arms'
+    /// <c>PARTITION BY</c> key, <c>execution_type_desc</c> included), that interval's latest snapshot, kept as raw is
+    /// written. Same parameters; $6 is the gate's clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>,
+    /// <c>max(baseline start, raw's chunk floor)</c>), so the table never reaches below what raw itself still holds.
+    ///
+    /// <para><b>Why not <c>query_store_interval_latest</c>.</b> That table keeps Regular executions only, and the raw arms
+    /// count every outcome (Aborted and Exception too). The wide table keeps every outcome, so the averages and
+    /// exec counts are the same function of the same intervals.</para>
+    ///
+    /// <para><b>Bounds.</b> Each arm keeps the raw arm's own <c>collection_time</c> window (the semantic one) and adds the
+    /// #5533 <c>first_execution_time</c> range, both ends: from the arm's start minus
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> (#4605: no row of the arm has an older first execution) to
+    /// its end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>. That range is what
+    /// <c>ix_query_store_interval_wide_server_first_exec</c> scans, so each arm reads its own days of the server's rows
+    /// and no sort runs to dedupe them. The recent arm also takes <c>collection_time &gt;= $6</c>, which only matters when
+    /// raw's floor is inside the recent window: raw then reads the recent arm from its floor too.</para>
+    ///
+    /// <para><b>The one edge where the two reads differ.</b> An interval collected on both sides of the window start (its
+    /// first snapshots before $2, its latest after) is counted by raw in BOTH arms, the partial snapshot in the baseline and
+    /// the latest in the recent window. The table holds only the latest, so it counts that interval in the recent arm alone.
+    /// That is at most one interval per plan (the one open at $2), its partial counts blended into a 7-day baseline, and the
+    /// table form is the one that does not count the same executions on both sides. The window END is exact: the gate reads
+    /// raw for an end before the table's <c>applied_through</c> (its clause 4), where a latest snapshot could sit past it.</para>
+    ///
+    /// <para><c>1 AS rn</c> keeps <see cref="QueryStoreRegressionsSuffix"/>'s <c>WHERE rn = 1</c> true for every row:
+    /// the table's row IS the raw arm's <c>rn = 1</c> row. A static readonly because the interval literals are derived
+    /// from TimeSpans; <c>$$"""</c> keeps <c>$1</c> literal.</para>
+    /// </summary>
+    public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
 
     /// <summary>
     /// Whether this server has Query Store rows BEFORE the window, and whether it has any INSIDE it.
@@ -389,7 +393,16 @@ internal static class DarlingQueryStoreRegressionReader
                 McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
             if (!plan.UseTable)
             {
-                if (plan.DecisionFailed) ReadScope.Note(ReadFallback.GateFailed);
+                if (plan.DecisionFailed)
+                {
+                    ReadScope.Note(ReadFallback.GateFailed);
+                }
+                else
+                {
+                    /* An expected state, not a fault: a young store, a span past the horizon, a pending batch. */
+                    ReadScope.Current?.Logger?.LogDebug("#5809 Query Store regressions read: the interval table's gate chose raw for server {ServerId}", serverId);
+                }
+
                 return null;
             }
 
@@ -403,10 +416,39 @@ internal static class DarlingQueryStoreRegressionReader
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.NoteFallback(gateDecided ? ReadFallback.FallbackRaw : ReadFallback.GateFailed, "#5809 Query Store regressions table read", ex);
+            ReadScope.Note(gateDecided ? ReadFallback.FallbackRaw : ReadFallback.GateFailed);
+            LogTableFault(ReadScope.Current?.Logger, ex);
             return null;
         }
     }
+
+    /// <summary>Set once the first table-read fault of this process has been logged at Warning.</summary>
+    private static int s_tableFaultWarned;
+
+    /// <summary>
+    /// Logs a table-read fault (#5809). The first one in the process is a Warning that names the exception's message,
+    /// so a store whose every call has quietly fallen back to raw shows it in the service log; every later one is Debug,
+    /// so a store that faults on every call does not write a Warning per call. With no logger the Trace line unscoped
+    /// callers have always had is written, and the once flag is left for the first call that has a logger.
+    /// </summary>
+    internal static void LogTableFault(ILogger? logger, Exception ex)
+    {
+        if (logger is null)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#5809 Query Store regressions table read fell back to raw: {ex.GetType().Name}");
+        }
+        else if (Interlocked.Exchange(ref s_tableFaultWarned, 1) == 0)
+        {
+            logger.LogWarning(ex, "#5809 Query Store regressions table read fell back to raw: {Message}. Later faults in this process log at Debug.", ex.Message);
+        }
+        else
+        {
+            logger.LogDebug(ex, "#5809 Query Store regressions table read fell back to raw: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>Re-arms <see cref="LogTableFault"/>'s once-per-process Warning. Tests only.</summary>
+    internal static void ResetTableFaultWarningForTests() => Interlocked.Exchange(ref s_tableFaultWarned, 0);
 
     /// <summary>The six parameters both forms of the read take, in their order: $1 server_id, $2 window start, $3 window
     /// end, $4 database filter, $5 row cap, $6 baseline start.</summary>

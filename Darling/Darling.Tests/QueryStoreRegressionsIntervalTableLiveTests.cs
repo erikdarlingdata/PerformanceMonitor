@@ -150,32 +150,77 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
     }
 
-    /// <summary>Every relation an EXPLAIN (FORMAT JSON) plan reads, by its <c>Relation Name</c>.</summary>
-    private static async Task<List<string>> PlanRelationsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DateTime baselineStart, CancellationToken ct)
+    /// <summary>
+    /// Every scan node of the statement's EXECUTED plan (EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)), as the table it reads
+    /// and the rows it returned. A scan names a partition or a TimescaleDB chunk, never its parent, so each node's
+    /// relation is resolved to its root through <c>pg_inherits</c>, which both a chunk and a native partition carry.
+    /// </summary>
+    private static async Task<List<(string Table, long Rows)>> ExecutedScansAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, DateTime baselineStart, CancellationToken ct, bool viewerParameters = false)
     {
-        await using var command = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection);
-        AddParameters(command, start, end, baselineStart);
-        var json = (string)(await command.ExecuteScalarAsync(ct))!;
-        using var doc = JsonDocument.Parse(json);
-        var relations = new List<string>();
-        void Walk(JsonElement node)
+        var scans = new List<(string Schema, string Name, long Rows)>();
+        await using (var command = new NpgsqlCommand("EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + sql, connection))
         {
-            if (node.ValueKind == JsonValueKind.Object)
+            if (viewerParameters)
             {
-                foreach (var p in node.EnumerateObject())
+                /* The viewer's copy numbers its own: $1 server, $2 start, $3 end, $4 database filter, $5 baseline start. */
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = start });
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = end });
+                command.Parameters.Add(DatabaseFilter.One(Db).Parameter());
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+            }
+            else
+            {
+                AddParameters(command, start, end, baselineStart);
+            }
+
+            var json = (string)(await command.ExecuteScalarAsync(ct))!;
+            using var doc = JsonDocument.Parse(json);
+            void Walk(JsonElement node)
+            {
+                if (node.ValueKind == JsonValueKind.Object)
                 {
-                    if (p.Name == "Relation Name") relations.Add(p.Value.GetString()!);
-                    Walk(p.Value);
+                    if (node.TryGetProperty("Relation Name", out var name))
+                    {
+                        var loops = node.TryGetProperty("Actual Loops", out var l) ? l.GetDouble() : 1;
+                        var rows = node.TryGetProperty("Actual Rows", out var r) ? r.GetDouble() : 0;
+                        scans.Add((node.GetProperty("Schema").GetString()!, name.GetString()!, (long)Math.Round(rows * loops)));
+                    }
+
+                    foreach (var p in node.EnumerateObject()) Walk(p.Value);
+                }
+                else if (node.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var e in node.EnumerateArray()) Walk(e);
                 }
             }
-            else if (node.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var e in node.EnumerateArray()) Walk(e);
-            }
+
+            Walk(doc.RootElement);
         }
 
-        Walk(doc.RootElement);
-        return relations;
+        var resolved = new List<(string Table, long Rows)>();
+        foreach (var (schema, name, rows) in scans)
+        {
+            await using var root = new NpgsqlCommand("""
+                WITH RECURSIVE up (oid, depth) AS (
+                    SELECT format('%I.%I', $1, $2)::regclass::oid, 0
+                    UNION ALL
+                    SELECT i.inhparent, up.depth + 1
+                    FROM pg_inherits AS i
+                    JOIN up ON i.inhrelid = up.oid
+                )
+                SELECT pc.relname::text
+                FROM up
+                JOIN pg_class AS pc ON pc.oid = up.oid
+                ORDER BY up.depth DESC
+                LIMIT 1
+                """, connection);
+            root.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schema });
+            root.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });
+            resolved.Add(((string)(await root.ExecuteScalarAsync(ct))!, rows));
+        }
+
+        return resolved;
     }
 
     [Fact]
@@ -227,16 +272,23 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         /* The viewer's grid takes the same route to the same rows. */
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
+            var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, ct);
+            Assert.NotNull(viewerTable);
+            Assert.Equal(raw, viewerTable.Select(Describe).ToList());
             var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, [Db], cancellationToken: ct);
             Assert.Equal(raw, viewerRows.Select(Describe).ToList());
         }
 
-        /* The interval path's plan reads no query_store_stats row; the raw read's does (so the check can fail). */
-        var tableRelations = await PlanRelationsAsync(connection, DarlingQueryStoreRegressionReader.QueryStoreRegressionsTableSql, start, end, baselineStart, ct);
-        Assert.Contains("query_store_interval_wide", tableRelations);
-        Assert.DoesNotContain(tableRelations, r => r.StartsWith("query_store_stats", StringComparison.Ordinal));
-        var rawRelations = await PlanRelationsAsync(connection, DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql, start, end, baselineStart, ct);
-        Assert.Contains(rawRelations, r => r.StartsWith("query_store_stats", StringComparison.Ordinal));
+        /* The interval path's executed plan reads no query_store_stats row, and reads interval_wide rows; the raw read's
+           plan reads query_store_stats rows, so the check can fail. */
+        var tableScans = await ExecutedScansAsync(connection, DarlingQueryStoreRegressionReader.QueryStoreRegressionsTableSql, start, end, baselineStart, ct);
+        Assert.DoesNotContain(tableScans, n => n.Table == "query_store_stats");
+        Assert.True(tableScans.Where(n => n.Table == "query_store_interval_wide").Sum(n => n.Rows) > 0, string.Join(", ", tableScans));
+        var viewerScans = await ExecutedScansAsync(connection, ViewerDataService.QueryStoreRegressionsTableSql, start, end, baselineStart, ct, viewerParameters: true);
+        Assert.DoesNotContain(viewerScans, n => n.Table == "query_store_stats");
+        Assert.True(viewerScans.Where(n => n.Table == "query_store_interval_wide").Sum(n => n.Rows) > 0, string.Join(", ", viewerScans));
+        var rawScans = await ExecutedScansAsync(connection, DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql, start, end, baselineStart, ct);
+        Assert.True(rawScans.Where(n => n.Table == "query_store_stats").Sum(n => n.Rows) > 0, string.Join(", ", rawScans));
 
         /* The #5541 floor rule: coverage that starts after the baseline start means the table does not hold the span, so
            the gate says raw, and the read still returns the same rows from raw. */
@@ -248,6 +300,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(raw, fallback.Select(Describe).ToList());
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
+            Assert.Null(await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, ct));
             var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, [Db], cancellationToken: ct);
             Assert.Equal(raw, viewerRows.Select(Describe).ToList());
         }

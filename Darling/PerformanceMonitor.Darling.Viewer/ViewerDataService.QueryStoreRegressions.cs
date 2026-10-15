@@ -249,39 +249,10 @@ public sealed partial class ViewerDataService
         LIMIT 50
         """;
 
-    /// <summary>
-    /// The regression read over <c>query_store_interval_wide</c> (#5809): <see cref="QueryStoreRegressionsSql"/> with its
-    /// two deduping arms replaced by reads of the table, which already holds ONE row per interval identity (the raw arms'
-    /// <c>PARTITION BY</c> key, <c>execution_type_desc</c> included), that interval's latest snapshot, kept as raw is
-    /// written. Same parameters; $5 (the baseline start) is the gate's clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>,
-    /// <c>max(baseline start, raw's chunk floor)</c>), so the table never reaches below what raw itself still holds.
-    ///
-    /// <para><b>Why not <c>query_store_interval_latest</c>.</b> That table keeps Regular executions only, and the raw arms
-    /// count every outcome (Aborted and Exception too). The wide table keeps every outcome, so the averages and
-    /// exec counts are the same function of the same intervals.</para>
-    ///
-    /// <para><b>Bounds.</b> Each arm keeps the raw arm's own <c>collection_time</c> window (the semantic one) and adds the
-    /// #5533 <c>first_execution_time</c> range, both ends: from the arm's start minus
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> (#4605: no row of the arm has an older first execution) to
-    /// its end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>. That range is what
-    /// <c>ix_query_store_interval_wide_server_first_exec</c> scans, so each arm reads its own days of the server's rows
-    /// and no sort runs to dedupe them. The recent arm also takes <c>collection_time &gt;= $5</c>, which only matters when
-    /// raw's floor is inside the recent window: raw then reads the recent arm from its floor too.</para>
-    ///
-    /// <para><b>The one edge where the two reads differ.</b> An interval collected on both sides of the window start (its
-    /// first snapshots before $2, its latest after) is counted by raw in BOTH arms, the partial snapshot in the baseline and
-    /// the latest in the recent window. The table holds only the latest, so it counts that interval in the recent arm alone.
-    /// That is at most one interval per plan (the one open at $2), its partial counts blended into a 7-day baseline, and the
-    /// table form is the one that does not count the same executions on both sides. The window END is exact: the gate reads
-    /// raw for an end before the table's <c>applied_through</c> (its clause 4), where a latest snapshot could sit past it.</para>
-    ///
-    /// <para><c>1 AS rn</c> keeps <see cref="QueryStoreRegressionsSuffix"/>'s <c>WHERE rn = 1</c> true for every row:
-    /// the table's row IS the raw arm's <c>rn = 1</c> row. A static readonly because the interval literals are derived
-    /// from TimeSpans; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// </summary>
-    public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
-
-    /// <summary>The table read's two arms (#5809), in place of <see cref="QueryStoreRegressionsRawPrefix"/>.</summary>
+    /// <summary>The table read's two arms (#5809), in place of <see cref="QueryStoreRegressionsRawPrefix"/>. Declared
+    /// ABOVE <see cref="QueryStoreRegressionsTableSql"/> on purpose: static field initializers run in textual order, so a
+    /// prefix declared below it was still null when the field read it, and the table SQL began at
+    /// <c>baseline_performance</c> and failed with 42601 on every call.</summary>
     private static readonly string QueryStoreRegressionsTablePrefix = $$"""
         WITH deduped_baseline AS (
             SELECT
@@ -323,6 +294,38 @@ public sealed partial class ViewerDataService
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
         """;
+
+    /// <summary>
+    /// The regression read over <c>query_store_interval_wide</c> (#5809): <see cref="QueryStoreRegressionsSql"/> with its
+    /// two deduping arms replaced by reads of the table, which already holds ONE row per interval identity (the raw arms'
+    /// <c>PARTITION BY</c> key, <c>execution_type_desc</c> included), that interval's latest snapshot, kept as raw is
+    /// written. Same parameters; $5 (the baseline start) is the gate's clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>,
+    /// <c>max(baseline start, raw's chunk floor)</c>), so the table never reaches below what raw itself still holds.
+    ///
+    /// <para><b>Why not <c>query_store_interval_latest</c>.</b> That table keeps Regular executions only, and the raw arms
+    /// count every outcome (Aborted and Exception too). The wide table keeps every outcome, so the averages and
+    /// exec counts are the same function of the same intervals.</para>
+    ///
+    /// <para><b>Bounds.</b> Each arm keeps the raw arm's own <c>collection_time</c> window (the semantic one) and adds the
+    /// #5533 <c>first_execution_time</c> range, both ends: from the arm's start minus
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> (#4605: no row of the arm has an older first execution) to
+    /// its end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>. That range is what
+    /// <c>ix_query_store_interval_wide_server_first_exec</c> scans, so each arm reads its own days of the server's rows
+    /// and no sort runs to dedupe them. The recent arm also takes <c>collection_time &gt;= $5</c>, which only matters when
+    /// raw's floor is inside the recent window: raw then reads the recent arm from its floor too.</para>
+    ///
+    /// <para><b>The one edge where the two reads differ.</b> An interval collected on both sides of the window start (its
+    /// first snapshots before $2, its latest after) is counted by raw in BOTH arms, the partial snapshot in the baseline and
+    /// the latest in the recent window. The table holds only the latest, so it counts that interval in the recent arm alone.
+    /// That is at most one interval per plan (the one open at $2), its partial counts blended into a 7-day baseline, and the
+    /// table form is the one that does not count the same executions on both sides. The window END is exact: the gate reads
+    /// raw for an end before the table's <c>applied_through</c> (its clause 4), where a latest snapshot could sit past it.</para>
+    ///
+    /// <para><c>1 AS rn</c> keeps <see cref="QueryStoreRegressionsSuffix"/>'s <c>WHERE rn = 1</c> true for every row:
+    /// the table's row IS the raw arm's <c>rn = 1</c> row. A static readonly because the interval literals are derived
+    /// from TimeSpans; <c>$$"""</c> keeps <c>$1</c> literal.</para>
+    /// </summary>
+    public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
 
     /// <summary>
     /// The start of the baseline window of the regressions read whose recent window starts at <paramref name="startUtc"/>:
@@ -392,7 +395,7 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreIntervalWide.WideReadPlan.ClampedStart"/>, so it reads exactly the span raw would, which is
     /// the span <see cref="GetQueryStoreRegressionsDataStartAsync"/>'s notice describes.
     /// </summary>
-    private async Task<List<ViewerQueryStoreRegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
+    internal async Task<List<ViewerQueryStoreRegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, CancellationToken cancellationToken)
     {
         try
