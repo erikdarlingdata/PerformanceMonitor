@@ -2780,7 +2780,7 @@ public sealed class DarlingCollectorRunner
                            first row, which no client-side budget shortens. Hoisted out of the `using` header
                            only so the reader below keeps its original disposal scope. */
                         /* #5813: the per-database budget on the runtime-stats statement, open through drain, the
-                           same as the enumerated readItem (null for every collector but query_store). Linked to
+                           same as the enumerated readItem (query_store only; null for the rest). Linked to
                            dbToken, so the #2150 item budget and shutdown still win their own cases. */
                         using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, dbToken);
                         var readToken = readBudget?.Token ?? dbToken;

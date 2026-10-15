@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// end; these pins keep the other three from drifting off the same shape.
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class QueryStoreReadBudgetWiringPinTests
 {
     [Fact]

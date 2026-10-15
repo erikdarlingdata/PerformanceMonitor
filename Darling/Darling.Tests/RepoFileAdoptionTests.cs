@@ -227,6 +227,9 @@ public sealed class RepoFileAdoptionTests
            column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
            loader call on the NEXT line — anchors that a CRLF read would miss on every arm. */
         "QueryStoreClutterViewerSurfacesTests.cs",
+        /* #5813: its wiring pins match the read budget's statements across line breaks in both products' runners, and
+           its fan-out pin anchors the stamp on the rethrow on the NEXT line. */
+        "QueryStoreReadBudgetWiringPinTests.cs",
         /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
            view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
         /* #4427: its wiring pins slice RunPurgeNowBackgroundAsync's body by brace balance and matches calls that span line breaks. */
