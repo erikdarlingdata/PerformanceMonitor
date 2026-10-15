@@ -24,7 +24,7 @@ namespace Lite.Tests;
 /// nor a dropped code-behind <c>new DataGridFilterManager&lt;T&gt;()</c> / chart-menu wiring / a grid's
 /// <c>RowStyle</c> (how its whole context menu attaches). Those are the "went missing" failure modes.
 ///
-/// MECHANISM = RATCHET, not golden (mirrors <see cref="CollectorViewerCoverageTests"/> /
+/// MECHANISM = RATCHET, not golden (mirrors <c>CollectorViewerCoverageTests</c> (deleted in #5833) /
 /// <see cref="CrossAppMcpToolInventoryPinTests"/> — a subset assertion + a non-vacuous floor + a scan
 /// self-check, NOT an exact snapshot). Each section captures a capability SET from the CURRENT source and
 /// asserts the committed BASELINE is a SUBSET of it: a captured capability may never disappear, but NEW ones
