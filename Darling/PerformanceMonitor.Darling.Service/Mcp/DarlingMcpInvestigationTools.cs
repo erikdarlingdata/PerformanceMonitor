@@ -559,6 +559,10 @@ public sealed class DarlingMcpInvestigationTools
         "THE WINDOW IS BOUNDED AT 100 REQUESTS, newest first: requests_returned is how many you got, truncated says the " +
         "window held more (the reports and journal are those of the returned requests only; narrow hours_back or pass " +
         "server_name or request_id), and journal_truncated says their journal held more than 200 rows. " +
+        "Each report also carries the feedback people gave it (verdict right, partly or wrong, corrected_verdict, " +
+        "missed_step, comment, author), and a window read returns family_counts: per alert family, reported, " +
+        "with_feedback, marked_wrong, agent_false_positives (reports that say false_positive) and false_positives " +
+        "(the same after people's corrected verdicts). " +
         "hours_back 1-168, default 24.")]
     public static Task<string> GetInvestigationReports(
         NpgsqlDataSource postgres,

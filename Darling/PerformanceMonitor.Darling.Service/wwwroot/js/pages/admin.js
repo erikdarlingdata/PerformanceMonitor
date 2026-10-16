@@ -7,10 +7,12 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Four tabs, three of them one existing read:
+   Five tabs (the first three each one existing read):
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
+     Report Feedback     GET /api/investigation-feedback (#5913: the feedback people gave investigation reports, the false-positive
+                         counts per alert family, and a form to record feedback for a sign-in that can make changes)
      Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903)
    Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
@@ -20,7 +22,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
 import { getSession } from "../views-api.js";
 
 export const SERVER_COLUMNS = [
@@ -658,6 +660,7 @@ const TABS = [
   { id: "servers", label: "Servers" },
   { id: "routes", label: "Notification Routes" },
   { id: "settings", label: "Alert Settings" },
+  { id: "feedback", label: "Report Feedback" },
   { id: "pending", label: "Pending Notes" },
 ];
 
@@ -1213,6 +1216,172 @@ async function buildSettings(body, generation) {
   mount(body, nodes);
 }
 
+/* Report Feedback (#5913): what people say about the investigation reports agents write. GET /api/investigation-feedback lists the
+   reported requests of the last week (the newest 200 are listed; the counts cover every one) with the feedback each one holds and
+   the false-positive counts per alert family. The page lists for everyone. The form (PUT /api/investigation-feedback/{id}) shows
+   only for a sign-in that can make changes AND when the list's own answer says `can_record`: the service asks the store whether
+   the web dashboard's login may write the table. Managed and compose stores connect the web as the viewer role, where it may not,
+   so the page is list-only there (FEEDBACK_LIST_ONLY says so and names the Viewer); a record that is refused anyway still answers
+   403. A second record by the same author replaces the first. */
+export const FEEDBACK_VERDICTS = [
+  { value: "right", label: "Right" },
+  { value: "partly", label: "Partly right" },
+  { value: "wrong", label: "Wrong" },
+];
+export const FEEDBACK_CORRECTIONS = [
+  { value: "", label: "Keep the report's verdict" },
+  { value: "real", label: "Real" },
+  { value: "false_positive", label: "False positive" },
+  { value: "needs_person", label: "Needs a person" },
+];
+
+export const FEEDBACK_NOTE =
+  "Say whether each report was right, partly right or wrong, and what the agent missed. The counts show how often each alert " +
+  "family's investigations end as a false positive once your corrections are applied. A request's settled verdict is the corrected " +
+  "verdict of the newest feedback that gave one, so a later feedback that gives no corrected verdict does not displace an earlier " +
+  "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
+
+/* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
+export const FEEDBACK_LIST_ONLY =
+  "Recording needs a store login with the admin role. On managed and compose stores the web dashboard connects as the viewer role, " +
+  "so this page is list-only there and feedback is given in the desktop Viewer.";
+
+/* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
+export function feedbackWindowLabel(hours) {
+  const h = Number.isInteger(hours) && hours > 0 ? hours : 168;
+  const span = h % 24 === 0 ? (h / 24) + (h === 24 ? " day" : " days") : h + " hours";
+  return "Counts and reports cover the requests opened in the last " + span + " that have a report.";
+}
+
+export const FEEDBACK_FAMILY_COLUMNS = [
+  { key: "family", label: "Alert family" },
+  { key: "reported", label: "Reported" },
+  { key: "with_feedback", label: "With feedback" },
+  { key: "marked_wrong", label: "Marked wrong" },
+  { key: "agent_false_positives", label: "False positives (agent)" },
+  { key: "false_positives", label: "False positives (after feedback)" },
+];
+
+/* The body of a feedback PUT from the form's values. Blank text is sent as null; the service refuses what the table would. */
+export function buildFeedbackBody(values) {
+  const text = (v) => (typeof v === "string" && v.trim() !== "" ? v : null);
+  return {
+    verdict: typeof values.verdict === "string" ? values.verdict : "",
+    corrected_verdict: text(values.corrected_verdict),
+    missed_step: text(values.missed_step),
+    comment: text(values.comment),
+  };
+}
+
+/* What the page does with a feedback PUT's answer. `reread` says the list is stale (read it again); a 403 refusal and a bad value
+   leave it as it is, because the list is right and the person is told why. */
+export function interpretFeedback(status, body, message, expired) {
+  const b = body !== null && typeof body === "object" && !Array.isArray(body) ? body : null;
+  const sentence = (b && [b.message, b.error].find((s) => typeof s === "string" && s !== "")) || "Request failed (HTTP " + status + ").";
+  if (status === 0) return { kind: "network", reread: false, message: typeof message === "string" && message ? message : "Network error." };
+  if (status === 401 || expired === true) return { kind: "expired", reread: false, message: "" };
+  if (status === 200 && b && (b.status === "recorded" || b.status === "replaced")) {
+    return { kind: b.status, reread: true, message: b.status === "replaced" ? "Your earlier feedback on this report was replaced." : "Feedback recorded." };
+  }
+  if (status === 403) return { kind: "refused", reread: false, message: sentence };
+  if (status === 404 || status === 409) return { kind: "stale", reread: true, message: sentence };
+  if (status === 400) return { kind: "invalid", reread: false, message: sentence };
+  return { kind: "failed", reread: false, message: sentence };
+}
+
+/* The page state, in module scope so the 60 s repaint keeps what a person is typing: the status line of each report, by request id. */
+const feedbackStatus = new Map();
+const feedbackDrafts = new Map();
+
+function feedbackLine(f) {
+  const parts = [f.author + ": " + f.verdict];
+  if (f.corrected_verdict) parts.push("corrected to " + f.corrected_verdict);
+  if (f.missed_step) parts.push("missed: " + f.missed_step);
+  if (f.comment) parts.push(f.comment);
+  if (f.recorded_at_utc) parts.push("given " + localizeIsoText(f.recorded_at_utc));
+  return parts.join(" - ");
+}
+
+function selectField(requestId, field, options, draft) {
+  const select = el("select", { "data-fb-field": field, "data-request-id": requestId },
+    options.map((o) => el("option", { value: o.value, text: o.label })));
+  select.value = draft[field] != null ? draft[field] : options[0].value;
+  select.addEventListener("change", () => { draft[field] = select.value; });
+  return select;
+}
+
+function textField(requestId, field, label, draft) {
+  const input = el("textarea", { "data-fb-field": field, "data-request-id": requestId, rows: "2", maxlength: "4000", "aria-label": label });
+  input.value = draft[field] != null ? draft[field] : "";
+  input.addEventListener("input", () => { draft[field] = input.value; });
+  return input;
+}
+
+function feedbackForm(r, rerender) {
+  const id = r.request_id;
+  if (!feedbackDrafts.has(id)) feedbackDrafts.set(id, { verdict: "right" });
+  const draft = feedbackDrafts.get(id);
+  const status = el("div", { class: "tag-status", "data-fb-status": id, role: "status", text: feedbackStatus.get(id) || "" });
+  const save = el("button", { type: "button", class: "btn", "data-fb-save": id, text: "Record feedback" });
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    const out = await apiWrite("PUT", "/api/investigation-feedback/" + encodeURIComponent(id), buildFeedbackBody(draft));
+    save.disabled = false;
+    const a = interpretFeedback(out.status, out.body, out.message, out.expired);
+    if (a.kind === "expired") return;
+    feedbackStatus.set(id, a.message);
+    status.textContent = a.message;
+    if (a.kind === "recorded" || a.kind === "replaced") feedbackDrafts.delete(id);
+    if (a.reread) await rerender();
+  });
+  return el("div", { class: "feedback-form", "data-fb-form": id }, [
+    el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "The report was" }), selectField(id, "verdict", FEEDBACK_VERDICTS, draft)]),
+    el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "The verdict should be" }), selectField(id, "corrected_verdict", FEEDBACK_CORRECTIONS, draft)]),
+    el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "What the agent missed" }), textField(id, "missed_step", "What the agent missed", draft)]),
+    el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Comment" }), textField(id, "comment", "Comment", draft)]),
+    save,
+    status,
+  ]);
+}
+
+function feedbackCard(r, canEdit, rerender) {
+  const lines = (r.feedback || []).map((f) => el("li", { "data-fb-line": r.request_id, text: feedbackLine(f) }));
+  return el("section", { class: "feedback-card", "data-request-id": r.request_id }, [
+    el("h4", { text: r.server_name + " - " + r.family + " - " + r.first_metric }),
+    el("p", { class: "mute-label", text: localizeIsoText("Reported " + r.reported_at_utc + " by " + r.agent_id + ": " + r.report_verdict) }),
+    el("p", { text: r.root_cause }),
+    lines.length ? el("ul", {}, lines) : el("p", { class: "mute-label", text: "No feedback yet." }),
+    canEdit ? feedbackForm(r, rerender) : null,
+  ]);
+}
+
+async function buildFeedback(body, generation) {
+  const [session, res] = await Promise.all([getSession(), apiGet("/api/investigation-feedback")]);
+  if (generation !== renderGeneration) return;
+  const bad = failure(res);
+  if (bad) return mount(body, bad);
+  const data = res.data || {};
+  const requests = Array.isArray(data.requests) ? data.requests : [];
+  const families = Array.isArray(data.families) ? data.families : [];
+  const rerender = () => buildFeedback(body, generation);
+  const canRecord = session.can_edit === true && data.can_record === true;
+  const nodes = [noticeStrip(FEEDBACK_NOTE)];
+  if (data.can_record !== true) nodes.push(noticeStrip(FEEDBACK_LIST_ONLY));
+  nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
+  nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
+  nodes.push(VIZ.table({ families }, {
+    rowsKey: "families",
+    columns: FEEDBACK_FAMILY_COLUMNS,
+    emptyText: "No investigation reports in the last " + (data.hours_back || 168) + " hours.",
+  }));
+  nodes.push(el("h3", { class: "section-title", text: "Reports" }));
+  if (data.truncated === true) nodes.push(noticeStrip("Showing the newest " + requests.length + " reports; older ones in the window are not listed, and the counts above still cover them."));
+  if (!requests.length) nodes.push(emptyStrip("No investigation has reported in this window."));
+  for (const r of requests) nodes.push(feedbackCard(r, canRecord, rerender));
+  mount(body, nodes);
+}
+
+
 /* ─────────────────────────── pending agent notes (#5903) ─────────────────────────── */
 
 /* A Level 1 agent proposes a note with its report. It stays pending, out of every brief, until a person approves it here.
@@ -1375,7 +1544,7 @@ async function buildPending(body, generation) {
   mount(body, nodes);
 }
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, pending: buildPending };
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, pending: buildPending };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */

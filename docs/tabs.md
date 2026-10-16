@@ -36,7 +36,7 @@ The Darling web dashboard has these pages in its sidebar:
 - FinOps, with the same twelve sub-tabs as the table above
 - Fleet Sweeps
 - Alert History and Alert Rules
-- Admin, with the tabs Servers, Notification Routes, and Alert Settings
+- Admin, with the tabs Servers, Notification Routes, Alert Settings, and Report Feedback
 - Custom Views, Mute Rules, and Manage Tags
 - Job History
 
