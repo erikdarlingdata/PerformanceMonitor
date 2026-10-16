@@ -91,6 +91,9 @@ internal static class DarlingMcpWritePolicy
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        "create_query_tag_rule",
+        "update_query_tag_rule",
+        "delete_query_tag_rule",
         "run_collectors_now",
     };
 
@@ -138,6 +141,9 @@ internal static class DarlingMcpWritePolicy
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        "create_query_tag_rule",
+        "update_query_tag_rule",
+        "delete_query_tag_rule",
         "run_collectors_now",
         "add_servers",
         "remove_server",
