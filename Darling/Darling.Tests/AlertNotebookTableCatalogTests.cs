@@ -329,6 +329,19 @@ public sealed class AlertNotebookTableCatalogTests
         Assert.DoesNotMatch(BuiltKeyPattern("recovered"), source);
     }
 
+    /* #5917: a read whose rows are the shared image record (the tool and the undo journal one type) names its fields in that record,
+       not in the tool file. The record's own JsonPropertyNames are what the wire carries, so they are read by reflection. */
+    private static readonly Dictionary<string, Type> s_imageTypedReads = new(StringComparer.Ordinal)
+    {
+        ["get_mute_rules"] = typeof(PerformanceMonitor.Darling.Storage.MuteRuleImage),
+    };
+
+    private static HashSet<string> ImageWireNames(Type imageType) =>
+        imageType.GetProperties()
+            .Select(p => p.GetCustomAttributes(typeof(System.Text.Json.Serialization.JsonPropertyNameAttribute), true)
+                .Cast<System.Text.Json.Serialization.JsonPropertyNameAttribute>().FirstOrDefault()?.Name)
+            .Where(n => n is not null).Select(n => n!).ToHashSet(StringComparer.Ordinal);
+
     [Fact]
     public void EveryFieldKeyInTheCatalog_IsAFieldTheReadsOwnPayloadBuilds()
     {
@@ -364,7 +377,8 @@ public sealed class AlertNotebookTableCatalogTests
             {
                 var assignment = BuiltKeyPattern(key);
                 var viaConstant = s_keyConstants.TryGetValue(read + "." + key, out var constant) && source.Contains(constant, StringComparison.Ordinal);
-                if (!assignment.IsMatch(source) && !viaConstant) bad.Add(read + "." + key);
+                var viaImage = s_imageTypedReads.TryGetValue(read, out var imageType) && ImageWireNames(imageType).Contains(key);
+                if (!assignment.IsMatch(source) && !viaConstant && !viaImage) bad.Add(read + "." + key);
             }
         }
 

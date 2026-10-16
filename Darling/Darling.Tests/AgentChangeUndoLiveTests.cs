@@ -112,6 +112,24 @@ VALUES (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9,
     }
 
     [Fact]
+    public async Task AMuteRow_CountsThePopulationOfMutedAlerts_NotThePageTheAlertsRouteReturns()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, reason, metric_name, server_id) VALUES ('m5', true, now() at time zone 'utc', 'agent says', 'Blocking', 7)", ct);
+            var called = await JournalChangeAsync(connection, "mute", "m5", 7, null, Mute("agent says"), ct: ct, ageHours: 5);
+            /* More than the old 1000-row page the list counted: the row must report all of them (#5917, #3679). */
+            await ExecAsync(connection, @"INSERT INTO config.config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, muted)
+SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 5, true FROM generate_series(1, 1005)", ct);
+
+            var row = (await undo.ReadAsync(50, ct)).Changes.Single(c => c.CalledId == called);
+            Assert.Equal(1005, row.MutedAlerts);
+            /* The alerts route still pages, and says how many it returned. */
+            Assert.Equal(2, (await undo.ReadMutedAlertsAsync(called, 2, ct)).Count);
+        });
+    }
+
+    [Fact]
     public async Task ADeletedRule_ComesBackWithItsOwnCustomId_AndANameClashRefuses()
     {
         await RunAsync(async (undo, connection, ct) =>
@@ -252,6 +270,8 @@ VALUES (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9,
         await RunAsync(async (undo, connection, ct) =>
         {
             await ExecAsync(connection, "INSERT INTO config.investigation_journal (event, actor, reason, detail) VALUES ('refused', 'agent:a', 'actions_off', '{\"tool\":\"create_mute_rule\"}')", ct);
+            /* A Level 1 request refusal (InvestigationRequestStore.RecordRefusalAsync: claim and submit) is an agent refusal with no tool; it refused no change (#5917). */
+            await ExecAsync(connection, "INSERT INTO config.investigation_journal (event, actor, reason, detail) VALUES ('refused', 'agent:a', 'claim:not_open', NULL), ('refused', 'agent:a', 'submit:stale', '{\"note\":\"x\"}')", ct);
             var read = await undo.ReadAsync(50, ct);
             var refusal = Assert.Single(read.Refusals);
             Assert.Equal("actions_off", refusal.Code);

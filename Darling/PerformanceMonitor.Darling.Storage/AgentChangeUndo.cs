@@ -34,7 +34,7 @@ public sealed record AgentChangeRow(
     string? UndoneBy,
     int? MutedAlerts)
 {
-    /// <summary>The kind word the tool journaled (<c>mute</c>, <c>rule</c> or <c>override</c>).</summary>
+    /// <summary>The kind word the tool journaled (<c>mute</c>, <c>custom_rule</c> or <c>threshold_override</c>; <see cref="AgentChangeKinds"/>).</summary>
     public string? Kind => ReadString("kind");
 
     /// <summary>The tool that made the change.</summary>
@@ -79,9 +79,9 @@ public sealed record AgentUndoResult(bool Undone, string? Code, string Words)
 /// <c>person:&lt;login&gt;</c>). Any difference refuses "changed since": a person edited it after the agent, and their edit stays.
 /// <para><b>Images by kind.</b> The tool journals a kind word and flat JSON images (column names; <c>null</c> = the object did not
 /// exist). <c>mute</c>: <c>config_mute_rules</c>, target id = the rule id, fields <c>enabled, expires_at_utc, reason, server_name, server_id, metric_name,
-/// database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern</c>. <c>rule</c>:
+/// external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern</c>. <c>custom_rule</c>:
 /// <c>custom_alert_rules</c>, target id = the rule id (<c>Custom:&lt;id&gt;</c> or the number), fields <c>name, definition, description, enabled</c>.
-/// <c>override</c>: <c>config_threshold_overrides</c>, target = server id, database and threshold key as the target id, field <c>value</c>.
+/// <c>threshold_override</c>: <c>config_threshold_overrides</c>, target = server id, database and threshold key as the target id, field <c>value</c>.
 /// Never <c>updated_at</c>, <c>updated_by</c>, <c>version</c> or the <c>config_version</c> beacon: they change with every write.</para>
 /// <para>Created (before null) is undone by deleting; changed by restoring the before image; deleted (after null) by re-inserting it
 /// (a rule with <c>OVERRIDING SYSTEM VALUE</c>, so it keeps its <c>Custom:&lt;id&gt;</c>; a rule with that name since is refused).
@@ -137,10 +137,12 @@ WHERE c.event = 'action_called' AND c.event_time >= $1 AND ($3::bigint IS NULL O
 ORDER BY c.event_time DESC, c.journal_id DESC
 LIMIT $2";
 
+    /* A gate refusal always carries detail.tool (InvestigationRequestStore.AgentAction, DarlingAgentActionGate). The Level 1 request
+       refusals (claim and submit, InvestigationRequestStore.RecordRefusalAsync) are agent-actor refusals too but refuse no change. */
     internal const string RefusalsSql = @"
 SELECT journal_id, event_time, request_id, server_id, actor, reason, detail->>'tool'
 FROM config.investigation_journal
-WHERE event = 'refused' AND actor LIKE 'agent:%' AND event_time >= $1
+WHERE event = 'refused' AND actor LIKE 'agent:%' AND detail->>'tool' IS NOT NULL AND event_time >= $1
 ORDER BY event_time DESC, journal_id DESC
 LIMIT $2";
 
@@ -156,6 +158,16 @@ WHERE a.muted
 ORDER BY a.alert_time DESC
 LIMIT $4";
 
+    /// <summary>How many alerts the rule muted since the change: the population, a count above any page (#5917). The predicate is
+    /// <see cref="MutedAlertsSql"/>'s, with no LIMIT, so one row crosses the wire however many alerts the rule muted.</summary>
+    internal const string MutedAlertsCountSql = @"
+SELECT count(*)
+FROM config.config_alert_log AS a
+WHERE a.muted
+  AND a.alert_time >= $1
+  AND ($2::integer IS NULL OR a.server_id = $2)
+  AND ($3::text IS NULL OR a.metric_name = $3)";
+
     /// <summary>The list: the calls and the refusals newest first, with the switch's state.</summary>
     public async Task<AgentChangesRead> ReadAsync(int limit = 200, CancellationToken cancellationToken = default)
     {
@@ -168,7 +180,7 @@ LIMIT $4";
         for (var i = 0; i < changes.Count; i++)
         {
             if (changes[i].Kind == AgentChangeKinds.Mute && changes[i].Result == AgentChangeResult.Done)
-                changes[i] = changes[i] with { MutedAlerts = (await MutedAlertsAsync(connection, changes[i], 1000, cancellationToken)).Count };
+                changes[i] = changes[i] with { MutedAlerts = await MutedAlertCountAsync(connection, changes[i], cancellationToken) };
         }
 
         var refusals = new List<AgentRefusalRow>();
@@ -217,12 +229,30 @@ LIMIT $4";
         return row is null || row.Kind != AgentChangeKinds.Mute ? [] : await MutedAlertsAsync(connection, row, Math.Clamp(limit, 1, 1000), cancellationToken);
     }
 
-    private async Task<List<MutedAlertRow>> MutedAlertsAsync(NpgsqlConnection connection, AgentChangeRow row, int limit, CancellationToken cancellationToken)
+    /// <summary>The server and metric a mute rule's image names (a null matches any): the link into the alert log.</summary>
+    private static (int? ServerId, string? Metric) MuteScope(AgentChangeRow row)
     {
         var done = row.ResultJson is null ? null : JsonNode.Parse(row.ResultJson) as JsonObject;
         var image = AfterImageNode(AgentChangeKinds.Mute, done?["after"]) as JsonObject ?? (JsonNode.Parse(row.DetailJson) as JsonObject)?["before"] as JsonObject;
         var serverId = image?["server_id"] is JsonValue sv && sv.TryGetValue(out int sid) ? (int?)sid : null;
         var metric = image?["metric_name"] is JsonValue mv && mv.TryGetValue(out string? m) ? m : null;
+        return (serverId, metric);
+    }
+
+    /* The list's count is a statement of its own, not the length of a page (#5917, #3679): one count(*) row per mute change, however
+       many alerts the rule muted. */
+    private async Task<int> MutedAlertCountAsync(NpgsqlConnection connection, AgentChangeRow row, CancellationToken cancellationToken)
+    {
+        var (serverId, metric) = MuteScope(row);
+        await using var command = Command(connection, null, MutedAlertsCountSql, P(row.CalledAtUtc),
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, PText(metric));
+        var count = await command.ExecuteScalarAsync(cancellationToken);
+        return (int)Math.Min(Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture), int.MaxValue);
+    }
+
+    private async Task<List<MutedAlertRow>> MutedAlertsAsync(NpgsqlConnection connection, AgentChangeRow row, int limit, CancellationToken cancellationToken)
+    {
+        var (serverId, metric) = MuteScope(row);
         var rows = new List<MutedAlertRow>();
         await using var command = Command(connection, null, MutedAlertsSql, P(row.CalledAtUtc),
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, PText(metric), P(limit));
