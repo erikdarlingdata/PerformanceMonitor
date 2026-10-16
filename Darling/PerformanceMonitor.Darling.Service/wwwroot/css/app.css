@@ -1323,6 +1323,9 @@ pre.code {
 .jh-detail { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
 .jh-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .jh-detail-message { margin: 8px 0 0; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The Investigations page (#5904) reuses the jh-detail pane, head and message above; these two only space its sections and its report blocks. */
+.inv-section { margin: 10px 0 0; }
+.inv-report { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--border); }
 
 /* Storage Growth heatmap (#4843): one accent shade per service band, 0 (smallest) to 7 (largest). */
 .heat-band-0 { background: rgba(46, 174, 241, 0.10); }

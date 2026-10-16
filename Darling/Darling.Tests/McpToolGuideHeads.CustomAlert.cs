@@ -25,6 +25,7 @@ public sealed class McpToolGuideHeadsCustomAlertTests
     [
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
+        "backtest_custom_alert_rule",
         "update_custom_alert_rule",
         "list_custom_alert_templates",
     ];
@@ -40,6 +41,11 @@ public sealed class McpToolGuideHeadsCustomAlertTests
         ("test_custom_alert_rule", "breaching:true means the predicate is true THIS INSTANT, not that the rule has fired"),
         ("test_custom_alert_rule", "A null current_value is no-data and never breaches"),
         ("test_custom_alert_rule", "Zero in-scope servers returns status:no_in_scope_servers with empty results, not an error"),
+
+        ("backtest_custom_alert_rule", "with the same persistence rule the live engine applies"),
+        ("backtest_custom_alert_rule", "over 168 is refused"),
+        ("backtest_custom_alert_rule", "a cap that stops the replay answers status:partial with stopped_at"),
+        ("backtest_custom_alert_rule", "A server with no stored samples is unavailable, never 0 fires"),
 
         ("update_custom_alert_rule", "an omitted field keeps its current value"),
         ("update_custom_alert_rule", "description ALSO accepts an empty string \"\" to clear it"),

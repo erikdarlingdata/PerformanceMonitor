@@ -24,7 +24,7 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail } from "../util.js";
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -768,13 +768,6 @@ export function reportLinksCell(links) {
       ? el("div", { text: `${label}: ${String(l.url ?? "")} (shown as text: ${problem})` })
       : el("div", {}, [el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer", title: l.url, text: label })]);
   }));
-}
-
-/* The rows of a reply under `key`, or the reply itself when it is an array; [] for anything else. */
-function rowsUnder(data, key) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data[key])) return data[key];
-  return [];
 }
 
 /* The requests of list_investigation_requests, each with the verdict and summary of its newest report from

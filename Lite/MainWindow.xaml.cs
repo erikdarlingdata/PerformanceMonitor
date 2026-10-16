@@ -1782,6 +1782,14 @@ public partial class MainWindow : Window
         }
     }
 
+    /* #5904: the read-only investigations panel. Modeless, so it can stay open beside the servers; it reads through the
+       store at Full, as the operator's own window (mcp.dataDetail masks agents over MCP only, so _mcpDataDetail is not used here). */
+    private void InvestigationsButton_Click(object sender, RoutedEventArgs e)
+    {
+        var reader = new PerformanceMonitorLite.Investigations.InvestigationPanelReader(InvestigationStore);
+        new PerformanceMonitorLite.Windows.InvestigationsWindow(reader) { Owner = this }.Show();
+    }
+
     private async void ManageTagsButton_Click(object sender, RoutedEventArgs e)
     {
         if (_dataService == null)

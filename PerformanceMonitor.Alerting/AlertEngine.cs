@@ -94,6 +94,8 @@ public sealed class AlertEngine
     private static readonly TimeSpan OccurrenceStaleAfter = TimeSpan.FromHours(RollingCountWindowHours);
 
     private readonly IAlertEngineSettings _settings;
+    /// <summary>#5910: per-server and per-database threshold overrides; null = every threshold is the global setting.</summary>
+    private readonly IAlertThresholdOverrides? _overrides;
     private readonly IAlertReadAdapter _readAdapter;
     private readonly IAlertStateStore _stateStore;
     private readonly IAlertDeliverer _deliverer;
@@ -374,6 +376,12 @@ public sealed class AlertEngine
     /// retried on the next sweep until the seed ends (a read succeeds, the process touches the key, or one cooldown passes
     /// since the engine was built); null leaves the tier in memory only.
     /// </param>
+    /// <param name="overrides">
+    /// #5910: per-server and per-database threshold overrides. Every <see cref="AlertThresholdKey"/> member of
+    /// <paramref name="settings"/> is read through <see cref="IAlertThresholdOverrides.Resolve"/>, with the database
+    /// passed only for a key whose scope allows one. Null (Lite, which stays advise-only) is the engine before #5910:
+    /// every threshold is the global setting.
+    /// </param>
     public AlertEngine(
         IAlertEngineSettings settings,
         IAlertReadAdapter readAdapter,
@@ -386,7 +394,8 @@ public sealed class AlertEngine
         ILogger? logger = null,
         Func<DateTime>? utcNow = null,
         AlertReadFailureCounter? readFailures = null,
-        Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? escalationSeedReader = null)
+        Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? escalationSeedReader = null,
+        IAlertThresholdOverrides? overrides = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _readAdapter = readAdapter ?? throw new ArgumentNullException(nameof(readAdapter));
@@ -400,6 +409,7 @@ public sealed class AlertEngine
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _readFailures = readFailures;
         _escalationSeedReader = escalationSeedReader;
+        _overrides = overrides;
         /* #5715 round 1: the restart seed counts only history rows from before this engine existed; construction is the
            process start for both hosts, which build the engine once at startup. */
         _engineStartUtc = _utcNow();
@@ -417,6 +427,41 @@ public sealed class AlertEngine
             (VolumeFreeSpaceWatermarkMetric, EscalationSeed.VolumeFreeSpaceResolvedTitle, true, true, _lowDiskEscalation),
         };
     }
+
+    /// <summary>
+    /// #5910: the value of a tunable threshold for <paramref name="serverKey"/>, or for <paramref name="database"/> on
+    /// that server. Every read of an <see cref="AlertThresholdKey"/> member goes through here. With no overrides it is
+    /// the global setting, exactly as before. With overrides it is what <see cref="IAlertThresholdOverrides.Resolve"/>
+    /// answers, and the database is passed on only for a key whose scope allows one, so a database-level override
+    /// can never move a server-scoped check. A throwing override is logged and the global value applies: losing the
+    /// whole check, or the whole sweep for a read outside a check's catch, to one bad override would hide more than
+    /// it protects.
+    /// </summary>
+    private int Threshold(AlertThresholdKey thresholdKey, string serverKey, string? database = null)
+    {
+        int globalValue = _settings.GlobalValue(thresholdKey);
+        if (_overrides is null)
+        {
+            return globalValue;
+        }
+
+        string? scopedDatabase = AlertThresholdKeys.ScopeOf(thresholdKey) == AlertThresholdScope.ServerAndDatabase ? database : null;
+        try
+        {
+            return _overrides.Resolve(thresholdKey, serverKey, scopedDatabase, globalValue);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("The threshold override for {Key} on {Server} failed, so the global value {Value} applies: {Message}",
+                thresholdKey, serverKey, globalValue, ex.Message);
+            return globalValue;
+        }
+    }
+
+    /// <summary>#5910: the file growth rise and level bars for one database on one server.</summary>
+    private (int RiseMbPerHour, int VolumePercent) FileGrowthBars(string serverKey, string database) =>
+        (Threshold(AlertThresholdKey.FileGrowthRiseMb, serverKey, database),
+         Threshold(AlertThresholdKey.FileGrowthVolumePercent, serverKey, database));
 
     /// <summary>#5715 part B: the history reader that seeds <see cref="TierEscalation"/> across a restart; null leaves the tier in-memory only.</summary>
     private readonly Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? _escalationSeedReader;
@@ -904,6 +949,7 @@ public sealed class AlertEngine
            second arm behind the same gate. The instant is the row's UTC twin where the store has one and the
            target's local stamp before V134 (#3744); the gate compares it for EQUALITY, so which clock stamped
            it is not a gate input — see ObservePersistenceAsync for why order was the wrong test. */
+        int cpuThreshold = Threshold(AlertThresholdKey.CpuThresholdPercent, key);
         var observations = SelectCpuObservations(snapshot, key, now);
         var events = new List<(bool IsFire, double Value, DateTime? ReadingUtc)>();
         foreach (var obs in observations)
@@ -920,7 +966,7 @@ public sealed class AlertEngine
                 continue;
             }
 
-            bool breaching = sampleValue.Value >= _settings.CpuThresholdPercent;      /* :65-67 */
+            bool breaching = sampleValue.Value >= cpuThreshold;      /* :65-67 */
             var (outcome, incidentOpen) = await ObservePersistenceAsync(
                 _cpuPersistence, CpuPersistenceMetric, key, obs.Instant, breaching,
                 CpuBreachSamples, CpuClearSamples);
@@ -1170,7 +1216,8 @@ public sealed class AlertEngine
                 _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
             }
 
-            var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
+            int cpuThreshold = Threshold(AlertThresholdKey.CpuThresholdPercent, key);
+            var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {cpuThreshold}%{maintenanceDetail}"; /* :89 + #3495 */
 
             /* :91-98 — ShortMessage = the toast body of :84 minus the server-name prefix. The numerics
                are REQUIRED, not optional (#1830): the ported no-numerics form left the history stores
@@ -1194,11 +1241,11 @@ public sealed class AlertEngine
             var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "High CPU",
                 $"{alertCpuValue:F0}% ({cpuMetricLabel})",
-                $"{_settings.CpuThresholdPercent}%",
+                $"{cpuThreshold}%",
                 Context: cpuContext, DetailText: cpuDetailText,
-                NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
+                NumericCurrentValue: alertCpuValue, NumericThresholdValue: cpuThreshold,
                 Muted: isMuted, Severity: cpuGrade,
-                ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
+                ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {cpuThreshold}%)"), ct);
             AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
 
             /* A fire nobody received has not delivered this tier: the retry is still the escalation (#5709 round 2). */
@@ -1391,8 +1438,9 @@ public sealed class AlertEngine
         /* Edge-trigger the rolling 1-hour count (#1091) — :135-150. */
         int blockingWatermark = _lastAlertedBlockingCount.TryGetValue(key, out var labc) ? labc : 0; /* :138 */
         bool blockingCooldownElapsed = CooldownElapsed(_lastBlockingAlert, key, now, alertCooldown); /* :139 */
+        int blockingThreshold = Threshold(AlertThresholdKey.BlockingCountThreshold, key);
         var blockingDecision = _settings.BlockingEnabled
-            ? RollingCountAlertGate.Evaluate(effectiveBlockingCount, _settings.BlockingCountThreshold, blockingWatermark, blockingCooldownElapsed, suppressed)
+            ? RollingCountAlertGate.Evaluate(effectiveBlockingCount, blockingThreshold, blockingWatermark, blockingCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :140-142 */
         _lastAlertedBlockingCount[key] = blockingDecision.Watermark;                /* :143 */
         if (blockingDecision.Watermark != blockingWatermark)                        /* :147 — persist on change (#1145) */
@@ -1437,9 +1485,9 @@ public sealed class AlertEngine
             var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "Blocking Detected",
                 effectiveBlockingCount.ToString(),
-                _settings.BlockingCountThreshold.ToString(),
+                blockingThreshold.ToString(),
                 blockingContext, detailText,
-                NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: _settings.BlockingCountThreshold,
+                NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: blockingThreshold,
                 Muted: isMuted, Severity: blockingContext?.SeverityOverride,
                 ShortMessage: $"{effectiveBlockingCount} blocking session(s)"), ct);
             AfterFire("Blocking Detected", _lastBlockingAlert, key, now, alertCooldown, delivery);
@@ -1644,7 +1692,7 @@ public sealed class AlertEngine
         string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
         List<BlockedProcessAlertRow>? blockingRows, IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
-        int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
+        int thresholdSeconds = Threshold(AlertThresholdKey.BlockingWaitSecondsThreshold, key);
         bool enabled = _settings.BlockingEnabled && thresholdSeconds > 0;
 
         if (!enabled)
@@ -1821,6 +1869,7 @@ public sealed class AlertEngine
         IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         List<DeadlockAlertRow>? deadlockRows = null;
+        int deadlockThreshold = Threshold(AlertThresholdKey.DeadlockCountThreshold, key);
         int effectiveDeadlockCount = 0;
 
         if (_settings.DeadlockEnabled)
@@ -1836,7 +1885,7 @@ public sealed class AlertEngine
                 /* :198-205 — recount excluding deadlocks whose processes ALL ran in excluded
                    databases (graph-XML parse via the shared IsDeadlockExcluded). */
                 if (excludedDatabases.Count > 0
-                    && effectiveDeadlockCount >= _settings.DeadlockCountThreshold)
+                    && effectiveDeadlockCount >= deadlockThreshold)
                 {
                     effectiveDeadlockCount = deadlockRows
                         .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, excludedDatabases));
@@ -1865,7 +1914,7 @@ public sealed class AlertEngine
         var deadlockEscalation = _settings.DeadlockEnabled && _deadlockEscalation.IsEscalation(key, deadlockTier);
         bool deadlockCooldownElapsed = EscalationOpensGate("Deadlocks Detected", key, deadlockEscalation, _lastDeadlockAlert, now, alertCooldown); /* :217 */
         var deadlockDecision = _settings.DeadlockEnabled
-            ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, _settings.DeadlockCountThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
+            ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, deadlockThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :218-220 */
         _lastAlertedDeadlockCount[key] = deadlockDecision.Watermark;                /* :221 */
         if (deadlockDecision.Watermark != deadlockWatermark)                        /* :224 — persist on change (#1145) */
@@ -1929,9 +1978,9 @@ public sealed class AlertEngine
             var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "Deadlocks Detected",
                 effectiveDeadlockCount.ToString(),
-                _settings.DeadlockCountThreshold.ToString(),
+                deadlockThreshold.ToString(),
                 deadlockContext, detailText,
-                NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: _settings.DeadlockCountThreshold,
+                NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: deadlockThreshold,
                 Muted: isMuted, Severity: deadlockContext.SeverityOverride,
                 ShortMessage: $"{effectiveDeadlockCount} deadlock(s) in the last hour"), ct);
             AfterFire("Deadlocks Detected", _lastDeadlockAlert, key, now, alertCooldown, delivery);
@@ -2192,7 +2241,7 @@ public sealed class AlertEngine
             _lastRunnableQueueEvaluation[key] = now;
 
             var finding = RunnableQueueEvaluator.Evaluate(
-                reading, _settings.RunnableQueueWarningPerScheduler, _settings.RunnableQueueCriticalPerScheduler);
+                reading, Threshold(AlertThresholdKey.RunnableQueueWarningPerScheduler, key), Threshold(AlertThresholdKey.RunnableQueueCriticalPerScheduler, key));
 
             if (finding is not null)
             {
@@ -2373,7 +2422,7 @@ public sealed class AlertEngine
             _lastAttentionEvaluation[key] = now;
 
             var finding = AttentionEvaluator.Evaluate(
-                reading, _settings.ClientTimeoutsWarningPerMinute, _settings.ClientTimeoutsCriticalPerMinute,
+                reading, Threshold(AlertThresholdKey.ClientTimeoutsWarningPerMinute, key), Threshold(AlertThresholdKey.ClientTimeoutsCriticalPerMinute, key),
                 (database, app) => _isAlertMuted(new AlertMuteContext
                 {
                     ServerName = serverName,
@@ -2541,6 +2590,7 @@ public sealed class AlertEngine
             return;
         }
 
+        int lrqThresholdMinutes = Threshold(AlertThresholdKey.LongRunningQueryThresholdMinutes, key);
         var readClock = Stopwatch.StartNew();
         try
         {
@@ -2555,7 +2605,7 @@ public sealed class AlertEngine
                 _settings.LongRunningQueryExcludedProgramNamePrefixes, _settings.LongRunningQueryExcludedLogins);
             var read = await _readAdapter.GetLongRunningQueriesAsync(              /* :346 */
                 key,
-                _settings.LongRunningQueryThresholdMinutes,
+                lrqThresholdMinutes,
                 _settings.LongRunningQueryMaxResults,
                 _settings.LongRunningQueryExcludeSpServerDiagnostics,
                 _settings.LongRunningQueryExcludeWaitFor,
@@ -2699,10 +2749,10 @@ public sealed class AlertEngine
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Query",
                         $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
-                        $"{_settings.LongRunningQueryThresholdMinutes}m",
+                        $"{lrqThresholdMinutes}m",
                         lrqContext, detailText,
                         NumericCurrentValue: elapsedMinutes,
-                        NumericThresholdValue: _settings.LongRunningQueryThresholdMinutes,
+                        NumericThresholdValue: lrqThresholdMinutes,
                         Muted: isMuted, Severity: lrqContext?.SeverityOverride,
                         ShortMessage: $"Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}"), ct);
                     AfterFire("Long-Running Query", _lastLongRunningQueryAlert, key, now, alertCooldown, delivery);
@@ -2744,6 +2794,7 @@ public sealed class AlertEngine
             return;
         }
 
+        int tempDbThreshold = Threshold(AlertThresholdKey.TempDbSpaceThresholdPercent, key);
         var readClock = Stopwatch.StartNew();
         try
         {
@@ -2772,7 +2823,7 @@ public sealed class AlertEngine
                from the first sub-threshold read, though with TempDbSpaceClearSamples = 1 that is the same
                instant it always was. The in-memory active flag is gone; the record's Firing bit is the one
                "incident open" fact, and it survives a restart. */
-            bool breaching = tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent; /* :420 */
+            bool breaching = tempDb.ReservedPercent >= tempDbThreshold; /* :420 */
             var (outcome, incidentOpen) = await ObservePersistenceAsync(
                 _tempDbPersistence, TempDbSpacePersistenceMetric, key, tempDb.CollectionTimeUtc, breaching,
                 TempDbSpaceBreachSamples, TempDbSpaceClearSamples);
@@ -2810,10 +2861,10 @@ public sealed class AlertEngine
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "tempdb Space",
                         $"{tempDb.ReservedPercent:F0}% reserved ({tempDb.TotalReservedMb:F0} MB)",
-                        $"{_settings.TempDbSpaceThresholdPercent}%",
+                        $"{tempDbThreshold}%",
                         tempDbContext, detailText,
                         NumericCurrentValue: tempDb.ReservedPercent,
-                        NumericThresholdValue: _settings.TempDbSpaceThresholdPercent,
+                        NumericThresholdValue: tempDbThreshold,
                         Muted: isMuted, Severity: tempDbContext.SeverityOverride,
                         ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
                     AfterFire("tempdb Space", _lastTempDbSpaceAlert, key, now, alertCooldown, delivery);
@@ -2861,13 +2912,17 @@ public sealed class AlertEngine
             return false;
         }
 
+        int lowDiskPercent = Threshold(AlertThresholdKey.LowDiskThresholdPercent, key);
+        int lowDiskGb = Threshold(AlertThresholdKey.LowDiskThresholdGb, key);
+        int diskCriticalPercent = Threshold(AlertThresholdKey.DiskCriticalFreePercent, key);
+        int diskCriticalGb = Threshold(AlertThresholdKey.DiskCriticalFreeGb, key);
         bool conditionPresent = false;
         var readClock = Stopwatch.StartNew();
         try
         {
             var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
             readClock.Restart();
-            var breached = AlertContextBuilders.GetBreachedVolumes(volumes, _settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb); /* :481 */
+            var breached = AlertContextBuilders.GetBreachedVolumes(volumes, lowDiskPercent, lowDiskGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
@@ -2890,7 +2945,7 @@ public sealed class AlertEngine
                    worsening check and the cooldown. The alert is one per server (its cooldown and last-alerted level are
                    keyed by server and its tier comes from the worst volume), so the escalation is keyed the same way. */
                 var lowDiskTier = LowDiskAlertGate.IsCriticallyLow(
-                    worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb)
+                    worst.FreePercent, worst.FreeGb, diskCriticalPercent, diskCriticalGb)
                     ? AlertSeverityLevel.Critical
                     : AlertSeverityLevel.Warning;
                 var escalation = _lowDiskEscalation.IsEscalation(key, lowDiskTier);
@@ -2924,10 +2979,10 @@ public sealed class AlertEngine
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Volume Free Space",
                         $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)",
-                        AlertContextBuilders.FormatLowDiskThreshold(_settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb),
+                        AlertContextBuilders.FormatLowDiskThreshold(lowDiskPercent, lowDiskGb),
                         lowDiskContext, detailText,
                         NumericCurrentValue: worst.FreePercent,
-                        NumericThresholdValue: _settings.LowDiskThresholdPercent,
+                        NumericThresholdValue: lowDiskPercent,
                         Muted: isMuted, Severity: lowDiskContext?.SeverityOverride,
                         ShortMessage: $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)"), ct);
                     AfterFire("Volume Free Space", _lastLowDiskAlert, key, now, alertCooldown, delivery);
@@ -2987,7 +3042,10 @@ public sealed class AlertEngine
     private async Task CheckPvsPressureAsync(
         string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
-        if (!_settings.PvsEnabled || _settings.PvsThresholdPercent <= 0)
+        /* #5910: the server-level percent gates the read (0 is off for this server); each database is then
+           held to its own pair, and a database whose percent resolves to 0 never breaches. */
+        int pvsPercent = Threshold(AlertThresholdKey.PvsThresholdPercent, key);
+        if (!_settings.PvsEnabled || pvsPercent <= 0)
         {
             return;
         }
@@ -2997,7 +3055,8 @@ public sealed class AlertEngine
         {
             var databases = await _readAdapter.GetPvsPressureAsync(key, ct);
             readClock.Restart();
-            var breached = AlertContextBuilders.GetBreachedPvsDatabases(databases, _settings.PvsThresholdPercent, _settings.PvsFloorGb);
+            var breached = AlertContextBuilders.GetBreachedPvsDatabases(
+                databases, d => (Threshold(AlertThresholdKey.PvsThresholdPercent, key, d.DatabaseName), Threshold(AlertThresholdKey.PvsFloorGb, key, d.DatabaseName)));
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
                identically here: counting only at delivery lets an event that ages out during a cooldown mask
@@ -3025,13 +3084,16 @@ public sealed class AlertEngine
                     pvsContext = AlertSampleAge.Stamp(pvsContext, "PVS", AlertSampleAge.Newest(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
+                    /* #5910: the card states the pair the worst database was held to. */
+                    int worstPvsPercent = Threshold(AlertThresholdKey.PvsThresholdPercent, key, worst.DatabaseName);
+                    int worstPvsFloorGb = Threshold(AlertThresholdKey.PvsFloorGb, key, worst.DatabaseName);
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Version Store (PVS)",
                         $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)",
-                        AlertContextBuilders.FormatPvsThreshold(_settings.PvsThresholdPercent, _settings.PvsFloorGb),
+                        AlertContextBuilders.FormatPvsThreshold(worstPvsPercent, worstPvsFloorGb),
                         pvsContext, detailText,
                         NumericCurrentValue: worst.PvsPercent,
-                        NumericThresholdValue: _settings.PvsThresholdPercent,
+                        NumericThresholdValue: worstPvsPercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)"), ct);
                     AfterFire("Version Store (PVS)", _lastPvsAlert, key, now, alertCooldown, delivery);
@@ -3117,18 +3179,19 @@ public sealed class AlertEngine
             return;
         }
 
+        int fileGrowthLookback = Threshold(AlertThresholdKey.FileGrowthLookbackMinutes, key);
         var readClock = Stopwatch.StartNew();
         try
         {
             var files = await _readAdapter.GetDatabaseFileGrowthAsync(
-                key, _settings.FileGrowthLookbackMinutes, ct);
+                key, fileGrowthLookback, ct);
             readClock.Restart();
 
             /* #3539 A8c: the rise knob is MB per HOUR and the lookback is the window that rate is averaged over,
                so the builder scales the bar to the window rather than comparing the raw in-window delta against
                a number whose meaning would otherwise change with the other knob. */
             var breached = AlertContextBuilders.GetBreachedFiles(
-                files, _settings.FileGrowthRiseMb, _settings.FileGrowthVolumePercent, _settings.FileGrowthLookbackMinutes);
+                files, f => FileGrowthBars(key, f.DatabaseName), fileGrowthLookback);
 
             var fileGrowthOccurrences = await ObserveOccurrencesAsync(
                 key, FileGrowthWatermarkMetric,
@@ -3157,7 +3220,7 @@ public sealed class AlertEngine
                 }
 
                 bool anyNewObservation = breached.Any(f =>
-                    AlertContextBuilders.BreachesLevelGate(f, _settings.FileGrowthVolumePercent)
+                    AlertContextBuilders.BreachesLevelGate(f, Threshold(AlertThresholdKey.FileGrowthVolumePercent, key, f.DatabaseName))
                     || !(f.ObservedAtUtc is { } observedAt
                          && alertedObservations.TryGetValue(FileGrowthObservationKey(f), out var lastAlertedAt)
                          && observedAt <= lastAlertedAt));
@@ -3203,16 +3266,18 @@ public sealed class AlertEngine
                        The card's own rate is over the MEASURED span, which can be narrower than the window on a
                        server that started collecting recently; naming the in-window bar is what lets the two be
                        compared without knowing that. */
+                    /* #5910: the threshold line states the bars the worst file's database was held to. */
+                    var worstBars = FileGrowthBars(key, worst.DatabaseName);
                     var riseBarMb = AlertContextBuilders.FileGrowthRiseBarMb(
-                        _settings.FileGrowthRiseMb, _settings.FileGrowthLookbackMinutes);
+                        worstBars.RiseMbPerHour, fileGrowthLookback);
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Database File Growth",
                         headline,
-                        $"rise ≥ {_settings.FileGrowthRiseMb} {AlertContextBuilders.FileGrowthRiseUnit} averaged over {_settings.FileGrowthLookbackMinutes} min "
-                        + $"(≥ {riseBarMb:F0} MB in the window) or file ≥ {_settings.FileGrowthVolumePercent}% of volume",
+                        $"rise ≥ {worstBars.RiseMbPerHour} {AlertContextBuilders.FileGrowthRiseUnit} averaged over {fileGrowthLookback} min "
+                        + $"(≥ {riseBarMb:F0} MB in the window) or file ≥ {worstBars.VolumePercent}% of volume",
                         context, detailText,
                         NumericCurrentValue: worst.VolumePercent,
-                        NumericThresholdValue: _settings.FileGrowthVolumePercent,
+                        NumericThresholdValue: worstBars.VolumePercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: headline), ct);
                     AfterFire("Database File Growth", _lastFileGrowthAlert, key, now, alertCooldown, delivery);
@@ -3284,10 +3349,11 @@ public sealed class AlertEngine
             return;
         }
 
+        int jobMultiplier = Threshold(AlertThresholdKey.LongRunningJobMultiplier, key);
         var readClock = Stopwatch.StartNew();
         try
         {
-            var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
+            var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, jobMultiplier, ct); /* :562 */
             readClock.Restart();
 
             /* #1812: a stale latest snapshot is NO evidence, in either direction. Firing on it re-alerts
@@ -3340,11 +3406,11 @@ public sealed class AlertEngine
                     /* :603-613. ShortMessage = the toast body of :595. */
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Job",
-                        $"{anomalousJobs.Count} job(s) exceeding {_settings.LongRunningJobMultiplier}x average",
-                        $"{_settings.LongRunningJobMultiplier}x historical avg",
+                        $"{anomalousJobs.Count} job(s) exceeding {jobMultiplier}x average",
+                        $"{jobMultiplier}x historical avg",
                         jobContext, detailText,
                         NumericCurrentValue: (double)(worst.PercentOfAverage ?? 0),
-                        NumericThresholdValue: _settings.LongRunningJobMultiplier * 100,
+                        NumericThresholdValue: jobMultiplier * 100,
                         Muted: isMuted, Severity: jobContext?.SeverityOverride,
                         ShortMessage: $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)"), ct);
 
@@ -3397,6 +3463,7 @@ public sealed class AlertEngine
             return false;
         }
 
+        int failedJobLookbackMinutes = Threshold(AlertThresholdKey.FailedJobLookbackMinutes, key);
         bool conditionPresent = false;
         try
         {
@@ -3410,7 +3477,7 @@ public sealed class AlertEngine
                 return false;
             }
 
-            var failedJobs = await _failedJobsFetcher(key, _settings.FailedJobLookbackMinutes, ct); /* :657 */
+            var failedJobs = await _failedJobsFetcher(key, failedJobLookbackMinutes, ct); /* :657 */
             conditionPresent = failedJobs.Count > 0;                                /* :663 — feeds the sweep result */
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
@@ -3444,14 +3511,14 @@ public sealed class AlertEngine
 
                     var failedJobContext = AlertContextBuilders.BuildFailedJobContext(
                         fingerprintServer, failedJobs, failedJobOccurrences.Decorate,
-                        windowEndUtc: now, lookbackMinutes: _settings.FailedJobLookbackMinutes); /* :695 */
+                        windowEndUtc: now, lookbackMinutes: failedJobLookbackMinutes); /* :695 */
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 
                     /* :698-708. ShortMessage = the toast body of :690. */
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Failed Agent Job",
-                        $"{failedJobs.Count} job failure(s) in last {_settings.FailedJobLookbackMinutes}m — {jobNames}",
-                        $"last {_settings.FailedJobLookbackMinutes}m",
+                        $"{failedJobs.Count} job failure(s) in last {failedJobLookbackMinutes}m — {jobNames}",
+                        $"last {failedJobLookbackMinutes}m",
                         failedJobContext, detailText,
                         NumericCurrentValue: failedJobs.Count,
                         NumericThresholdValue: 0,

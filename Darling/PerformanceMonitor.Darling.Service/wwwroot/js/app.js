@@ -15,6 +15,7 @@
  *   #/server/{name}     — one server's detail (Overview)
  *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
+ *   #/investigations    — agent investigation requests, their reports and journal (#5904)
  *   #/alert-rules       — Custom Alert Rules list (#3285)
  *   #/alert-rule/new    — the alert-rule editor creating a new rule (optionally /new/{template})
  *   #/alert-rule/{id}   — the alert-rule editor editing a saved rule (#3285)
@@ -44,6 +45,7 @@ import { renderAdmin } from "./pages/admin.js";
 import { renderServer } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
+import { renderInvestigations } from "./pages/investigations.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
 import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice, PAGE_REFRESH_KEY } from "./refresh-policy.js";
@@ -86,6 +88,7 @@ function currentRoute() {
     return { name: "triage", query: q >= 0 ? h.slice(q + 1) : "" };
   }
   if (h.startsWith("#/alerts")) return { name: "alerts" };
+  if (h === "#/investigations" || h === "#/investigations/") return { name: "investigations" };
   /* Alert-rule routes (#3285): the list, the new form (optionally /new/{template}), then the bare /{id} edit form,
      tested most-specific first. Distinct from #/alerts above (which cannot collide: #/alert- never starts #/alerts). */
   if (h === "#/alert-rules" || h === "#/alert-rules/") return { name: "alertRules" };
@@ -180,6 +183,7 @@ function route(opts) {
   else if (r.name === "ag") renderAg(main);
   else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);
+  else if (r.name === "investigations") renderInvestigations(main);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
   else if (r.name === "admin") renderAdmin(main, r.tab);
