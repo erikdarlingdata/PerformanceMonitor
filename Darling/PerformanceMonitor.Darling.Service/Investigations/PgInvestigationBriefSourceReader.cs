@@ -11,6 +11,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Investigations;
@@ -40,7 +41,7 @@ public sealed class PgInvestigationBriefSourceReader : IInvestigationBriefSource
 
     internal const string RequestSql = @"
 SELECT r.server_id, r.server_name, r.family, r.state, r.expires_at, r.lease_until, r.alert_count, r.first_metric,
-       r.story_path_hash, s.engine_kind, r.first_alert_at, r.first_dedup_key
+       r.story_path_hash, s.engine_kind, r.first_alert_at, r.first_dedup_key, r.practice_of
 FROM config.investigation_requests AS r
 LEFT JOIN collect.servers AS s ON s.server_id = r.server_id
 WHERE r.request_id = $1";
@@ -80,13 +81,18 @@ LEFT JOIN LATERAL (
 ) AS l ON true
 ORDER BY p.alert_time";
 
-    internal const string EarlierReportsSql = @"
+    /* #5918: the earlier reports read no practice request's report (practice is never real history for a live brief) and no
+       report of a case a LIVE practice request replays (that report is the practising agent's answer key). "Live" is the
+       store's one definition (InvestigationRequestStore.LivePracticeRequestsSql), aliased here, never copied. $5 now. */
+    internal static readonly string EarlierReportsSql = @"
 SELECT rp.request_id, rp.submitted_at, rp.agent_id, rp.verdict, rp.root_cause, rp.root_cause_found, rp.summary
 FROM config.investigation_reports AS rp
 JOIN config.investigation_requests AS rq ON rq.request_id = rp.request_id
 WHERE rp.server_id = $1
   AND rq.family = $2
   AND rp.request_id <> $3
+  AND rq.practice_of IS NULL
+  AND NOT EXISTS (SELECT 1 FROM (" + InvestigationRequestStore.LivePracticeRequestsSql("$5") + @") AS lp WHERE lp.practice_of = rp.request_id)
 ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
@@ -100,6 +106,7 @@ FROM config.investigation_notes
 WHERE (server_id = $1 OR server_id IS NULL)
   AND state = 'approved'
   AND expires_at > $2
+  AND ($3::uuid IS NULL OR source_request_id IS DISTINCT FROM $3)
 ORDER BY (server_id IS NULL), coalesce(decided_at, created_at) DESC
 LIMIT 10";
 
@@ -156,7 +163,7 @@ LIMIT $4";
 
     /* #5914: the links earlier reports on the same server and family recorded in the last PriorLinkDays days, newest
        first: link_recorded journal rows of other requests, whose detail holds {kind, url, key}. */
-    internal const string PriorLinksSql = @"
+    internal static readonly string PriorLinksSql = @"
 SELECT j.request_id, j.event_time, j.detail::text
 FROM config.investigation_journal AS j
 JOIN config.investigation_requests AS rq ON rq.request_id = j.request_id
@@ -165,6 +172,8 @@ WHERE j.event = 'link_recorded'
   AND rq.family = $2
   AND j.request_id <> $3
   AND j.event_time >= $4
+  AND rq.practice_of IS NULL
+  AND NOT EXISTS (SELECT 1 FROM (" + InvestigationRequestStore.LivePracticeRequestsSql("$6") + @") AS lp WHERE lp.practice_of = j.request_id)
 ORDER BY j.event_time DESC, j.journal_id DESC
 LIMIT $5";
 
@@ -199,6 +208,7 @@ LIMIT $5";
 
         InvestigationBriefRequest? request = null;
         string? requestUrl = null;
+        Guid? practiceOf = null;
         await using (var command = Command(connection, RequestSql, requestId))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -218,6 +228,7 @@ LIMIT $5";
                     reader.IsDBNull(8) ? null : reader.GetString(8));
                 requestUrl = reader.IsDBNull(10) ? null : TriageLink.Build(_publicBaseUrl, request.ServerName, request.FirstMetric,
                     DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(10), DateTimeKind.Utc), reader.IsDBNull(11) ? null : reader.GetString(11));
+                practiceOf = reader.IsDBNull(12) ? null : reader.GetGuid(12);
             }
         }
 
@@ -247,8 +258,11 @@ LIMIT $5";
 
         var findings = await FindingsAsync(request, cancellationToken).ConfigureAwait(false);
 
+        /* #5918: a practice request's brief holds no answer, so it reads no earlier report (the replayed case's own report is one
+           of them) and no prior link, and no note the replayed case's report proposed (NotesSql). */
         var earlier = new List<InvestigationEarlierReport>();
-        await using (var command = Command(connection, EarlierReportsSql, request.ServerId, request.Family, requestId, MaxEarlierReports))
+        await using (var command = Command(connection, EarlierReportsSql, request.ServerId, request.Family, requestId,
+            practiceOf is null ? MaxEarlierReports : 0, now))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -265,7 +279,7 @@ LIMIT $5";
         }
 
         var notes = new List<InvestigationBriefNote>();
-        await using (var command = Command(connection, NotesSql, request.ServerId, now))
+        await using (var command = Command(connection, NotesSql, request.ServerId, now, (object?)practiceOf ?? DBNull.Value))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -303,7 +317,7 @@ LIMIT $5";
 
         var priorLinks = new List<InvestigationPriorLink>();
         await using (var command = Command(connection, PriorLinksSql, request.ServerId, request.Family, requestId,
-            now.AddDays(-PriorLinkDays), MaxPriorLinks))
+            now.AddDays(-PriorLinkDays), practiceOf is null ? MaxPriorLinks : 0, now))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -317,7 +331,7 @@ LIMIT $5";
         }
 
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
-            priorLinks.Count > 0 ? priorLinks : null, requestUrl);
+            priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null);
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each

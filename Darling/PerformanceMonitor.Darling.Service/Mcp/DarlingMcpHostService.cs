@@ -1172,6 +1172,11 @@ public sealed class DarlingMcpHostService : BackgroundService
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
             DarlingInvestigationBriefTools.Tools));
 
+        /* #5918: get_investigation_reports hides the case a live practice request replays under the investigations arm. The arm is
+           the policy the host started with, so the tool takes it as a service parameter. Typed-generic AddSingleton<T>, for the
+           seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<InvestigationReadPolicy>(new InvestigationReadPolicy(writes.Investigations));
+
         /* #5822: wait_for_investigation_requests waits on the signal the worker's dispatcher fires when a request opens, a
            service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
            host share it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */

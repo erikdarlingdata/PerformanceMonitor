@@ -287,6 +287,16 @@ public sealed class QueryStoreIntervalBrinLiveTests
         Assert.DoesNotContain("autosummarize = on", rung.Sql);
     }
 
+    /// <summary>
+    /// #5938: turns autovacuum off for one table of the scratch database. The fresh table is exactly what the autovacuum launcher
+    /// picks first, and a worker on it reads as "being vacuumed" in pg_stat_progress_vacuum (the poll that decides the manual
+    /// VACUUM is running), holds SHARE UPDATE EXCLUSIVE (so the manual VACUUM, and the second summarize pass, queue behind it),
+    /// and puts the manual VACUUM's own ungranted request in pg_locks, which the watchers read as the step's. Done before the
+    /// rows are inserted, so no worker can already be on the table.
+    /// </summary>
+    private static Task NoAutovacuumAsync(NpgsqlConnection connection, string table, CancellationToken ct) =>
+        ExecAsync(connection, $"ALTER TABLE {table} SET (autovacuum_enabled = false)", ct);
+
     /// <summary>A second session that watches pg_locks for a request on one relation that is not granted, and how long it stayed ungranted.</summary>
     private sealed class WaiterWatch : IAsyncDisposable
     {
@@ -366,6 +376,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
                 });
         }
 
+        /* The progress row must be the manual VACUUM's own (its backend pid), not a worker's on the same table (#5938). */
         public static async Task<SlowVacuum> StartAsync(ScratchPostgres scratch, NpgsqlConnection probe, string table, CancellationToken ct)
         {
             var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -373,7 +384,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
             var vacuum = new SlowVacuum(connection, table);
             for (var attempt = 0; attempt < 300; attempt++)
             {
-                if (await CountAsync(probe, $"SELECT count(*) FROM pg_stat_progress_vacuum WHERE relid = '{table}'::regclass", ct) > 0)
+                if (await CountAsync(probe, $"SELECT count(*) FROM pg_stat_progress_vacuum WHERE relid = '{table}'::regclass AND pid = {connection.ProcessID}", ct) > 0)
                 {
                     return vacuum;
                 }
@@ -408,6 +419,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var logger = new ListLogger();
 
         await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON {LegacyTable} USING brin (collection_time) WITH (autosummarize = off)", ct);
+        await NoAutovacuumAsync(connection, LegacyTable, ct);
         await InsertManyAsync(connection, ct);
         await ExecAsync(connection, $"ALTER INDEX {LegacyBrin} SET (autosummarize = on)", ct);
 
@@ -510,6 +522,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var logger = new ListLogger();
 
         await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON {LegacyTable} USING brin (collection_time) WITH (autosummarize = off)", ct);
+        await NoAutovacuumAsync(connection, LegacyTable, ct);
         await InsertManyAsync(connection, ct);
 
         QueryStoreIntervalPartitions.StepResult step;

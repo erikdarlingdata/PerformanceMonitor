@@ -53,11 +53,13 @@ public sealed partial class InvestigationRequestStore : IInvestigationRequestSto
 
     internal const string RouteLockSql = "SELECT pg_advisory_xact_lock($1, $2)";
 
+    /* #5918: a practice request is never joined (a live alert must open its own request) and never counts against a route's limits. */
     internal const string FindJoinSql = @"
 SELECT r.request_id
 FROM config.investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
+  AND r.practice_of IS NULL
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
   AND r.opened_at >= $3 - interval '30 minutes'
@@ -88,6 +90,7 @@ SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
        count(*)
 FROM config.investigation_requests
 WHERE route_id = $1
+  AND practice_of IS NULL
   AND opened_at > $2 - interval '1 day'";
 
     internal static readonly string OpenSql = @"
@@ -172,7 +175,7 @@ LIMIT $3";
 
     internal const string ListSql = @"
 SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
-       effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at
+       effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at, practice_of
 FROM (
     SELECT r.*,
            CASE
@@ -214,6 +217,7 @@ SELECT route_id,
        count(*)
 FROM config.investigation_requests
 WHERE opened_at > $1 - interval '1 day'
+  AND practice_of IS NULL
 GROUP BY route_id";
 
     internal const string RefusalServerSql = @"
@@ -259,13 +263,38 @@ SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_m
            WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
            ELSE r.state
        END AS effective_state,
-       r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief::text
+       r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief::text, r.practice_of
 FROM config.investigation_requests AS r
 WHERE ($2::uuid IS NULL OR r.request_id = $2)
   AND ($3::integer IS NULL OR r.server_id = $3)
   AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
 ORDER BY r.opened_at DESC, r.request_id
 LIMIT $5";
+
+    /* #5918: the one definition of "a LIVE practice request": a practice request that reads open or claimed (the computed state,
+       as ListSql computes it), so a submitted, released-to-expiry or expired practice is not live. It returns
+       (request_id, practice_of, opened_at). <paramref name="nowParameter"/> is the positional parameter that holds now ($1).
+       The hider (LivePracticeReplaysSql), the brief reader's earlier reports and links, and the practice store's "already live"
+       check all alias this text, so they cannot disagree about what is live. */
+    public static string LivePracticeRequestsSql(string nowParameter) => $@"
+SELECT s.request_id, s.practice_of, s.opened_at
+FROM (
+    SELECT r.request_id, r.practice_of, r.opened_at,
+           CASE
+               WHEN r.state IN ('open', 'claimed') AND r.expires_at <= {nowParameter} THEN 'expired'
+               WHEN r.state = 'claimed' AND r.lease_until < {nowParameter} AND r.claim_count >= 3 THEN 'expired'
+               WHEN r.state = 'open' AND r.claim_count >= 3 THEN 'expired'
+               WHEN r.state = 'claimed' AND r.lease_until < {nowParameter} THEN 'open'
+               ELSE r.state
+           END AS effective_state
+    FROM config.investigation_requests AS r
+    WHERE r.practice_of IS NOT NULL
+) AS s
+WHERE s.effective_state IN ('open', 'claimed')";
+
+    /* #5918: the cases a LIVE practice request replays. $1 now. */
+    internal static readonly string LivePracticeReplaysSql =
+        "SELECT DISTINCT lp.practice_of FROM (" + LivePracticeRequestsSql("$1") + ") AS lp";
 
     internal const string ReportsSql = @"
 SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence::text
@@ -735,7 +764,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         reader.IsDBNull(12) ? null : reader.GetString(12),
         reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
         reader.GetInt32(14),
-        reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15));
+        reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15),
+        reader.IsDBNull(17) ? null : reader.GetGuid(17));
 
     /// <summary>
     /// Reads requests with their reports and journal (#5632 Phase A, <c>get_investigation_reports</c>): one request by id
@@ -844,6 +874,21 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     }
 
     /// <summary>
+    /// The ids of the cases a live practice request replays (#5918): practice requests that read open or claimed now. The
+    /// investigations arm's report read leaves their reports and feedback out while this answers them. Writes nothing.
+    /// </summary>
+    public async Task<IReadOnlySet<Guid>> LivePracticeReplaysAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, LivePracticeReplaysSql, P(Now()));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var ids = new HashSet<Guid>();
+        while (await reader.ReadAsync(cancellationToken))
+            ids.Add(reader.GetGuid(0));
+        return ids;
+    }
+
+    /// <summary>
     /// Lists requests newest first, with the state computed from the lease and the expiry (a lapsed lease reads
     /// <c>open</c>, or <c>expired</c> after three claims; a request past its expiry reads <c>expired</c>). Writes nothing.
     /// Every filter is optional.
@@ -876,7 +921,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.IsDBNull(12) ? null : reader.GetString(12),
                 reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
                 reader.GetInt32(14),
-                reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15)));
+                reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15),
+                reader.IsDBNull(16) ? null : reader.GetGuid(16)));
         }
 
         return rows;

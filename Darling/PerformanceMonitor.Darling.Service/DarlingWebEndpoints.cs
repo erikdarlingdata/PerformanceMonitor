@@ -633,6 +633,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
+        MapInvestigationPractice(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -2286,6 +2287,66 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal const string FeedbackRefusedMessage =
         "Recording feedback needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role, "
         + "which lists feedback but cannot record it: give feedback in the desktop Viewer, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+
+    /* ─────────────────────── #5918 practice scores ─────────────────────── */
+
+    /// <summary>
+    /// The web's list of practice scores (#5918, #5632 Phase B): <c>GET /api/investigation-practice-scores</c> answers the score per agent
+    /// over the practice requests opened in the last <c>hours_back</c> hours (default 720, at most 8760): <c>{hours_back, agents: [{agent_id,
+    /// cases, scored, matched, unscored, points, possible, percent, missed_step_cases}]}</c>, agents in name order, <c>percent</c> null for an
+    /// agent with nothing scored yet. List-only: a practice request is started in the desktop Viewer, and the score is advisory, so nothing
+    /// here decides anything or writes.
+    /// </summary>
+    internal static void MapInvestigationPractice(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    {
+        var store = new InvestigationPracticeStore(postgres, McpCommandDeadlines.ReadSeconds);
+
+        app.MapGet("/api/investigation-practice-scores", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var hours = 720;
+            if (context.Request.Query.TryGetValue("hours_back", out var hoursText)
+                && (!int.TryParse(hoursText.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out hours) || hours < 1 || hours > 8760))
+            {
+                return ErrorResult("hours_back must be a whole number from 1 to 8760.", StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var scores = await store.ReadScoresAsync(DateTime.UtcNow.AddHours(-hours), context.RequestAborted);
+                return DarlingWebStatementSweep.JsonText(
+                    PracticeScoresBody(scores, hours), "/api/investigation-practice-scores", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-practice-scores", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    /// <summary>PURE: the practice scores body (see <see cref="MapInvestigationPractice"/>).</summary>
+    internal static JsonObject PracticeScoresBody(IReadOnlyList<InvestigationPracticeScore> scores, int hoursBack)
+    {
+        var agents = new JsonArray();
+        foreach (var s in scores)
+        {
+            agents.Add(new JsonObject
+            {
+                ["agent_id"] = s.AgentId,
+                ["cases"] = s.Cases,
+                ["scored"] = s.Scored,
+                ["matched"] = s.Matched,
+                ["unscored"] = s.Unscored,
+                ["points"] = s.Points,
+                ["possible"] = s.Possible,
+                ["percent"] = s.Percent is { } p ? Math.Round(p * 100, 1) : null,
+                ["missed_step_cases"] = s.MissedStepCases,
+            });
+        }
+
+        return new JsonObject { ["hours_back"] = hoursBack, ["agents"] = agents };
+    }
 
     /// <summary>
     /// The feedback routes (#5913): <c>GET /api/investigation-feedback</c> lists the reported requests of the last

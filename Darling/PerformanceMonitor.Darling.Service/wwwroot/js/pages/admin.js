@@ -7,12 +7,13 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Six tabs (the first three each one existing read):
+   Seven tabs (the first three each one existing read):
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
      Report Feedback     GET /api/investigation-feedback (#5913: the feedback people gave investigation reports, the false-positive
                          counts per alert family, and a form to record feedback for a sign-in that can make changes)
+     Practice Scores     GET /api/investigation-practice-scores (#5918: how each agent did on practice requests, list only)
      Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903)
      Threshold Overrides GET /api/threshold-overrides, with Save, Edit and Remove under an admin store login (#5916)
    Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
@@ -662,6 +663,7 @@ const TABS = [
   { id: "routes", label: "Notification Routes" },
   { id: "settings", label: "Alert Settings" },
   { id: "feedback", label: "Report Feedback" },
+  { id: "practice", label: "Practice Scores" },
   { id: "pending", label: "Pending Notes" },
   { id: "overrides", label: "Threshold Overrides" },
 ];
@@ -1384,6 +1386,58 @@ async function buildFeedback(body, generation) {
 }
 
 
+/* ─────────────────────────── practice scores (#5918) ─────────────────────────── */
+
+/* Practice Scores: how each agent did on practice requests, cases an operator already judged and replayed without their answers.
+   GET /api/investigation-practice-scores. List-only: a practice request is started in the desktop Viewer. The score is advisory and
+   turns no route on or off. */
+const PRACTICE_NOTE =
+  "A practice request replays a case somebody gave feedback on, without its answers, and scores the agent's report against that " +
+  "feedback. A corrected verdict is the answer; otherwise right makes the report's verdict the answer, partly counts half, and wrong " +
+  "with no correction has no answer. Scores are advisory and turn no route on or off. Start a practice request in the desktop Viewer.";
+
+export function practiceScoreText(a) {
+  if (a.percent === null || a.percent === undefined) return "not scored yet";
+  return Number(a.points) + " of " + Number(a.possible) + " (" + a.percent + "%)";
+}
+
+export function practiceRows(agents) {
+  return (Array.isArray(agents) ? agents : []).map((a) => ({
+    agent_id: a.agent_id,
+    cases: a.cases,
+    scored: a.scored,
+    matched: a.matched,
+    score: practiceScoreText(a),
+    unscored: a.unscored,
+    missed_step_cases: a.missed_step_cases,
+  }));
+}
+
+const PRACTICE_COLUMNS = [
+  { key: "agent_id", label: "Agent" },
+  { key: "cases", label: "Cases" },
+  { key: "scored", label: "Scored" },
+  { key: "matched", label: "Matched" },
+  { key: "score", label: "Score" },
+  { key: "unscored", label: "No answer" },
+  { key: "missed_step_cases", label: "Missed step noted" },
+];
+
+async function buildPractice(body, generation) {
+  const res = await apiGet("/api/investigation-practice-scores");
+  if (generation !== renderGeneration) return;
+  const bad = failure(res);
+  if (bad) return mount(body, bad);
+  const data = res.data || {};
+  const agents = practiceRows(data.agents);
+  const nodes = [noticeStrip(PRACTICE_NOTE)];
+  nodes.push(el("p", { class: "mute-label", "data-practice-window": "1", text: "Practice requests opened in the last " + (data.hours_back || 720) + " hours." }));
+  if (!agents.length) nodes.push(emptyStrip("No agent has reported on a practice request in this window."));
+  else nodes.push(VIZ.table({ agents }, { rowsKey: "agents", columns: PRACTICE_COLUMNS, emptyText: "No practice scores." }));
+  mount(body, nodes);
+}
+
+
 /* ─────────────────────────── pending agent notes (#5903) ─────────────────────────── */
 
 /* A Level 1 agent proposes a note with its report. It stays pending, out of every brief, until a person approves it here.
@@ -1732,7 +1786,7 @@ async function buildOverrides(body, generation) {
   mount(body, nodes);
 }
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, pending: buildPending, overrides: buildOverrides };
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */

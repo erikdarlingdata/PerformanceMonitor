@@ -222,6 +222,23 @@ SELECT (SELECT state FROM config.investigation_requests) || '|' || (SELECT state
         });
     }
 
+    [Fact]
+    public async Task TheRequestsTab_KeepsItsV184Floor_ListingAStoreBeforeV191AsBefore_WithNoPracticeColumn()
+    {
+        await RunAsRoleAsync("viewer", async (viewer, owner, requestId, ct) =>
+        {
+            /* #5918: practice_of arrives with V191. A store before it (no feedback table, the V191 sentinel, and no column) lists as it
+               always did, not as a raw 42703 that empties the tab. */
+            await ExecAsync(owner, "DROP TABLE config.investigation_feedback CASCADE; ALTER TABLE config.investigation_requests DROP COLUMN practice_of CASCADE", ct);
+            Assert.True(await viewer.GetStoreSchemaVersionAsync(ct) < ViewerDataService.PracticeStoreSchemaVersion);
+
+            var row = Assert.Single(await viewer.GetInvestigationRequestsAsync(null, ct));
+            Assert.Equal(requestId, row.RequestId);
+            Assert.Null(row.PracticeOf);
+            Assert.Equal("", row.PracticeDisplay);
+        });
+    }
+
     private static async Task RunAsRoleAsync(
         string managedRole, Func<ViewerDataService, NpgsqlDataSource, Guid, CancellationToken, Task> body)
     {
