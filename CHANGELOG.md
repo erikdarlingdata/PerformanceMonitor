@@ -23,6 +23,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Added
 
+- **A new Darling MCP tool, `backtest_custom_alert_rule`, shows where a custom alert rule would have fired and cleared over stored history** ([#5919]) - there was no way to see how often a rule would fire before saving or changing it: `test_custom_alert_rule` reads only the current value and skips the breach and clear samples. The new tool replays a saved rule or a draft definition over up to 7 days (default 24 hours) on up to 10 servers. At each step it reads the rule's own panel as of that step and applies the same breach and clear samples the live engine applies, so the fire and clear points match what the live engine would do on the same samples. It writes and sends nothing. One call runs at most 2,880 queries and 60 seconds, and a call a cap stops answers `partial` with `stopped_at` and what it covered. A server with no stored samples answers `unavailable`, never 0 fires. The MCP catalog grows from 187 to 188 tools.
 - **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
 
 ### Fixed
@@ -5208,6 +5209,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
 [#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
+[#5919]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5919
 [#5663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5663
 [#5668]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5668
 [#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
