@@ -194,6 +194,61 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#5904: the two reads the Investigations page makes carry the fields it draws, in the MCP order (requests
+    /// <c>opened_at DESC</c>, journal <c>event_time DESC</c>), and the report read the web serves is the full report and
+    /// brief an operator sees (the same answer the tool gives at the full level).</summary>
+    [Fact]
+    public async Task TheWebReads_CarryTheFieldsThePageDraws_InTheMcpOrder_AndTheReportIsServedInFull()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var older = (await store.OpenOrJoinAsync(Alert("resources"), ct)).RequestId!.Value;
+            _now = _now.AddSeconds(2);
+            var newer = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var id = newer.ToString();
+            var claim = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct));
+            await DarlingMcpInvestigationTools.SubmitAsync(store, id, claim.GetProperty("claim_id").GetString()!, 1,
+                "needs_person", "could not tell", Evidence, "see the table SecretOrders for the cause", null, null, ct);
+
+            async Task<JsonElement> WebRead(string tool, string query)
+            {
+                var context = new DefaultHttpContext();
+                context.Request.QueryString = new QueryString(query);
+                return Root(await DarlingWebEndpoints.BuildReadDispatch()[tool](context, dataSource, null!));
+            }
+
+            var list = await WebRead("list_investigation_requests", "?limit=100");
+            var requests = list.GetProperty("requests").EnumerateArray().ToArray();
+            Assert.Equal(new[] { newer, older }, requests.Select(r => r.GetProperty("request_id").GetGuid()));
+            foreach (var key in new[] { "request_id", "opened_at", "state", "server_name", "first_metric", "family", "alert_count",
+                         "claimed_by", "lease_until", "reported_at", "route_id" })
+                Assert.True(requests[0].TryGetProperty(key, out _), "the list row carries " + key);
+            Assert.Equal("reported", requests[0].GetProperty("state").GetString());
+            Assert.Equal("agent-a", requests[0].GetProperty("claimed_by").GetString());
+            Assert.Equal("open", requests[1].GetProperty("state").GetString());
+
+            var full = await WebRead("get_investigation_reports", "?request_id=" + id);
+            var report = Assert.Single(full.GetProperty("reports").EnumerateArray().ToArray());
+            foreach (var key in new[] { "agent_id", "submitted_at", "verdict", "root_cause_found", "root_cause", "summary", "evidence" })
+                Assert.True(report.TryGetProperty(key, out _), "the report carries " + key);
+            Assert.Equal("see the table SecretOrders for the cause", report.GetProperty("summary").GetString());
+            Assert.True(full.GetProperty("brief").ValueKind == JsonValueKind.Object);
+            var journal = full.GetProperty("journal").EnumerateArray().ToArray();
+            Assert.Contains(journal, j => j.GetProperty("event").GetString() == "claimed");
+            Assert.Contains(journal, j => j.GetProperty("event").GetString() == "reported");
+            var times = journal.Select(j => j.GetProperty("event_time").GetDateTime()).ToArray();
+            Assert.Equal(times.OrderByDescending(t => t), times);
+            foreach (var key in new[] { "event_time", "event", "actor", "reason", "request_id" })
+                Assert.True(journal[0].TryGetProperty(key, out _), "the journal row carries " + key);
+
+            /* The web read is the tool's full-level answer: an operator sees the whole report and brief. */
+            var tool = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, id, 24, ct));
+            Assert.Equal(tool.GetProperty("reports").GetRawText(), full.GetProperty("reports").GetRawText());
+            Assert.Equal(tool.GetProperty("brief").GetRawText(), full.GetProperty("brief").GetRawText());
+        });
+    }
+
     [Fact]
     public async Task Submit_AProposedNote_LandsPending_AndTheReportIsStored()
     {
@@ -215,6 +270,42 @@ public sealed class InvestigationToolsLiveTests
             /* Ruling 3: root_cause_found is false only for needs_person. */
             Assert.Equal("false", await ScalarAsync(connection,
                 $"SELECT root_cause_found::text FROM config.investigation_reports WHERE request_id = '{id}'", ct));
+        });
+    }
+
+    /// <summary>#5914: submit refuses a UNC link as invalid, naming links and the rule, and stores nothing; the same report
+    /// with https links is reported, the repeated URL counted once in links_recorded and journaled once; a report without
+    /// links answers with no links_recorded key.</summary>
+    [Fact]
+    public async Task Submit_Links_RefusesAUncUrl_AndRecordsEachUrlOnce()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var claimId = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct))
+                .GetProperty("claim_id").GetString()!;
+
+            var refused = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, "[{\"kind\":\"jira\",\"url\":\"\\\\\\\\attacker.example.invalid\\\\share\"}]"));
+            Assert.Equal("invalid", refused.GetProperty("status").GetString());
+            Assert.Contains("links: item 0 url: a UNC path", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*)::text FROM config.investigation_reports WHERE request_id = '{id}'", ct));
+
+            const string Links = "[{\"kind\":\"jira\",\"url\":\"https://jira.example.invalid/browse/OPS-7\",\"key\":\"OPS-7\"}," +
+                "{\"kind\":\"bug_report\",\"url\":\"https://jira.example.invalid/browse/OPS-7\"}," +
+                "{\"kind\":\"pull_request\",\"url\":\"https://git.example.invalid/pm/pull/9\",\"key\":\"#9\"}]";
+            var answer = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, Links));
+            Assert.Equal("reported", answer.GetProperty("status").GetString());
+            Assert.Equal(2, answer.GetProperty("links_recorded").GetInt32());
+            Assert.Equal("2", await ScalarAsync(connection,
+                $"SELECT count(*)::text FROM config.investigation_journal WHERE request_id = '{id}' AND event = 'link_recorded'", ct));
+
+            var read = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, id, 24, ct));
+            var links = read.GetProperty("reports")[0].GetProperty("links");
+            Assert.Equal(2, links.GetArrayLength());
+            Assert.Equal("https://jira.example.invalid/browse/OPS-7", links[0].GetProperty("url").GetString());
         });
     }
 

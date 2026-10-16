@@ -15,6 +15,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -215,6 +216,7 @@ public partial class InvestigationsWindow : Window
             DetailHeader.Text = "Select a request to see its brief, alerts, report and journal.";
             BriefBox.Text = "";
             ReportBox.Text = "";
+            ShowReportLinks(null);
             AlertsGrid.ItemsSource = null;
             JournalGrid.ItemsSource = null;
             return;
@@ -229,6 +231,7 @@ public partial class InvestigationsWindow : Window
             AlertsGrid.ItemsSource = detail.Alerts;
             JournalGrid.ItemsSource = detail.Journal;
             ReportBox.Text = detail.Reports.Count == 0 ? "No report yet." : FormatReport(detail.Reports[0]);
+            ShowReportLinks(detail.Reports.Count == 0 ? null : detail.Reports[0]);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -252,6 +255,57 @@ public partial class InvestigationsWindow : Window
 
         text.Append("Evidence: ").Append(report.EvidenceJson);
         return text.ToString();
+    }
+
+    /// <summary>
+    /// One report link as the detail pane shows it (#5914): its label (kind, key and URL), and the URI to open, or null
+    /// with the reason when <see cref="InvestigationReportLinks.UrlProblem"/> refuses the stored URL. The check runs here
+    /// again, on render, whatever the submit checked: a file or UNC link opened on Windows sends the user's credentials to
+    /// its host, and a row can reach the store without the submit tool.
+    /// </summary>
+    internal static (string Label, Uri? Target, string? Refused) LinkItem(InvestigationReportLink link)
+    {
+        var label = link.Kind + (string.IsNullOrEmpty(link.Key) ? "" : " " + link.Key) + ": " + link.Url;
+        if (InvestigationReportLinks.UrlProblem(link.Url) is { } problem)
+            return (label, null, problem);
+        return Uri.TryCreate(link.Url, UriKind.Absolute, out var uri) ? (label, uri, null) : (label, null, "not an absolute URL.");
+    }
+
+    /// <summary>The report's links under the report box: a safe one as a hyperlink, a refused one as plain text that says
+    /// why. No report, or none with links: the line is hidden.</summary>
+    private void ShowReportLinks(InvestigationReportViewRow? report)
+    {
+        ReportLinks.Inlines.Clear();
+        if (report is null || report.Links.Count == 0)
+        {
+            ReportLinks.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        ReportLinks.Inlines.Add(new System.Windows.Documents.Run("Links: "));
+        for (var i = 0; i < report.Links.Count; i++)
+        {
+            if (i > 0)
+                ReportLinks.Inlines.Add(new System.Windows.Documents.LineBreak());
+            var (label, target, refused) = LinkItem(report.Links[i]);
+            if (target is null)
+            {
+                ReportLinks.Inlines.Add(new System.Windows.Documents.Run(label + " (shown as text: " + refused + ")"));
+                continue;
+            }
+
+            var hyperlink = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run(label)) { NavigateUri = target };
+            hyperlink.RequestNavigate += (_, e) =>
+            {
+                /* Checked once more at the click: only an https URL the rule passes is handed to the shell. */
+                if (InvestigationReportLinks.IsSafeUrl(e.Uri.OriginalString))
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = e.Uri.AbsoluteUri, UseShellExecute = true });
+                e.Handled = true;
+            };
+            ReportLinks.Inlines.Add(hyperlink);
+        }
+
+        ReportLinks.Visibility = Visibility.Visible;
     }
 
     /// <summary>Close: checks the selection and the reason, then closes the request and reloads.</summary>

@@ -256,6 +256,14 @@ public sealed class AlertNotebookTableCatalogTests
         ["get_ag_health"] = "DarlingAgReader.cs",
     };
 
+    /// <summary>#5904: a read whose payload is built in the shared library rather than in the Mcp folder (the investigation
+    /// tools' core, shared with Lite): the file in <c>PerformanceMonitor.Common/Investigations</c> that builds it.</summary>
+    private static readonly Dictionary<string, string> s_commonPayloadFiles = new(StringComparer.Ordinal)
+    {
+        ["list_investigation_requests"] = "InvestigationToolCore.cs",
+        ["get_investigation_reports"] = "InvestigationToolCore.cs",
+    };
+
     /// <summary>A key the payload code spells through a shared constant rather than a literal: the constant it uses.</summary>
     private static readonly Dictionary<string, string> s_keyConstants = new(StringComparer.Ordinal)
     {
@@ -293,6 +301,11 @@ public sealed class AlertNotebookTableCatalogTests
         if (s_payloadTypeFiles.TryGetValue(read, out var typeFile))
         {
             source += File.ReadAllText(PathTo(s_serviceDir.Append("Mcp").Append(typeFile).ToArray()));
+        }
+
+        if (s_commonPayloadFiles.TryGetValue(read, out var commonFile))
+        {
+            source += File.ReadAllText(PathTo("PerformanceMonitor.Common", "Investigations", commonFile));
         }
 
         return source;

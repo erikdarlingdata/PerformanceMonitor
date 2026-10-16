@@ -915,7 +915,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 6),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 7),
+        /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
+           not a read; the check it serves still reads, and counts, exactly as before. */
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
            since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
@@ -1087,6 +1089,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["delivery stamp could not be written"] = "a write (#3580): the daily document was already delivered and process memory already gates it; the dropped stamp costs one re-announcement at the next restart and never a delivery - the stamp READ beside it is the read, and it is counted",
         ["Store statement history is still failing"] = "the Debug repeat of a telemetry write sweep (#5097); the first failure warns, no alert is judged on its result",
         ["Collection log hourly rollup failed"] = "a maintenance write (#5810): the pass upserts the hourly rollup and no alert is judged on its result; a failed pass is redone by the next, and get_collection_health reads the hours after the newest rolled hour from the raw log",
+        ["The threshold override for"] = "an in-memory override lookup (#5910), not a read: the global value applies and the check's own read is counted as before",
         ["Read-latency flush failed"] ="the read-latency histogram flush writes instrumentation; losing an hour's rows can't hide an alert condition",
     };
 
@@ -1280,8 +1283,9 @@ public sealed class AlertReadFailureSurfaceTests
            wrapper catch, handed its report as a parameter. 39th since #5810: the collection log hourly rollup's catch, a
            maintenance write no alert is judged on, redone by the next pass. 40th since #5867: the Compose Rollup Hours Stuck
            self-alert's wrapper catch, handed its failure record as a parameter. 41st since #5867: the worker's read of that
-           record, which holds the standing alert on a failure. */
-        Assert.Equal(41, totalExempt);
+           record, which holds the standing alert on a failure. 42nd since #5910: the engine's threshold-override
+           fallback, an in-memory lookup and not a read. */
+        Assert.Equal(42, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

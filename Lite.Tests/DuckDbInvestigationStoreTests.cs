@@ -468,4 +468,112 @@ SELECT concat_ws('|', (SELECT count(*) FROM investigation_request_alerts WHERE r
                       (SELECT count(*) FROM investigation_journal WHERE request_id = '{old}'))"));
         Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{recent}' AND event = 'opened'"));
     }
+
+    /// <summary>#5914 review r1: the report-link write on DuckDB, which Lite's submit tool does not reach today but the shared
+    /// store contract carries. Links go in as one statement (max + row_number(), as the sweeps do), so the ids are distinct and
+    /// continue the table's own; a URL given twice (as two kinds) writes one row, the first kind kept; the read hands the links
+    /// back on the report in the order the agent gave them; a second request's links continue the ids without a collision.</summary>
+    [Fact]
+    public async Task ReportLinks_AreWrittenInOneStatement_WithDistinctIds_AndReadBackInOrder()
+    {
+        var id = (await _store.OpenOrJoinAsync(Alert(T0), Ct)).RequestId!.Value;
+        var claim = await _store.ClaimAsync(id, "agent-a", Ct);
+        var links = new[]
+        {
+            new InvestigationReportLink("pull_request", "https://git.example.invalid/pm/pull/42", "#42"),
+            new InvestigationReportLink("jira", "https://jira.example.invalid/browse/OPS-1", "OPS-1"),
+            new InvestigationReportLink("bug_report", "https://jira.example.invalid/browse/OPS-1", null),
+            new InvestigationReportLink("bug_report", "https://bugs.example.invalid/9", null),
+        };
+        Assert.Equal(InvestigationSubmitOutcome.Reported, await _store.SubmitAsync(Report(id, claim.ClaimId!.Value) with { Links = links }, Ct));
+
+        Assert.Equal("3|3|agent:agent-a", Scalar($@"
+SELECT concat_ws('|', count(*), count(DISTINCT journal_id), min(actor)) FROM investigation_journal
+WHERE request_id = '{id}' AND event = 'link_recorded'"));
+        Assert.Equal("pull_request|jira|bug_report", Scalar($@"
+SELECT string_agg(reason, '|' ORDER BY journal_id) FROM investigation_journal WHERE request_id = '{id}' AND event = 'link_recorded'"));
+        /* Every id of the journal is distinct, the lifecycle rows' and the links' alike. */
+        Assert.Equal("t", Scalar("SELECT CASE WHEN count(*) = count(DISTINCT journal_id) THEN 't' ELSE 'f' END FROM investigation_journal"));
+
+        var report = Assert.Single((await _store.ReadReportsAsync(id, null, T0.AddDays(-1), 10, 200, Ct)).Reports);
+        Assert.Equal(new[]
+        {
+            "pull_request #42 https://git.example.invalid/pm/pull/42",
+            "jira OPS-1 https://jira.example.invalid/browse/OPS-1",
+            "bug_report  https://bugs.example.invalid/9",
+        }, report.Links!.Select(l => l.Kind + " " + l.Key + " " + l.Url));
+
+        _now = T0.AddMinutes(1);
+        var other = (await _store.OpenOrJoinAsync(Alert(_now, family: "jobs"), Ct)).RequestId!.Value;
+        var otherClaim = await _store.ClaimAsync(other, "agent-b", Ct);
+        Assert.Equal(InvestigationSubmitOutcome.Reported, await _store.SubmitAsync(Report(other, otherClaim.ClaimId!.Value) with
+        {
+            Links = new[] { new InvestigationReportLink("jira", "https://jira.example.invalid/browse/OPS-1", "OPS-1") },
+        }, Ct));
+        /* The same URL on another request is its own row (the once-key carries the request). */
+        Assert.Equal("4", Scalar("SELECT count(*) FROM investigation_journal WHERE event = 'link_recorded'"));
+        Assert.Equal("t", Scalar("SELECT CASE WHEN count(*) = count(DISTINCT journal_id) THEN 't' ELSE 'f' END FROM investigation_journal"));
+    }
+
+    /// <summary>#5914 review r1: a link whose once_key is already on the journal hits ON CONFLICT (once_key) on DuckDB's plain
+    /// VARCHAR UNIQUE column (Schema.cs notes it is not Darling's partial index) and writes nothing, without failing the
+    /// submit; the other link of the same report is still written.</summary>
+    [Fact]
+    public async Task ARepeatedLinkUrl_HitsOnConflictOnTheOnceKey_AndWritesOneRow()
+    {
+        var id = (await _store.OpenOrJoinAsync(Alert(T0), Ct)).RequestId!.Value;
+        var claim = await _store.ClaimAsync(id, "agent-a", Ct);
+        const string url = "https://jira.example.invalid/browse/OPS-1";
+        var onceKey = InvestigationReportLinks.OnceKey(id, url);
+        Exec($@"
+INSERT INTO investigation_journal (journal_id, event_time, request_id, server_id, event, actor, reason, detail, once_key)
+VALUES ((SELECT coalesce(max(journal_id), 0) + 1 FROM investigation_journal), now(), '{id}', 7, 'link_recorded', 'agent:agent-a',
+        'jira', '{{""kind"":""jira"",""url"":""{url}""}}', '{onceKey}')");
+
+        Assert.Equal(InvestigationSubmitOutcome.Reported, await _store.SubmitAsync(Report(id, claim.ClaimId!.Value) with
+        {
+            Links = new[]
+            {
+                new InvestigationReportLink("jira", url, "OPS-1"),
+                new InvestigationReportLink("pull_request", "https://git.example.invalid/pm/pull/42", "#42"),
+            },
+        }, Ct));
+
+        Assert.Equal("2|2", Scalar($@"
+SELECT concat_ws('|', count(*), count(DISTINCT once_key)) FROM investigation_journal
+WHERE request_id = '{id}' AND event = 'link_recorded'"));
+        Assert.Equal(2, Assert.Single((await _store.ReadReportsAsync(id, null, T0.AddDays(-1), 10, 200, Ct)).Reports).Links!.Count);
+    }
+
+    /// <summary>#5914 review r1: as Darling's pin. link_recorded rows are served whole on each report, so the capped journal
+    /// page leaves them out; 50 reported requests with two links each would otherwise overflow the 200-row page.</summary>
+    [Fact]
+    public async Task ReportLinks_DoNotCompeteForTheJournalPage_WithTheLifecycleRows()
+    {
+        const int requests = 50;
+        for (var i = 0; i < requests; i++)
+        {
+            _now = T0.AddSeconds(i * 10);
+            var id = (await _store.OpenOrJoinAsync(Alert(_now, serverId: 100 + i, maxPerHour: 1000, maxPerDay: 1000), Ct)).RequestId!.Value;
+            var claim = await _store.ClaimAsync(id, "agent-a", Ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await _store.SubmitAsync(Report(id, claim.ClaimId!.Value) with
+            {
+                Links = new[]
+                {
+                    new InvestigationReportLink("jira", "https://jira.example.invalid/browse/OPS-" + i, "OPS-" + i),
+                    new InvestigationReportLink("pull_request", "https://git.example.invalid/pm/pull/" + i, "#" + i),
+                },
+            }, Ct));
+        }
+
+        var read = await _store.ReadReportsAsync(null, null, T0.AddDays(-1), 100, 200, Ct);
+        Assert.Equal(requests, read.Reports.Count);
+        Assert.All(read.Reports, r => Assert.Equal(2, r.Links!.Count));
+        Assert.DoesNotContain(read.Journal, j => j.Event == InvestigationReportLinks.JournalEvent);
+        Assert.False(read.JournalTruncated);
+        foreach (var evt in new[] { "opened", "claimed", "reported" })
+        {
+            Assert.Equal(requests, read.Journal.Count(j => j.Event == evt));
+        }
+    }
 }

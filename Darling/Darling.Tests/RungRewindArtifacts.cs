@@ -199,6 +199,44 @@ ALTER TABLE IF EXISTS config.config_alert_log
     }
 
     /// <summary>
+    /// V191 (#5909): the Level 2 store. Drops the feedback table (the probe's newest sentinel), the threshold overrides, the
+    /// request's <c>practice_of</c> and the agent-actions switch, and puts the two level CHECKs back to their V184 shape
+    /// (route 0 to 1, request 1), so a re-run of V191 does everything again. Safe on a store that never had any of it.
+    /// </summary>
+    internal static async Task DropV191SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(@"
+DROP TABLE IF EXISTS config.investigation_feedback;
+DROP TABLE IF EXISTS config.config_threshold_overrides;
+ALTER TABLE IF EXISTS config.investigation_requests
+    DROP COLUMN IF EXISTS practice_of;
+ALTER TABLE IF EXISTS config.config_service
+    DROP COLUMN IF EXISTS agent_actions_enabled;
+DO $do$
+BEGIN
+    IF to_regclass('config.config_notification_routes') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_notification_routes_agent'
+                   AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes DROP CONSTRAINT ck_config_notification_routes_agent;
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_agent CHECK (
+                (agent_level IS NULL OR agent_level IN (0, 1))
+                AND agent_max_per_hour BETWEEN 1 AND 60
+                AND agent_max_per_day BETWEEN 1 AND 500
+                AND agent_lease_minutes BETWEEN 5 AND 120
+                AND agent_expiry_minutes BETWEEN 15 AND 1440);
+    END IF;
+    IF to_regclass('config.investigation_requests') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_investigation_requests_autonomy'
+                   AND conrelid = 'config.investigation_requests'::regclass) THEN
+        ALTER TABLE config.investigation_requests DROP CONSTRAINT ck_investigation_requests_autonomy;
+        ALTER TABLE config.investigation_requests ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level = 1);
+    END IF;
+END $do$;", connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// V190 (#5857): <c>size_estimated</c> on <c>collect.store_metrics</c> (the probe's newest sentinel). Safe on a store
     /// that never had it. A store below V190 sizes every row exactly, as before.
     /// </summary>

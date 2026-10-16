@@ -296,6 +296,8 @@
                                 ToolTip="Paste a list of servers and add them all at once with shared credentials"/>
                         <Button x:Name="ManageServersButton" Content="Manage Servers" Click="ManageServersButton_Click" Margin="0,8,0,0"/>
                         <Button x:Name="ManageTagsButton" Content="Manage Tags" Click="ManageTagsButton_Click" Margin="0,8,0,0"/>
+                        <Button x:Name="InvestigationsButton" Content="Investigations" Click="InvestigationsButton_Click" Margin="0,8,0,0"
+                                ToolTip="Read-only list of the investigation requests agents were asked to look into, with their reports and journal (#5904)"/>
                         <Button Click="OpenPlanViewerButton_Click" Margin="0,8,0,0"
                                 ToolTip="Open or paste an execution plan (independent of any server)">
                             <StackPanel Orientation="Horizontal">

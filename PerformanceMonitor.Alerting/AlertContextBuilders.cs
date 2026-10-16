@@ -393,12 +393,25 @@ public static class AlertContextBuilders
     /// than a 10 GB file that is now 80% of a small one.</para>
     /// </summary>
     public static List<DatabaseFileGrowthInfo> GetBreachedFiles(
-        IReadOnlyList<DatabaseFileGrowthInfo>? files, int riseMbPerHour, int volumePercent, int lookbackMinutes)
+        IReadOnlyList<DatabaseFileGrowthInfo>? files, int riseMbPerHour, int volumePercent, int lookbackMinutes) =>
+        GetBreachedFiles(files, _ => (riseMbPerHour, volumePercent), lookbackMinutes);
+
+    /// <summary>#5910: <see cref="GetBreachedFiles(IReadOnlyList{DatabaseFileGrowthInfo}, int, int, int)"/> with each
+    /// file held to its own database's rise and level bars, which the engine resolves through
+    /// <see cref="IAlertThresholdOverrides"/>. The lookback stays one per server: it shapes the read.</summary>
+    public static List<DatabaseFileGrowthInfo> GetBreachedFiles(
+        IReadOnlyList<DatabaseFileGrowthInfo>? files,
+        Func<DatabaseFileGrowthInfo, (int RiseMbPerHour, int VolumePercent)> barsFor,
+        int lookbackMinutes)
     {
         if (files is null || files.Count == 0) return new List<DatabaseFileGrowthInfo>();
 
         var breached = files
-            .Where(f => BreachesRiseGate(f, riseMbPerHour, lookbackMinutes) || BreachesLevelGate(f, volumePercent))
+            .Where(f =>
+            {
+                var (riseMbPerHour, volumePercent) = barsFor(f);
+                return BreachesRiseGate(f, riseMbPerHour, lookbackMinutes) || BreachesLevelGate(f, volumePercent);
+            })
             .OrderByDescending(f => f.VolumePercent)
             .ThenByDescending(f => f.GrowthMb)
             .ToList();
@@ -1218,12 +1231,22 @@ public static class AlertContextBuilders
        PVS %) first, so the alert names the most-consumed database. AND, not the volume pair's OR:
        percent is the trigger and the floor only keeps small databases from paging anyone. A
        thresholdPercent of 0 disables the check at the caller. */
-    public static List<PvsPressureInfo> GetBreachedPvsDatabases(List<PvsPressureInfo> databases, double thresholdPercent, double floorGb)
+    public static List<PvsPressureInfo> GetBreachedPvsDatabases(List<PvsPressureInfo> databases, double thresholdPercent, double floorGb) =>
+        GetBreachedPvsDatabases(databases, _ => (thresholdPercent, floorGb));
+
+    /* #5910: the same gates with each database held to its own pair, which the engine resolves through
+       IAlertThresholdOverrides. A database whose percent resolves to 0 never breaches. */
+    public static List<PvsPressureInfo> GetBreachedPvsDatabases(
+        List<PvsPressureInfo> databases, Func<PvsPressureInfo, (double ThresholdPercent, double FloorGb)> barsFor)
     {
         return databases
-            .Where(d => thresholdPercent > 0
-                && d.PvsPercent >= thresholdPercent
-                && (floorGb <= 0 || d.PvsGb >= floorGb))
+            .Where(d =>
+            {
+                var (thresholdPercent, floorGb) = barsFor(d);
+                return thresholdPercent > 0
+                    && d.PvsPercent >= thresholdPercent
+                    && (floorGb <= 0 || d.PvsGb >= floorGb);
+            })
             .OrderByDescending(d => d.PvsPercent)
             .ToList();
     }

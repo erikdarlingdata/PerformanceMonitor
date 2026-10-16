@@ -249,6 +249,16 @@ public sealed class MigrationDataMovingRungCensusPins
             + "an earlier rung created beyond that table. The six investigation tables are created empty. It does not move "
             + "the lock-wait floor."),
         new(
+            191,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_notification_routes (#5909, created V131) and on "
+            + "config.investigation_requests (created V184): each level CHECK is replaced by a wider one and validated against "
+            + "every stored row. The routes table holds a handful of operator-written rows, and the requests table holds at "
+            + "most a year of investigation requests (one per server, alert family and 30-minute window, retention "
+            + "InvestigationRetentionDays), narrow rows with no payload read, so each scan is milliseconds. Each replacement "
+            + "runs only when the stored definition does not already name level 2. The ADD COLUMNs carry a constant default "
+            + "or none and rewrite nothing; the two new tables are created empty. It does not move the lock-wait floor."),
+        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "

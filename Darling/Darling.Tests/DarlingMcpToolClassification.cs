@@ -24,7 +24,7 @@ internal static class DarlingMcpToolClassification
     internal static readonly IReadOnlySet<string> ReadOnlyTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-        "analyze_server", "audit_config", "compare_analysis", "describe_custom_view_catalog", "get_active_queries",
+        "analyze_server", "audit_config", "backtest_custom_alert_rule", "compare_analysis", "describe_custom_view_catalog", "get_active_queries",
         "get_active_query_plan_xml", "get_ag_health", "get_alert_history", "get_alert_settings",
         "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking",
         "get_blocking_plan_xml", "get_blocking_stats", "get_blocking_trend", "get_client_timeouts", "get_collection_health",

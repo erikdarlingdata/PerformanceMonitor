@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -91,6 +92,15 @@ SELECT report_id, submitted_at, agent_id, report_format, verdict, root_cause, ro
 FROM config.investigation_reports
 WHERE request_id = $1
 ORDER BY submitted_at DESC";
+
+    /// <summary>One request's report links (#5914): its link_recorded journal rows, oldest first. The viewer re-checks each
+    /// URL with <see cref="InvestigationReportLinks.UrlProblem"/> before it shows one as a link.</summary>
+    public const string InvestigationLinksSelectSql = @"
+SELECT detail::text
+FROM config.investigation_journal
+WHERE request_id = $1
+  AND event = 'link_recorded'
+ORDER BY journal_id";
 
     /// <summary>One request's journal, oldest first.</summary>
     public const string InvestigationJournalSelectSql = @"
@@ -232,6 +242,17 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
                     Summary = reader.IsDBNull(7) ? null : reader.GetString(7),
                     EvidenceJson = reader.GetString(8),
                 });
+            }
+        }
+
+        if (detail.Reports.Count > 0)
+        {
+            await using var links = Command(connection, InvestigationLinksSelectSql, requestId);
+            await using var reader = await links.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (InvestigationReportLinks.FromDetail(reader.IsDBNull(0) ? null : reader.GetString(0)) is { } link)
+                    detail.Reports[0].Links.Add(link);
             }
         }
 
@@ -592,6 +613,10 @@ public sealed class InvestigationReportViewRow
     public bool RootCauseFound { get; init; }
     public string? Summary { get; init; }
     public string EvidenceJson { get; init; } = "[]";
+
+    /// <summary>The links the report recorded (#5914), as stored: render each through
+    /// <see cref="InvestigationReportLinks.IsSafeUrl"/>, never straight.</summary>
+    public List<InvestigationReportLink> Links { get; } = new();
 }
 
 /// <summary>A note as the Notes tab lists it.</summary>
