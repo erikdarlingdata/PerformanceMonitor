@@ -67,7 +67,6 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/admin/servers/{id:int}\""] = "server registry",
         ["DarlingAdminServersReader.Route"] = "server registry",
         ["\"/api/alert-history/dismiss\""] = "a dismissal receipt",
-        ["\"/api/investigation-feedback/{requestId}\""] = "a feedback receipt (a status word, the request id and the author; #5913)",
         ["\"/api/server-tags\""] = "server tags",
         ["\"/api/server-tags/{id:int}\""] = "server tags",
         ["\"/api/server-tags/{id:int}/servers\""] = "server tags",

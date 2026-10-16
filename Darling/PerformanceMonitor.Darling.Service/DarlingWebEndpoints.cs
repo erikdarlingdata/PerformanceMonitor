@@ -2108,6 +2108,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return UnsupportedMediaTypeResult();
             }
 
+            var stopwatch = Stopwatch.StartNew();
             if (!Guid.TryParse(requestId, out var request))
             {
                 return ErrorResult("The request id is not a request id.", StatusCodes.Status400BadRequest);
@@ -2125,16 +2126,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             if (!TryParseFeedbackBody(text, request, DarlingWebSeat.FromContext(context).EditorPrincipal, out var submission, out var refusal))
             {
-                return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = refusal! }, "/api/investigation-feedback/{requestId}",
+                    logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
-            var stopwatch = Stopwatch.StartNew();
             try
             {
                 var result = await store.RecordAsync(submission!, context.RequestAborted);
                 if (result.Outcome is not (InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced))
                 {
-                    return ErrorResult(result.Message!, FeedbackRefusalStatus(result.Outcome));
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = result.Message! }, "/api/investigation-feedback/{requestId}",
+                        logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, FeedbackRefusalStatus(result.Outcome));
                 }
 
                 var receipt = FeedbackReceipt(result.Outcome, request, submission!.Author);
@@ -2143,7 +2145,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
             {
-                return ErrorResult(FeedbackRefusedMessage, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = FeedbackRefusedMessage }, "/api/investigation-feedback/{requestId}",
+                    logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2225,7 +2228,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return false;
         }
 
-        /* A sign-in name the table's author rule cannot hold is shaped, not refused: DOMAIN\erik is DOMAIN_erik. */
+        /* A sign-in name the table's author rule cannot hold is shaped, not refused: DOMAIN\erik reads DOMAIN_erik-1a2b3c4d (a hash suffix keeps two such sign-ins apart). */
         var author = InvestigationFeedbackRules.AuthorFromIdentity(identity) ?? "web";
         var candidate = new InvestigationFeedbackSubmission(
             request, verdict ?? "", string.IsNullOrWhiteSpace(corrected) ? null : corrected,

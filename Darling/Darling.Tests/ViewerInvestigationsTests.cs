@@ -75,6 +75,14 @@ public sealed class ViewerInvestigationsValidationTests
         Assert.StartsWith("A note is kept from 1 to 365 days.", note.Message, StringComparison.Ordinal);
         var profile = await Assert.ThrowsAsync<ArgumentException>(() => viewer.SaveInvestigationProfileAsync(1, 2, "text", "erik"));
         Assert.StartsWith("A profile is for the fleet, one server or one tag", profile.Message, StringComparison.Ordinal);
+
+        /* #5913: feedback is refused in the rules' words, and a blank login before any store call. */
+        var feedbackLogin = await Assert.ThrowsAsync<ArgumentException>(
+            () => viewer.RecordInvestigationFeedbackAsync(Guid.NewGuid(), "wrong", null, null, null, " "));
+        Assert.StartsWith("The viewer could not tell who you are", feedbackLogin.Message, StringComparison.Ordinal);
+        var feedbackVerdict = await Assert.ThrowsAsync<ArgumentException>(
+            () => viewer.RecordInvestigationFeedbackAsync(Guid.NewGuid(), "fine", null, null, null, "erik"));
+        Assert.StartsWith("The feedback was not recorded. verdict:", feedbackVerdict.Message, StringComparison.Ordinal);
     }
 }
 
@@ -168,6 +176,28 @@ public sealed class InvestigationsWindowStaTests
     }
 
     [Fact]
+    public void SaveFeedback_NeedsAReport_AndTheRulesWords_BeforeTheStore()
+    {
+        OnWindow(false, async window =>
+        {
+            await window.SaveFeedbackCommandAsync();
+            Assert.Equal("Select a report to give feedback on.", window.StatusText.Text);
+
+            /* The first choice of each box is "right" and "keep the report's verdict" (no correction). */
+            Assert.Null(InvestigationsWindow.CorrectedVerdictOf(((System.Windows.Controls.ComboBoxItem)window.FeedbackCorrectedBox.SelectedItem).Content as string));
+            Assert.Equal("false_positive", InvestigationsWindow.CorrectedVerdictOf("false_positive"));
+
+            var item = new InvestigationsWindow.FeedbackReportItem(new PerformanceMonitor.Common.InvestigationFeedbackListRow(
+                Guid.NewGuid(), "srv", "blocking", "Blocking", DateTime.UtcNow, DateTime.UtcNow, "agent-a", "real", "root", null,
+                Array.Empty<PerformanceMonitor.Common.InvestigationFeedbackRow>()));
+            Assert.Null(InvestigationsWindow.FeedbackError(item, "wrong", "false_positive", "", ""));
+            Assert.StartsWith("The feedback was not recorded. verdict:", InvestigationsWindow.FeedbackError(item, "", null, null, null), StringComparison.Ordinal);
+            Assert.Contains("comment: 4001 characters", InvestigationsWindow.FeedbackError(item, "wrong", null, null, new string('c', 4001)), StringComparison.Ordinal);
+            Assert.Equal("none", item.FeedbackSummary);
+        });
+    }
+
+    [Fact]
     public void AReadOnlySeat_HasNoWriteControls_AndSaysWhy()
     {
         OnWindow(true, window =>
@@ -177,6 +207,7 @@ public sealed class InvestigationsWindowStaTests
             Assert.Equal(Visibility.Collapsed, window.DecideNotePanel.Visibility);
             Assert.Equal(Visibility.Collapsed, window.WriteNotePanel.Visibility);
             Assert.Equal(Visibility.Collapsed, window.SaveProfilePanel.Visibility);
+            Assert.Equal(Visibility.Collapsed, window.GiveFeedbackPanel.Visibility);
             Assert.True(window.ProfileTextBox.IsReadOnly);
             Assert.Equal(InvestigationsWindow.ReadOnlyMessage, window.StatusText.Text);
             return Task.CompletedTask;
