@@ -162,9 +162,9 @@ public sealed class PhaseCStoreTests
         {
             await ExecAsync(store,
                 "INSERT INTO config.investigation_signature_days (server_id, signature, day, count) VALUES "
-                + "(1, 'sig-a', (now() AT TIME ZONE 'UTC')::date - 31, 4), "
+                + "(1, 'sig-a', (now() AT TIME ZONE 'UTC')::date - 35, 4), "
                 + "(1, 'sig-a', (now() AT TIME ZONE 'UTC')::date - 40, 2), "
-                + "(1, 'sig-a', (now() AT TIME ZONE 'UTC')::date - 29, 5), "
+                + "(1, 'sig-a', (now() AT TIME ZONE 'UTC')::date - 25, 5), "
                 + "(1, 'sig-b', (now() AT TIME ZONE 'UTC')::date, 1)", ct);
             await ExecAsync(store,
                 "INSERT INTO config.investigation_signature_merges (server_id, signature, merged_into, reason, merged_by, merged_at) "

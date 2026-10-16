@@ -260,7 +260,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "runs only when the stored definition does not already name level 2. The ADD COLUMNs carry a constant default "
             + "or none and rewrite nothing; the two new tables are created empty. It does not move the lock-wait floor."),
         new(
-            192,
+            193,
             SetsTheFloor: false,
             "ADD COLUMN event_id uuid NOT NULL DEFAULT gen_random_uuid() on config.investigation_journal (#5997, created V184) "
             + "is a volatile default, so it rewrites the table once and fills every stored row, and the unique index on it "

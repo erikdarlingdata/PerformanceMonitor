@@ -273,23 +273,24 @@ public static class DarlingRetention
     internal const string ClearInvestigationBriefSql =
         "UPDATE config.investigation_requests SET brief = NULL WHERE brief IS NOT NULL AND opened_at < $1";
 
-    /// <summary>The evidence rows of a request (config.investigation_evidence, V192, #5997) are cleared with its brief, at
+    /// <summary>The evidence rows of a request (config.investigation_evidence, V193, #5997) are cleared with its brief, at
     /// <see cref="InvestigationBriefRetentionDays"/>, and the rest of the request keeps <see cref="InvestigationRetentionDays"/>.
     /// A request that is still open or claimed keeps its evidence however old (<see cref="FinishedInvestigationStates"/>, the
     /// request purge's own filter): an agent may still be reading it. Evidence also goes with its request at the year
     /// (<c>ON DELETE CASCADE</c>). The delete is capped at <see cref="InvestigationEvidenceBatchRows"/> rows a statement and
     /// the drain loop repeats it until a statement deletes nothing. Compile-time constant, never user input; <c>$1</c> is the
     /// cutoff.</summary>
-    internal const string ClearInvestigationEvidenceSql =
+    internal static readonly string ClearInvestigationEvidenceSql =
         "DELETE FROM config.investigation_evidence WHERE evidence_id IN ("
         + "SELECT e.evidence_id FROM config.investigation_evidence AS e "
         + "JOIN config.investigation_requests AS r ON r.request_id = e.request_id "
-        + "WHERE r.opened_at < $1 AND r." + FinishedInvestigationStates + " LIMIT 5000)";
+        + "WHERE r.opened_at < $1 AND r." + FinishedInvestigationStates + $" LIMIT {InvestigationEvidenceBatchRows})";
 
-    /// <summary>The row cap of <see cref="ClearInvestigationEvidenceSql"/>'s statement. Evidence is at most 32 KB a row.</summary>
+    /// <summary>The row cap of <see cref="ClearInvestigationEvidenceSql"/>'s statement, also the batchSize the PurgeOneAsync call
+    /// for it passes. Evidence is at most 32 KB a row.</summary>
     internal const int InvestigationEvidenceBatchRows = 5000;
 
-    /// <summary>The daily deadlock signature counts (config.investigation_signature_days, V192, #5997) keep this many days: the
+    /// <summary>The daily deadlock signature counts (config.investigation_signature_days, V193, #5997) keep this many days: the
     /// 7-day average and the 24-hour count the gate compares need no more, and the rest is a count per day per signature.</summary>
     internal const int InvestigationSignatureDayRetentionDays = 30;
 
@@ -834,6 +835,28 @@ public static class DarlingRetention
                 }
             }
 
+            /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the fact tables
+               that carry query statistics, so it is kept as long as the longest raw retention of those tables
+               (widestFactRetentionDays, resolved above through the same resolver the fact purge uses) and no longer. last_seen is
+               NOT NULL and defaulted, so no row can slip past the horizon by never being stamped. Only this table is aged: the
+               tags, assignments and rules are configuration and the map is rebuilt from them, so retention never touches
+               them. The cutoff is bound like the external alert purge below (the store's sessions are pinned to UTC).
+               Failure-isolated like every sibling. */
+            var sightingsDeleted = await PurgeOneAsync(
+                postgres, "collect.query_tag_sightings",
+                TimeSlicedDeleteSql("collect.query_tag_sightings", "last_seen"),
+                utcNow.AddDays(-widestFactRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (sightingsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += sightingsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collection_log retention. Since V23 it is a TimescaleDB hypertable (converted DIRECTLY by the V23
                migration — it is NOT in CollectorCatalog.All, so the loop above skips it), so with Timescale it
                purges via drop_chunks in O(1) — no DELETE churn — at its own 2x horizon (CollectionLogRetentionDays).
@@ -1064,7 +1087,7 @@ public static class DarlingRetention
                 ClearInvestigationBriefSql,
                 utcNow.AddDays(-InvestigationBriefRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
-            /* config.investigation_evidence and config.investigation_signature_days (V192, #5997): the evidence is cleared with the
+            /* config.investigation_evidence and config.investigation_signature_days (V193, #5997): the evidence is cleared with the
                brief at InvestigationBriefRetentionDays, except for a request still open or claimed; the daily signature counts
                are purged at InvestigationSignatureDayRetentionDays. config.investigation_signature_merges is a recorded decision
                and is never aged. Each is failure-isolated like the passes above. */
@@ -1072,6 +1095,7 @@ public static class DarlingRetention
                 postgres, "config.investigation_evidence",
                 ClearInvestigationEvidenceSql,
                 utcNow.AddDays(-InvestigationBriefRetentionDays), logger, cancellationToken,
+                batchSize: InvestigationEvidenceBatchRows,
                 pacer: walPacer);
             var investigationSignatureDaysDeleted = await PurgeOneAsync(
                 postgres, "config.investigation_signature_days",

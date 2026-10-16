@@ -43,12 +43,34 @@ public sealed class AgentLevel2StoreRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == RungName);
 
     [Fact]
-    public void TheRungIsRegistered_AndTheViewerGateRequiresTheTopOfTheLadder()
+    public void TheRungIsRegistered_AndTheViewerGateRequiresTheLadderTop()
     {
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.True(Rung.Version <= StorageVersion.SchemaVersion);
+        Assert.Equal(191, Rung.Version);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
+    }
+
+    [Fact]
+    public void TheProbeCarriesTheSentinel_AndAStoreBehindItMapsOneRungBack()
+    {
+        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var parameters = method.GetParameters();
+        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasAgentLevel2Store");
+        Assert.True(ownOrdinal >= 0);
+
+        /* A later rung's sentinel (V192 and above) is absent: this rung is then the answer, and one rung back without its own. */
+        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        for (var later = ownOrdinal + 1; later < parameters.Length; later++)
+        {
+            all[later] = false;
+        }
+
+        Assert.Equal(191, (int)method.Invoke(null, all)!);
+
+        var behind = (object[])all.Clone();
+        behind[ownOrdinal] = false;
+        Assert.Equal(190, (int)method.Invoke(null, behind)!);
     }
 
     /// <summary>A new store: the levels, the switch, the unique override scope, the beacon, the cascades and the practice link.</summary>

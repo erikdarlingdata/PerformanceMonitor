@@ -471,7 +471,7 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
                 && statement.Contains(" config.investigation_", StringComparison.Ordinal)
                 /* The Level 2 read on the feedback table (V191, #5909) is pinned by AgentLevel2StoreGrantLiveTests. */
                 && !statement.Contains("investigation_feedback", StringComparison.Ordinal)
-                /* The read on the Phase C tables (V192, #5997) is pinned by PhaseCStoreGrantLiveTests. */
+                /* The read on the Phase C tables (V193, #5997) is pinned by PhaseCStoreGrantLiveTests. */
                 && !statement.Contains("investigation_evidence", StringComparison.Ordinal))
             .Select(statement => statement[..^" TO mcp".Length] + " TO " + roleName)
             .ToList();

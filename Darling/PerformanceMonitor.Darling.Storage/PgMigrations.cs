@@ -1507,7 +1507,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_feedback_author
     ON config.investigation_feedback (request_id, lower(author));";
 
     /// <summary>
-    /// V192 (#5997, Phase C of #5632): the store for investigation evidence, follow-ups and signed webhooks. This is the only
+    /// V192 (#5977, wave 1 of #5971): the store for query tags. The tag set (<c>config.query_tags</c>, the shape of
+    /// <c>config.server_tags</c> and its own table), hand assignments by <c>query_hash</c> or by object, rules, the per-pass
+    /// sightings of query keys and caller fields (<c>collect.query_tag_sightings</c>), the materialised tag map the reads join
+    /// (one tag per key, held by its primary key) and the one-row version state. This is the only migration of #5971.
+    ///
+    /// <para>Deleting a tag deletes its assignments, rules and map rows (cascade); deleting a rule leaves its map rows until the
+    /// next rebuild. A write to tags, assignments or rules bumps <c>config.query_tag_state.rules_version</c> through a
+    /// statement-level trigger. The trigger function is <c>SECURITY DEFINER</c> with a pinned search_path, unlike V117's
+    /// invoker-rights beacon: the mcp role writes the three tables and the viewer role deletes server-scoped rows when a server is
+    /// removed, and neither is granted anything on the state row, so the bump has to run as the owner.</para>
+    ///
+    /// <para>Grants are provisioning's (<c>DarlingManagedRoles</c>, mirrored in <c>Darling/tools/provision-roles.sql</c>). The
+    /// service writes sightings, the map and the state row as the store owner. Every statement is idempotent. All new tables are
+    /// created empty. <b>Lite twin:</b> the DuckDB tables come in #5989.</para>
+    /// </summary>
+    private static readonly string V192Sql = QueryTagSchema.CreateSql;
+
+    /// <summary>
+    /// V193 (#5997, Phase C of #5632): the store for investigation evidence, follow-ups and signed webhooks. This is the only
     /// migration in Phase C; every later slice uses these tables and columns.
     ///
     /// <para><b>Journal.</b> <c>config.investigation_journal.event_id</c>, a <c>uuid</c> per event row, unique, sent as the
@@ -1546,7 +1564,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_feedback_author
     /// <para>Grants are provisioning's (managed section 10f and provision-roles.sql step 3l). <b>No Lite twin here:</b> Lite's
     /// schema step is #6010.</para>
     /// </summary>
-    private const string V192Sql = @"
+    private const string V193Sql = @"
 ALTER TABLE config.investigation_journal
     ADD COLUMN IF NOT EXISTS event_id uuid NOT NULL DEFAULT gen_random_uuid();
 
@@ -1966,7 +1984,8 @@ $rung$;";
         new Migration(189, "query-store-compose-failures", V189Sql),
         new Migration(190, "store-metrics-size-estimated", V190Sql),
         new Migration(191, "agent-level-2-store", V191Sql),
-        new Migration(192, "phase-c-store", V192Sql),
+        new Migration(192, "query-tags-store", V192Sql),
+        new Migration(193, "phase-c-store", V193Sql),
     };
 
     /// <summary>

@@ -796,13 +796,13 @@ WHERE server_id = $1";
         return sameIdentity ? MonitoredServerAddOutcome.Duplicate : MonitoredServerAddOutcome.Collides;
     }
 
-    /// <summary>Removes a server definition by id (the Remove action), and the server's tag assignments in the
-    /// same transaction, so a re-added server (same id) does not get its old tags back.</summary>
+    /// <summary>Removes a server definition by id (the Remove action), and the server's tag assignments and query-tag rows
+    /// (#5977) in the same transaction, so a re-added server (same id) does not get its old tags back.</summary>
     public async Task DeleteMonitoredServerAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql })
+        foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql }.Concat(QueryTagSchema.ClearForServerSqls))
         {
             await using var command = new NpgsqlCommand(sql, connection, transaction);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;

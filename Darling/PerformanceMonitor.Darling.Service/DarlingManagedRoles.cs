@@ -234,7 +234,7 @@ public static class DarlingManagedRoles
                 /* V187 (#5825): whether each channel sends an alert's resolution. Behaviour, not a credential, the
                    same as pagerduty_auto_resolve above. */
                 "slack_send_resolutions", "teams_send_resolutions", "generic_send_resolutions", "email_send_resolutions",
-                /* V192 (#5997): when the previous webhook signing key stops being sent. A time, not the key. */
+                /* V193 (#5997): when the previous webhook signing key stops being sent. A time, not the key. */
                 "previous_signing_key_until",
             },
             /* generic_headers carries the Authorization bearer token itself, and generic_url is a bearer
@@ -244,7 +244,7 @@ public static class DarlingManagedRoles
             {
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
                 "generic_url", "generic_headers", "pagerduty_routing_key",
-                /* V192 (#5997): the sealed webhook signing key and the previous one kept for the 7-day overlap. Whoever holds
+                /* V193 (#5997): the sealed webhook signing key and the previous one kept for the 7-day overlap. Whoever holds
                    a key can forge a signed send, so a read role never sees either. */
                 "signing_key", "previous_signing_key",
             }),
@@ -264,7 +264,7 @@ public static class DarlingManagedRoles
                 "agent_expiry_minutes",
                 /* V187 (#5825): the route's override of the channels' "send resolutions" flags. Non-secret. */
                 "send_resolutions",
-                /* V192 (#5997): the fallback route (D8) and when the previous signing key stops being sent. Non-secret. */
+                /* V193 (#5997): the fallback route (D8) and when the previous signing key stops being sent. Non-secret. */
                 "fallback_route_id", "previous_signing_key_until",
             },
             SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" }),
@@ -1502,6 +1502,18 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
 --    no migration rung carries this.
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {mcp};
+-- #5977: the query-tag tables (V192). mcp writes the three tables a person edits: the tags, the hand assignments and the
+--    rules. The map and the sightings are the service's (the owner writes them), so mcp holds only DELETE on the map, which
+--    remove_server runs to clear a removed server's map rows (a server_id is a hash, so orphaned rows would come back when the
+--    server is re-added). mcp holds no write on any collect table, the sightings included: like every other collect table,
+--    a removed server's sightings are left to the owner's retention pass (DarlingRetention). The identity
+--    columns need no sequence grant. The rules_version bump on a write is a SECURITY
+--    DEFINER trigger function (V192), so no grant on config.query_tag_state is needed or given. Provisioning re-runs every
+--    start, so no migration rung carries this.
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tags TO {mcp};
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {mcp};
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {mcp};
+GRANT DELETE ON {config}.query_tag_map TO {mcp};
 -- #3450: the web dashboard's dedicated mute-rule endpoints (POST/PATCH/PUT/DELETE under /api/mute-rules) run
 --    as the least-privilege viewer role -- the web host's ONLY store identity -- so viewer gets the SAME
 --    single-table config_mute_rules write mcp holds above, the shape of the custom_views/custom_alert_rules
@@ -1538,6 +1550,13 @@ GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
 --    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
+-- #5977: server removal clears that server's query-tag rows (assignments, rules, map), so viewer gets DELETE on
+--    those three and nothing else on the query-tag tables: no INSERT or UPDATE, and no write on the tags themselves. Admin
+--    (the desktop Viewer's default identity) already holds the config writes through the blanket grant above. Neither holds
+--    a write on the sightings in collect: a removed server's sightings are left to retention, like every collect table.
+GRANT DELETE ON {config}.query_tag_assignments TO {viewer};
+GRANT DELETE ON {config}.query_tag_rules TO {viewer};
+GRANT DELETE ON {config}.query_tag_map TO {viewer};
 -- #4843: the web dashboard's add-server route (POST /api/servers) runs the SAME add_servers core the MCP tool runs, as
 --    viewer, so viewer gets the INSERT that core issues on config_monitored_servers; no DELETE, because no web route
 --    removes a server yet. Viewer holds no UPDATE on the table: see the #5240 note right below.
@@ -1756,7 +1775,7 @@ GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
 GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
 
--- 10f. Phase C tables (V192, #5997): the evidence of a request, the daily deadlock signature counts and the signature
+-- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
 --     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege
 --     from PUBLIC and the three roles, and SELECT goes back to all three: the web dashboard and the MCP tools read them.
