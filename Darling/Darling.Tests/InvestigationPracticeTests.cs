@@ -10,12 +10,15 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Investigations;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -131,6 +134,42 @@ public sealed class InvestigationPracticeTests
         var score = Assert.Single(InvestigationPracticeScoring.ByAgent(new[] { run }));
         Assert.Null(score.Percent);
         Assert.Equal(1, score.Unscored);
+    }
+
+    [Theory]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    public void TheReportReadHidesTheReplayedCase_OnlyUnderTheInvestigationsArm(bool investigations, bool writes, bool expected)
+    {
+        var services = new ServiceCollection();
+        DarlingMcpHostService.ConfigureMcpServices(services, DarlingPeerDirectory.Snapshot.Empty,
+            writes: new DarlingMcpWritePolicy.Effective(writes, false, investigations));
+        using var provider = services.BuildServiceProvider();
+        Assert.Equal(expected, provider.GetRequiredService<InvestigationReadPolicy>().HideLivePracticeAnswers);
+    }
+
+    [Fact]
+    public void WithoutReplayedAnswers_DropsTheReportFeedbackAndJournalOfTheReplayedCaseOnly()
+    {
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+        var request = new InvestigationRequestRow(
+            a, 1, 7, "srv", "blocking", "Blocking", Now, Now, 1, "reported", Now, Now.AddHours(4), null, null, 1, Now);
+        InvestigationReportRow Report(Guid id) =>
+            new(id, 1, "agent", Now, "real", "root", true, null, "[]");
+        var read = new InvestigationReportsRead(
+            [request, request with { RequestId = b }], [Report(a), Report(b)],
+            [new(Now, a, 7, "reported", "agent", null, null), new(Now, b, 7, "reported", "agent", null, null)], null,
+            Feedback: [Row("right") with { RequestId = a }, Row("wrong") with { RequestId = b }]);
+
+        var kept = DarlingMcpInvestigationTools.WithoutReplayedAnswers(read, new HashSet<Guid> { a });
+
+        Assert.Equal(2, kept.Requests.Count);
+        Assert.Equal(b, Assert.Single(kept.Reports).RequestId);
+        Assert.Equal(b, Assert.Single(kept.Feedback!).RequestId);
+        Assert.Equal(b, Assert.Single(kept.Journal).RequestId);
+        Assert.Same(read, DarlingMcpInvestigationTools.WithoutReplayedAnswers(read, new HashSet<Guid>()));
     }
 }
 
@@ -326,6 +365,66 @@ public sealed class InvestigationPracticeLiveTests
             Assert.Equal((1, 1, 1), (score.Cases, score.Scored, score.Matched));
             Assert.Equal(1.0, score.Percent);
             Assert.Equal(1, score.MissedStepCases);
+        });
+    }
+
+    private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
+
+    private static string[] Ids(JsonElement root, string array) =>
+        root.GetProperty(array).EnumerateArray().Select(e => e.GetProperty("request_id").GetString()!).ToArray();
+
+    [Fact]
+    public async Task WhileAPracticeIsLive_TheInvestigationsArm_ReadsNoReportOrFeedbackOfTheReplayedCase_AndEveryOtherReport()
+    {
+        await RunAsync(async (dataSource, fixedClockStore, ct) =>
+        {
+            /* The tool reads on the real clock, so this fact writes on it too (a fixed clock would age the practice out). */
+            var store = new InvestigationRequestStore(dataSource, 30);
+            var now = DateTime.UtcNow;
+            var replayed = await ReportedAsync(store, now.AddHours(-9), "real", null, ct);
+            var other = await ReportedAsync(store, now.AddHours(-6), "false_positive", null, ct);
+            var feedback = new InvestigationFeedbackStore(dataSource, 30);
+            await feedback.RecordAsync(new InvestigationFeedbackSubmission(replayed, "wrong", "false_positive", "ZEBRA-MISSED", "ZEBRA-COMMENT", "lee"), ct);
+            await feedback.RecordAsync(new InvestigationFeedbackSubmission(other, "right", null, null, "OTHER-COMMENT", "lee"), ct);
+            var practiceStore = new InvestigationPracticeStore(dataSource, 30);
+            var practice = (await practiceStore.OpenAsync(replayed, "person:lee", ct)).RequestId!.Value;
+
+            /* One request by id and the window, both: the answer key is absent from each. */
+            foreach (var requestId in new string?[] { replayed.ToString(), null })
+            {
+                var arm = await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, requestId, 24, ct, hideLivePracticeAnswers: true);
+                Assert.DoesNotContain("ZEBRA-COMMENT", arm, StringComparison.Ordinal);
+                Assert.DoesNotContain("ZEBRA-MISSED", arm, StringComparison.Ordinal);
+                var root = Root(arm);
+                Assert.DoesNotContain(replayed.ToString(), Ids(root, "reports"));
+                Assert.DoesNotContain(replayed.ToString(), root.GetProperty("journal").EnumerateArray().Select(j => j.GetProperty("request_id").GetString() ?? "").ToArray());
+                Assert.Contains(replayed.ToString(), Ids(root, "requests"));
+                if (requestId is null)
+                {
+                    Assert.Equal(other.ToString(), Assert.Single(Ids(root, "reports")));
+                    var feedbackOfOther = root.GetProperty("reports").EnumerateArray().Single().GetProperty("feedback");
+                    Assert.Equal("OTHER-COMMENT", Assert.Single(feedbackOfOther.EnumerateArray()).GetProperty("comment").GetString());
+                    var row = root.GetProperty("requests").EnumerateArray().Single(r => r.GetProperty("request_id").GetString() == practice.ToString());
+                    Assert.Equal(replayed.ToString(), row.GetProperty("practice_of").GetString());
+                    Assert.All(root.GetProperty("requests").EnumerateArray().Where(r => r.GetProperty("request_id").GetString() != practice.ToString()),
+                        r => Assert.False(r.TryGetProperty("practice_of", out _), "a request that is not practice has no practice_of key"));
+                }
+            }
+
+            /* The writes arm (and a host serving neither arm): nothing is hidden. */
+            var operators = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, null, 24, ct, hideLivePracticeAnswers: false));
+            Assert.Contains(replayed.ToString(), Ids(operators, "reports"));
+            Assert.Contains("ZEBRA-COMMENT", operators.GetRawText(), StringComparison.Ordinal);
+
+            /* A claimed practice still hides it; once its report is submitted the case shows again. */
+            var claim = await store.ClaimAsync(practice, "agent-b", ct);
+            Assert.DoesNotContain(replayed.ToString(), Ids(Root(await DarlingMcpInvestigationTools.ReportsAsync(
+                dataSource, McpDataDetail.Full, null, null, 24, ct, hideLivePracticeAnswers: true)), "reports"));
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                practice, claim.ClaimId!.Value, "agent-b", 1, "false_positive", "batch", true, "done", "[{\"tool\":\"get_blocking\"}]"), ct));
+            var after = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, null, 24, ct, hideLivePracticeAnswers: true));
+            Assert.Contains(replayed.ToString(), Ids(after, "reports"));
+            Assert.Contains("ZEBRA-COMMENT", after.GetRawText(), StringComparison.Ordinal);
         });
     }
 }

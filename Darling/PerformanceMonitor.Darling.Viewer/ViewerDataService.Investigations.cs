@@ -58,7 +58,8 @@ public sealed partial class ViewerDataService
     public const string InvestigationRequestsSelectSql = @"
 SELECT request_id, server_id, server_name, family, first_metric, opened_at, alert_count, effective_state,
        claimed_by, lease_until, claim_count, expires_at, reported_at, closed_at, closed_by, closed_reason,
-       (SELECT p.verdict FROM config.investigation_reports AS p WHERE p.request_id = s.request_id) AS verdict
+       (SELECT p.verdict FROM config.investigation_reports AS p WHERE p.request_id = s.request_id) AS verdict,
+       practice_of
 FROM (
     SELECT r.*,
            CASE
@@ -192,6 +193,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
                 ClosedBy = reader.IsDBNull(14) ? null : reader.GetString(14),
                 ClosedReason = reader.IsDBNull(15) ? null : reader.GetString(15),
                 Verdict = reader.IsDBNull(16) ? null : reader.GetString(16),
+                PracticeOf = reader.IsDBNull(17) ? null : reader.GetGuid(17),
             });
         }
 
@@ -658,6 +660,12 @@ public sealed class InvestigationRequestViewRow
     public string? ClosedBy { get; init; }
     public string? ClosedReason { get; init; }
     public string? Verdict { get; init; }
+
+    /// <summary>The request a practice request replays (#5918); null for every other request.</summary>
+    public Guid? PracticeOf { get; init; }
+
+    /// <summary>"Practice" for a practice request, empty otherwise: the Requests tab's marker column.</summary>
+    public string PracticeDisplay => PracticeOf is null ? "" : "Practice";
 
     /// <summary>True when a person may still close it: open, claimed or reported.</summary>
     public bool IsClosable => State is "open" or "claimed" or "reported";

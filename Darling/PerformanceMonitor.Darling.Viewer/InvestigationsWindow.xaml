@@ -74,6 +74,7 @@
                             <DataGridTextColumn Header="Claims" Binding="{Binding ClaimsDisplay}" Width="55"/>
                             <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="120" SortMemberPath="ExpiresAtUtc"/>
                             <DataGridTextColumn Header="Verdict" Binding="{Binding Verdict}" Width="90"/>
+                            <DataGridTextColumn Header="Practice" Binding="{Binding PracticeDisplay}" Width="60"/>
                         </DataGrid.Columns>
                     </DataGrid>
 
