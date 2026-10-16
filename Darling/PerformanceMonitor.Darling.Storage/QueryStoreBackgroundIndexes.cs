@@ -219,7 +219,10 @@ public static class QueryStoreBackgroundIndexes
     /// <para><b>Write cost.</b> The table already carries the unique key, V153's <c>first_execution_time</c> index and
     /// <see cref="LatestServerFirstExec"/>; this is a fourth btree of four narrow columns, maintained on each new interval row.
     /// An update of an existing interval stays heap-only (HOT): all four columns are part of the upsert's identity, so
-    /// <c>ON CONFLICT ... DO UPDATE</c> rewrites none of them.</para>
+    /// <c>ON CONFLICT ... DO UPDATE</c> rewrites none of them. Pinned by
+    /// <c>QueryStoreBackgroundIndexesLiveTests.TheLatestUpsertsWholeSetList_StaysHotWithTheLatestBtreePresent_AndNotWithABtreeOnASetColumn</c>,
+    /// which builds every spec in <see cref="All"/> and asserts the whole SET list updates HOT (a btree on a SET column is
+    /// its control); the wide census does not cover this table.</para>
     ///
     /// <para><b>Until it is built</b> the read is unchanged: the statement names no index, so the planner keeps its old plan
     /// on a store that lacks this one.</para>
