@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
@@ -30,10 +31,6 @@ namespace PerformanceMonitorLite;
 /// </summary>
 public partial class MainWindow
 {
-    /// <summary>Nesting cap shared with the store's own guard; the sidebar refuses a child that would
-    /// exceed it, matching the viewer and the Manage Tags editor.</summary>
-    private const int MaxTagDepth = 4;
-
     /// <summary>The single projection behind the sidebar. Consumers asking "what servers exist?" read
     /// <see cref="ServerManager.GetAllServers"/> (Lite's authoritative fleet), never the bound list.</summary>
     private readonly FleetView _fleet = new();
@@ -205,7 +202,7 @@ public partial class MainWindow
             return;
         }
 
-        if (TagDepth(header.Tag.Id) >= MaxTagDepth - 1)
+        if (!CanAddChildTag(_tags, header.Tag.Id))
         {
             StatusText.Text = "Tags can nest at most four levels deep.";
             return;
@@ -331,16 +328,21 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>Whether the tag may take a child: the shared tag tree rules decide from its depth (#5978), the
+    /// same call the Manage Tags editor makes.</summary>
+    internal static bool CanAddChildTag(IReadOnlyList<ServerTag> tags, int tagId)
+        => TagTreeRules.CanHaveChildren(TagDepth(tags, tagId));
+
     /// <summary>0-based nesting depth of a tag, walking the ParentId chain (guarded against a bad cycle).</summary>
-    private int TagDepth(int tagId)
+    internal static int TagDepth(IReadOnlyList<ServerTag> tags, int tagId)
     {
-        var byId = _tags.ToDictionary(t => t.Id);
+        var byId = tags.ToDictionary(t => t.Id);
         var depth = 0;
         var current = byId.TryGetValue(tagId, out var start) ? start : null;
         var guard = 0;
         while (current?.ParentId is int parentId
                && byId.TryGetValue(parentId, out var parent)
-               && guard++ < MaxTagDepth + 2)
+               && guard++ < TagTreeRules.MaxDepth + 2)
         {
             depth++;
             current = parent;
