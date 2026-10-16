@@ -26,7 +26,7 @@
 
 import { VIZ } from "../panels.js";
 import { READ_FIELDS } from "../read-fields.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable } from "../util.js";
+import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
 
 /** The states the list read takes; an empty value is every state. */
 export const STATES = [
@@ -58,11 +58,6 @@ export const REQUEST_COLUMNS = READ_FIELDS.list_investigation_requests.table.col
 
 /** The journal's columns, in the order the read gave them (newest first): the read's own, then the detail the page draws as text. */
 export const JOURNAL_COLUMNS = [...READ_FIELDS.get_investigation_reports.table.columns, { key: "detail_text", label: "Detail", wrap: true }];
-
-/* The rows of a reply under `key`; [] for anything else. */
-function rowsUnder(data, key) {
-  return data && Array.isArray(data[key]) ? data[key] : [];
-}
 
 /** The text of one value: a string as it is, nothing as "", anything else as indented JSON (a masked field is an object). */
 export function valueText(v) {
@@ -129,11 +124,11 @@ function reportBlock(rep) {
     .filter(Boolean).join(" · ");
   const parts = [el("div", { class: "muted", text: head })];
   if (rep.verdict != null) parts.push(el("div", {}, [el("strong", { text: "Verdict: " }), el("span", { text: valueText(rep.verdict) })]));
-  if (rep.summary != null) parts.push(el("div", {}, [el("strong", { text: "Summary: " }), el("pre", { class: "inv-text", text: valueText(rep.summary) })]));
-  if (rep.root_cause != null) parts.push(el("div", {}, [el("strong", { text: "Root cause: " }), el("pre", { class: "inv-text", text: valueText(rep.root_cause) })]));
+  if (rep.summary != null) parts.push(el("div", {}, [el("strong", { text: "Summary: " }), el("pre", { class: "jh-detail-message", text: valueText(rep.summary) })]));
+  if (rep.root_cause != null) parts.push(el("div", {}, [el("strong", { text: "Root cause: " }), el("pre", { class: "jh-detail-message", text: valueText(rep.root_cause) })]));
   const evidence = Array.isArray(rep.evidence) ? rep.evidence : [];
   if (evidence.length) {
-    parts.push(el("div", {}, [el("strong", { text: "Evidence (" + evidence.length + "): " }), ...evidence.map((e) => el("pre", { class: "inv-text", text: valueText(e) }))]));
+    parts.push(el("div", {}, [el("strong", { text: "Evidence (" + evidence.length + "): " }), ...evidence.map((e) => el("pre", { class: "jh-detail-message", text: valueText(e) }))]));
   }
   return el("div", { class: "inv-report" }, parts);
 }
@@ -150,7 +145,7 @@ function detailPane(row, data) {
     row.reported_at ? "reported " + localTime(row.reported_at) : "not reported",
   ].join(" · ");
   const parts = [
-    el("div", { class: "inv-detail-head" }, [
+    el("div", { class: "jh-detail-head" }, [
       el("strong", { text: "Request on " + (row.server_name || "?") + " (" + (row.family || "?") + ")" }),
       el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; mount(slot, []); } }),
     ]),
@@ -166,7 +161,7 @@ function detailPane(row, data) {
 
   if (data && data.brief != null) {
     const level = data.brief && data.brief.data_detail ? " (data detail: " + data.brief.data_detail + ")" : "";
-    parts.push(section("Stored brief" + level, [el("pre", { class: "inv-text inv-brief", text: valueText(data.brief) })]));
+    parts.push(section("Stored brief" + level, [el("pre", { class: "jh-detail-message", text: valueText(data.brief) })]));
   }
 
   const jparts = [];
@@ -200,7 +195,7 @@ export function renderInvestigations(main) {
   const signal = (pageAbort = new AbortController()).signal;
   ++pageSeq;
   const body = el("div", {}, [loadingStrip("Loading investigation requests…")]);
-  slot = el("div", { class: "inv-detail" });
+  slot = el("div", { class: "jh-detail" });
 
   const reload = () => {
     choices.requestId = null;

@@ -89,10 +89,9 @@ public sealed class InvestigationsPageTests
         Assert.Contains("SUMMARY <img src=x onerror=alert(1)>", text);
         Assert.Contains("<script>x</script>", text);
         Assert.Equal(0, picked.GetProperty("createdImgOrScript").GetInt32());
-        // The journal keeps the read's order (newest first) and the claim time comes from its claimed event.
+        // The journal keeps the read's order (newest first). The claim time's mapping (the claimed event, not the row) is pinned zone-independently by claimedAt below; the rendered text depends on the runner's zone, so it is not asserted.
         var journal = picked.GetProperty("journalRows").EnumerateArray().Select(Strings).ToArray();
         Assert.Equal(new[] { "reported", "claimed", "opened" }, journal.Select(r => r[1]));
-        Assert.Matches("claimed .*6:05", text);
     }
 
     [Fact]

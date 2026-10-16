@@ -8,9 +8,10 @@
         Icon="/EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
     <!-- #5904: the investigation requests agents were asked to look into, with each report and the journal per request.
-         Read only: nothing here claims, releases, reports or approves anything. The same columns and grouping as the
-         Investigations page in the Darling web UI. Reports and the stored brief are masked at the level the MCP
-         investigation tools serve (mcp_data_detail), so a masked brief stays masked here. -->
+         Read only: nothing here claims, releases, reports or approves anything. The same ten columns and grouping as the
+         Investigations page in the Darling web UI (the order differs: State leads here, Opened there). Reports, the stored
+         brief and the journal are shown in full, as on the web page and in the Darling Viewer: mcp_data_detail masks agents
+         over MCP only. -->
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -52,6 +53,7 @@
                 <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
                 <DataGridTextColumn Header="Metric" Binding="{Binding FirstMetric}" Width="180"/>
                 <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="130"/>
+                <DataGridTextColumn Header="Alerts" Binding="{Binding AlertCount}" ElementStyle="{StaticResource NumericCell}" Width="60"/>
                 <DataGridTextColumn Header="Opened" Binding="{Binding Opened}" SortMemberPath="OpenedAtUtc" Width="140"/>
                 <DataGridTextColumn Header="Agent" Binding="{Binding Agent}" Width="130"/>
                 <DataGridTextColumn Header="Lease until" Binding="{Binding LeaseUntil}" SortMemberPath="LeaseUntilUtc" Width="140"/>

@@ -18,9 +18,9 @@ namespace PerformanceMonitorLite.Windows;
 
 /// <summary>
 /// The investigations panel (#5904): the requests agents were asked to look into, newest first, with the reports and the
-/// journal of the picked one. Read only; every read goes through <see cref="InvestigationPanelReader"/>, which masks
-/// reports, briefs and journal text at the level the MCP investigation tools serve. The same columns and grouping as the
-/// Investigations page of the Darling web UI.
+/// journal of the picked one. Read only; every read goes through <see cref="InvestigationPanelReader"/>, which reads
+/// at full detail (the operator's own window; mcp_data_detail masks agents over MCP only). The same ten columns and
+/// grouping as the Investigations page of the Darling web UI.
 /// </summary>
 public partial class InvestigationsWindow : Window
 {

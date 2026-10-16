@@ -163,7 +163,7 @@ try {
   fetches.length = 0;
   rowsOf(main)[0].handlers.click({ type: "click" });
   await settle();
-  const slotText = () => all(main, "div").filter((d) => d.className === "inv-detail").map((d) => d.textContent).join("");
+  const slotText = () => all(main, "div").filter((d) => d.className === "jh-detail").map((d) => d.textContent).join("");
   out.picked = {
     reportCalls: calls("get_investigation_reports"),
     text: slotText(),

@@ -31,6 +31,7 @@ internal sealed record InvestigationPanelRequest(InvestigationRequestRow Row)
     public int RouteId => Row.RouteId;
     public string Agent => Row.ClaimedBy ?? "";
     public int ClaimCount => Row.ClaimCount;
+    public int AlertCount => Row.AlertCount;
     /* The UTC times are what the grid's time columns sort by (SortMemberPath), never their local text. */
     public DateTime OpenedAtUtc => Row.OpenedAtUtc;
     public DateTime? LeaseUntilUtc => Row.LeaseUntilUtc;
@@ -48,8 +49,7 @@ internal sealed record InvestigationPanelReport(
 /// <summary>One journal row under a request (claims, releases, lapses, limits, refusals), newest first.</summary>
 internal sealed record InvestigationPanelJournalRow(string Time, string Event, string Actor, string Reason, string Detail, DateTime TimeUtc);
 
-/// <summary>The detail pane of one request: its reports, journal and stored brief, all masked at the level the MCP
-/// investigation tools serve. <see cref="Claimed"/> is the newest <c>claimed</c> journal time, or empty when never claimed.</summary>
+/// <summary>The detail pane of one request: its reports, journal and stored brief, all at full detail. <see cref="Claimed"/> is the newest <c>claimed</c> journal time, or empty when never claimed.</summary>
 internal sealed record InvestigationPanelDetail(
     InvestigationRequestRow Request,
     string Claimed,
@@ -61,10 +61,10 @@ internal sealed record InvestigationPanelDetail(
 /// <summary>
 /// The read side of Lite's investigations panel (#5904), read-only over <see cref="IInvestigationRequestStore"/>: the list
 /// in the MCP list order (<c>opened_at DESC, request_id</c>, which the store's list read already gives) and, per request,
-/// the same <c>ReportsAnswer</c> the <c>get_investigation_reports</c> tool builds. Running that one masker over the read
-/// means a brief, report or journal reason the tool would mask is masked here, at the level the host serves now
-/// (<c>mcp_data_detail</c>); a brief stored at a weaker level is re-masked. Each call is its own store connection under
-/// the store's read rule. Nothing here claims, releases or reports.
+/// the same <c>ReportsAnswer</c> the <c>get_investigation_reports</c> tool builds, at <see cref="McpDataDetail.Full"/>.
+/// The panel is the operator's own window, like the Darling web page and the Darling Viewer, so the report, the stored
+/// brief and the journal are shown in full; <c>mcp_data_detail</c> masks agents over MCP only and is never consulted here.
+/// Each call is its own store connection under the store's read rule. Nothing here claims, releases or reports.
 /// </summary>
 internal sealed class InvestigationPanelReader
 {
@@ -72,13 +72,11 @@ internal sealed class InvestigationPanelReader
     internal const int ListLimit = InvestigationToolCore.MaxLimit;
 
     private readonly IInvestigationRequestStore _store;
-    private readonly Func<McpDataDetail> _mode;
     private readonly Func<DateTime> _utcNow;
 
-    internal InvestigationPanelReader(IInvestigationRequestStore store, Func<McpDataDetail> mode, Func<DateTime>? utcNow = null)
+    internal InvestigationPanelReader(IInvestigationRequestStore store, Func<DateTime>? utcNow = null)
     {
         _store = store;
-        _mode = mode;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
@@ -99,7 +97,7 @@ internal sealed class InvestigationPanelReader
     {
         var read = await _store.ReadReportsAsync(
             requestId, null, _utcNow(), 1, InvestigationToolCore.JournalLimit, cancellationToken);
-        return read.Requests.Count == 0 ? null : Detail(read, _mode());
+        return read.Requests.Count == 0 ? null : Detail(read, McpDataDetail.Full);
     }
 
     /// <summary>The detail of the first request of <paramref name="read"/> at <paramref name="mode"/>. The masked text comes
