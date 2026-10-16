@@ -190,17 +190,20 @@ public sealed record InvestigationReportsRead(
 
 /// <summary>
 /// One request as the long-poll's catch-up read returns it (#5822): the request id, its route, the server name, the family
-/// and when it opened (UTC), and nothing else.
+/// and when it opened (UTC), and the registry's names (#5999: <see cref="DisplayName"/> always set on Darling,
+/// <see cref="InstanceName"/> null once the server has left the registry; both null where the read has no registry join).
 /// </summary>
 public sealed record InvestigationOpenedRow(
     Guid RequestId, int RouteId, string ServerName, string Family, DateTime OpenedAtUtc,
-    string? DisplayName = null, string? HostName = null);
+    string? DisplayName = null, string? InstanceName = null);
 
 /// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.
 /// <see cref="PracticeOf"/> (#5918) is the request a practice request replays; null for every other request, and then absent from the answer.
-/// <see cref="DisplayName"/> and <see cref="HostName"/> (#5999) are the registry's names for the server, read when the row is served so a
-/// rename shows on the next read (<see cref="ServerName"/> stays the name the request was opened with); a store that has no registry
-/// leaves them null, and then they are absent from the answer.</summary>
+/// <see cref="DisplayName"/> and <see cref="InstanceName"/> (#5999) are the registry's names for the server, read when the row is served so a
+/// rename shows on the next read (<see cref="ServerName"/> stays the name the request was opened with). Darling always fills
+/// <see cref="DisplayName"/> (it falls back to the opened name) and leaves <see cref="InstanceName"/> null once the server has left the
+/// registry; a store whose reads do not join the registry (Lite until #6011) leaves both null. A null is absent from the answer.
+/// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,
     int RouteId,
@@ -220,7 +223,7 @@ public sealed record InvestigationRequestRow(
     DateTime? ReportedAtUtc,
     Guid? PracticeOf = null,
     string? DisplayName = null,
-    string? HostName = null);
+    string? InstanceName = null);
 
 /// <summary>What one expiry sweep did.</summary>
 public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);

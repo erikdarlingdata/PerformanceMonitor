@@ -25,15 +25,15 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5999 on a live store: an investigation request, its brief and the long-poll's opened row carry the registry's display
-/// name and host name, read when served. A rename of the display name shows on the next read of a request opened before
-/// it; the host name is the registry's <c>server_name</c>; <c>server_name</c> keeps the name the request was opened with;
-/// and a server the registry no longer holds still reads (its display name falls back to that opened name, no host name).
+/// name and instance name, read when served. A rename of the display name shows on the next read of a request opened before
+/// it; the instance name is the registry's <c>server_name</c>; <c>server_name</c> keeps the name the request was opened with;
+/// and a server the registry no longer holds still reads (its display name falls back to that opened name, no instance name).
 /// </summary>
 public sealed class InvestigationServerNamesLiveTests
 {
     private const int ServerId = 7_599_001;
     private const string OpenedName = "Prod OLTP";
-    private const string HostName = @"SQLPROD01\INST1";
+    private const string InstanceName = @"SQLPROD01\INST1";
 
     private static readonly DateTime Now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
 
@@ -60,7 +60,7 @@ VALUES ($1, $2, $3, TRUE, $4, $4)", serverId, host, display, DarlingMcpTestData.
     {
         await RunAsync(async (dataSource, connection, ct) =>
         {
-            await RegisterAsync(connection, ServerId, HostName, OpenedName, ct);
+            await RegisterAsync(connection, ServerId, InstanceName, OpenedName, ct);
             var store = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-10));
             var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
 
@@ -72,37 +72,37 @@ VALUES ($1, $2, $3, TRUE, $4, $4)", serverId, host, display, DarlingMcpTestData.
             Assert.Equal("Renamed OLTP", (string?)request["display_name"]);
 
             var list = Assert.Single(await store.ListAsync(null, ServerId, null, 10, ct));
-            Assert.Equal(("Renamed OLTP", HostName), (list.DisplayName, list.HostName));
+            Assert.Equal(("Renamed OLTP", InstanceName), (list.DisplayName, list.InstanceName));
 
             var reports = await store.ReadReportsAsync(null, ServerId, Now.AddDays(-1), 10, 10, ct);
             var report = Assert.Single(reports.Requests);
-            Assert.Equal(("Renamed OLTP", HostName), (report.DisplayName, report.HostName));
+            Assert.Equal(("Renamed OLTP", InstanceName), (report.DisplayName, report.InstanceName));
 
             var opened = Assert.Single(await store.OpenedSinceAsync(Now.AddDays(-1), null, 10, ct));
-            Assert.Equal(("Renamed OLTP", HostName), (opened.DisplayName, opened.HostName));
+            Assert.Equal(("Renamed OLTP", InstanceName), (opened.DisplayName, opened.InstanceName));
 
             /* The brief is composed from the registry when it is read, so a claim after the rename composes the new name. */
             var sources = await new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now).ReadAsync(id, ct);
-            Assert.Equal(("Renamed OLTP", HostName), (sources!.Request.DisplayName, sources.Request.HostName));
+            Assert.Equal(("Renamed OLTP", InstanceName), (sources!.Request.DisplayName, sources.Request.InstanceName));
             var brief = JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now))!;
             Assert.Equal("Renamed OLTP", (string?)brief["request"]!["display_name"]);
-            Assert.Equal(HostName, (string?)brief["request"]!["host_name"]);
+            Assert.Equal(InstanceName, (string?)brief["request"]!["instance_name"]);
         });
     }
 
     [Fact]
-    public async Task TheHostName_IsTheRegistrysServerName_AndFollowsItWhenTheRegistryChanges()
+    public async Task TheInstanceName_IsTheRegistrysServerName_AndFollowsItWhenTheRegistryChanges()
     {
         await RunAsync(async (dataSource, connection, ct) =>
         {
-            await RegisterAsync(connection, ServerId, HostName, OpenedName, ct);
+            await RegisterAsync(connection, ServerId, InstanceName, OpenedName, ct);
             var store = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-10));
             var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
 
-            Assert.Equal(HostName, (string?)(await PayloadAsync(store, id, ct))["host_name"]);
+            Assert.Equal(InstanceName, (string?)(await PayloadAsync(store, id, ct))["instance_name"]);
 
             await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET server_name = 'SQLPROD02' WHERE server_id = $1", ServerId);
-            Assert.Equal("SQLPROD02", (string?)(await PayloadAsync(store, id, ct))["host_name"]);
+            Assert.Equal("SQLPROD02", (string?)(await PayloadAsync(store, id, ct))["instance_name"]);
         });
     }
 
@@ -111,7 +111,7 @@ VALUES ($1, $2, $3, TRUE, $4, $4)", serverId, host, display, DarlingMcpTestData.
     {
         await RunAsync(async (dataSource, connection, ct) =>
         {
-            await RegisterAsync(connection, ServerId, HostName, OpenedName, ct);
+            await RegisterAsync(connection, ServerId, InstanceName, OpenedName, ct);
             var store = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-10));
             var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
             await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET display_name = 'Renamed OLTP' WHERE server_id = $1", ServerId);
@@ -119,17 +119,17 @@ VALUES ($1, $2, $3, TRUE, $4, $4)", serverId, host, display, DarlingMcpTestData.
             Assert.Equal(OpenedName, (string?)renamed["server_name"]);
             Assert.Equal("Renamed OLTP", (string?)renamed["display_name"]);
 
-            /* A registered server with no display name shows its host name as the display name, as the fleet cards do. */
+            /* A registered server with no display name shows its instance name as the display name, as the fleet cards do. */
             await RegisterAsync(connection, ServerId + 1, "SQLPROD03", null, ct);
             var plainId = (await store.OpenOrJoinAsync(Alert(ServerId + 1, "SQLPROD03"), ct)).RequestId!.Value;
             var plain = await PayloadAsync(store, plainId, ct);
-            Assert.Equal(("SQLPROD03", "SQLPROD03", "SQLPROD03"), ((string?)plain["server_name"], (string?)plain["display_name"], (string?)plain["host_name"]));
+            Assert.Equal(("SQLPROD03", "SQLPROD03", "SQLPROD03"), ((string?)plain["server_name"], (string?)plain["display_name"], (string?)plain["instance_name"]));
 
-            /* A request whose server is no longer in the registry reads with the name it was opened with and no host name. */
+            /* A request whose server is no longer in the registry reads with the name it was opened with and no instance name. */
             var goneId = (await store.OpenOrJoinAsync(Alert(ServerId + 2, "Gone Server"), ct)).RequestId!.Value;
             var gone = await PayloadAsync(store, goneId, ct);
             Assert.Equal(("Gone Server", "Gone Server"), ((string?)gone["server_name"], (string?)gone["display_name"]));
-            Assert.False(gone.ContainsKey("host_name"));
+            Assert.False(gone.ContainsKey("instance_name"));
         });
     }
 

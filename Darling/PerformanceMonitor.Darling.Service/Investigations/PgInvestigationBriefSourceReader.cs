@@ -39,10 +39,10 @@ public sealed class PgInvestigationBriefSourceReader : IInvestigationBriefSource
     /// <summary>How far back recent changes reach.</summary>
     public static readonly TimeSpan ChangeWindow = TimeSpan.FromDays(7);
 
-    internal const string RequestSql = @"
+    internal static readonly string RequestSql = $@"
 SELECT r.server_id, r.server_name, r.family, r.state, r.expires_at, r.lease_until, r.alert_count, r.first_metric,
        r.story_path_hash, s.engine_kind, r.first_alert_at, r.first_dedup_key, r.autonomy_level, r.practice_of,
-       COALESCE(s.display_name, s.server_name, r.server_name), s.server_name
+       {InvestigationRequestStore.RegistryNamesSelect("r", "s")}
 FROM config.investigation_requests AS r
 LEFT JOIN collect.servers AS s ON s.server_id = r.server_id
 WHERE r.request_id = $1";

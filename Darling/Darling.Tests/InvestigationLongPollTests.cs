@@ -159,7 +159,7 @@ public sealed class InvestigationLongPollTests
         Assert.Equal(0, rig.Signal.WaiterCount);
     }
 
-    /// <summary>#5999: a request the registry names answers its display name and host name beside <c>server_name</c> (the
+    /// <summary>#5999: a request the registry names answers its display name and instance name beside <c>server_name</c> (the
     /// name it was opened with); a request with no registry names keeps the shape above, with neither key.</summary>
     [Fact]
     public async Task AWait_AnswersBothServerNames_WhenTheStoreHasThem()
@@ -172,7 +172,7 @@ public sealed class InvestigationLongPollTests
         var row = Assert.Single(Requests(await rig.WaitAsync([BlockingRoute], cursor, 0, TestContext.Current.CancellationToken)))!.AsObject();
         Assert.Equal("srv", (string)row["server_name"]!);
         Assert.Equal("Prod OLTP", (string)row["display_name"]!);
-        Assert.Equal("SQLPROD01\\INST1", (string)row["host_name"]!);
+        Assert.Equal("SQLPROD01\\INST1", (string)row["instance_name"]!);
     }
 
     [Fact]

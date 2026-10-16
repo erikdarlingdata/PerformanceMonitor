@@ -206,8 +206,9 @@ public sealed class DarlingMcpInvestigationTools
         }
     }
 
-    /// <summary>One request the wait answers. #5999: <c>display_name</c> and <c>host_name</c> are the registry's names, read when
-    /// served, and absent when the registry has none (the shape <c>list_investigation_requests</c> keeps).</summary>
+    /// <summary>One request the wait answers. #5999: <c>display_name</c> and <c>instance_name</c> are the registry's names, read when
+    /// served. On this store <c>display_name</c> is always present (it falls back to the name the request was opened with); only
+    /// <c>instance_name</c> is absent, when the server has left the registry (the shape <c>list_investigation_requests</c> keeps).</summary>
     private static Dictionary<string, object?> WaitRequest(InvestigationOpenedRow r)
     {
         var node = new Dictionary<string, object?>
@@ -217,7 +218,7 @@ public sealed class DarlingMcpInvestigationTools
             ["server_name"] = r.ServerName,
         };
         if (r.DisplayName is not null) node["display_name"] = r.DisplayName;
-        if (r.HostName is not null) node["host_name"] = r.HostName;
+        if (r.InstanceName is not null) node["instance_name"] = r.InstanceName;
         node["family"] = r.Family;
         node["opened_at"] = r.OpenedAtUtc;
         return node;

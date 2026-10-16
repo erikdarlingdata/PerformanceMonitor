@@ -128,19 +128,42 @@ public sealed class InvestigationBriefComposerTests
         Assert.Contains(LiteralCanary, (string?)fields["Query"]);
     }
 
-    /// <summary>#5999: the brief's request carries the registry's display name and host name beside <c>server</c>, which keeps
+    /// <summary>#5999: the brief's request carries the registry's display name and instance name beside <c>server</c>, which keeps
     /// the name the request was opened with; a store with no registry (Lite until #6011) leaves both keys out.</summary>
     [Fact]
     public void Brief_CarriesBothServerNames_BesideTheServerKey()
     {
-        var named = Brief(Sources(request: Request() with { DisplayName = "Prod OLTP", HostName = "SQLPROD01\\INST1" }))["request"]!.AsObject();
+        var named = Brief(Sources(request: Request() with { DisplayName = "Prod OLTP", InstanceName = "SQLPROD01\\INST1" }))["request"]!.AsObject();
         Assert.Equal("SQLPROD01", (string?)named["server"]);
         Assert.Equal("Prod OLTP", (string?)named["display_name"]);
-        Assert.Equal("SQLPROD01\\INST1", (string?)named["host_name"]);
+        Assert.Equal("SQLPROD01\\INST1", (string?)named["instance_name"]);
 
         var bare = Brief(Sources())["request"]!.AsObject();
         Assert.False(bare.ContainsKey("display_name"));
-        Assert.False(bare.ContainsKey("host_name"));
+        Assert.False(bare.ContainsKey("instance_name"));
+    }
+
+    /// <summary>#5999 review: a claim answer embeds the brief, and the host filter walks the whole answer. At <c>metadataOnly</c> the
+    /// brief's request still carries the real instance name (the key is not <c>host_name</c>, which the filter numbers).</summary>
+    [Fact]
+    public void ClaimAnswer_AtMetadataOnly_CarriesTheRealInstanceName()
+    {
+        var brief = Brief(
+            Sources(request: Request() with { DisplayName = "Prod OLTP", InstanceName = "SQLPROD01\\INST1" }),
+            McpDataDetail.MetadataOnly);
+        var answer = new JsonObject { ["status"] = "claimed", ["brief"] = brief };
+        var result = new ModelContextProtocol.Protocol.CallToolResult
+        {
+            Content = new List<ModelContextProtocol.Protocol.ContentBlock>
+            {
+                new ModelContextProtocol.Protocol.TextContentBlock { Text = answer.ToJsonString() },
+            },
+        };
+
+        var masked = JsonNode.Parse(
+            ((ModelContextProtocol.Protocol.TextContentBlock)McpDataDetailFilter.Mask(result, McpDataDetail.MetadataOnly).Content[0]).Text)!;
+        Assert.Equal("SQLPROD01\\INST1", (string?)masked["brief"]!["request"]!["instance_name"]);
+        Assert.Equal("Prod OLTP", (string?)masked["brief"]!["request"]!["display_name"]);
     }
 
     [Fact]

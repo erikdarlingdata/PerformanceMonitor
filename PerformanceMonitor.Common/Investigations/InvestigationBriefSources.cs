@@ -18,7 +18,7 @@ public sealed record InvestigationBriefRequest(
     string? StoryPathHash,
     int AutonomyLevel = 1,
     string? DisplayName = null,
-    string? HostName = null);
+    string? InstanceName = null);
 
 /// <summary>One alert linked to the request, with its stored text and context (<c>config_alert_log</c>).</summary>
 public sealed record InvestigationBriefAlert(

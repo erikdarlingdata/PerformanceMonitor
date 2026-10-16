@@ -118,7 +118,7 @@ public sealed class InvestigationWebhookTokenTests
     }
 
     /// <summary>
-    /// #5999: the token carries the registry's display name and host name beside <c>server_name</c> (the name the request was
+    /// #5999: the token carries the registry's display name and instance name beside <c>server_name</c> (the name the request was
     /// opened with), exactly as the request row read back holds them.
     /// </summary>
     [Fact]
@@ -126,12 +126,12 @@ public sealed class InvestigationWebhookTokenTests
     {
         var (body, _) = await DeliverAsync(
             BareTemplate, Outcome("Deadlocks Detected"), [Route(5, "Deadlocks Detected")],
-            row: id => Row(id) with { DisplayName = "Prod OLTP", HostName = "SQLPROD01\\INST1" });
+            row: id => Row(id) with { DisplayName = "Prod OLTP", InstanceName = "SQLPROD01\\INST1" });
 
         var investigation = Investigation(body);
         Assert.Equal("srv", investigation.GetProperty("server_name").GetString());
         Assert.Equal("Prod OLTP", investigation.GetProperty("display_name").GetString());
-        Assert.Equal("SQLPROD01\\INST1", investigation.GetProperty("host_name").GetString());
+        Assert.Equal("SQLPROD01\\INST1", investigation.GetProperty("instance_name").GetString());
     }
 
     /// <summary>
