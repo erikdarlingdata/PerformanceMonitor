@@ -809,6 +809,28 @@ public static class DarlingRetention
                 }
             }
 
+            /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the fact tables
+               that carry query statistics, so it is kept as long as the longest raw retention of those tables
+               (widestFactRetentionDays, resolved above through the same resolver the fact purge uses) and no longer. last_seen is
+               NOT NULL and defaulted, so no row can slip past the horizon by never being stamped. Only this table is aged: the
+               tags, assignments and rules are configuration and the map is rebuilt from them, so retention never touches
+               them. The cutoff is bound like the external alert purge below (the store's sessions are pinned to UTC).
+               Failure-isolated like every sibling. */
+            var sightingsDeleted = await PurgeOneAsync(
+                postgres, "collect.query_tag_sightings",
+                TimeSlicedDeleteSql("collect.query_tag_sightings", "last_seen"),
+                utcNow.AddDays(-widestFactRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (sightingsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += sightingsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collection_log retention. Since V23 it is a TimescaleDB hypertable (converted DIRECTLY by the V23
                migration — it is NOT in CollectorCatalog.All, so the loop above skips it), so with Timescale it
                purges via drop_chunks in O(1) — no DELETE churn — at its own 2x horizon (CollectionLogRetentionDays).

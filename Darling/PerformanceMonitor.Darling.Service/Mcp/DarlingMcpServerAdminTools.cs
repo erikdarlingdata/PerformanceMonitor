@@ -491,6 +491,17 @@ public sealed partial class DarlingMcpServerAdminTools
                     await clear.ExecuteNonQueryAsync();
                 }
 
+                /* #5977: the server's query-tag assignments, rules, map rows and sightings go in the same transaction, for the
+                   same reason (server_id is a hash, so orphaned rows would come back when the server is re-added). Only this
+                   server's rows: an all-server assignment or rule (server_id NULL) and the tags themselves stay. */
+                foreach (var queryTagSql in QueryTagSchema.ClearForServerSqls)
+                {
+                    await using var queryTagClear = new NpgsqlCommand(queryTagSql, connection) { Transaction = transaction };
+                    queryTagClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    queryTagClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                    await queryTagClear.ExecuteNonQueryAsync();
+                }
+
                 await transaction.CommitAsync();
             }
 

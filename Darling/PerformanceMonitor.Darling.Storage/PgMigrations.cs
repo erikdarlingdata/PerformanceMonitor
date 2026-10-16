@@ -1507,6 +1507,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_feedback_author
     ON config.investigation_feedback (request_id, lower(author));";
 
     /// <summary>
+    /// V192 (#5977, wave 1 of #5971): the store for query tags. The tag set (<c>config.query_tags</c>, the shape of
+    /// <c>config.server_tags</c> and its own table), hand assignments by <c>query_hash</c> or by object, rules, the per-pass
+    /// sightings of query keys and caller fields (<c>collect.query_tag_sightings</c>), the materialised tag map the reads join
+    /// (one tag per key, held by its primary key) and the one-row version state. This is the only migration of #5971.
+    ///
+    /// <para>Deleting a tag deletes its assignments, rules and map rows (cascade); deleting a rule leaves its map rows until the
+    /// next rebuild. A write to tags, assignments or rules bumps <c>config.query_tag_state.rules_version</c> through a
+    /// statement-level trigger. The trigger function is <c>SECURITY DEFINER</c> with a pinned search_path, unlike V117's
+    /// invoker-rights beacon: the mcp role writes the three tables and the viewer role deletes server-scoped rows when a server is
+    /// removed, and neither is granted anything on the state row, so the bump has to run as the owner.</para>
+    ///
+    /// <para>Grants are provisioning's (<c>DarlingManagedRoles</c>, mirrored in <c>Darling/tools/provision-roles.sql</c>). The
+    /// service writes sightings, the map and the state row as the store owner. Every statement is idempotent. All new tables are
+    /// created empty. <b>Lite twin:</b> the DuckDB tables come in #5989.</para>
+    /// </summary>
+    private static readonly string V192Sql = QueryTagSchema.CreateSql;
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1809,6 +1827,7 @@ $rung$;";
         new Migration(189, "query-store-compose-failures", V189Sql),
         new Migration(190, "store-metrics-size-estimated", V190Sql),
         new Migration(191, "agent-level-2-store", V191Sql),
+        new Migration(192, "query-tags-store", V192Sql),
     };
 
     /// <summary>

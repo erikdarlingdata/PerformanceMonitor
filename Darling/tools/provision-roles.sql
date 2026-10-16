@@ -54,7 +54,7 @@
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
--- V117, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 and the Level 2 tables (step 3j: config_threshold_overrides and investigation_feedback, #5909) are V191 -- so re-run this script after upgrading past each.
+-- V117, the query-tag tables (step 3k, #5977) are V192, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 and the Level 2 tables (step 3j: config_threshold_overrides and investigation_feedback, #5909) are V191 -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
@@ -1794,6 +1794,39 @@ BEGIN
    GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
       window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO admin;
    GRANT INSERT ON config.investigation_request_alerts TO admin;
+END $do$;
+
+-- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
+--     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
+--     them), so mcp holds only DELETE on those two, which remove_server runs to clear a removed server's rows (a server_id is
+--     a hash, so orphaned rows would come back when the server is re-added). viewer gets DELETE on the four per-server tables
+--     (assignments, rules, map, sightings) for server removal and nothing else on the query-tag tables: no INSERT or UPDATE,
+--     and no write on the tags themselves. admin (the desktop Viewer's default identity) already holds the config writes
+--     through the blanket grant of step 3; its one collect grant is the same DELETE on the sightings table. The identity
+--     columns need no sequence grant, and the rules_version bump on a write is a SECURITY DEFINER trigger function, so no
+--     role is granted anything on config.query_tag_state. The tables are created by V192: on a store below it the block warns
+--     and skips, so the rest of the script still runs; re-run the script once the service has migrated the store to V192.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.query_tags') IS NULL
+      OR pg_catalog.to_regclass('config.query_tag_assignments') IS NULL
+      OR pg_catalog.to_regclass('config.query_tag_rules') IS NULL
+      OR pg_catalog.to_regclass('config.query_tag_map') IS NULL
+      OR pg_catalog.to_regclass('collect.query_tag_sightings') IS NULL THEN
+      RAISE WARNING 'The query-tag tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   GRANT INSERT, UPDATE, DELETE ON config.query_tags TO mcp;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tag_assignments TO mcp;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tag_rules TO mcp;
+   GRANT DELETE ON config.query_tag_map TO mcp;
+   GRANT DELETE ON collect.query_tag_sightings TO mcp;
+   GRANT DELETE ON config.query_tag_assignments TO viewer;
+   GRANT DELETE ON config.query_tag_rules TO viewer;
+   GRANT DELETE ON config.query_tag_map TO viewer;
+   GRANT DELETE ON collect.query_tag_sightings TO viewer;
+   GRANT DELETE ON collect.query_tag_sightings TO admin;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
