@@ -219,7 +219,15 @@ public sealed class InvestigationBriefComposer
 
         /* #6000: how often each linked metric fired at the first alert's time of day, held to its own cap inside what the
            sections left. Placed before prior_links: it is a count the agent cannot get in one call elsewhere. Absent, never
-           [], when the source supplied none (Lite's, until #6011), so such a brief is byte for byte as before. */
+           [], when the source supplied none (Lite's, until #6011), so such a brief is byte for byte as before.
+           A practice request (#5918) keeps this section, unlike earlier_reports and prior_links: those hold what agents said
+           about the case, this is observed config_alert_log history around the replayed incident (a practice request's alerts are
+           copies of the case's, so its anchor is the incident's own clock time), not the case's answer, and the agent could count
+           it itself through get_alert_history. Withholding it would make practice harder than the live article.
+           No masking: the section holds a metric name, a clock time, counts and dates, no free text. The composer bypasses the
+           masker here, and InvestigationFieldMasking.StoredBrief re-masks only BriefFreeTextKeys and the alerts special case, so it
+           skips this section too and leaves it as stored: the two paths agree, and the section cannot shift between levels. A
+           free-text field added here needs a BriefFreeTextKeys row, or the two paths would disagree silently. */
         if (sources.Recurrence is { Count: > 0 } recurrence)
         {
             var list = recurrence.Select(RecurrenceNode).ToList();
@@ -437,7 +445,8 @@ public sealed class InvestigationBriefComposer
         ["days"] = InvestigationAlertRecurrence.Days,
         ["fired"] = r.Fired,
         ["muted"] = r.Muted,
-        ["dates"] = new JsonArray(r.Dates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
+        ["fired_dates"] = new JsonArray(r.FiredDates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
+        ["muted_dates"] = new JsonArray(r.MutedDates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
     };
 
     /// <summary>A prior link (#5914): the request it came from, when, its kind, and the URL and key as free text.</summary>

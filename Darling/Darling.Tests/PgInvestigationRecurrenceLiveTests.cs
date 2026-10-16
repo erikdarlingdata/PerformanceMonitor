@@ -62,36 +62,88 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
     }
 
     /// <summary>
-    /// A 02:10 alert counts a 01:45 fire and not a 02:41 fire. The edges: 29 minutes either side count, 31 minutes either side
-    /// do not, 30 exactly counts. Another metric, another server, the alert's own row and a fire after it never count.
+    /// A 02:10 alert counts a fire within the window of its clock time on an earlier day, edge minutes included, and no fire
+    /// beyond it. The edge minutes come from <see cref="InvestigationAlertRecurrence.WindowMinutes"/>, the constant the brief
+    /// publishes, so the SQL and the brief state one window (#3684): one inside either side counts, the window's last minute
+    /// either side counts, one past it does not. Another metric, another server, the alert's own row and a fire after it never count.
     /// </summary>
     [Fact]
-    public async Task A_0210Alert_Counts01_45_AndNot02_41_AndTheEdgesAre29In_31Out()
+    public async Task A_0210Alert_CountsToTheWindowEdge_AndNotOneMinutePast()
     {
         await RunAsync(async (dataSource, connection, ct) =>
         {
+            const int W = InvestigationAlertRecurrence.WindowMinutes;
             var anchor = new DateTime(2026, 10, 10, 2, 10, 0, DateTimeKind.Utc);
             var requestId = await OpenAsync(dataSource, anchor, ct);
-            var day = anchor.Date;
 
             await FireAsync(connection, anchor, ct);                                              // the alert's own row
-            await FireAsync(connection, day.AddDays(-1).AddHours(1).AddMinutes(45), ct);          // 01:45, counts
-            await FireAsync(connection, day.AddDays(-2).AddHours(2).AddMinutes(39), ct);           // +29, counts
-            await FireAsync(connection, day.AddDays(-3).AddHours(1).AddMinutes(41), ct);           // -29, counts
-            await FireAsync(connection, day.AddDays(-4).AddHours(2).AddMinutes(40), ct);           // +30, counts
-            await FireAsync(connection, day.AddDays(-5).AddHours(2).AddMinutes(41), ct);           // 02:41, +31, does not
-            await FireAsync(connection, day.AddDays(-6).AddHours(1).AddMinutes(39), ct);           // -31, does not
-            await FireAsync(connection, day.AddDays(-1).AddHours(2).AddMinutes(10), ct, metric: "Deadlocks");
-            await FireAsync(connection, day.AddDays(-2).AddHours(2).AddMinutes(10), ct, serverId: ServerId + 1);
+            await FireAsync(connection, anchor.AddDays(-1).AddMinutes(-(W - 5)), ct);             // inside, before the clock time, counts
+            await FireAsync(connection, anchor.AddDays(-2).AddMinutes(W - 1), ct);                // one inside the edge, after, counts
+            await FireAsync(connection, anchor.AddDays(-3).AddMinutes(-(W - 1)), ct);             // one inside the edge, before, counts
+            await FireAsync(connection, anchor.AddDays(-4).AddMinutes(W), ct);                    // the edge itself, counts
+            await FireAsync(connection, anchor.AddDays(-5).AddMinutes(W + 1), ct);                // one past, does not
+            await FireAsync(connection, anchor.AddDays(-6).AddMinutes(-(W + 1)), ct);             // one past, before, does not
+            await FireAsync(connection, anchor.AddDays(-1), ct, metric: "Deadlocks");
+            await FireAsync(connection, anchor.AddDays(-2), ct, serverId: ServerId + 1);
             await FireAsync(connection, anchor.AddMinutes(5), ct);                                 // this incident, after the alert
 
             var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
             Assert.Equal(4, recurrence.Fired);
             Assert.Equal(0, recurrence.Muted);
             Assert.Equal(new[] { new DateOnly(2026, 10, 9), new DateOnly(2026, 10, 8), new DateOnly(2026, 10, 7), new DateOnly(2026, 10, 6) },
-                recurrence.Dates);
+                recurrence.FiredDates);
+            Assert.Empty(recurrence.MutedDates);
             Assert.Equal(new TimeSpan(2, 10, 0), recurrence.AroundUtc.TimeOfDay);
         }, extraServers: 1);
+    }
+
+    /// <summary>The incident's own rise is not its history (#6000 review): a fire 10 minutes before the first alert (the same
+    /// rise, as when an episode spent its route cap and opened on a later fire) does not count, nor does one at the window's
+    /// length before it; a fire 23 hours 50 minutes before it, the same clock time a day back, does.</summary>
+    [Fact]
+    public async Task TheIncidentsOwnRise_IsNotCounted_ButTheSameClockTimeADayBackIs()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 10, 2, 10, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            await FireAsync(connection, anchor.AddMinutes(-10), ct);                                     // the rise, does not count
+            await FireAsync(connection, anchor.AddMinutes(-InvestigationAlertRecurrence.WindowMinutes), ct); // the window's length back, does not
+            await FireAsync(connection, anchor.AddHours(-23).AddMinutes(-50), ct);                       // a day back, counts
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(1, recurrence.Fired);
+            Assert.Equal(new[] { new DateOnly(2026, 10, 9) }, recurrence.FiredDates);
+        });
+    }
+
+    /// <summary>The anchor is compared as naive UTC whatever the session time zone says: the same fires read the same with the
+    /// session set east of UTC (#6000 review: config.investigation_request_alerts.alert_time is timestamptz).</summary>
+    [Fact]
+    public async Task TheCounts_DoNotMoveWithTheSessionTimeZone()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 10, 2, 10, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            await FireAsync(connection, anchor.AddDays(-1), ct);
+            await FireAsync(connection, anchor.AddDays(-2).AddMinutes(InvestigationAlertRecurrence.WindowMinutes), ct);
+            await FireAsync(connection, anchor.AddDays(-3).AddMinutes(InvestigationAlertRecurrence.WindowMinutes + 1), ct);
+
+            await using var tokyo = await dataSource.OpenConnectionAsync(ct);
+            await using (var set = new NpgsqlCommand("SET timezone = 'Asia/Tokyo'", tokyo))
+                await set.ExecuteNonQueryAsync(ct);
+            await using (var sql = new NpgsqlCommand(PgInvestigationBriefSourceReader.RecurrenceSql, tokyo))
+            {
+                sql.Parameters.Add(new NpgsqlParameter { Value = requestId });
+                sql.Parameters.Add(new NpgsqlParameter { Value = ServerId });
+                await using var reader = await sql.ExecuteReaderAsync(ct);
+                var counted = 0L;
+                while (await reader.ReadAsync(ct))
+                    if (!reader.IsDBNull(2)) counted += reader.GetInt64(4);
+                Assert.Equal(2L, counted);
+            }
+        });
     }
 
     /// <summary>The 7-day reach: a fire at the clock time 6 days before counts, one 8 days before does not.</summary>
@@ -107,7 +159,7 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
 
             var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
             Assert.Equal(1, recurrence.Fired);
-            Assert.Equal(new[] { new DateOnly(2026, 10, 14) }, recurrence.Dates);
+            Assert.Equal(new[] { new DateOnly(2026, 10, 14) }, recurrence.FiredDates);
         });
     }
 
@@ -127,11 +179,12 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
 
             var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
             Assert.Equal(2, recurrence.Fired);
-            Assert.Equal(new[] { new DateOnly(2026, 10, 9), new DateOnly(2026, 10, 8) }, recurrence.Dates);
+            Assert.Equal(new[] { new DateOnly(2026, 10, 9), new DateOnly(2026, 10, 8) }, recurrence.FiredDates);
         });
     }
 
-    /// <summary>Muted fires are counted apart from the ones that were not muted, and a day with only muted fires is still a date.</summary>
+    /// <summary>Muted fires are counted apart from the ones that were not muted, and so are their dates: a day with only muted
+    /// fires is in <c>muted_dates</c> and not in <c>fired_dates</c>.</summary>
     [Fact]
     public async Task MutedFires_AreCountedApartFromUnmutedOnes()
     {
@@ -148,7 +201,8 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
             var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
             Assert.Equal(2, recurrence.Fired);
             Assert.Equal(2, recurrence.Muted);
-            Assert.Equal(3, recurrence.Dates.Count);
+            Assert.Equal(new[] { new DateOnly(2026, 10, 9), new DateOnly(2026, 10, 8) }, recurrence.FiredDates);
+            Assert.Equal(new[] { new DateOnly(2026, 10, 7) }, recurrence.MutedDates);
         });
     }
 
@@ -168,7 +222,8 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
             Assert.Equal(new[] { Metric, "Deadlocks" }, sources!.Recurrence!.Select(r => r.MetricName));
             Assert.Equal(0, sources.Recurrence![0].Fired);
             Assert.Equal(0, sources.Recurrence[0].Muted);
-            Assert.Empty(sources.Recurrence[0].Dates);
+            Assert.Empty(sources.Recurrence[0].FiredDates);
+            Assert.Empty(sources.Recurrence[0].MutedDates);
             Assert.Equal(1, sources.Recurrence[1].Fired);
 
             var brief = JsonNode.Parse(InvestigationBriefComposer.Compose(
@@ -176,10 +231,11 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
             var node = brief["recurrence"]!.AsArray().Single(n => n!["metric"]!.GetValue<string>() == Metric)!;
             Assert.Equal(0, node["fired"]!.GetValue<int>());
             Assert.Equal(0, node["muted"]!.GetValue<int>());
-            Assert.Empty(node["dates"]!.AsArray());
+            Assert.Empty(node["fired_dates"]!.AsArray());
+            Assert.Empty(node["muted_dates"]!.AsArray());
             Assert.Equal("02:10", node["around_utc"]!.GetValue<string>());
-            Assert.Equal(30, node["window_minutes"]!.GetValue<int>());
-            Assert.Equal(7, node["days"]!.GetValue<int>());
+            Assert.Equal(InvestigationAlertRecurrence.WindowMinutes, node["window_minutes"]!.GetValue<int>());
+            Assert.Equal(InvestigationAlertRecurrence.Days, node["days"]!.GetValue<int>());
         });
     }
 

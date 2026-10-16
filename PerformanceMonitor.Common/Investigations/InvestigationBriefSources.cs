@@ -85,11 +85,15 @@ public sealed record InvestigationPriorLink(Guid RequestId, DateTime RecordedAtU
 /// <summary>
 /// #6000: how often one linked metric fired at this time of day. Counts the metric's alert history rows within
 /// <see cref="WindowMinutes"/> minutes either side of <paramref name="AroundUtc"/>'s clock time, on any of the
-/// <see cref="Days"/> days before the first alert. <paramref name="Fired"/> and <paramref name="Muted"/> are kept apart (a muted
-/// fire reached no one); <paramref name="Dates"/> are the UTC dates of the fires, newest first. Zero is a real answer: no
-/// history says <c>0</c>, it does not leave the metric out.
+/// <see cref="Days"/> days before the first alert, except the <see cref="WindowMinutes"/> minutes right before it (that is this
+/// incident's own rise, not its history). <paramref name="Fired"/> and <paramref name="Muted"/> are kept apart (a muted fire
+/// reached no one), and so are their dates: <paramref name="FiredDates"/> are the UTC dates with at least one unmuted fire,
+/// <paramref name="MutedDates"/> those with at least one muted fire (a date can be in both), each newest first.
+/// <paramref name="AroundUtc"/> is the request's first alert, shared by every linked metric, not that metric's own first alert.
+/// Zero is a real answer: no history says <c>0</c>, it does not leave the metric out.
 /// </summary>
-public sealed record InvestigationAlertRecurrence(string MetricName, DateTime AroundUtc, int Fired, int Muted, IReadOnlyList<DateOnly> Dates)
+public sealed record InvestigationAlertRecurrence(
+    string MetricName, DateTime AroundUtc, int Fired, int Muted, IReadOnlyList<DateOnly> FiredDates, IReadOnlyList<DateOnly> MutedDates)
 {
     /// <summary>Minutes either side of the first alert's clock time that still count as the same time of day.</summary>
     public const int WindowMinutes = 30;
