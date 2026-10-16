@@ -565,7 +565,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT ON config.investigation_journal TO mcp;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id) ON config.investigation_notes TO mcp;", flat, StringComparison.Ordinal);
 
-        /* admin (the WPF viewer): close a request, write the profiles, write and decide notes, journal it. */
+        /* admin (the WPF viewer): close a request, write the profiles, write and decide notes, journal it. viewer (the web host) also decides notes and journals it (#5903, below). */
         Assert.Contains("GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON config.investigation_requests TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, DELETE ON config.investigation_notes TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;", flat, StringComparison.Ordinal);
