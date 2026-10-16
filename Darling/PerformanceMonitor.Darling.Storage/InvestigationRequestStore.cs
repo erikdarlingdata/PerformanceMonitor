@@ -778,7 +778,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         var journal = new List<InvestigationJournalRow>();
         if (ids.Length == 0)
         {
-            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated);
+            /* #5913: this store keeps feedback, so even an empty read says so (no family_counts key would read as "a store that keeps none"). */
+            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, false, [], requestId is null ? [] : null);
         }
 
         await using (var command = Command(connection, null, ReportsSql, P(ids)))
@@ -834,7 +835,12 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             journal.RemoveRange(journalLimit, journal.Count - journalLimit);
         }
 
-        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated);
+        /* #5913: the people's feedback on these reports, and (for a window, not one request) the false-positive counts per family
+           over the same window and server. The V191 table is SELECT-able by every role that reads these tables. */
+        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds);
+        var feedback = await feedbackStore.ReadAsync(connection, ids, cancellationToken);
+        var familyCounts = requestId is null ? await feedbackStore.FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken) : null;
+        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts);
     }
 
     /// <summary>

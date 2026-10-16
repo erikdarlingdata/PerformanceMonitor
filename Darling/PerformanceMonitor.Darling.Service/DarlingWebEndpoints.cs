@@ -629,6 +629,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapAdminServers(app, postgres);
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
+        MapInvestigationFeedback(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -2203,6 +2204,263 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
+    }
+
+    /* ─────────────────────── #5913 feedback on investigation reports ─────────────────────── */
+
+    /// <summary>The longest feedback request body the route reads (two 4000-character fields plus the rest, with room for escapes).</summary>
+    internal const int MaxFeedbackBodyBytes = 64 * 1024;
+
+    /// <summary>The most reported requests one feedback list answers (the Viewer's list holds the same number).</summary>
+    internal const int FeedbackListLimit = 200;
+
+    /// <summary>The 403 sentence a feedback record answers when the store refuses the write (SQLSTATE 42501): the web host runs on
+    /// whatever login <c>postgres.webConnectionString</c> names, and recording feedback is an <c>admin</c> role write (#5913).</summary>
+    internal const string FeedbackRefusedMessage =
+        "Recording feedback needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role, "
+        + "which lists feedback but cannot record it: give feedback in the desktop Viewer, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+
+    /// <summary>
+    /// The feedback routes (#5913): <c>GET /api/investigation-feedback</c> lists the reported requests of the last
+    /// <c>hours_back</c> hours (default 168, at most 2160) with the feedback people gave each, and the false-positive counts per alert
+    /// family; <c>PUT /api/investigation-feedback/{requestId}</c> records the signed-in person's feedback on one report.
+    /// The write answers as the mute-rule writes do: <c>application/json</c> required, a read-only seat refused by the host's write gate,
+    /// 400 for a value the rules refuse (<see cref="InvestigationFeedbackRules"/>, in plain words), 404 for an unknown request, 409 for
+    /// a request with no report, 403 with <see cref="FeedbackRefusedMessage"/> when the store refuses the write for privilege (the web
+    /// decides only under an admin store login, as the notes screen does), a fixed-sentence 500 or 503 for any other store failure.
+    /// The author is the seat's <see cref="DarlingWebSeat.EditorPrincipal"/> shaped by <see cref="InvestigationFeedbackRules.AuthorFromIdentity"/>.
+    /// A second record by the same author replaces the first. Bodies go through the statement sweep (#4348): they carry text an agent
+    /// and a person wrote.
+    /// </summary>
+    internal static void MapInvestigationFeedback(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    {
+        var store = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
+
+        app.MapGet("/api/investigation-feedback", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var hours = 168;
+            if (context.Request.Query.TryGetValue("hours_back", out var hoursText)
+                && (!int.TryParse(hoursText.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out hours) || hours < 1 || hours > 2160))
+            {
+                return ErrorResult("hours_back must be a whole number from 1 to 2160.", StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var since = DateTime.UtcNow.AddHours(-hours);
+                /* One connection for the list, the counts and the capability probe (#5913). */
+                await using var connection = await postgres.OpenConnectionAsync(context.RequestAborted);
+                var (rows, truncated) = await store.ListReportedAsync(connection, since, null, FeedbackListLimit, context.RequestAborted);
+                var counts = await store.FamilyCountsAsync(connection, since, null, context.RequestAborted);
+                var canRecord = await store.CanRecordAsync(connection, context.RequestAborted);
+                return DarlingWebStatementSweep.JsonText(
+                    FeedbackListBody(rows, truncated, counts, hours, canRecord), "/api/investigation-feedback", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-feedback", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/investigation-feedback/{requestId}", async (HttpContext context, string requestId) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            if (!Guid.TryParse(requestId, out var request))
+            {
+                return ErrorResult("The request id is not a request id.", StatusCodes.Status400BadRequest);
+            }
+
+            string text;
+            try
+            {
+                text = await ReadBoundedBodyAsync(context, MaxFeedbackBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            if (!TryParseFeedbackBody(text, request, DarlingWebSeat.FromContext(context).EditorPrincipal, out var submission, out var refusal))
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = refusal! }, "/api/investigation-feedback/{requestId}",
+                    logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var result = await store.RecordAsync(submission!, context.RequestAborted);
+                /* The store's own sentence for a refused, unknown or unreported request (never an exception's text). */
+                var (outcome, sentence) = result;
+                if (outcome is not (InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced))
+                {
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = sentence! },"/api/investigation-feedback/{requestId}",
+                        logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, FeedbackRefusalStatus(outcome));
+                }
+
+                var receipt = FeedbackReceipt(outcome, request, submission!.Author);
+                return DarlingWebStatementSweep.JsonText(
+                    receipt, "/api/investigation-feedback/{requestId}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = FeedbackRefusedMessage }, "/api/investigation-feedback/{requestId}",
+                    logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-feedback/{requestId}", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    internal static JsonObject FeedbackReceipt(InvestigationFeedbackOutcome outcome, Guid request, string author) => new()
+    {
+        ["status"] = outcome == InvestigationFeedbackOutcome.Recorded ? "recorded" : "replaced",
+        ["request_id"] = request.ToString(),
+        ["author"] = author,
+    };
+
+    /// <summary>The status a refused feedback record answers: 404 for an unknown request, 409 for one with no report, else 400.</summary>
+    private static int FeedbackRefusalStatus(InvestigationFeedbackOutcome outcome) => outcome switch
+    {
+        InvestigationFeedbackOutcome.NotFound => StatusCodes.Status404NotFound,
+        InvestigationFeedbackOutcome.NoReport => StatusCodes.Status409Conflict,
+        _ => StatusCodes.Status400BadRequest,
+    };
+
+    /// <summary>True when the store refused the feedback write for privilege (SQLSTATE 42501).</summary>
+    private static bool IsFeedbackPrivilegeRefusal(Exception ex) => ex is PostgresException { SqlState: "42501" };
+
+    /// <summary>
+    /// PURE: parses a feedback body, <c>{"verdict": "right|partly|wrong", "corrected_verdict": null|"real"|"false_positive"|"needs_person",
+    /// "missed_step": null|"...", "comment": null|"..."}</c>, into the submission for <paramref name="request"/> by <paramref name="identity"/>.
+    /// False with a caller-facing <paramref name="refusal"/> when the body is not a JSON object, a field is not text, or a value fails
+    /// <see cref="InvestigationFeedbackRules"/>. Unknown fields are ignored.
+    /// </summary>
+    internal static bool TryParseFeedbackBody(string body, Guid request, string identity, out InvestigationFeedbackSubmission? submission, out string? refusal)
+    {
+        submission = null;
+        refusal = null;
+        JsonNode? parsed;
+        try
+        {
+            parsed = JsonNode.Parse(body);
+        }
+        catch (JsonException)
+        {
+            refusal = "The body is not JSON.";
+            return false;
+        }
+
+        if (parsed is not JsonObject obj)
+        {
+            refusal = "The body must be a JSON object with a verdict.";
+            return false;
+        }
+
+        string? Field(string name, out bool bad)
+        {
+            bad = false;
+            if (!obj.TryGetPropertyValue(name, out var node) || node is null)
+            {
+                return null;
+            }
+
+            if (node is JsonValue value && value.TryGetValue<string>(out var text))
+            {
+                return text;
+            }
+
+            bad = true;
+            return null;
+        }
+
+        var verdict = Field("verdict", out var badVerdict);
+        var corrected = Field("corrected_verdict", out var badCorrected);
+        var missed = Field("missed_step", out var badMissed);
+        var comment = Field("comment", out var badComment);
+        if (badVerdict || badCorrected || badMissed || badComment)
+        {
+            refusal = "verdict, corrected_verdict, missed_step and comment must each be text or null.";
+            return false;
+        }
+
+        /* A sign-in name the table's author rule cannot hold is shaped, not refused: DOMAIN\erik reads DOMAIN_erik-1a2b3c4d (a hash suffix keeps two such sign-ins apart). */
+        var author = InvestigationFeedbackRules.AuthorFromIdentity(identity) ?? "web";
+        var candidate = new InvestigationFeedbackSubmission(
+            request, verdict ?? "", string.IsNullOrWhiteSpace(corrected) ? null : corrected,
+            string.IsNullOrWhiteSpace(missed) ? null : missed, string.IsNullOrWhiteSpace(comment) ? null : comment, author);
+        var problems = InvestigationFeedbackRules.Validate(candidate);
+        if (problems.Count > 0)
+        {
+            refusal = InvestigationFeedbackRules.RefusalMessage(problems);
+            return false;
+        }
+
+        submission = candidate;
+        return true;
+    }
+
+    /// <summary>The list body: <c>{hours_back, can_record, requests_returned, truncated, families: [{family, reported, with_feedback, marked_wrong,
+    /// agent_false_positives, false_positives}], requests: [{request_id, server_name, family, first_metric, opened_at_utc, reported_at_utc,
+    /// agent_id, report_verdict, root_cause, summary, feedback: [{verdict, corrected_verdict, missed_step, comment, author, recorded_at_utc}]}]}</c>,
+    /// newest report first. <c>can_record</c> is whether the web dashboard's own store login may write feedback (false on managed and
+    /// compose stores, where it connects as the viewer role): the page shows its form only when it is true (#5913).</summary>
+    internal static JsonObject FeedbackListBody(
+        IReadOnlyList<InvestigationFeedbackListRow> rows, bool truncated, IReadOnlyList<InvestigationFamilyCounts> counts, int hoursBack,
+        bool canRecord)
+    {
+        static string Iso(DateTime t) => DateTime.SpecifyKind(t, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
+        var requests = new JsonArray();
+        foreach (var row in rows)
+        {
+            var feedback = new JsonArray();
+            foreach (var f in row.Feedback)
+            {
+                feedback.Add(new JsonObject
+                {
+                    ["verdict"] = f.Verdict,
+                    ["corrected_verdict"] = f.CorrectedVerdict,
+                    ["missed_step"] = f.MissedStep,
+                    ["comment"] = f.Comment,
+                    ["author"] = f.Author,
+                    ["recorded_at_utc"] = Iso(f.CreatedAtUtc),
+                });
+            }
+
+            requests.Add(new JsonObject
+            {
+                ["request_id"] = row.RequestId.ToString(),
+                ["server_name"] = row.ServerName,
+                ["family"] = row.Family,
+                ["first_metric"] = row.FirstMetric,
+                ["opened_at_utc"] = Iso(row.OpenedAtUtc),
+                ["reported_at_utc"] = Iso(row.ReportedAtUtc),
+                ["agent_id"] = row.AgentId,
+                ["report_verdict"] = row.ReportVerdict,
+                ["root_cause"] = row.RootCause,
+                ["summary"] = row.Summary,
+                ["feedback"] = feedback,
+            });
+        }
+
+        return new JsonObject
+        {
+            ["hours_back"] = hoursBack,
+            ["can_record"] = canRecord,
+            ["requests_returned"] = requests.Count,
+            ["truncated"] = truncated,
+            ["families"] = InvestigationToolCore.FamilyCountsPayload(counts),
+            ["requests"] = requests,
+        };
     }
 
     /// <summary>
