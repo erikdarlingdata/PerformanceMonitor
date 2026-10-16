@@ -119,7 +119,7 @@
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Agent investigation" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <ComboBox Grid.Row="0" Grid.Column="1" x:Name="AgentLevelCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
                       SelectionChanged="AgentLevelCombo_SelectionChanged"
-                      ToolTip="Investigate: a matching alert also opens an investigation request your own agent can take over MCP. Off: no request, and no broader route is asked. Inherit: a broader route decides."/>
+                      ToolTip="Investigate: a matching alert also opens an investigation request your own agent can take over MCP. Act (Level 2): the same, and the agent may also mute one metric on that server or change custom alert rules scoped to it while its claim is live; each change is journaled and refused after it reports. Off: no request, and no broader route is asked. Inherit: a broader route decides."/>
 
             <TextBlock Grid.Row="1" Grid.Column="0" Text="Requests per hour / day" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">

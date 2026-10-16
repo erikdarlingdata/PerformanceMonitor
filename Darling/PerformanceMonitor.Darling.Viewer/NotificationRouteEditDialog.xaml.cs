@@ -34,7 +34,7 @@ public partial class NotificationRouteEditDialog : Window
     internal const string ResolutionsNeverChoice = "Never";
     private const string AgentOffChoice = "Off";
     /* #5912: shown only on a route already stored at Level 2, and never chosen from here (the write path for Act is a later slice). */
-    private const string AgentActChoice = "Act (set in SQL)";
+    private const string AgentActChoice = "Act (Level 2: investigate and change alert settings)";
     private const string AgentInvestigateChoice = "Investigate";
 
     /// <summary>The "Every metric (*)" entry of the Matches list. It is in the list only while a server or a tag is chosen
@@ -69,6 +69,8 @@ public partial class NotificationRouteEditDialog : Window
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInheritChoice, Tag = null });
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentOffChoice, Tag = NotificationRoute.AgentLevelOff });
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInvestigateChoice, Tag = NotificationRoute.AgentLevelInvestigate });
+        /* #5915: Level 2 is offered. An agent holding a live claim may mute one metric on the request's server and change custom alert rules scoped to it; every change is journaled. */
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentActChoice, Tag = NotificationRoute.AgentLevelAct });
         ShowAgent(existing ?? new NotificationRouteRow());
 
         SendResolutionsCombo.Items.Add(new ComboBoxItem { Content = ResolutionsChannelChoice, Tag = null });
@@ -239,7 +241,7 @@ public partial class NotificationRouteEditDialog : Window
         UpdateAgentLimitsEnabled();
     }
 
-    /// <summary>The combo item for a stored level. A level the combo does not offer (a Level 2 row, #5912: an operator set it in SQL) gets
+    /// <summary>The combo item for a stored level. A level the combo does not offer (a value outside Inherit, Off, Investigate and Act) gets
     /// a DISABLED item showing it, selected and so kept on save: the dialog neither throws on it nor silently saves it as Inherit, Off or
     /// Investigate. It cannot be picked again once the user moves off it.</summary>
     private ComboBoxItem AgentLevelItemFor(int? level)

@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
@@ -896,7 +897,7 @@ public sealed class DarlingMcpAlertTools
     }
 
     /// <summary>The per-rule shape get_mute_rules returns AND create_mute_rule echoes back for the stored rule.</summary>
-    private static object BuildMuteRulePayload(MuteRule r) => new
+    internal static object BuildMuteRulePayload(MuteRule r) => new
     {
         id = r.Id,
         enabled = r.Enabled,
@@ -1144,7 +1145,7 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "create_mute_rule"), Description(
-        "Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
+        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
         "<<GUIDE>>" +
         "Creates an alert mute rule that suppresses matching alerts (they are still logged, just not delivered) — " +
         "the same rules get_mute_rules lists and the Viewer's Manage Mute Rules surface writes. Provide any " +
@@ -1177,8 +1178,14 @@ public sealed class DarlingMcpAlertTools
         [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
         [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null,
         [Description("Case-insensitive substring of the alert's client application name (e.g. 'Management Studio'). Omit for any.")] string? client_app_pattern = null,
-        [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null) =>
-        CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
+        [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        DarlingAgentActionSeat? agentSeat = null,
+        ILogger? logger = null) =>
+        DarlingAgentActionSeat.IsGated(agentSeat)
+            ? DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
+                query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source)
+            : CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
             wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source);
 
     /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
@@ -1405,14 +1412,19 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "delete_mute_rule"), Description(
-        "Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
+        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
         "{status:\"deleted\", rule_id} on success, or {status:\"not_found\"} when no rule has that id. Permanent. " +
         "The running service stops honoring the rule on its next collection sweep, when the delete's " +
         "config_version bump makes it reload its mute cache.")]
     public static Task<string> DeleteMuteRule(
         NpgsqlDataSource postgres,
-        [Description("The id of the mute rule to delete (from get_mute_rules or create_mute_rule).")] string rule_id) =>
-        DeleteMuteRuleCore(new PgMuteRuleStore(postgres), rule_id);
+        [Description("The id of the mute rule to delete (from get_mute_rules or create_mute_rule).")] string rule_id,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        DarlingAgentActionSeat? agentSeat = null,
+        ILogger? logger = null) =>
+        DarlingAgentActionSeat.IsGated(agentSeat)
+            ? DarlingMcpAgentActions.DeleteMuteAsync(agentSeat!, postgres, logger, agent_action, rule_id)
+            : DeleteMuteRuleCore(new PgMuteRuleStore(postgres), rule_id);
 
     /// <summary>
     /// delete_mute_rule's body over the <see cref="IMuteRuleStore"/> seam <see cref="PgMuteRuleStore"/>
@@ -1446,7 +1458,7 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "set_mute_rule_enabled"), Description(
-        "Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
+        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
         "<<GUIDE>>" +
         "Enables or disables an existing alert mute rule by its id (from get_mute_rules or create_mute_rule) " +
         "WITHOUT deleting it. A disabled rule suppresses nothing while keeping its id, its scope, its reason " +
@@ -1467,8 +1479,13 @@ public sealed class DarlingMcpAlertTools
     public static Task<string> SetMuteRuleEnabled(
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to enable or disable (from get_mute_rules or create_mute_rule).")] string rule_id,
-        [Description("true to put the rule back in force, false to stop it suppressing while keeping the rule.")] bool enabled) =>
-        SetMuteRuleEnabledCore(new PgMuteRuleStore(postgres), rule_id, enabled);
+        [Description("true to put the rule back in force, false to stop it suppressing while keeping the rule.")] bool enabled,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        DarlingAgentActionSeat? agentSeat = null,
+        ILogger? logger = null) =>
+        DarlingAgentActionSeat.IsGated(agentSeat)
+            ? DarlingMcpAgentActions.SetMuteEnabledAsync(agentSeat!, postgres, logger, agent_action, rule_id, enabled)
+            : SetMuteRuleEnabledCore(new PgMuteRuleStore(postgres), rule_id, enabled);
 
     /// <summary>
     /// set_mute_rule_enabled's body over the <see cref="IMuteRuleStore"/> seam
@@ -1539,7 +1556,7 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_mute_rule"), Description(
-        "Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
+        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
         "update: send only the fields to change, in the same shape get_mute_rules returns; a field you do NOT " +
         "send stays exactly as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable " +
         "here — use set_mute_rule_enabled instead. created_at_utc never moves, whatever changes. Clearing " +
@@ -1576,8 +1593,13 @@ public sealed class DarlingMcpAlertTools
     public static Task<string> UpdateMuteRule(
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to edit (from get_mute_rules or create_mute_rule).")] string rule_id,
-        [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json) =>
-        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json, id => MonitoredServerDisplayNameAsync(postgres, id));
+        [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        DarlingAgentActionSeat? agentSeat = null,
+        ILogger? logger = null) =>
+        DarlingAgentActionSeat.IsGated(agentSeat)
+            ? DarlingMcpAgentActions.UpdateMuteAsync(agentSeat!, postgres, logger, agent_action, rule_id, changes_json)
+            : UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json, id => MonitoredServerDisplayNameAsync(postgres, id));
 
     /// <summary>
     /// update_mute_rule's body over the <see cref="IMuteRuleStore"/> seam <see cref="PgMuteRuleStore"/>
@@ -1725,6 +1747,23 @@ public sealed class DarlingMcpAlertTools
     /// to preserve, <c>enabled</c> belongs to set_mute_rule_enabled, and <c>summary</c> is derived, not
     /// stored.</para>
     /// </summary>
+    /// <summary>
+    /// The mute rule an <c>update_mute_rule</c> body would leave stored: <paramref name="before"/> cloned with the body's
+    /// changes applied, through the same parser the tool runs (#5915). Null with an <paramref name="error"/> when the body
+    /// is invalid. The Level 2 kind rule reads the after image from this, so it cannot disagree with the write.
+    /// </summary>
+    internal static MuteRule? MuteRuleAfterUpdate(MuteRule before, JsonObject body, out string? error)
+    {
+        var (changes, problem) = BuildMuteRuleUpdate(body);
+        error = problem;
+        if (problem is not null)
+            return null;
+        var after = before.Clone();
+        foreach (var change in changes)
+            change.Apply(after);
+        return after;
+    }
+
     private static (List<MuteRuleFieldChange> Changes, string? Error) BuildMuteRuleUpdate(JsonObject body)
     {
         var changes = new List<MuteRuleFieldChange>();
@@ -1884,7 +1923,7 @@ public sealed class DarlingMcpAlertTools
 
     /// <summary>One rule by id, or null — an ordinal id match over the store's full read, which is the only
     /// read <see cref="IMuteRuleStore"/> offers.</summary>
-    private static async Task<MuteRule?> FindRuleAsync(IMuteRuleStore store, string ruleId) =>
+    internal static async Task<MuteRule?> FindRuleAsync(IMuteRuleStore store, string ruleId) =>
         (await store.LoadAllAsync())
             .FirstOrDefault(r => r is not null && string.Equals(r.Id, ruleId, StringComparison.Ordinal));
 
@@ -2004,7 +2043,7 @@ public sealed class DarlingMcpAlertTools
     /// <summary>A small {status, message} envelope for a non-data write outcome (invalid / not_found / unavailable)
     /// — the same shape <see cref="DarlingMcpCustomViewTools"/> uses, so an MCP client can branch on the outcome
     /// kind. A successful update/create/delete returns its own data-bearing shape, not this.</summary>
-    private static string Outcome(string status, string message) =>
+    internal static string Outcome(string status, string message) =>
         JsonSerializer.Serialize(new { status, message }, McpHelpers.JsonOptions);
 
     /// <summary>
