@@ -117,7 +117,7 @@ public sealed class InvestigationBriefComposer
                 ["scope"] = p.Scope,
                 ["text"] = null,
             }, masker, cut, ("text", p.Text))).ToList(),
-            ["earlier_reports"] = sources.EarlierReports.Select(r => EarlierReportNode(r, masker, cut)).ToList(),
+            ["earlier_reports"] = (sources.Practice ? Array.Empty<InvestigationEarlierReport>() : sources.EarlierReports).Select(r => EarlierReportNode(r, masker, cut)).ToList(),
             ["recent_changes"] = sources.RecentChanges.Select(c => ChangeNode(c, masker, cut)).ToList(),
         };
 
@@ -159,6 +159,16 @@ public sealed class InvestigationBriefComposer
         /* #5914: the request's page on the web dashboard, for a ticket the agent files. Absent when there is none. */
         if (!string.IsNullOrWhiteSpace(sources.RequestUrl))
             root["request_url"] = sources.RequestUrl;
+        /* #5918: a practice request replays an earlier case. The brief says so, and holds no answer from that case: the
+           earlier-reports section is empty above (the case's own report is one of them) and prior_links is skipped below.
+           Absent for every other request, so no other brief moves a byte. */
+        if (sources.Practice)
+        {
+            ((JsonObject)root["request"]!)["practice"] = true;
+            ((JsonArray)root["read_rules"]!).Add(
+                "This is a practice request: an earlier case replayed. Nothing you report changes anything, and the answer to the case is not in this brief. Report what you find as you would for a live request.");
+        }
+
         foreach (var (section, _, _) in Sections)
             root[section] = new JsonArray();
 
@@ -200,7 +210,7 @@ public sealed class InvestigationBriefComposer
 
         /* #5914: links earlier reports on this server and family recorded, newest first, held to their own cap inside what
            the sections left. Absent, never [], when there is none, so a brief without one is byte for byte as before. */
-        if (sources.PriorLinks is { Count: > 0 } priorLinks)
+        if (!sources.Practice && sources.PriorLinks is { Count: > 0 } priorLinks)
         {
             var list = priorLinks.Select(l => PriorLinkNode(l, masker, cut)).ToList();
             var budget = Math.Max(0, Math.Min(PriorLinksCap, remaining));

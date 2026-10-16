@@ -1692,7 +1692,7 @@ REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_servi
 --     claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
 --     state column, so an agent's note stays pending until a person decides it. admin (the WPF viewer) closes a
 --     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did.
---     Nothing but the owner writes the alert links. An identity column needs no sequence grant. One table per write
+--     Nothing but the owner writes the alert links (but for the Viewer's practice copy, section 10e). An identity column needs no sequence grant. One table per write
 --     grant, so provision-roles.sql's mirror (its step 3i) is compared grant for grant. It runs after every blanket
 --     grant above, and before 10a.
 REVOKE ALL ON {config}.investigation_requests, {config}.investigation_request_alerts, {config}.investigation_reports,
@@ -1736,6 +1736,10 @@ GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feed
 GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.investigation_feedback TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {mcp};
+-- #5918: the Viewer opens a practice request (V191's practice_of) and copies its case's alert rows, so these two grants are here, after 10d's revoke.
+GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+   window_until, opened_at, expires_at, lease_minutes, autonomy_level, practice_of) ON {config}.investigation_requests TO {admin};
+GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
 
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,

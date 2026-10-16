@@ -53,11 +53,13 @@ public sealed partial class InvestigationRequestStore : IInvestigationRequestSto
 
     internal const string RouteLockSql = "SELECT pg_advisory_xact_lock($1, $2)";
 
+    /* #5918: a practice request is never joined (a live alert must open its own request) and never counts against a route's limits. */
     internal const string FindJoinSql = @"
 SELECT r.request_id
 FROM config.investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
+  AND r.practice_of IS NULL
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
   AND r.opened_at >= $3 - interval '30 minutes'
@@ -88,6 +90,7 @@ SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
        count(*)
 FROM config.investigation_requests
 WHERE route_id = $1
+  AND practice_of IS NULL
   AND opened_at > $2 - interval '1 day'";
 
     internal static readonly string OpenSql = @"
@@ -214,6 +217,7 @@ SELECT route_id,
        count(*)
 FROM config.investigation_requests
 WHERE opened_at > $1 - interval '1 day'
+  AND practice_of IS NULL
 GROUP BY route_id";
 
     internal const string RefusalServerSql = @"

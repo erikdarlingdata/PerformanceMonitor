@@ -96,4 +96,5 @@ public sealed record InvestigationBriefSources(
     IReadOnlyList<InvestigationBriefNote> Notes,
     IReadOnlyList<InvestigationProfileText> Profiles,
     IReadOnlyList<InvestigationPriorLink>? PriorLinks = null,
-    string? RequestUrl = null);
+    string? RequestUrl = null,
+    bool Practice = false);
