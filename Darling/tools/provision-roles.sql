@@ -1700,6 +1700,8 @@ BEGIN
    GRANT INSERT ON config.investigation_journal TO admin;
    GRANT INSERT, DELETE ON config.investigation_notes TO admin;
    GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;
+   GRANT UPDATE (state, decided_at, decided_by) ON config.investigation_notes TO viewer;
+   GRANT INSERT ON config.investigation_journal TO viewer;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
 END $do$;
 

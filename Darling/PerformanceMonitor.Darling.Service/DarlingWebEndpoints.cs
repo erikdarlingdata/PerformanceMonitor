@@ -622,6 +622,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
+        MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapServerTags(app, postgres, logger);
         MapAdminServers(app, postgres);
         MapServers(app, postgres, logger);
@@ -1090,6 +1091,118 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /* ─────────────────────── #3450 mute rules: the dedicated write endpoints ─────────────────────── */
+
+    /// <summary>
+    /// The pending agent notes screen's routes (#5903): <c>GET /api/investigation-notes/pending</c> lists the notes an agent
+    /// proposed that nobody has decided, and <c>PUT /api/investigation-notes/{id}/approve</c> and <c>.../reject</c> decide
+    /// one. The write routes answer as the mute-rule writes do: <c>application/json</c> required (the same CSRF discipline),
+    /// born gated by the host's write gate (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/> refuses every unsafe
+    /// method to a read-only seat), 404 when the note is gone or already decided, a fixed-sentence 500 or 503 for a store
+    /// failure. The decision is stamped <c>person:</c> plus the seat's signed-in subject, else <c>person:viewer</c>. The
+    /// list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
+    /// </summary>
+    private static void MapInvestigationNotes(WebApplication app, IInvestigationNoteStore notes, ILogger logger)
+    {
+        app.MapGet("/api/investigation-notes/pending", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var pending = await notes.ListPendingNotesAsync(PendingNotesLimit, context.RequestAborted);
+                return DarlingWebStatementSweep.JsonText(
+                    PendingNotesBody(pending), "/api/investigation-notes/pending", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-notes/pending", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/investigation-notes/{id:long}/approve", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
+            try
+            {
+                return await notes.ApproveNoteAsync(id, decidedBy, context.RequestAborted)
+                    ? DarlingWebStatementSweep.JsonText(
+                        NoteDecisionBody("approved", id, decidedBy), "/api/investigation-notes/{id}/approve", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted)
+                    : ErrorResult(NoteNotPendingSentence, StatusCodes.Status404NotFound);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-notes/{id}/approve", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/investigation-notes/{id:long}/reject", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
+            try
+            {
+                return await notes.RejectNoteAsync(id, decidedBy, context.RequestAborted)
+                    ? DarlingWebStatementSweep.JsonText(
+                        NoteDecisionBody("rejected", id, decidedBy), "/api/investigation-notes/{id}/reject", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted)
+                    : ErrorResult(NoteNotPendingSentence, StatusCodes.Status404NotFound);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-notes/{id}/reject", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    /// <summary>The most pending notes one list answers. A fleet that proposes more than this has a backlog the screen cannot
+    /// show whole; deciding the oldest shows the rest.</summary>
+    internal const int PendingNotesLimit = 200;
+
+    internal const string NoteNotPendingSentence = "That note is not pending: it was already decided, or it is gone.";
+
+    /// <summary>Who a note decision is stamped as: <c>person:</c> plus the signed-in subject, or <c>person:viewer</c> for the
+    /// shared-token seat, the same <c>person:</c> prefix the desktop Viewer stamps.</summary>
+    internal static string NoteDecider(DarlingWebSeat seat) => "person:" + (string.IsNullOrWhiteSpace(seat.Subject) ? "viewer" : seat.Subject.Trim());
+
+    /// <summary>The list body: <c>{count, notes: [{note_id, server_id, server_name, metric_name, family, story_path_hash,
+    /// note_text, author, source_request_id, proposed_at_utc}]}</c>, oldest proposal first.</summary>
+    internal static JsonObject PendingNotesBody(IReadOnlyList<PendingInvestigationNote> pending)
+    {
+        var array = new JsonArray();
+        foreach (var note in pending)
+        {
+            array.Add(new JsonObject
+            {
+                ["note_id"] = note.NoteId,
+                ["server_id"] = note.ServerId,
+                ["server_name"] = note.ServerName,
+                ["metric_name"] = note.MetricName,
+                ["family"] = note.Family,
+                ["story_path_hash"] = note.StoryPathHash,
+                ["note_text"] = note.NoteText,
+                ["author"] = note.Author,
+                ["source_request_id"] = note.SourceRequestId?.ToString(),
+                ["proposed_at_utc"] = note.ProposedAtUtc.ToString("o", CultureInfo.InvariantCulture),
+            });
+        }
+
+        return new JsonObject { ["count"] = pending.Count, ["notes"] = array };
+    }
+
+    internal static JsonObject NoteDecisionBody(string status, long noteId, string decidedBy) =>
+        new() { ["status"] = status, ["note_id"] = noteId, ["decided_by"] = decidedBy };
 
     /// <summary>
     /// The mute-rule WRITE surface (#3450): create / update / set-enabled / delete, the web twins of the four

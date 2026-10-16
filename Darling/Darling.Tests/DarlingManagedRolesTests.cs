@@ -571,9 +571,13 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;", flat, StringComparison.Ordinal);
 
-        /* Nobody but the owner links alerts, and viewer writes nothing here. */
+        /* #5903: viewer (the web dashboard's only store identity) decides a note and journals it, and writes nothing else here. */
+        Assert.Contains("GRANT UPDATE (state, decided_at, decided_by) ON config.investigation_notes TO viewer;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT ON config.investigation_journal TO viewer;", flat, StringComparison.Ordinal);
+
+        /* Nobody but the owner links alerts, and viewer writes nothing else here. */
         Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO", flat);
-        Assert.DoesNotMatch(@"GRANT (INSERT|UPDATE|DELETE)[^;]* ON config\.(investigation|agent_environment)[a-z_]* TO [a-z_, ]*viewer", flat);
+        Assert.DoesNotMatch(@"GRANT (INSERT|UPDATE|DELETE)[^;]* ON config\.(investigation_requests|investigation_reports|agent_environment)[a-z_]* TO [a-z_, ]*viewer", flat);
     }
 
     [Fact]
