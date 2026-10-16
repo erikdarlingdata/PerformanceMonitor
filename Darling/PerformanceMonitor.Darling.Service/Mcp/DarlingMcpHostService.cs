@@ -1177,6 +1177,10 @@ public sealed class DarlingMcpHostService : BackgroundService
            host share it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
         services.AddSingleton<InvestigationOpenSignal>(InvestigationOpenSignal.Shared);
 
+        /* #5916: set_alert_threshold_override is a Level 2 action tool offered under both arms and takes the served policy as a
+           service parameter to tell them apart. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<DarlingMcpServedPolicy>(new DarlingMcpServedPolicy(writes));
+
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
            annotation hints. PostConfigure runs after the SDK's own options setup, so it sees the full set, and

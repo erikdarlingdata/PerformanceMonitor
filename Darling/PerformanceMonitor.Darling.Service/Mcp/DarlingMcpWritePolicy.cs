@@ -76,6 +76,7 @@ internal static class DarlingMcpWritePolicy
         "delete_mute_rule",
         "set_mute_rule_enabled",
         "update_alert_settings",
+        "set_alert_threshold_override",
         "delete_notification_route",
         "set_notification_route_enabled",
         "create_custom_alert_rule",
@@ -114,7 +115,10 @@ internal static class DarlingMcpWritePolicy
     /// mute, custom-rule and threshold override tools add to it (#5915, #5916). A name in <see cref="NeverAgentTools"/> is
     /// never offered under the investigations arm, even if listed here.
     /// </summary>
-    internal static readonly IReadOnlySet<string> AgentActionTools = new HashSet<string>(StringComparer.Ordinal);
+    internal static readonly IReadOnlySet<string> AgentActionTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "set_alert_threshold_override",
+    };
 
     /// <summary>
     /// The write tools never offered to agents (#5912): the one global alert settings row, the analysis finding mute,
