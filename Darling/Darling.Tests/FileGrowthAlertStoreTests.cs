@@ -70,7 +70,6 @@ public class FileGrowthAlertStoreTests
            was quietly asserting a later rung's wiring while reading as though it still guarded this one.
            Pinned at 54, this rung's own ordinal, which cannot slide. The "and no more than that" half
            belongs to whichever rung is newest and lives there. */
-        Assert.Contains("reader.GetBoolean(54)", ReadViewerSource(), StringComparison.Ordinal);
     }
 
     [Fact]

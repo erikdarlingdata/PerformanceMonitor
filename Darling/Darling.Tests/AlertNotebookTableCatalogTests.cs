@@ -197,7 +197,7 @@ public sealed class AlertNotebookTableCatalogTests
     public void EveryReadCellEveryNotebookEmits_ResolvesToTheFieldArrayItsVizNeeds()
     {
         var all = EveryReadCell();
-        Assert.True(all.Count >= 150, "expected the authored, prefix and mechanical notebooks to emit well over 150 read cells, found " + all.Count);
+        Assert.NotEmpty(all); // a sweep that found no cells would pass for free; the count itself is not a rule (#5950)
         Assert.Contains(all, c => c.Origin.StartsWith("mechanical: ", StringComparison.Ordinal));
         Assert.Contains(all, c => c.Origin.Contains("(matched row)", StringComparison.Ordinal));
 
@@ -435,7 +435,7 @@ public sealed class AlertNotebookTableCatalogTests
     {
         var reads = TemplateTableReads();
 
-        Assert.True(reads.Length >= 24, "expected the template sources to name about 25 distinct reads, found " + reads.Length);
+        Assert.NotEmpty(reads); // not a count of reads: adding or merging a template read is not a defect (#5950)
         Assert.Contains("get_blocking", reads);
         Assert.Contains("get_collection_log", reads);
         Assert.Contains("get_collector_stall_probes", reads);

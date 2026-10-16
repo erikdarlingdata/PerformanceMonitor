@@ -34,6 +34,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpConfigTools
 {
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_server_config"), Description("Gets the current SQL Server instance configuration (sys.configurations). Shows all sp_configure settings with configured and in-use values. Useful for checking CTFP, MAXDOP, max memory, and other instance-level settings right now (unlike get_server_config_changes, which shows only what changed between connect snapshots). LATEST IS A TIME: configuration is captured when the collector CONNECTS, not on a schedule, so 'current' here means 'as of the last capture' - captured_at is that instant, and a value can be days old on a server the monitor has stayed connected to.")]
     public static async Task<string> GetServerConfig(
         NpgsqlDataSource postgres,
@@ -75,6 +76,7 @@ public sealed class DarlingMcpConfigTools
         }
     }
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_database_config"), Description("Gets database-level configuration for all databases (sys.databases). Shows recovery model, RCSI, auto-shrink, auto-close, Query Store, compatibility level, page verify, and other settings. Critical for identifying misconfigured databases. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of, and a database created or altered since is not reflected until the next connect.")]
     public static Task<string> GetDatabaseConfig(
         NpgsqlDataSource postgres,
@@ -163,6 +165,7 @@ public sealed class DarlingMcpConfigTools
             runFacts.NoTraceFlagsEnabled()
                 ?? "No trace flags found (none enabled, or the config collector has not run yet).");
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these flags are as of; a flag turned on or off since is not reflected until the next connect.")]
     public static async Task<string> GetTraceFlags(
         NpgsqlDataSource postgres,

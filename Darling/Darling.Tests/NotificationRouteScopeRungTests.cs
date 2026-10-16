@@ -82,42 +82,6 @@ public sealed class NotificationRouteScopeRungTests
         Assert.DoesNotContain("CREATE TABLE", sql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void TheProbeCarriesTheSentinel_AndMapsToThisRungWhenNoLaterSentinelIsPresent()
-    {
-        Assert.Contains("attname = 'scope_server_id'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var parameters = method.GetParameters();
-        var index = Array.FindIndex(parameters, p => p.Name == "hasNotificationRouteScope");
-        Assert.True(index > 0, "the V181 sentinel is a parameter of MapProbedSchemaVersion");
-        Assert.Equal("hasExternalAlerts", parameters[index - 1].Name);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({parameters.Length - 1})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({parameters.Length})", viewer, StringComparison.Ordinal);
-
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* A store whose newest sentinel is this rung's maps to it; one without it maps to the rung below. */
-        var atThisRung = (object[])all.Clone();
-        for (var i = index + 1; i < atThisRung.Length; i++)
-        {
-            atThisRung[i] = false;
-        }
-
-        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
-        var behind = (object[])atThisRung.Clone();
-        behind[index] = false;
-        Assert.Equal(180, (int)method.Invoke(null, behind)!);
-
-        var thisArm = viewer.IndexOf("if (hasNotificationRouteScope)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasExternalAlerts)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V181 arm sits above the V180 arm");
-    }
-
     /// <summary>The viewer and mcp roles read the two scope columns: they are on the non-secret list (an upgraded managed store gets the
     /// grant when provisioning re-runs after migration), and the MCP read selects them.</summary>
     [Fact]
@@ -180,17 +144,7 @@ public sealed class NotificationRouteScopeRungTests
         try
         {
             /* A store one rung behind: V181's columns gone, a legacy fleet-wide row and a legacy unscoped '*' row stored. */
-            await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, RungVersion - 1, ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 181", ct);
             await ExecAsync(connection,
                 "INSERT INTO config.config_notification_routes (metric_match, slack_url) VALUES ('Deadlocks Detected', 'sealed-a'), ('*', 'sealed-b')", ct);

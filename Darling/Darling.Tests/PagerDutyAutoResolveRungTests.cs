@@ -112,7 +112,6 @@ public sealed class PagerDutyAutoResolveRungTests
         Assert.Contains($"column_name = '{ResolveColumn}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)

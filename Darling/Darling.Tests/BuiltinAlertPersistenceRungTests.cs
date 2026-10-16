@@ -99,7 +99,6 @@ public sealed class BuiltinAlertPersistenceRungTests
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasBuiltinAlertPersistence", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService)

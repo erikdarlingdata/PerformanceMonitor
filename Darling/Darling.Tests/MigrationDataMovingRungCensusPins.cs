@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -315,37 +316,36 @@ public sealed class MigrationDataMovingRungCensusPins
     }
 
     /// <summary>
-    /// The multiple and the census cannot drift apart. Deliberately reads the constant out of the
-    /// SOURCE rather than widening its visibility: the value is private, and the thing worth pinning is
-    /// the derived FORM the constant's own doc comment argues for ("a multiple rather than a literal so
-    /// the two budgets cannot drift apart"), which a compiled <c>int</c> no longer carries.
+    /// The multiple and the census cannot drift apart. Reads the two private constants out of the compiled product by
+    /// reflection, so the test follows the values the migrator runs with and not the way the source spells them (#5950): the
+    /// lock-wait budget has to be one command timeout per floor-setting rung, plus one of margin.
     /// </summary>
     [Fact]
     public void TheLockWaitMultiple_IsOneMoreThanTheFloorContributingRungCount()
     {
-        var source = ReadRepoFile("Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs");
+        const BindingFlags constantFlags = BindingFlags.NonPublic | BindingFlags.Static;
+        var lockWaitField = typeof(PgMigrations).GetField("MigrationLockWaitTimeoutSeconds", constantFlags);
+        var commandField = typeof(PgMigrations).GetField("MigrationCommandTimeoutSeconds", constantFlags);
 
-        var declaration = Regex.Match(
-            source,
-            @"MigrationLockWaitTimeoutSeconds\s*=\s*(?<multiple>\d+)\s*\*\s*MigrationCommandTimeoutSeconds",
-            RegexOptions.CultureInvariant);
-
-        /* Positive control for the read itself: a rename or a switch to a literal makes the regex
-           miss, and a miss must not read as agreement. */
+        /* Positive control for the read itself: a rename makes the lookup miss, and a miss must not read as agreement. */
         Assert.True(
-            declaration.Success,
-            "MigrationLockWaitTimeoutSeconds is no longer declared as <n> * MigrationCommandTimeoutSeconds "
-            + "in PgMigrations.cs. The multiple IS the link between the lock-wait budget and the rung "
-            + "census (#2894); a literal breaks it and leaves this pin unable to check anything. Restore "
-            + "the multiple form, or move this assertion to whatever expresses the derivation now.");
+            lockWaitField is not null && commandField is not null,
+            "PgMigrations no longer declares MigrationLockWaitTimeoutSeconds and MigrationCommandTimeoutSeconds as private "
+            + "constants. They are the link between the lock-wait budget and the rung census (#2894); point this pin at "
+            + "whatever expresses the budget now.");
 
-        var multiple = int.Parse(
-            declaration.Groups["multiple"].Value, CultureInfo.InvariantCulture);
+        var lockWait = (int)lockWaitField!.GetRawConstantValue()!;
+        var commandTimeout = (int)commandField!.GetRawConstantValue()!;
+        Assert.True(
+            commandTimeout > 0 && lockWait % commandTimeout == 0,
+            $"MigrationLockWaitTimeoutSeconds ({lockWait}) is not a whole multiple of MigrationCommandTimeoutSeconds "
+            + $"({commandTimeout}): the budget must stay a multiple of one rung bound so the census can count it.");
+        var multiple = lockWait / commandTimeout;
         var floor = s_declared.Count(d => d.SetsTheFloor);
 
         Assert.True(
             multiple == floor + 1,
-            $"MigrationLockWaitTimeoutSeconds is {multiple} * MigrationCommandTimeoutSeconds, but the "
+            $"MigrationLockWaitTimeoutSeconds is {multiple} * MigrationCommandTimeoutSeconds ({lockWait} s), but the "
             + $"census declares {floor} floor-setting rung(s) "
             + $"({string.Join(", ", s_declared.Where(d => d.SetsTheFloor).Select(d => "V" + d.Version.ToString(CultureInfo.InvariantCulture)))})"
             + $", which derives {floor + 1} — {floor} multiples of floor plus one of margin, sized at one "

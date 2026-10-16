@@ -196,7 +196,7 @@ public sealed class AgentLevel2StoreRungTests
     {
         await WithStoreAsync(async (store, ct) =>
         {
-            await RungRewindArtifacts.DropV191SentinelAsync(store, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(store, Rung.Version - 1, ct);
             await ExecAsync(store, "DELETE FROM darling_schema_version WHERE version >= " + Rung.Version.ToString(CultureInfo.InvariantCulture), ct);
             await ExecAsync(store, "UPDATE config.config_service SET paused = TRUE", ct);
             await ExecAsync(store, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('kept', 1)", ct);
@@ -455,7 +455,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
                 .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal);
 
             /* Behind the rung (the feedback table is absent): the script warns, skips the block and grants nothing on the overrides. */
-            await RungRewindArtifacts.DropV191SentinelAsync(owner, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 190, ct);
             await ExecAsync(owner, script, ct);
             Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct));
 

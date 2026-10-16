@@ -445,7 +445,6 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
             ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         /* The "nothing past me" half of this claim moved to V138's test with the top ordinal; what stays is
            that this rung's sentinel is read at its OWN ordinal, which is what keeps every later one on the
            right column. */

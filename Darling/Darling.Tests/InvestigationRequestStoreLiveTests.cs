@@ -531,7 +531,7 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
     /// <summary>
     /// <c>provision-roles.sql</c> runs clean on a store one rung below V184 (#5632 review round 1, L5): every block that names
     /// a V184 column or table (the route carves of steps 2b and 2c, and step 3i) runs on the store wound back by
-    /// <see cref="RungRewindArtifacts.DropV184SentinelAsync"/>, carves the V181 route columns and skips the agent ones; on the
+    /// <see cref="RungRewindArtifacts.DropSentinelsAboveAsync"/>, carves the V181 route columns and skips the agent ones; on the
     /// full store the same blocks grant the agent columns. The blocks are retargeted at per-run roles created inside one
     /// transaction that is rolled back, so no role or grant outlives the test and the fixed role names are never written.
     /// </summary>
@@ -580,14 +580,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {mcp};";
 
             Assert.Equal("false|true|true|true|true", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
 
-            await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 183, ct);
             Assert.Equal("false|true|true|false|false", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
         });
     }

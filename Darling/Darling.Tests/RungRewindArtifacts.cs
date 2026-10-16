@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -13,92 +15,111 @@ using Npgsql;
 namespace Darling.Tests;
 
 /// <summary>
-/// The removal of a store rung's probe sentinel, written ONCE for the live tests that rewind a store below that rung
-/// and then read the probed schema version (<c>ViewerDataService.MapProbedSchemaVersion</c>). The probe maps the
-/// NEWEST sentinel present, so a rewind that only deletes the version rows and the older rungs' objects still reads
-/// as the newest rung while the newest rung's sentinel is on disk (#5641: V177's three
-/// <c>config.config_alert_settings</c> columns made <c>CaggGroupIndexDropLiveTests</c> read 177 on a store rewound to
-/// V150/V151). A new rung that adds a probe sentinel adds its removal here, and both rewind chains
-/// (<c>CaggGroupIndexDropLiveTests</c> and <c>QueryStoreIntervalPartitionRungTests</c>) call it.
+/// The store's probe ladder, written ONCE (#5950): for each rung the viewer's schema probe names
+/// (<c>ViewerDataService.MapProbedSchemaVersion</c>), the probe parameter that is the rung's sentinel and, for the rungs the live
+/// tests rewind a store below, the SQL that removes the sentinel. The probe maps the NEWEST sentinel present, so a rewind that
+/// only deletes the version rows and the older rungs' objects still reads as the newest rung while that rung's sentinel is on
+/// disk (#5641: V177's three <c>config.config_alert_settings</c> columns made <c>CaggGroupIndexDropLiveTests</c> read 177 on a
+/// store rewound to V150/V151).
+/// <para>A new rung that adds a probe sentinel adds ONE entry to <see cref="Ladder"/>, in this file: its version, the
+/// parameter it adds to <c>MapProbedSchemaVersion</c>, and the SQL that removes it. <see cref="DropSentinelsAboveAsync"/>
+/// then removes it from every rewind chain, and <c>MigrationProbeLadderTests</c> checks the probe answers it.</para>
 /// </summary>
 internal static class RungRewindArtifacts
 {
-    /// <summary>
-    /// V178 (#5684): the per-batch Query Store watermark table, the probe's newest sentinel until V179 (#5640) went on top, and the coverage table that goes
-    /// with it. Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV178SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(
-            "DROP TABLE IF EXISTS collect.query_store_watermarks, collect.query_store_watermarks_coverage",
-            connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+    /// <summary>One rung of the ladder. <c>DropSql</c> is null for a rung no live test rewinds below through this helper.</summary>
+    internal sealed record LadderRung(int Version, string ProbeParameter, string? DropSql = null);
 
     /// <summary>
-    /// V177 (#5641): the Runnable Queue settings columns of <c>config.config_alert_settings</c>, the probe's newest
-    /// sentinel until V178 (#5684) went on top of it. Safe on a store that never had them.
+    /// Every rung from V140 up, oldest first. Each parameter sits later in the probe's signature than the previous entry's, which
+    /// is how the probe's newest-first arms read it: with entry k's parameter and every earlier one present and every later one
+    /// absent, the probe answers rung k.
     /// </summary>
-    internal static async Task DropV177SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(
+    internal static readonly IReadOnlyList<LadderRung> Ladder =
+    [
+        new(140, "hasCheckpointsTimed"),
+        new(141, "hasCollectionCaveats"),
+        new(142, "hasIndexObjectStatsServerTimeIndex"),
+        new(143, "hasQueryStoreIntervalLatest"),
+        new(144, "hasRawChunkIntervalRungHistory"),
+        new(145, "hasQueryStoreIntervalWide"),
+        new(146, "hasManagedConfVerdicts"),
+        new(147, "hasComposeTimeoutSixty"),
+        new(148, "hasReadLatency"),
+        new(149, "hasHotLivenessTouch"),
+        new(150, "hasCollectionLogWatermarkAndJobHistoryIndexes"),
+        new(151, "hasAgGroupId"),
+        new(152, "hasCaggGroupIndexDrop"),
+        new(153, "hasIntervalFirstExecIndexes"),
+        new(154, "hasIntervalWideFirstExecIndex"),
+        new(155, "hasQueryStoreIntervalEnd"),
+        new(156, "hasCheckpointLongestSync"),
+        new(157, "hasMuteRuleServerId"),
+        new(158, "hasInstallId"),
+        new(159, "hasInstallIdTableOid"),
+        new(160, "hasCollectorRunAt"),
+        new(161, "hasQueryStoreTopDaily"),
+        new(162, "hasSlowReads"),
+        new(163, "hasStoreStatementHistory"),
+        new(164, "hasQueryStatsHourLedger"),
+        new(165, "hasPasswordKey"),
+        new(166, "hasPagerDutyAutoResolve"),
+        new(167, "hasLegacyPinCandidates"),
+        new(168, "hasPlanRegressionDaily"),
+        new(169, "hasAwsRole"),
+        new(170, "hasPgIoStatsHourly"),
+        new(171, "hasQueryStoreIntervalWidePartitioned"),
+        new(172, "hasQueryStoreIntervalLatestPartitioned"),
+        new(173, "hasQueryStoreComposeStamp"),
+        new(174, "hasServiceVersion"),
+        new(175, "hasPlanRegressionDailyRowcount"),
+        new(176, "hasProcedureStatsTotals"),
+
+        // /// V177 (#5641): the Runnable Queue settings columns of config.config_alert_settings, the probe's newest sentinel
+        // until V178 (#5684) went on top of it. Safe on a store that never had them.
+        new(177, "hasRunnableQueueSettings",
             "ALTER TABLE IF EXISTS config.config_alert_settings"
             + " DROP COLUMN IF EXISTS runnable_queue_enabled,"
             + " DROP COLUMN IF EXISTS runnable_queue_warning_per_scheduler,"
-            + " DROP COLUMN IF EXISTS runnable_queue_critical_per_scheduler",
-            connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+            + " DROP COLUMN IF EXISTS runnable_queue_critical_per_scheduler"),
 
-    /// <summary>
-    /// V179 (#5640): the Client Timeouts settings columns of <c>config.config_alert_settings</c>, the probe's newest
-    /// sentinel until V180 (#5654) went on top of it. Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV179SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(
+        // /// The removal of a store rung's probe sentinel, written ONCE for the live tests that rewind a store below that rung
+        // and then read the probed schema version (ViewerDataService.MapProbedSchemaVersion). The probe maps the NEWEST sentinel
+        // present, so a rewind that only deletes the version rows and the older rungs' objects still reads as the newest rung
+        // while the newest rung's sentinel is on disk (#5641: V177's three config.config_alert_settings columns made
+        // CaggGroupIndexDropLiveTests read 177 on a store rewound to V150/V151). A new rung that adds a probe sentinel adds its
+        // removal here, and both rewind chains (CaggGroupIndexDropLiveTests and QueryStoreIntervalPartitionRungTests) call it.
+        // </summary> internal static class RungRewindArtifacts { <summary> V178 (#5684): the per-batch Query Store watermark
+        // table, the probe's newest sentinel until V179 (#5640) went on top, and the coverage table that goes with it. Safe on a
+        // store that never had them.
+        new(178, "hasQueryStoreWatermarks",
+            "DROP TABLE IF EXISTS collect.query_store_watermarks, collect.query_store_watermarks_coverage"),
+
+        // /// V179 (#5640): the Client Timeouts settings columns of config.config_alert_settings, the probe's newest sentinel
+        // until V180 (#5654) went on top of it. Safe on a store that never had them.
+        new(179, "hasClientTimeoutSettings",
             "ALTER TABLE IF EXISTS config.config_alert_settings"
             + " DROP COLUMN IF EXISTS client_timeouts_enabled,"
             + " DROP COLUMN IF EXISTS client_timeouts_warning_per_minute,"
-            + " DROP COLUMN IF EXISTS client_timeouts_critical_per_minute",
-            connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+            + " DROP COLUMN IF EXISTS client_timeouts_critical_per_minute"),
 
-    /// <summary>
-    /// V180 (#5654): the registry of the services that raise alerts through the store, the probe's newest sentinel,
-    /// and its two dependants (the pending queue and the firing state). Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV180SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(
-            "DROP TABLE IF EXISTS config.external_alert_state, config.external_alert_pending, config.external_alert_source",
-            connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+        // /// V180 (#5654): the registry of the services that raise alerts through the store, the probe's newest sentinel, and
+        // its two dependants (the pending queue and the firing state). Safe on a store that never had them.
+        new(180, "hasExternalAlerts",
+            "DROP TABLE IF EXISTS config.external_alert_state, config.external_alert_pending, config.external_alert_source"),
 
-    /// <summary>
-    /// V181 (#5750): the route scope columns of <c>config.config_notification_routes</c>, the probe's newest sentinel. The two
-    /// CHECK constraints name the columns, so dropping the columns drops them. Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV181SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(
+        // /// V181 (#5750): the route scope columns of config.config_notification_routes, the probe's newest sentinel. The two
+        // CHECK constraints name the columns, so dropping the columns drops them. Safe on a store that never had them.
+        new(181, "hasNotificationRouteScope",
             "ALTER TABLE IF EXISTS config.config_notification_routes"
             + " DROP COLUMN IF EXISTS scope_server_id,"
-            + " DROP COLUMN IF EXISTS scope_tag_id",
-            connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+            + " DROP COLUMN IF EXISTS scope_tag_id"),
 
-    /// <summary>
-    /// V182 (#5506): the window band, in-flight and connection-wait columns of <c>collect.read_latency</c> (the band is the probe's
-    /// newest sentinel) and the two slow-read columns. Dropping the band drops the key that names it, so the V181 key is put back.
-    /// Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV182SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(@"
+        // /// V182 (#5506): the window band, in-flight and connection-wait columns of collect.read_latency (the band is the
+        // probe's newest sentinel) and the two slow-read columns. Dropping the band drops the key that names it, so the V181 key
+        // is put back. Safe on a store that never had them.
+        new(182, "hasReadLatencyCapacityFields",
+            @"
 ALTER TABLE IF EXISTS collect.read_latency
     DROP COLUMN IF EXISTS window_band,
     DROP COLUMN IF EXISTS max_in_flight,
@@ -112,31 +133,21 @@ BEGIN
 END $$;
 ALTER TABLE IF EXISTS collect.slow_reads
     DROP COLUMN IF EXISTS in_flight,
-    DROP COLUMN IF EXISTS wait_ms;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+    DROP COLUMN IF EXISTS wait_ms;"),
 
-    /// <summary>
-    /// V183 (#5793): the read caller column of <c>collect.slow_reads</c> and the distinct caller count of
-    /// <c>collect.read_latency</c>. Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV183SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(@"
+        // /// V183 (#5793): the read caller column of collect.slow_reads and the distinct caller count of collect.read_latency.
+        // Safe on a store that never had them.
+        new(183, "hasReadCaller",
+            @"
 ALTER TABLE IF EXISTS collect.read_latency
     DROP COLUMN IF EXISTS distinct_callers;
 ALTER TABLE IF EXISTS collect.slow_reads
-    DROP COLUMN IF EXISTS caller;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+    DROP COLUMN IF EXISTS caller;"),
 
-    /// <summary>
-    /// V184 (#5632): the investigation tables (the probe's V184 sentinel is the request table) and the agent columns of
-    /// <c>config.config_notification_routes</c>. Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV184SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(@"
+        // /// V184 (#5632): the investigation tables (the probe's V184 sentinel is the request table) and the agent columns of
+        // config.config_notification_routes. Safe on a store that never had them.
+        new(184, "hasInvestigations",
+            @"
 DROP TABLE IF EXISTS config.investigation_reports;
 DROP TABLE IF EXISTS config.investigation_request_alerts;
 DROP TABLE IF EXISTS config.investigation_requests;
@@ -149,42 +160,27 @@ ALTER TABLE IF EXISTS config.config_notification_routes
     DROP COLUMN IF EXISTS agent_max_per_hour,
     DROP COLUMN IF EXISTS agent_max_per_day,
     DROP COLUMN IF EXISTS agent_lease_minutes,
-    DROP COLUMN IF EXISTS agent_expiry_minutes;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+    DROP COLUMN IF EXISTS agent_expiry_minutes;"),
 
-    /// <summary>
-    /// V185 (#5812): the partial-day columns of <c>collect.plan_regression_daily_built</c>, <c>built_through</c> (the probe's
-    /// V185 sentinel) and <c>partial_seq</c>. Safe on a store that never had them. A whole build made under V185 keeps
-    /// <c>built_seq = late_seq</c> and reads as a whole-day build, as every day built before V185 does. A partial build already
-    /// has <c>built_seq</c> NULL, so V184 reads it as not built, and its V184 builder rebuilds it whole.
-    /// </summary>
-    internal static async Task DropV185SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(@"
+        // /// V185 (#5812): the partial-day columns of collect.plan_regression_daily_built, built_through (the probe's V185
+        // sentinel) and partial_seq. Safe on a store that never had them. A whole build made under V185 keeps built_seq =
+        // late_seq and reads as a whole-day build, as every day built before V185 does. A partial build already has built_seq
+        // NULL, so V184 reads it as not built, and its V184 builder rebuilds it whole.
+        new(185, "hasPlanRegressionPartialDays",
+            @"
 ALTER TABLE IF EXISTS collect.plan_regression_daily_built
     DROP COLUMN IF EXISTS built_through,
-    DROP COLUMN IF EXISTS partial_seq;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+    DROP COLUMN IF EXISTS partial_seq;"),
 
-    /// <summary>
-    /// V186 (#5810): <c>collect.collection_log_hourly</c> (the probe's V186 sentinel), with its index. Safe on a store that
-    /// never had it. Nothing before V186 reads it.
-    /// </summary>
-    internal static async Task DropV186SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.collection_log_hourly;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+        // /// V186 (#5810): collect.collection_log_hourly (the probe's V186 sentinel), with its index. Safe on a store that
+        // never had it. Nothing before V186 reads it.
+        new(186, "hasCollectionLogHourly",
+            "DROP TABLE IF EXISTS collect.collection_log_hourly;"),
 
-    /// <summary>
-    /// V187 (#5825): the four per-channel resolution flags, the route override and the alert log's three resolution columns
-    /// (<c>resolution_outcome</c> is the probe's newest sentinel). Safe on a store that never had them.
-    /// </summary>
-    internal static async Task DropV187SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(@"
+        // /// V187 (#5825): the four per-channel resolution flags, the route override and the alert log's three resolution
+        // columns (resolution_outcome is the probe's newest sentinel). Safe on a store that never had them.
+        new(187, "hasAlertResolutionDelivery",
+            @"
 ALTER TABLE IF EXISTS config.config_notification
     DROP COLUMN IF EXISTS slack_send_resolutions,
     DROP COLUMN IF EXISTS teams_send_resolutions,
@@ -194,18 +190,37 @@ ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS se
 ALTER TABLE IF EXISTS config.config_alert_log
     DROP COLUMN IF EXISTS resolution_sent_at,
     DROP COLUMN IF EXISTS resolution_channels,
-    DROP COLUMN IF EXISTS resolution_outcome;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+    DROP COLUMN IF EXISTS resolution_outcome;"),
 
-    /// <summary>
-    /// V191 (#5909): the Level 2 store. Drops the feedback table (the probe's newest sentinel), the threshold overrides, the
-    /// request's <c>practice_of</c> and the agent-actions switch, and puts the two level CHECKs back to their V184 shape
-    /// (route 0 to 1, request 1), so a re-run of V191 does everything again. Safe on a store that never had any of it.
-    /// </summary>
-    internal static async Task DropV191SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(@"
+        // /// V188 (#5821): the alert values on config.investigation_request_alerts, context_json (the probe's newest sentinel)
+        // and the other four. Safe on a store that never had them or has no investigation tables. A brief composed below V188
+        // reads every alert value from the history row, as it did before.
+        new(188, "hasInvestigationAlertFacts",
+            @"
+ALTER TABLE IF EXISTS config.investigation_request_alerts
+    DROP COLUMN IF EXISTS current_value,
+    DROP COLUMN IF EXISTS threshold_value,
+    DROP COLUMN IF EXISTS muted,
+    DROP COLUMN IF EXISTS detail_text,
+    DROP COLUMN IF EXISTS context_json;"),
+
+        // /// V189 (#5867): collect.query_store_compose_stamp_failures (the probe's newest sentinel), the compose builder's
+        // failure record. Safe on a store that never had it. Nothing before V189 reads it.
+        new(189, "hasComposeStampFailures",
+            "DROP TABLE IF EXISTS collect.query_store_compose_stamp_failures;"),
+
+        // /// V190 (#5857): size_estimated on collect.store_metrics (the probe's newest sentinel). Safe on a store that never
+        // had it. A store below V190 sizes every row exactly, as before.
+        new(190, "hasStoreMetricsSizeEstimated",
+            @"
+ALTER TABLE IF EXISTS collect.store_metrics
+    DROP COLUMN IF EXISTS size_estimated;"),
+
+        // /// V191 (#5909): the Level 2 store. Drops the feedback table (the probe's newest sentinel), the threshold overrides,
+        // the request's practice_of and the agent-actions switch, and puts the two level CHECKs back to their V184 shape (route
+        // 0 to 1, request 1), so a re-run of V191 does everything again. Safe on a store that never had any of it.
+        new(191, "hasAgentLevel2Store",
+            @"
 DROP TABLE IF EXISTS config.investigation_feedback;
 DROP TABLE IF EXISTS config.config_threshold_overrides;
 ALTER TABLE IF EXISTS config.investigation_requests
@@ -232,46 +247,19 @@ BEGIN
         ALTER TABLE config.investigation_requests DROP CONSTRAINT ck_investigation_requests_autonomy;
         ALTER TABLE config.investigation_requests ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level = 1);
     END IF;
-END $do$;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+END $do$;"),
+    ];
 
     /// <summary>
-    /// V190 (#5857): <c>size_estimated</c> on <c>collect.store_metrics</c> (the probe's newest sentinel). Safe on a store
-    /// that never had it. A store below V190 sizes every row exactly, as before.
+    /// Removes every probe sentinel above <paramref name="rungVersion"/>, newest first, so a store rewound to that rung reads as
+    /// that rung rather than as the newest sentinel left on disk. Each removal is safe on a store that never had the objects.
     /// </summary>
-    internal static async Task DropV190SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    internal static async Task DropSentinelsAboveAsync(NpgsqlConnection connection, int rungVersion, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(@"
-ALTER TABLE IF EXISTS collect.store_metrics
-    DROP COLUMN IF EXISTS size_estimated;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    /// <summary>
-    /// V188 (#5821): the alert values on <c>config.investigation_request_alerts</c>, <c>context_json</c> (the probe's newest
-    /// sentinel) and the other four. Safe on a store that never had them or has no investigation tables. A brief composed
-    /// below V188 reads every alert value from the history row, as it did before.
-    /// </summary>
-    internal static async Task DropV188SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(@"
-ALTER TABLE IF EXISTS config.investigation_request_alerts
-    DROP COLUMN IF EXISTS current_value,
-    DROP COLUMN IF EXISTS threshold_value,
-    DROP COLUMN IF EXISTS muted,
-    DROP COLUMN IF EXISTS detail_text,
-    DROP COLUMN IF EXISTS context_json;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    /// <summary>
-    /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c> (the probe's newest sentinel), the compose builder's
-    /// failure record. Safe on a store that never had it. Nothing before V189 reads it.
-    /// </summary>
-    internal static async Task DropV189SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand("DROP TABLE IF EXISTS collect.query_store_compose_stamp_failures;", connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        foreach (var rung in Ladder.Where(r => r.Version > rungVersion && r.DropSql is not null).OrderByDescending(r => r.Version))
+        {
+            await using var command = new NpgsqlCommand(rung.DropSql, connection);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 }

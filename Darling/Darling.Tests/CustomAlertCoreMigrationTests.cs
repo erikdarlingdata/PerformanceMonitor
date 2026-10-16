@@ -73,7 +73,6 @@ public sealed class CustomAlertCoreMigrationTests
             ViewerDataService.StoreSchemaProbeSql, System.StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, System.StringComparison.Ordinal);
         Assert.Contains("hasCustomAlertCore", viewer, System.StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);

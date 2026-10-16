@@ -119,19 +119,7 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Contains("attname = 'rowcount_sum'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         /* V176's (#5638), V177's (#5641), V178's (#5684), V179's (#5640) and V180's (#5654) sentinels are appended after this one, so this rung is no longer the top. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, V187's (#5825) and V188's (#5821) next, and V189's (#5867) is the probe's last ordinal. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();

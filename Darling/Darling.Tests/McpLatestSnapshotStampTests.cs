@@ -24,6 +24,7 @@ using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 using static Darling.Tests.RepoFile;
+using Shape = PerformanceMonitor.Common.LatestSnapshotShape;
 
 namespace Darling.Tests;
 
@@ -51,136 +52,59 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class McpLatestSnapshotStampTests
 {
-    /* ───────────────────────── the roster ───────────────────────── */
+    /* ───────────────────────── the declaration ───────────────────────── */
 
-    /// <summary>The three honest shapes. Named rather than inferred so a tool's disposition is a decision
-    /// written down here, and moving one is a visible edit.</summary>
-    public enum Shape
+    /// <summary>
+    /// Every latest-snapshot tool, read off the tools themselves (#5950): a tool declares it reads the latest
+    /// snapshot, and in which of the three shapes, with <see cref="ReadsLatestSnapshotAttribute"/> on its method.
+    /// This used to be a test-side roster of rows, so every new latest read edited the test; now the declaration
+    /// lives with the tool and the census follows it. The Lite file is found by the tool's name, because Lite
+    /// hosts the same tool names in differently-named files; a Darling tool with no Lite twin has an empty
+    /// <c>LiteFile</c> (<c>get_pg_logging_audit</c> and <c>get_pg_server_config</c>: Lite has no PostgreSQL
+    /// target). A Lite twin that does not carry the same attribute fails
+    /// <see cref="TheLiteTwin_DeclaresTheSameShape"/>.
+    /// </summary>
+    public static IReadOnlyList<(Type Tools, string ToolName, string LiteFile, Shape Shape)> LatestTools { get; } = DiscoverLatestTools();
+
+    private static (Type Tools, string ToolName, string LiteFile, Shape Shape)[] DiscoverLatestTools()
     {
-        /// <summary>Reads one snapshot, takes no window: <c>captured_at</c> only.</summary>
-        Stamped,
+        var found = new List<(Type, string, string, Shape)>();
+        foreach (var type in typeof(DarlingMcpDataTools).Assembly.GetTypes().OrderBy(t => t.FullName, StringComparer.Ordinal))
+        {
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                var declared = method.GetCustomAttribute<ReadsLatestSnapshotAttribute>();
+                var tool = method.GetCustomAttribute<McpServerToolAttribute>();
+                if (declared is null || tool?.Name is null)
+                {
+                    continue;
+                }
 
-        /// <summary><c>hours_back</c> bounds the SEARCH for the newest snapshot (described in those words) and
-        /// <c>as_of</c> anchors it: <c>captured_at</c> + <c>age_seconds</c>.</summary>
-        SearchBound,
+                found.Add((type, tool.Name, LiteFileOf(tool.Name), declared.Shape));
+            }
+        }
 
-        /// <summary><c>hours_back</c> is READ: the newest snapshot (<c>captured_at</c> + <c>age_seconds</c>)
-        /// beside a <c>window</c> aggregate over every snapshot in it.</summary>
-        Windowed,
+        return [.. found];
     }
 
-    /// <summary>Every latest-snapshot tool this lane stamped, by SKU file, with its shape. The Lite file and
-    /// name are given per row because Lite hosts the same tool names in differently-named files.</summary>
-    public static readonly (Type Tools, string ToolName, string LiteFile, Shape Shape)[] LatestTools =
-    [
-        (typeof(DarlingMcpDataTools), "get_memory_stats", "Lite/Mcp/McpMemoryTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpDataTools), "get_memory_clerks", "Lite/Mcp/McpMemoryTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpDataTools), "get_file_io_stats", "Lite/Mcp/McpIoTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpDataTools), "get_perfmon_stats", "Lite/Mcp/McpPerfmonTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpConfigTools), "get_server_config", "Lite/Mcp/McpConfigTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpConfigTools), "get_database_config", "Lite/Mcp/McpConfigTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpConfigTools), "get_trace_flags", "Lite/Mcp/McpConfigTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpConfigHistoryTools), "get_database_scoped_config", "Lite/Mcp/McpConfigTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpConfigHistoryTools), "get_query_store_health", "Lite/Mcp/McpConfigTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpPlanCacheSchedulerTools), "get_plan_cache_bloat", "Lite/Mcp/McpPlanCacheSchedulerTools.cs", Shape.SearchBound),
-        (typeof(DarlingMcpPlanCacheSchedulerTools), "get_cpu_scheduler_pressure", "Lite/Mcp/McpPlanCacheSchedulerTools.cs", Shape.SearchBound),
-        (typeof(DarlingMcpMemoryGrantTools), "get_resource_semaphore", "Lite/Mcp/McpMemoryTools.cs", Shape.Windowed),
-        (typeof(DarlingMcpMemoryGrantTools), "get_memory_grants", "Lite/Mcp/McpMemoryTools.cs", Shape.Windowed),
-        /* #3653: the four latest reads that stamped themselves BEFORE #3637's vocabulary, under the top-level
-           key `collection_time`. The stamp was always true; only the spelling predated the census, and this
-           file carried them as a named allowance (`StampedUnderCollectionTime`) because the Darling web surface
-           read one of them (get_session_stats, server-tabs.js' SESSION_STATS "Collected" tile) by the old key
-           and that file sat outside #3637's boundary. The tile moved with the rename, all four publish
-           `captured_at` on both SKUs, and the allowance is gone - a roster row each, held to the Stamped
-           dialect like every other latest read. */
-        (typeof(DarlingMcpObjectStatsTools), "get_database_sizes", "Lite/Mcp/McpServerInfoTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpJobTools), "get_running_jobs", "Lite/Mcp/McpJobTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpDataTools), "get_server_properties", "Lite/Mcp/McpServerInfoTools.cs", Shape.Stamped),
-        (typeof(DarlingMcpSessionTools), "get_session_stats", "Lite/Mcp/McpSessionTools.cs", Shape.Stamped),
-        /* #3880: the first of the three object-stats residuals below to leave that list. Erik's ruling on the
-           call #3878/#3879 recorded: #3879 replaced this read's per-database_name MAX groups with the
-           server's newest capture, which made it one honest instant for the first time, and a read that
-           resolves one instant can say which instant — so it is stamped rather than rostered as debt on
-           McpPayloadContractCensusTests' shrink-only list. Stamped on BOTH SKUs in one lane (the twin is
-           #3877's), so this is a pair row like every other, not an asymmetry. */
-        (typeof(DarlingMcpObjectStatsTools), "get_object_locking", "Lite/Mcp/McpObjectStatsTools.cs", Shape.Stamped),
-    ];
+    /// <summary>The repo-relative Lite file that hosts a tool name, or empty when Lite has no such tool.</summary>
+    private static string LiteFileOf(string toolName)
+    {
+        var marker = $"[McpServerTool(Name = \"{toolName}\")";
+        foreach (var file in System.IO.Directory.EnumerateFiles(RepoFile.PathTo("Lite/Mcp"), "*.cs").Order(StringComparer.Ordinal))
+        {
+            if (System.IO.File.ReadAllText(file).Contains(marker, StringComparison.Ordinal))
+            {
+                return "Lite/Mcp/" + System.IO.Path.GetFileName(file);
+            }
+        }
 
-    /// <summary>
-    /// The latest reads this lane did NOT reach: the object-stats family reads the latest DAILY snapshot and
-    /// publishes no stamp at all on either SKU. Named here so the census fails the day one of them gains
-    /// <c>captured_at</c> without leaving this list, and so the gap is on the record rather than invisible.
-    /// Reported to #3541 as the A10 residual.
-    ///
-    /// <para><b>#3880 took the first of the three</b>, and the route it took is the route the other two have.
-    /// This comment used to carry a parenthetical — <c>DarlingObjectStatsReader.IndexLockingSql</c> "takes MAX
-    /// per database, not one instant" — that was true when written and was itself the defect #3878 removed: a
-    /// per-<c>database_name</c> MAX group is not one instant, which is precisely why the read kept returning
-    /// databases renamed away a month earlier (#3876). All four Darling locking reads now anchor on
-    /// <c>(SELECT MAX(collection_time) … WHERE server_id = $1)</c>, making the read one instant like the rest
-    /// of the family — exactly the property a <c>captured_at</c> stamp needs to be truthful about. #3879 left
-    /// it here anyway, unstamped, which is all this list ever claimed; Erik ruled the other way in #3880, the
-    /// SQL projects its anchor column, <c>get_object_locking</c> publishes <c>captured_at</c> on both SKUs,
-    /// and the tool is a <see cref="LatestTools"/> row above.</para>
-    ///
-    /// <para>The two that remain are an ordinary A10 residual each, not a different rule:
-    /// <c>get_index_usage</c> and <c>get_table_index_sizes</c> read the same daily snapshots through anchors
-    /// of the same shape, and the same one-line projection would stamp them. They stay because nobody has
-    /// measured what their callers read, not because the pattern does not reach them.</para>
-    /// </summary>
-    public static readonly string[] UnstampedLatestReadsPendingA10 =
-    [
-        "get_index_usage", "get_table_index_sizes",
-    ];
+        return "";
+    }
 
-    /// <summary>
-    /// Tools the reader-call sweep sees because they call a <c>*Latest*Async</c> reader as an INPUT to a read
-    /// that is not itself a latest snapshot: the two CPU rankings read the newest server_properties row for the
-    /// core count their attribution divides by; get_plan_corrections reads the newest automatic-tuning settings
-    /// beside its paged correction history; audit_config reads the newest server_properties row for the Edition
-    /// string it echoes (#5633 item 10) beside its analysis-fact checks, which are the analysis pass's, not a snapshot; get_sweep_reports reads the newest fleet sweep, a worklist rather than
-    /// a per-server snapshot; get_pvs_stats mixes a latest per-database snapshot (stamped per row) with a trend,
-    /// and is the named exclusion <see cref="AsOfWindowAnchorTests"/> carries for that reason. None of them is a
-    /// latest-snapshot tool, and none gets a <c>captured_at</c> here — the control below fails if one gains it,
-    /// so the decision is revisited rather than drifted into.
-    /// </summary>
-    public static readonly string[] LatestLookupInsideAnotherRead =
-    [
-        "audit_config", "get_plan_corrections", "get_pvs_stats", "get_sweep_reports", "get_top_procedures_by_cpu", "get_top_queries_by_cpu",
-    ];
-
-    /// <summary>get_server_summary carries THREE clocks by name (<c>cpu_captured_at</c>, <c>memory_captured_at</c>,
-    /// <c>last_collection</c>) rather than one <c>captured_at</c>, because its two latest figures come from two
-    /// collectors that can be arbitrarily far apart. <see cref="ServerSummary_NamesItsThreeClocks_OnBothSkus"/>
-    /// holds the shape; the sweep only needs to know it is accounted for.</summary>
-    public static readonly string[] ThreeClockTools = ["get_server_summary"];
-
-    /// <summary>
-    /// Stamped latest reads that exist on ONE SKU. <see cref="LatestTools"/> is a roster of PAIRS — every entry
-    /// names the Lite file its twin lives in and <see cref="LatestToolBodies"/> reads both — so a Darling-only
-    /// tool cannot sit in it without a Lite file to point at. These are held to the Stamped dialect by
-    /// <see cref="DarlingOnlyStampedTools_KeepTheStampedDialect"/> below with the SAME three assertions the
-    /// roster's Stamped entries get (a <c>captured_at</c> on the payload, LATEST IS A TIME in the description,
-    /// neither knob in the signature) — only the Lite half is absent, because the SKU is.
-    ///
-    /// <para><c>get_pg_logging_audit</c> (#3607) judges seven logging GUCs from the newest
-    /// <c>pg_server_config</c> snapshot; Lite has no PostgreSQL target, so there is no twin for the roster to
-    /// pair it with. The same architectural boundary <c>CrossAppMcpToolInventoryPinTests</c> records for every
-    /// <c>get_pg_*</c> read.</para>
-    ///
-    /// <para><c>get_pg_server_config</c> (#3653, the #3541 A10 residual) reads the SAME newest snapshot through
-    /// <c>DarlingPgServerConfigReader.GetCurrentConfigAsync</c>. It sat OUTSIDE this census because
-    /// <see cref="LatestReaderCall"/> did not match a <c>GetCurrent*Async</c> reader — the gap the sibling lane
-    /// that added this list recorded rather than closed. The regex now names the family and the tool carries
-    /// the row's own <c>collection_time</c> as <c>captured_at</c>; <c>ConfigChangesSql</c>'s caller
-    /// (<c>get_pg_server_config_changes</c>) is a windowed history read, not a latest read, and the pattern
-    /// does not reach it.</para>
-    /// </summary>
-    public static readonly (Type Tools, string ToolName)[] DarlingOnlyStamped =
-    [
-        (typeof(DarlingMcpPgLoggingAuditTools), "get_pg_logging_audit"),
-        (typeof(DarlingMcpPgServerStateTools), "get_pg_server_config"),
-    ];
+    /// <summary>The declared tools that exist on both products; the rest are Darling-only.</summary>
+    private static IEnumerable<(Type Tools, string ToolName, string LiteFile, Shape Shape)> PairedLatestTools() =>
+        LatestTools.Where(t => t.LiteFile.Length > 0);
 
     /* ───────────────────────── the discriminators ───────────────────────── */
 
@@ -256,6 +180,11 @@ public sealed class McpLatestSnapshotStampTests
             Assert.DoesNotContain("hours_back", darling);
             Assert.DoesNotContain("as_of", darling);
 
+            if (liteFile.Length == 0)
+            {
+                continue;
+            }
+
             var lite = LiteParamNames(liteFile, name);
             Assert.DoesNotContain("hours_back", lite);
             Assert.DoesNotContain("as_of", lite);
@@ -263,28 +192,17 @@ public sealed class McpLatestSnapshotStampTests
     }
 
     /// <summary>
-    /// The Stamped dialect, held on the Darling-only reads with the roster's own three assertions — the stamp
-    /// on the payload, LATEST IS A TIME in the description, neither knob in the signature. Read from the
-    /// Darling source only, because there is no Lite half to read.
+    /// A tool that exists on both products declares the same shape on both. The Darling half is the attribute
+    /// the census reflects; the Lite half is the attribute on the Lite method, read from source because
+    /// Darling.Tests does not reference the Lite assembly.
     /// </summary>
     [Fact]
-    public void DarlingOnlyStampedTools_KeepTheStampedDialect()
+    public void TheLiteTwin_DeclaresTheSameShape()
     {
-        Assert.NotEmpty(DarlingOnlyStamped);
-
-        foreach (var (type, name) in DarlingOnlyStamped)
+        foreach (var (_, name, liteFile, shape) in PairedLatestTools())
         {
-            var body = ToolBody(ReadRepoFileLf(DarlingFileOf(type).Split('/')), name);
-            Assert.True(CapturedAtKey.IsMatch(Strip(body)),
-                $"Darling {name}: no `captured_at =` on the payload — a latest read that never says when it was captured");
-
-            var description = ToolMethod(type, name).GetCustomAttribute<DescriptionAttribute>()!.Description;
-            Assert.Contains("captured_at", description, StringComparison.Ordinal);
-            Assert.Contains("LATEST IS A TIME", description, StringComparison.Ordinal);
-
-            var parameters = ToolMethod(type, name).GetParameters().Select(p => p.Name).ToArray();
-            Assert.DoesNotContain("hours_back", parameters);
-            Assert.DoesNotContain("as_of", parameters);
+            var liteBody = ToolBody(ReadRepoFileLf(liteFile.Split('/')), name, includePrecedingAttributes: true);
+            Assert.Contains($"[ReadsLatestSnapshot(LatestSnapshotShape.{shape})]", liteBody, StringComparison.Ordinal);
         }
     }
 
@@ -296,7 +214,7 @@ public sealed class McpLatestSnapshotStampTests
     [Fact]
     public void SearchBoundTools_DescribeHoursBackAsTheSearchSpan_AndPublishAge_OnBothSkus()
     {
-        foreach (var (type, name, liteFile, _) in LatestTools.Where(t => t.Shape == Shape.SearchBound))
+        foreach (var (type, name, liteFile, _) in PairedLatestTools().Where(t => t.Shape == Shape.SearchBound))
         {
             var method = ToolMethod(type, name);
             var hours = method.GetParameters().Single(p => p.Name == "hours_back");
@@ -316,7 +234,7 @@ public sealed class McpLatestSnapshotStampTests
     [Fact]
     public void WindowedTools_PublishTheWindowBesideTheSnapshot_OnBothSkus()
     {
-        foreach (var (type, name, liteFile, _) in LatestTools.Where(t => t.Shape == Shape.Windowed))
+        foreach (var (type, name, liteFile, _) in PairedLatestTools().Where(t => t.Shape == Shape.Windowed))
         {
             var hours = ToolMethod(type, name).GetParameters().Single(p => p.Name == "hours_back");
             Assert.Contains(WindowedWords, hours.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
@@ -338,7 +256,7 @@ public sealed class McpLatestSnapshotStampTests
     [Fact]
     public void TheSameToolName_TakesTheSameParameters_OnBothSkus()
     {
-        foreach (var (type, name, liteFile, _) in LatestTools)
+        foreach (var (type, name, liteFile, _) in PairedLatestTools())
         {
             var darling = ToolMethod(type, name).GetParameters()
                 .Where(p => p.GetCustomAttribute<DescriptionAttribute>() is not null)
@@ -422,24 +340,20 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Contains("LATEST interval only", description, StringComparison.Ordinal);
     }
 
-    /* ───────────────────────── the sweep: no latest read escapes the roster ───────────────────────── */
+    /* ───────────────────────── the sweep: no stamp without a declaration ───────────────────────── */
 
     /// <summary>
-    /// Every Darling tool whose body calls a <c>*Latest*Async</c> / <c>*Snapshot*Async</c> / <c>Current</c>-family
-    /// reader, or whose reader const is a latest-snapshot read, is in the roster or a named residual — and
-    /// every allowance entry is still needed. A new latest read must pick a shape here rather than ship
-    /// unstamped. Since #3653 no tool body anywhere publishes the retired top-level <c>collection_time</c>
-    /// stamp: the <c>StampedUnderCollectionTime</c> allowance that held four pre-vocabulary reads is gone,
-    /// and the discriminator that used to admit them now refuses everyone.
+    /// A Darling tool whose body calls a <c>*Latest*Async</c> / <c>*Snapshot*Async</c> / <c>Current</c>-family
+    /// reader, or whose reader const is a latest-snapshot read, and publishes a <c>captured_at</c> stamp must
+    /// carry <see cref="ReadsLatestSnapshotAttribute"/>, so the shape assertions above hold it to its dialect
+    /// (#5950: the declaration replaces the old test-side roster and its allowance lists). A tool that stamps
+    /// without the attribute fails by name; a tool that carries the attribute is checked by every test above.
+    /// No tool body anywhere publishes the retired top-level <c>collection_time</c> stamp (#3653).
     /// </summary>
     [Fact]
-    public void EveryLatestReadTool_IsInTheRoster_OrANamedAllowance_AndEveryAllowanceIsStillNeeded()
+    public void EveryTool_ThatStampsALatestSnapshot_DeclaresIt()
     {
-        var rostered = LatestTools.Select(t => t.ToolName).ToHashSet(StringComparer.Ordinal);
-        var residualsSeen = new HashSet<string>(StringComparer.Ordinal);
-        var lookupsSeen = new HashSet<string>(StringComparer.Ordinal);
-        var threeClocksSeen = new HashSet<string>(StringComparer.Ordinal);
-        var darlingOnlySeen = new HashSet<string>(StringComparer.Ordinal);
+        var declared = LatestTools.Select(t => t.ToolName).ToHashSet(StringComparer.Ordinal);
         var examined = 0;
 
         foreach (var (file, source) in AllDarlingToolSources())
@@ -457,64 +371,22 @@ public sealed class McpLatestSnapshotStampTests
                 }
 
                 examined++;
-                /* The retired spelling is refused on EVERY latest-reading body, rostered or not: a rostered
-                   tool that kept collection_time beside captured_at would be publishing one instant under
-                   two names, which is the vocabulary drift #3637 closed. */
+                /* The retired spelling is refused on EVERY latest-reading body, declared or not: a tool that
+                   kept collection_time beside captured_at would be publishing one instant under two names,
+                   which is the vocabulary drift #3637 closed. */
                 Assert.False(TopLevelCollectionTimeKey.IsMatch(body),
-                    $"{file} {toolName}: publishes a top-level collection_time stamp — the census's spelling is captured_at (#3637; the last four holdouts moved in #3653)");
+                    $"{file} {toolName}: publishes a top-level collection_time stamp - the census's spelling is captured_at (#3637; the last four holdouts moved in #3653)");
 
-                if (rostered.Contains(toolName))
+                if (CapturedAtKey.IsMatch(body))
                 {
-                    continue;
+                    Assert.True(declared.Contains(toolName),
+                        $"{file} {toolName}: publishes captured_at from a latest-snapshot reader but does not carry [ReadsLatestSnapshot(...)] - declare its shape so the stamp dialect is held");
                 }
-
-                if (UnstampedLatestReadsPendingA10.Contains(toolName, StringComparer.Ordinal))
-                {
-                    Assert.False(CapturedAtKey.IsMatch(body),
-                        $"{file} {toolName}: now publishes captured_at — move it into the roster and out of UnstampedLatestReadsPendingA10");
-                    residualsSeen.Add(toolName);
-                    continue;
-                }
-
-                if (LatestLookupInsideAnotherRead.Contains(toolName, StringComparer.Ordinal))
-                {
-                    Assert.False(CapturedAtKey.IsMatch(body),
-                        $"{file} {toolName}: now publishes captured_at — it has become a latest-snapshot tool; give it a Shape and remove it from LatestLookupInsideAnotherRead");
-                    lookupsSeen.Add(toolName);
-                    continue;
-                }
-
-                if (ThreeClockTools.Contains(toolName, StringComparer.Ordinal))
-                {
-                    Assert.Contains("cpu_captured_at =", body, StringComparison.Ordinal);
-                    Assert.Contains("memory_captured_at =", body, StringComparison.Ordinal);
-                    threeClocksSeen.Add(toolName);
-                    continue;
-                }
-
-                if (DarlingOnlyStamped.Any(t => t.ToolName == toolName))
-                {
-                    Assert.True(CapturedAtKey.IsMatch(body),
-                        $"{file} {toolName}: listed as a Darling-only STAMPED read but publishes no captured_at");
-                    darlingOnlySeen.Add(toolName);
-                    continue;
-                }
-
-                Assert.Fail($"{file} {toolName}: calls a latest-snapshot reader and is in no list here — give it a Shape in LatestTools (and stamp it) or name it as an allowance with its reason");
             }
         }
 
-        /* Population controls: a sweep that matched nothing passes for free, and an allowance nobody needs is a
-           widened exemption. 26 latest-reading tool bodies at the time of writing. */
-        Assert.True(examined >= 24, $"only {examined} latest-reading tool bodies were found; the reader-call pattern has stopped matching");
-        Assert.True(LatestLookupInsideAnotherRead.ToHashSet(StringComparer.Ordinal).SetEquals(lookupsSeen),
-            "LatestLookupInsideAnotherRead no longer matches what the sweep finds: " + string.Join(", ", LatestLookupInsideAnotherRead.Except(lookupsSeen)));
-        Assert.True(ThreeClockTools.ToHashSet(StringComparer.Ordinal).SetEquals(threeClocksSeen),
-            "ThreeClockTools no longer matches what the sweep finds: " + string.Join(", ", ThreeClockTools.Except(threeClocksSeen)));
-        Assert.True(DarlingOnlyStamped.Select(t => t.ToolName).ToHashSet(StringComparer.Ordinal).SetEquals(darlingOnlySeen),
-            "DarlingOnlyStamped no longer matches what the sweep finds: " + string.Join(", ", DarlingOnlyStamped.Select(t => t.ToolName).Except(darlingOnlySeen)));
-        Assert.True(UnstampedLatestReadsPendingA10.ToHashSet(StringComparer.Ordinal).SetEquals(residualsSeen),
-            "UnstampedLatestReadsPendingA10 no longer matches what the sweep finds: " + string.Join(", ", UnstampedLatestReadsPendingA10.Except(residualsSeen)));
+        /* A sweep that matched nothing passes for free. */
+        Assert.True(examined > 0, "no latest-reading tool bodies were found; the reader-call pattern has stopped matching");
     }
 
     /// <summary>
@@ -735,7 +607,10 @@ public sealed class McpLatestSnapshotStampTests
         foreach (var (type, name, liteFile, shape) in LatestTools)
         {
             yield return ($"Darling {name}", ToolBody(ReadRepoFileLf(DarlingFileOf(type).Split('/')), name), shape);
-            yield return ($"Lite {name}", ToolBody(ReadRepoFileLf(liteFile.Split('/')), name), shape);
+            if (liteFile.Length > 0)
+            {
+                yield return ($"Lite {name}", ToolBody(ReadRepoFileLf(liteFile.Split('/')), name), shape);
+            }
         }
     }
 
@@ -780,13 +655,25 @@ public sealed class McpLatestSnapshotStampTests
 
     /// <summary>The source from one tool's <c>[McpServerTool(Name = "…")]</c> attribute to the next tool's, or
     /// to the end of the file — the span that holds its description, parameters and payload.</summary>
-    private static string ToolBody(string source, string toolName)
+    private static string ToolBody(string source, string toolName, bool includePrecedingAttributes = false)
     {
         var marker = $"[McpServerTool(Name = \"{toolName}\")";
         var start = source.IndexOf(marker, StringComparison.Ordinal);
         Assert.True(start >= 0, $"no tool named {toolName} in the source");
         var next = source.IndexOf("[McpServerTool(", start + marker.Length, StringComparison.Ordinal);
-        return next < 0 ? source[start..] : source[start..next];
+        var body = next < 0 ? source[start..] : source[start..next];
+
+        /* The next tool's [ReadsLatestSnapshot(...)] line sits ABOVE its [McpServerTool(, so it trails this
+           body: cut it off so a tool's body is only its own. */
+        body = Regex.Replace(body, @"[ \t]*\[ReadsLatestSnapshot\([^\n]*\]\s*\z", "");
+        if (includePrecedingAttributes)
+        {
+            var lineStart = source.LastIndexOf('\n', Math.Max(0, start - 1)) + 1;
+            var prior = source.LastIndexOf('\n', Math.Max(0, lineStart - 2)) + 1;
+            body = source[prior..start] + body;
+        }
+
+        return body;
     }
 
     /// <summary>The tool's description: the attribute's literal, or the const it names (the aligned tools

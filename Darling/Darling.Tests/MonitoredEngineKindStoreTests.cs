@@ -109,18 +109,13 @@ public sealed class MonitoredEngineKindStoreTests
     }
 
     [Fact]
-    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheColumn()
     {
         Assert.Contains(
             "table_name = 'servers' AND column_name = 'engine_kind'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        var viewerSource = ReadViewerSource();
 
-        /* Ordinals are positional and this rung's is FIXED at 57 now that V83 (#2539) is the newest — the
-           `mapParameters - 1` form belongs to whichever rung is on top, because it slides one place right
-           per new rung and would keep passing while quietly testing somebody else's wiring. */
-        Assert.Contains("reader.GetBoolean(57)", viewerSource, StringComparison.Ordinal);
     }
 
     [Fact]

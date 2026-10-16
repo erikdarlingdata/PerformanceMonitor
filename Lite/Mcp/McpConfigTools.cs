@@ -9,6 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpConfigTools
 {
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_server_config"), Description("Gets the current SQL Server instance configuration (sys.configurations). Shows all sp_configure settings with configured and in-use values. Useful for checking CTFP, MAXDOP, max memory, and other instance-level settings right now (unlike get_server_config_changes, which shows only what changed between connect snapshots). LATEST IS A TIME: configuration is captured when the collector CONNECTS, not on a schedule, so 'current' here means 'as of the last capture' - captured_at is that instant, and a value can be days old on a server the monitor has stayed connected to.")]
     public static async Task<string> GetServerConfig(
         LocalDataService dataService,
@@ -50,6 +51,7 @@ public sealed class McpConfigTools
         }
     }
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_database_config"), Description("Gets database-level configuration for all databases (sys.databases). Shows recovery model, RCSI, auto-shrink, auto-close, Query Store, compatibility level, page verify, and other settings. Critical for identifying misconfigured databases. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of, and a database created or altered since is not reflected until the next connect.")]
     public static async Task<string> GetDatabaseConfig(
         LocalDataService dataService,
@@ -114,6 +116,7 @@ public sealed class McpConfigTools
         }
     }
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of.")]
     public static async Task<string> GetDatabaseScopedConfig(
         LocalDataService dataService,
@@ -166,6 +169,7 @@ public sealed class McpConfigTools
         }
     }
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_query_store_health"), Description("Per-database Query Store health: actual/desired state (desired READ_WRITE, actual READ_ONLY = the storage-cap failure). query_capture_mode (churn knob): ALL (2016/17 default) churns most; AUTO (2019+ default) skips minor ones; CUSTOM tunes AUTO; NONE stops new capture. wait_stats_capture_mode: ON default, OFF empties per-query waits. null on either: pre-rung row, or pre-2017 engine for wait_stats - never OFF. No verdict rendered. No rows = unavailable or not_collected; an unmatched database_name gives database_count 0. LATEST IS A TIME: captured_at is the newest hourly capture. <<GUIDE>> Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, the runtime-stats interval length, and — the two trailing fields on every row since V137 / Lite v64 — query_capture_mode and wait_stats_capture_mode. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. CAPTURE MODE IS THE PLAN-CHURN KNOB: query_capture_mode is the one option on this row that names a plan-churn factory. ALL captures every query the engine compiles, one-off ad hoc statements included — on an ad hoc workload each distinct text is a new query with a new plan, so the store fills toward max_storage_size_mb, size-based cleanup cycles, and the READ_ONLY cap hit that readonly_reason decodes follows; ALL was the engine default on SQL Server 2016 and 2017. AUTO skips insignificant queries (the engine's own thresholds over a day: fewer than 30 executions, under 1 s of compile CPU and under 100 ms of execution CPU) and has been the default since SQL Server 2019 and on Azure SQL Database. CUSTOM (2019+) is AUTO with operator-set thresholds — the capture_policy_* knobs, which this row does not collect, so CUSTOM here says the thresholds were tuned, not to what. NONE stops capturing NEW queries while the store keeps collecting compile and runtime statistics for the ones it already holds. wait_stats_capture_mode ON (the default) records per-plan wait statistics into every runtime-stats interval, at a per-execution bookkeeping cost and more store bytes per interval; OFF saves both and leaves the store's per-query wait view empty. Both are the DMV's *_desc spelling verbatim. null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017 (the column does not exist there) — never OFF. Consumed by the Viewer's Query Store grid and, next, by get_query_store_clutter as its churn × ALL 'switch to AUTO' arm; this tool reports the modes and renders no verdict on them. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
     public static async Task<string> GetQueryStoreHealth(
         LocalDataService dataService,
@@ -238,6 +242,7 @@ public sealed class McpConfigTools
             runFacts.NoTraceFlagsEnabled()
                 ?? "No trace flags found (none enabled, or the config collector has not run yet).");
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these flags are as of; a flag turned on or off since is not reflected until the next connect.")]
     public static async Task<string> GetTraceFlags(
         LocalDataService dataService,

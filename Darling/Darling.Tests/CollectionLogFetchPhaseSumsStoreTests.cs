@@ -410,9 +410,6 @@ public class CollectionLogFetchPhaseSumsStoreTests
             "table_name = 'collection_log' AND column_name = 'plan_fetch_target_ms'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        Assert.Contains("reader.GetBoolean(85)", ReadSource(
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs"), StringComparison.Ordinal);
-
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)

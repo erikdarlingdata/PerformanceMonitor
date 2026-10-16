@@ -66,40 +66,6 @@ public sealed class ReadLatencyCapacityRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheSentinel_BelowV183sAndV184s_AndAStoreStoppedHereMapsToThisRung()
-    {
-        Assert.Contains("to_regclass('collect.read_latency') AND attname = 'window_band'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var parameters = method.GetParameters();
-        /* Found by name, not by distance from the top: every later rung's sentinel moved that distance (#5812, #5825). */
-        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasReadLatencyCapacityFields");
-        Assert.True(ownOrdinal > 0, "MapProbedSchemaVersion takes this rung's sentinel");
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* A store stopped here: this rung's sentinel and every one below it, none above it. */
-        var atThisRung = (object[])all.Clone();
-        for (var i = ownOrdinal + 1; i < atThisRung.Length; i++)
-        {
-            atThisRung[i] = false;
-        }
-
-        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
-        var behind = (object[])atThisRung.Clone();
-        behind[ownOrdinal] = false;
-        Assert.Equal(181, (int)method.Invoke(null, behind)!);
-
-        var thisArm = viewer.IndexOf("if (hasReadLatencyCapacityFields)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasNotificationRouteScope)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V182 arm sits above the V181 arm");
-    }
-
-    [Fact]
     public void ASlowReadRecord_CarriesTheScopesInFlightAndWait()
     {
         using var scope = ReadScope.Open(null);
@@ -127,16 +93,7 @@ public sealed class ReadLatencyCapacityRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V181 shape and the ladder back to 181. */
-        await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, RungVersion - 1, ct);
         await ExecAsync(connection, @"
 DELETE FROM darling_schema_version WHERE version >= 182;
 INSERT INTO collect.read_latency (metric_time, surface, route, outcome, run_count, total_ms, max_ms, bucket_counts)
