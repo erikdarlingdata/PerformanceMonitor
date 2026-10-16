@@ -311,12 +311,15 @@ public sealed class QueryTagStoreLiveTests
 
     private static async Task AssertOnlyTheKeptServerRemainsAsync(NpgsqlConnection store, CancellationToken ct)
     {
-        string[] perServer = ["config.query_tag_assignments", "config.query_tag_rules", "config.query_tag_map", "collect.query_tag_sightings"];
+        string[] perServer = ["config.query_tag_assignments", "config.query_tag_rules", "config.query_tag_map"];
         foreach (var table in perServer)
         {
             Assert.Equal("0", await ScalarAsync(store, $"SELECT count(*) FROM {table} WHERE server_id = {ServerB}", ct));
             Assert.Equal("1", await ScalarAsync(store, $"SELECT count(*) FROM {table} WHERE server_id = {ServerA}", ct));
         }
+
+        /* The sightings are collect history: a removal leaves them to retention, like every other collect table. */
+        Assert.Equal("1", await ScalarAsync(store, $"SELECT count(*) FROM collect.query_tag_sightings WHERE server_id = {ServerB}", ct));
 
         Assert.Equal("1|1|1", await ScalarAsync(store,
             "SELECT (SELECT count(*) FROM config.query_tags) || '|' || (SELECT count(*) FROM config.query_tag_assignments WHERE server_id IS NULL) || '|' || (SELECT count(*) FROM config.query_tag_rules WHERE server_id IS NULL)", ct));
@@ -466,6 +469,7 @@ public sealed class QueryTagStoreGrantLiveTests
             await AssertDeniedAsync(mcp, "UPDATE config.query_tag_map SET source = 'rule'", ct);
             await AssertDeniedAsync(mcp, "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key) VALUES (9, 'hash', '0x09')", ct);
             await AssertDeniedAsync(mcp, "UPDATE collect.query_tag_sightings SET seen_count = 5", ct);
+            await AssertDeniedAsync(mcp, "DELETE FROM collect.query_tag_sightings", ct);
             await AssertDeniedAsync(mcp, "UPDATE config.query_tag_state SET rules_version = 0", ct);
 
             await using var viewer = await LoginAsync(scratch, "viewer", viewerPassword, ct);
@@ -480,6 +484,7 @@ public sealed class QueryTagStoreGrantLiveTests
             await AssertDeniedAsync(viewer, "UPDATE config.query_tag_rules SET enabled = false", ct);
             await AssertDeniedAsync(viewer, $"INSERT INTO config.query_tag_map (server_id, key_kind, key, tag_id, source) VALUES (9, 'hash', '0x09', {tag}, 'rule')", ct);
             await AssertDeniedAsync(viewer, "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key) VALUES (9, 'hash', '0x09')", ct);
+            await AssertDeniedAsync(viewer, "DELETE FROM collect.query_tag_sightings", ct);
             await AssertDeniedAsync(viewer, "UPDATE config.query_tag_state SET rules_version = 0", ct);
         });
     }
@@ -508,7 +513,7 @@ public sealed class QueryTagStoreGrantLiveTests
                 }
 
                 Assert.Equal("0", await ScalarAsync(owner,
-                    $"SELECT (SELECT count(*) FROM config.query_tag_assignments WHERE server_id = {server}) + (SELECT count(*) FROM config.query_tag_rules WHERE server_id = {server}) + (SELECT count(*) FROM config.query_tag_map WHERE server_id = {server}) + (SELECT count(*) FROM collect.query_tag_sightings WHERE server_id = {server})", ct));
+                    $"SELECT (SELECT count(*) FROM config.query_tag_assignments WHERE server_id = {server}) + (SELECT count(*) FROM config.query_tag_rules WHERE server_id = {server}) + (SELECT count(*) FROM config.query_tag_map WHERE server_id = {server})", ct));
                 Assert.NotEqual(version, await ScalarAsync(owner, "SELECT rules_version FROM config.query_tag_state", ct));
             }
         });

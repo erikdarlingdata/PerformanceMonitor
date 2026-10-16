@@ -25,10 +25,10 @@ public static class QueryTagSchema
     public const int TextSampleMaxLength = 4000;
 
     /// <summary>
-    /// The statements that clear one server's rows from the per-server query-tag tables, each taking <c>$1</c> = server_id.
+    /// The statements that clear one server's rows from the per-server query-tag config tables, each taking <c>$1</c> = server_id.
     /// Run at both server-removal paths in the removal's own transaction. The reason is <see cref="ServerTagStore.ClearForServerSql"/>'s:
     /// <c>server_id</c> is a deterministic hash of host, database and read-only intent, so a removed-then-re-added server would
-    /// otherwise get its old assignments, rules, sightings and map rows back. Only that server's rows go: an assignment or rule
+    /// otherwise get its old assignments, rules and map rows back. The sightings are not here: they live in collect, which no role but the owner writes, and like every other collect table a removed server's rows are left to retention (DarlingRetention). Only that server's rows go: an assignment or rule
     /// whose <c>server_id</c> is NULL applies to every server and stays. The tags themselves are fleet-wide and stay.
     /// </summary>
     public static readonly string[] ClearForServerSqls =
@@ -36,7 +36,6 @@ public static class QueryTagSchema
         "DELETE FROM config.query_tag_assignments WHERE server_id = $1",
         "DELETE FROM config.query_tag_rules WHERE server_id = $1",
         "DELETE FROM config.query_tag_map WHERE server_id = $1",
-        "DELETE FROM collect.query_tag_sightings WHERE server_id = $1",
     ];
 
     /// <summary>The DDL of the rung. Every statement is idempotent, so a second run changes nothing.</summary>

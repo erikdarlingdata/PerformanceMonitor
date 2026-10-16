@@ -1798,11 +1798,12 @@ END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
 --     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
---     them), so mcp holds only DELETE on those two, which remove_server runs to clear a removed server's rows (a server_id is
---     a hash, so orphaned rows would come back when the server is re-added). viewer gets DELETE on the four per-server tables
---     (assignments, rules, map, sightings) for server removal and nothing else on the query-tag tables: no INSERT or UPDATE,
+--     them), so mcp holds only DELETE on the map, which remove_server runs to clear a removed server's map rows (a server_id is
+--     a hash, so orphaned rows would come back when the server is re-added). viewer gets DELETE on the three per-server config
+--     tables (assignments, rules, map) for server removal and nothing else on the query-tag tables: no INSERT or UPDATE,
 --     and no write on the tags themselves. admin (the desktop Viewer's default identity) already holds the config writes
---     through the blanket grant of step 3; its one collect grant is the same DELETE on the sightings table. The identity
+--     through the blanket grant of step 3. No role holds a write on the sightings in collect: like every other collect table,
+--     a removed server's sightings are left to the owner's retention pass. The identity
 --     columns need no sequence grant, and the rules_version bump on a write is a SECURITY DEFINER trigger function, so no
 --     role is granted anything on config.query_tag_state. The tables are created by V192: on a store below it the block warns
 --     and skips, so the rest of the script still runs; re-run the script once the service has migrated the store to V192.
@@ -1821,12 +1822,9 @@ BEGIN
    GRANT INSERT, UPDATE, DELETE ON config.query_tag_assignments TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.query_tag_rules TO mcp;
    GRANT DELETE ON config.query_tag_map TO mcp;
-   GRANT DELETE ON collect.query_tag_sightings TO mcp;
    GRANT DELETE ON config.query_tag_assignments TO viewer;
    GRANT DELETE ON config.query_tag_rules TO viewer;
    GRANT DELETE ON config.query_tag_map TO viewer;
-   GRANT DELETE ON collect.query_tag_sightings TO viewer;
-   GRANT DELETE ON collect.query_tag_sightings TO admin;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the

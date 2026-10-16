@@ -491,7 +491,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     await clear.ExecuteNonQueryAsync();
                 }
 
-                /* #5977: the server's query-tag assignments, rules, map rows and sightings go in the same transaction, for the
+                /* #5977: the server's query-tag assignments, rules and map rows go in the same transaction, for the
                    same reason (server_id is a hash, so orphaned rows would come back when the server is re-added). Only this
                    server's rows: an all-server assignment or rule (server_id NULL) and the tags themselves stay. */
                 foreach (var queryTagSql in QueryTagSchema.ClearForServerSqls)
