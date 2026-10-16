@@ -135,6 +135,56 @@ SELECT CONVERT(nvarchar(max), @ring_xml);";
     }
 
     /// <summary>
+    /// The other three collectors that read a ring buffer (system health, blocked process, long-query completions) run their
+    /// real batch, fragment included, against a live server. system_health exists on every instance; the other two name an own
+    /// session that does not exist, which must read as no rows rather than an error.
+    /// </summary>
+    [Fact]
+    public async Task TheOtherRingBufferCollectorsBatches_RunAgainstALiveServer()
+    {
+        var master = ConnectionString("pm-5948-batches-live-test");
+        Assert.SkipWhen(master is null, SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        CollectorContext Context(string? alwaysOnSession = null, string? longQuerySession = null) => new()
+        {
+            ServerId = 1,
+            ServerName = "live-sql",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = null!,
+            State = CollectorContext.NoState,
+            AlwaysOnSessionName = alwaysOnSession,
+            LongQuerySessionName = longQuerySession,
+            Watermark = DateTime.UtcNow.AddMinutes(-10),
+        };
+
+        var queries = new[]
+        {
+            SystemHealthEventsCollector.Instance.BuildQuery(Context()),
+            BlockedProcessReportCollector.Instance.BuildQuery(Context(
+                AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, suffix, AlwaysOnXeSessionKind.BlockedProcess))),
+            LongQueryCompletionsCollector.Instance.BuildQuery(Context(
+                null, LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, suffix))),
+        };
+
+        foreach (var query in queries)
+        {
+            await using var connection = new SqlConnection(master);
+            await connection.OpenAsync(ct);
+            await using var command = SqlServerTargetProvider.Instance.CreateCommand(query, connection, 60);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            do
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                }
+            }
+            while (await reader.NextResultAsync(ct));
+        }
+    }
+
+    /// <summary>
     /// The reproduction: two tables (and their primary keys) named with an ampersand, a real deadlock between them, and the
     /// deadlocks collector's REAL batch and <c>ReadAsync</c> over the session that captured it.
     /// </summary>
