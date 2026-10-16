@@ -148,8 +148,10 @@ internal sealed class PendingNoteRow
         MetricDisplay = note.MetricName ?? "";
         FamilyDisplay = note.Family ?? "";
         RequestDisplay = note.SourceRequestId?.ToString("D") ?? "";
-        ProposedDisplay = note.ProposedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-        ExpiresDisplay = note.ExpiresAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        ProposedLocal = note.ProposedAtUtc.ToLocalTime();
+        ExpiresLocal = note.ExpiresAtUtc.ToLocalTime();
+        ProposedDisplay = ProposedLocal.ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        ExpiresDisplay = ExpiresLocal.ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
     }
 
     public long NoteId { get; }
@@ -160,6 +162,12 @@ internal sealed class PendingNoteRow
     public string FamilyDisplay { get; }
     public string RequestDisplay { get; }
     public string ProposedDisplay { get; }
+
+    /// <summary>The time the Proposed column sorts by (#5903): the column shows text, and sorting that text is not sorting the time.</summary>
+    public DateTime ProposedLocal { get; }
+
+    /// <summary>The time the Expires column sorts by (#5903), for the same reason as <see cref="ProposedLocal"/>.</summary>
+    public DateTime ExpiresLocal { get; }
 
     /// <summary>When the note stops reaching a brief: approving it counts only before then (an expired note is not listed).</summary>
     public string ExpiresDisplay { get; }
