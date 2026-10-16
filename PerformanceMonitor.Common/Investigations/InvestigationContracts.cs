@@ -175,14 +175,18 @@ public sealed record InvestigationJournalRow(
 /// <summary>What <see cref="IInvestigationRequestStore.ReadReportsAsync"/> read; <see cref="Brief"/> only for one request.
 /// <see cref="RequestsTruncated"/> says the window held more requests than the page (the reports and the journal are
 /// those of the page's requests only), and <see cref="JournalTruncated"/> that those requests held more journal rows
-/// than the journal page (#5834).</summary>
+/// than the journal page (#5834). <see cref="Feedback"/> is the people's feedback on the page's reports and
+/// <see cref="FamilyCounts"/> the false-positive counts per family over the same window (#5913); both are null from a store
+/// that keeps no feedback (Lite's).</summary>
 public sealed record InvestigationReportsRead(
     IReadOnlyList<InvestigationRequestRow> Requests,
     IReadOnlyList<InvestigationReportRow> Reports,
     IReadOnlyList<InvestigationJournalRow> Journal,
     string? Brief,
     bool RequestsTruncated = false,
-    bool JournalTruncated = false);
+    bool JournalTruncated = false,
+    IReadOnlyList<InvestigationFeedbackRow>? Feedback = null,
+    IReadOnlyList<InvestigationFamilyCounts>? FamilyCounts = null);
 
 /// <summary>
 /// One request as the long-poll's catch-up read returns it (#5822): the request id, its route, the server name, the family

@@ -138,6 +138,90 @@ SELECT (SELECT state FROM config.investigation_requests) || '|' || (SELECT state
         });
     }
 
+    /* #5913: the request an agent claims and reports, so there is a report to give feedback on. */
+    private static async Task ReportAsync(NpgsqlDataSource owner, Guid requestId, string verdict, CancellationToken ct)
+    {
+        var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
+        var claim = await store.ClaimAsync(requestId, "agent-a", ct);
+        Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+            requestId, claim.ClaimId!.Value, "agent-a", 1, verdict, "root cause", true, "summary", "[{\"tool\":\"get_blocking\"}]"), ct));
+    }
+
+    [Fact]
+    public async Task AnAdminSeat_GivesFeedbackOnAReport_ReplacesItOnASecondSave_AndSeesItInTheListAndTheCounts()
+    {
+        await RunAsRoleAsync("admin", async (viewer, owner, requestId, ct) =>
+        {
+            var noReport = await viewer.RecordInvestigationFeedbackAsync(requestId, "wrong", null, null, null, "tester", ct);
+            Assert.Equal(InvestigationFeedbackOutcome.NoReport, noReport.Outcome);
+            Assert.Empty((await viewer.GetInvestigationFeedbackListAsync(30, ct)).Rows);
+
+            /* A window outside 1 to 365 days is refused, never shortened or lengthened (#5913, REVIEW-TRAPS: refuse, don't clamp). */
+            foreach (var days in new[] { -1, 0, 366, 4000 })
+            {
+                await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => viewer.GetInvestigationFeedbackListAsync(days, ct));
+                await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => viewer.GetInvestigationFamilyCountsAsync(days, ct));
+            }
+
+            Assert.Empty((await viewer.GetInvestigationFeedbackListAsync(365, ct)).Rows);
+            Assert.Empty((await viewer.GetInvestigationFeedbackListAsync(1, ct)).Rows);
+
+            await ReportAsync(owner, requestId, "real", ct);
+            var first = await viewer.RecordInvestigationFeedbackAsync(
+                requestId, "wrong", "false_positive", "look at the job history", "it is the nightly job", "DOMAIN\\Tester", ct);
+            Assert.Equal(InvestigationFeedbackOutcome.Recorded, first.Outcome);
+            var replaced = await viewer.RecordInvestigationFeedbackAsync(
+                requestId, "partly", "false_positive", null, "mostly the nightly job", "domain\\tester", ct);
+            Assert.Equal(InvestigationFeedbackOutcome.Replaced, replaced.Outcome);
+            var other = await viewer.RecordInvestigationFeedbackAsync(requestId, "right", null, null, null, "dana", ct);
+            Assert.Equal(InvestigationFeedbackOutcome.Recorded, other.Outcome);
+
+            var (rows, truncated) = await viewer.GetInvestigationFeedbackListAsync(30, ct);
+            Assert.False(truncated);
+            var listed = Assert.Single(rows);
+            Assert.Equal(requestId, listed.RequestId);
+            Assert.Equal(2, listed.Feedback.Count);
+            var mine = Assert.Single(listed.Feedback, f => f.Author.StartsWith("domain_tester", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal("partly", mine.Verdict);
+            Assert.Equal("mostly the nightly job", mine.Comment);
+            Assert.Equal(InvestigationFeedbackRules.AuthorFromIdentity("domain\\tester"), mine.Author);
+
+            /* dana's later record has no corrected verdict, so the newest correction (the first login's) settles it. */
+            var family = Assert.Single(await viewer.GetInvestigationFamilyCountsAsync(30, ct));
+            Assert.Equal("blocking", family.Family);
+            Assert.Equal(1, family.Reported);
+            Assert.Equal(1, family.WithFeedback);
+            Assert.Equal(0, family.AgentFalsePositives);
+            Assert.Equal(1, family.FalsePositives);
+
+            var refused = await Assert.ThrowsAsync<ArgumentException>(
+                () => viewer.RecordInvestigationFeedbackAsync(requestId, "fine", null, null, null, "tester", ct));
+            Assert.Contains("verdict", refused.Message, StringComparison.Ordinal);
+            await Assert.ThrowsAsync<ArgumentException>(
+                () => viewer.RecordInvestigationFeedbackAsync(requestId, "wrong", null, null, null, "  ", ct));
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_feedback", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AViewerSeat_ReadsTheFeedbackList_AndASaveRefusesAsReadOnly_WritingNothing()
+    {
+        await RunAsRoleAsync("viewer", async (viewer, owner, requestId, ct) =>
+        {
+            await ReportAsync(owner, requestId, "real", ct);
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(
+                new InvestigationFeedbackSubmission(requestId, "right", null, null, null, "dana"), ct);
+
+            var listed = Assert.Single((await viewer.GetInvestigationFeedbackListAsync(30, ct)).Rows);
+            Assert.Equal("dana", Assert.Single(listed.Feedback).Author);
+            Assert.Single(await viewer.GetInvestigationFamilyCountsAsync(30, ct));
+
+            await Assert.ThrowsAsync<ViewerReadOnlyException>(
+                () => viewer.RecordInvestigationFeedbackAsync(requestId, "wrong", null, null, null, "tester", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_feedback", ct));
+        });
+    }
+
     private static async Task RunAsRoleAsync(
         string managedRole, Func<ViewerDataService, NpgsqlDataSource, Guid, CancellationToken, Task> body)
     {
