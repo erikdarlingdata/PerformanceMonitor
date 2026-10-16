@@ -579,13 +579,6 @@ SELECT EXISTS
     public static string EdgeMarginSqlFor(TimeSpan margin) =>
         $"interval '{(long)Math.Ceiling(margin.TotalMinutes)} minutes'";
 
-    /// <summary>#5882: turns plain index scans off for the rest of the transaction (<c>SET LOCAL</c>, gone at its end). Bitmap
-    /// index scans are a separate setting and stay on. The reads that take a narrower edge margin run it first: with the range
-    /// that short the planner otherwise prefers a plain scan of <c>first_execution_time_idx</c>, which walks every server's rows
-    /// in the hours it covers, over the <c>(server_id, first_execution_time)</c> bitmap. Named, so its command keeps the shape
-    /// the read-deadline census recognizes.</summary>
-    public const string SetLocalNoIndexScanSql = "SET LOCAL enable_indexscan = off";
-
     /// <summary>#5882: <paramref name="sql"/> with every use of <see cref="PurgeEdgeMarginSql"/> replaced by
     /// <paramref name="marginSql"/> (<see cref="EdgeMarginSqlFor"/>). The margin is a literal in the statement text, not a
     /// parameter, so the planner sees the range it will scan and every caller that binds the statement by position is unchanged.</summary>
@@ -593,9 +586,12 @@ SELECT EXISTS
         sql.Replace(PurgeEdgeMarginSql, marginSql, StringComparison.Ordinal);
 
     /// <summary>
-    /// The longest <c>interval_length_minutes</c> the server's databases have reported (<c>v_query_store_health</c>, one
-    /// row per database per capture) over [readStart - 2 days, end + 1 day], and how many captures and NULL or
-    /// non-positive lengths that range holds, and the oldest capture in it. The lookback is a day of interval plus a day of
+    /// The longest positive <c>interval_length_minutes</c> the server's databases have reported (<c>v_query_store_health</c>, one
+    /// row per database per capture) over [readStart - 2 days, end + 1 day], and how many positive-length captures that range
+    /// holds, how many NULL or non-positive lengths it holds for a database that HAS wide rows (the collector writes 0 for a
+    /// NULL length; a database with no wide rows cannot contribute to
+    /// the read, so its non-positive row is ignored and does not pin the server at 26 hours), and the oldest positive-length
+    /// capture in it. The lookback is a day of interval plus a day of
     /// capture cadence; the day past the end covers a change the last capture before the end did not see. The fifth column is
     /// true when a database the server has wide rows for has no capture in that range, so its interval length is unknown and the
     /// longest of the others bounds nothing for it. The databases come from a skip scan of <c>ux_query_store_interval_wide</c>
@@ -628,35 +624,41 @@ SELECT EXISTS
             WHERE p.database_name IS NOT NULL
         )
         SELECT
-            MAX(interval_length_minutes),
-            COUNT(*),
-            COUNT(*) FILTER (WHERE interval_length_minutes IS NULL OR interval_length_minutes <= 0),
-            MIN(capture_time),
+            MAX(h.interval_length_minutes) FILTER (WHERE h.interval_length_minutes > 0),
+            COUNT(*) FILTER (WHERE h.interval_length_minutes > 0),
+            COUNT(*) FILTER
+            (
+                WHERE (h.interval_length_minutes IS NULL OR h.interval_length_minutes <= 0)
+                AND   d.database_name IS NOT NULL
+            ),
+            MIN(h.capture_time) FILTER (WHERE h.interval_length_minutes > 0),
             EXISTS
             (
                 SELECT 1
-                FROM wide_databases AS d
-                WHERE d.database_name IS NOT NULL
+                FROM wide_databases AS d2
+                WHERE d2.database_name IS NOT NULL
                 AND   NOT EXISTS
                 (
                     SELECT 1
-                    FROM v_query_store_health AS h
-                    WHERE h.server_id = $1
-                    AND   h.database_name = d.database_name
-                    AND   h.capture_time >= $2 - interval '2 days'
-                    AND   h.capture_time <= $3 + interval '1 day'
+                    FROM v_query_store_health AS h2
+                    WHERE h2.server_id = $1
+                    AND   h2.database_name = d2.database_name
+                    AND   h2.capture_time >= $2 - interval '2 days'
+                    AND   h2.capture_time <= $3 + interval '1 day'
                 )
             )
-        FROM v_query_store_health
-        WHERE server_id = $1
-        AND   capture_time >= $2 - interval '2 days'
-        AND   capture_time <= $3 + interval '1 day'
+        FROM v_query_store_health AS h
+        LEFT JOIN wide_databases AS d
+          ON d.database_name = h.database_name
+        WHERE h.server_id = $1
+        AND   h.capture_time >= $2 - interval '2 days'
+        AND   h.capture_time <= $3 + interval '1 day'
         """;
 
     /// <summary>
     /// The edge margin (<see cref="EdgeMarginFor"/>) for a read of <paramref name="readStart"/> through
     /// <paramref name="end"/> on one server (#5882), or <see cref="PurgeEdgeMargin"/> whenever the server's longest interval
-    /// cannot be trusted: no capture in the range, a NULL or non-positive length, a database with wide rows and no
+    /// cannot be trusted: no positive-length capture in the range, a NULL or non-positive length for a database with wide rows, a database with wide rows and no
     /// capture in the health range (its length is unknown and may exceed the longest the others report), or no capture as old as a day before the
     /// read starts (an interval that began then, or one backfilled from before the monitor connected, may have run under a
     /// setting the captures never saw). Exact otherwise: every stored row has

@@ -15,6 +15,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -38,6 +39,8 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
     private const int MixedHealth = 4;
     private const int YoungHealth = 5;
     private const int UnreportedDatabase = 6;
+    private const int ZeroLengthWithoutWideRows = 7;
+    private const int ZeroLengthWithWideRows = 8;
     private const int Top = 20;
     private const long StraddlerPlan = 9999;
     private const long UnreportedStraddlerPlan = 9998;
@@ -62,7 +65,6 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
         await SeedAsync(connection, ct);
 
         var wide = DarlingDataReader.QueryStoreTopTableSql;
-        var wideDaily = DarlingDataReader.QueryStoreTopDailyTableSql;
 
         /* The resolved floors: three hours at 60-minute intervals, four at 120, the full 26 wherever the length is unknown. */
         var hourlyMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, Hourly, WindowStart, WindowEnd, 60, ct);
@@ -87,21 +89,6 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
             Assert.Equal(wideRows, narrowRows);
         }
 
-        /* The read's own transaction (read-only, repeatable read, plain index scans off for it) takes the narrow statement and
-           returns the same rows; the setting ends with the transaction. */
-        await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct))
-        {
-            await ExecAsync(connection, "SET TRANSACTION READ ONLY", ct);
-            await ExecAsync(connection, QueryStoreIntervalWide.SetLocalNoIndexScanSql, ct);
-            Assert.Equal("off", await ScalarAsync(connection, "SHOW enable_indexscan", ct));
-            Assert.Equal(
-                await RunAsync(connection, wide, TwoHour, ct),
-                await RunAsync(connection, QueryStoreIntervalWide.WithEdgeMargin(wide, QueryStoreIntervalWide.EdgeMarginSqlFor(twoHourMargin)), TwoHour, ct));
-            await transaction.RollbackAsync(ct);
-        }
-
-        Assert.Equal("on", await ScalarAsync(connection, "SHOW enable_indexscan", ct));
-
         /* The straddling plan: its only interval began at 10:00, two hours before the window, and was collected at 12:02. */
         var straddlerKey = (await RunAsync(connection, QueryStoreIntervalWide.WithEdgeMargin(wide, QueryStoreIntervalWide.EdgeMarginSqlFor(twoHourMargin)), TwoHour, ct))[0];
         Assert.StartsWith($"a|{StraddlerPlan}|{StraddlerPlan}|", straddlerKey, StringComparison.Ordinal);
@@ -125,10 +112,80 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
         Assert.StartsWith($"c|{UnreportedStraddlerPlan}|{UnreportedStraddlerPlan}|", guardedRows[0], StringComparison.Ordinal);
         Assert.Equal(await RunAsync(connection, wide, UnreportedDatabase, ct), guardedRows);
 
-        /* The daily arm's two edge reads take the same floor; with no built day it returns the wide read's answer. */
-        var narrowDaily = QueryStoreIntervalWide.WithEdgeMargin(wideDaily, QueryStoreIntervalWide.EdgeMarginSqlFor(twoHourMargin));
-        Assert.NotEqual(wideDaily, narrowDaily);
-        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, narrowDaily, StringComparison.Ordinal);
+        /* A non-positive length counts only for a database that has wide rows. Server 7: hourly database "a" with a 60-minute
+           health row, plus a tempdb-style health row of length 0 with no wide rows: the 3-hour margin, not 26. Server 8: the
+           same, but the zero-length database "b" owns wide rows, so its length is unknown and the read keeps the full 26 hours. */
+        Assert.Equal(TimeSpan.FromHours(3),
+            await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, ZeroLengthWithoutWideRows, WindowStart, WindowEnd, 60, ct));
+        Assert.Equal(QueryStoreIntervalWide.PurgeEdgeMargin,
+            await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, ZeroLengthWithWideRows, WindowStart, WindowEnd, 60, ct));
+    }
+
+    /// <summary>
+    /// The Viewer's Queries grid (<c>ViewerDataService.TryGetQueryStoreTopQueriesFromTableAsync</c>, reached through
+    /// <c>GetQueryStoreTopQueriesWithReachAsync</c>) resolves the margin with <c>literalEndUtc ?? DateTime.UtcNow</c>. For an
+    /// open-ended preset and for a custom range, the narrowed read returns the rows, in the order, the 26-hour floor returns
+    /// (the same store once its health rows are gone), and it really ran the narrowed statement: a row the 26-hour floor admits
+    /// and the 4-hour floor drops is missing from the narrowed read.
+    /// </summary>
+    [Fact]
+    public async Task TheViewerGrid_WithANarrowedMargin_ReturnsTheWideFloorsRows_ForAnOpenEndedPresetAndACustomRange()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5882 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedAsync(connection, ct);
+
+        /* The gate's inputs: a coverage claim from the start of the year, applied through the same instant. */
+        await ExecAsync(connection, $"""
+            INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES ({Hourly}, 'srv{Hourly}', TRUE), ({TwoHour}, 'srv{TwoHour}', TRUE);
+            INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through)
+            VALUES ({Hourly}, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
+                   ({TwoHour}, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00')
+            """, ct);
+
+        Assert.Equal(TimeSpan.FromHours(4), await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, TwoHour, WindowStart, WindowEnd, 60, ct));
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        async Task<List<string>> GridAsync(DateTime? literalEnd)
+        {
+            var (rows, plan) = await viewer.GetQueryStoreTopQueriesWithReachAsync(TwoHour, WindowStart, WindowEnd, Top, null, literalEnd, ct);
+            Assert.NotNull(plan);   /* the table served, so the margin was resolved */
+            return rows.Select(r => string.Join('|', r.DatabaseName, r.QueryId, r.PlanId, r.AvgDurationMs, r.TotalExecutions)).ToList();
+        }
+
+        var narrowOpen = await GridAsync(null);
+        var narrowCustom = await GridAsync(WindowEnd);
+        Assert.Equal(Top, narrowOpen.Count);
+        Assert.StartsWith($"a|{StraddlerPlan}|{StraddlerPlan}|", narrowOpen[0], StringComparison.Ordinal);
+
+        /* A row the 4-hour floor drops and the 26-hour floor admits: collected 13:02, first executed 20 hours earlier. It breaks
+           the invariant a 2-hour server keeps, so only the narrowed statement can miss it; it ranks first when read. */
+        await ExecAsync(connection, $"""
+            INSERT INTO collect.query_store_interval_wide
+            (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+             last_execution_time, query_hash, query_plan_hash, execution_count, avg_duration_us, avg_cpu_time_us,
+             avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, runtime_stats_interval_id, interval_start_time_utc)
+            VALUES (timestamp '{WindowStart:yyyy-MM-dd} 13:02', {TwoHour}, 'a', 9990, 9990, 'Regular',
+                    timestamp '{WindowStart.AddHours(-20):yyyy-MM-dd HH:mm}', timestamp '{WindowStart:yyyy-MM-dd} 12:55', 'qhx', 'phx', 2000, 90000000, 1, 1, 0, 0, 1, 2,
+                    timestamp '{WindowStart.AddHours(-20):yyyy-MM-dd HH:mm}')
+            """, ct);
+        Assert.Equal(narrowOpen, await GridAsync(null));
+        Assert.Equal(narrowCustom, await GridAsync(WindowEnd));
+
+        /* No health rows: the server falls back to the 26-hour floor, the old read. */
+        await ExecAsync(connection, $"DELETE FROM collect.query_store_health WHERE server_id = {TwoHour}", ct);
+        Assert.Equal(QueryStoreIntervalWide.PurgeEdgeMargin, await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, TwoHour, WindowStart, WindowEnd, 60, ct));
+        foreach (var (wideRows, narrowRows) in new[] { (await GridAsync(null), narrowOpen), (await GridAsync(WindowEnd), narrowCustom) })
+        {
+            Assert.StartsWith("a|9990|9990|", wideRows[0], StringComparison.Ordinal);
+            Assert.Equal(narrowRows.Take(Top - 1), wideRows.Skip(1));
+        }
     }
 
     private static async Task<List<string>> RunAsync(NpgsqlConnection connection, string sql, int server, CancellationToken ct)
@@ -211,14 +268,26 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
                     timestamp '{WindowStart:yyyy-MM-dd} 08:30')
             """, ct);
 
+        /* Servers 7 and 8: hourly wide rows for database "a" (and "b" on server 8), one plan, enough for the skip scan to see the
+           databases; the read is never run on them, only the margin is resolved. */
+        await ExecAsync(connection, $"""
+            INSERT INTO collect.query_store_interval_wide {columns}
+            SELECT t.h + interval '62 minutes', s.s, s.d, 1, 1, 'Regular', t.h, t.h + interval '55 minutes', 'qh1', 'ph1', 10, 1100, 100, 1, 0, 0, 1,
+                   CAST(extract(epoch FROM t.h) AS bigint) / 3600, t.h
+            FROM generate_series(timestamp '{FirstHour:yyyy-MM-dd HH:mm}', timestamp '{WindowEnd.AddHours(-1):yyyy-MM-dd HH:mm}', interval '1 hour') AS t(h)
+            CROSS JOIN (VALUES ({ZeroLengthWithoutWideRows}, 'a'), ({ZeroLengthWithWideRows}, 'a'), ({ZeroLengthWithWideRows}, 'b')) AS s(s, d)
+            """, ct);
+
         /* Health captures: one per database every six hours from two days before the first interval. Server 1: 60, server 2: 120,
-           server 4: 60 for a and 1440 for b, server 5: first capture at the window start, server 3: none, server 6: 60 for a only. */
+           server 4: 60 for a and 1440 for b, server 5: first capture at the window start, server 3: none, server 6: 60 for a only, server 7: 60 for a and 0 for tempdb (no wide rows), server 8: 60 for a and 0 for b (wide rows). */
         await ExecAsync(connection, $"""
             INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
             SELECT row_number() OVER (), c.c, s.s, 'srv' || s.s, s.d_, s.len
             FROM generate_series(timestamp '{FirstHour.AddDays(-2):yyyy-MM-dd HH:mm}', timestamp '{WindowEnd:yyyy-MM-dd HH:mm}', interval '6 hours') AS c(c)
             CROSS JOIN (VALUES ({Hourly}, 60, 'a'), ({Hourly}, 60, 'b'), ({TwoHour}, 120, 'a'), ({TwoHour}, 120, 'b'),
-                               ({MixedHealth}, 60, 'a'), ({MixedHealth}, 1440, 'b'), ({UnreportedDatabase}, 60, 'a')) AS s(s, len, d_)
+                               ({MixedHealth}, 60, 'a'), ({MixedHealth}, 1440, 'b'), ({UnreportedDatabase}, 60, 'a'),
+                               ({ZeroLengthWithoutWideRows}, 60, 'a'), ({ZeroLengthWithoutWideRows}, 0, 'tempdb'),
+                               ({ZeroLengthWithWideRows}, 60, 'a'), ({ZeroLengthWithWideRows}, 0, 'b')) AS s(s, len, d_)
             """, ct);
         await ExecAsync(connection, $"""
             INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)

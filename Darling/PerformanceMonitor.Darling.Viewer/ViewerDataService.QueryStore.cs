@@ -536,16 +536,14 @@ public sealed partial class ViewerDataService
                TopFill's final limit; each fill round used to re-read the server's window from the wide table. */
             List<ViewerQueryStoreRow> rows;
 
-            /* #5882: the same shorter first_execution_time floor, and plain index scans off for this statement, as the MCP
-               read (DarlingDataReader.TryGetQueryStoreTopFromTableAsync explains both). An open end reads to now. */
+            /* #5882: the same shorter first_execution_time floor as the MCP read (DarlingDataReader.TryGetQueryStoreTopFromTableAsync
+               explains it), one extra round trip per table-served read. An open end reads to now. */
             var topSql = QueryStoreTopTableSql;
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
                 connection, serverId, plan.ReadStart, literalEndUtc ?? DateTime.UtcNow, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
             {
                 topSql = QueryStoreIntervalWide.WithEdgeMargin(topSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
-                await using var noIndexScan = new Npgsql.NpgsqlCommand(QueryStoreIntervalWide.SetLocalNoIndexScanSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-                await noIndexScan.ExecuteNonQueryAsync(cancellationToken);
             }
 
             await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
