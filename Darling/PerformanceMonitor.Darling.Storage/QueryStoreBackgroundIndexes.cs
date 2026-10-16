@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The Query Store read indexes that are built in the background after the service is up rather than by a
-/// migration rung (#4605's BRIN, #4952's, #5507's and #5807's btrees), and the one piece of machinery they share: the state read,
+/// migration rung (#4605's BRIN, #4952's, #5507's, #5807's and #5957's btrees), and the one piece of machinery they share: the state read,
 /// the build-or-skip decision, the invalid-leftover drop, the build and the delayed start.
 ///
 /// <para><b>Why not a migration rung.</b> Migrations run in one transaction and block startup, and
@@ -72,6 +72,9 @@ public static class QueryStoreBackgroundIndexes
 
     /// <summary>Name of the btree that lets the one-query history read seek its query on the wide table (#5807).</summary>
     public const string WideDatabaseQueryFirstExecIndexName = "collect.ix_query_store_interval_wide_db_query_first_exec";
+
+    /// <summary>Name of the btree that lets the PLAN_REGRESSION drill-down seek its offenders on the latest table (#5957).</summary>
+    public const string LatestDatabaseQueryFirstExecIndexName = "collect.ix_query_store_interval_latest_db_query_first_exec";
 
     /// <summary>What the ensure does about one index.</summary>
     public enum IndexAction
@@ -199,6 +202,39 @@ public static class QueryStoreBackgroundIndexes
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_db_query_first_exec;",
         IndexDefinition: "(server_id, database_name, query_id, first_execution_time)");
 
+    /// <summary>
+    /// A btree on <c>collect.query_store_interval_latest (server_id, database_name, query_id, first_execution_time)</c>
+    /// (#5957), the latest table's twin of <see cref="WideDatabaseQueryFirstExec"/>, built per partition by the partitioned
+    /// path (the table is day-partitioned like the wide one).
+    ///
+    /// <para><b>Why.</b> The PLAN_REGRESSION drill-down's table read (<c>PgDrillDownCollector.RegressedQueriesTableSql</c>)
+    /// re-runs the detection for the fact's top offenders only (#3902): <c>server_id</c> by equality, <c>database_name</c>
+    /// and <c>query_id</c> by <c>= ANY</c>, and <c>first_execution_time</c> bounded below over the 14-day comparison window.
+    /// In <c>ux_query_store_interval_latest</c> <c>query_id</c> is the fifth column, behind <c>runtime_stats_interval_id</c>
+    /// and <c>plan_id</c>, and <see cref="LatestServerFirstExec"/> narrows on the server and the time only, so the read took
+    /// every row the server had in 14 days and kept five queries' rows: 50,464 pages read from disk per call on a 42-server
+    /// store, run on almost every pass of every server. This index puts the equalities first and the bound last, so the read
+    /// is one range per offender per partition the bound reaches.</para>
+    ///
+    /// <para><b>Write cost.</b> The table already carries the unique key, V153's <c>first_execution_time</c> index and
+    /// <see cref="LatestServerFirstExec"/>; this is a fourth btree of four narrow columns, maintained on each new interval row.
+    /// An update of an existing interval stays heap-only (HOT): all four columns are part of the upsert's identity, so
+    /// <c>ON CONFLICT ... DO UPDATE</c> rewrites none of them. Pinned by
+    /// <c>QueryStoreBackgroundIndexesLiveTests.TheLatestUpsertsWholeSetList_StaysHotWithTheLatestBtreePresent_AndNotWithABtreeOnASetColumn</c>,
+    /// which builds every spec in <see cref="All"/> and asserts the whole SET list updates HOT (a btree on a SET column is
+    /// its control); the wide census does not cover this table.</para>
+    ///
+    /// <para><b>Until it is built</b> the read is unchanged: the statement names no index, so the planner keeps its old plan
+    /// on a store that lacks this one.</para>
+    /// </summary>
+    public static readonly IndexSpec LatestDatabaseQueryFirstExec = new(
+        LatestDatabaseQueryFirstExecIndexName,
+        "collect.query_store_interval_latest",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_latest_db_query_first_exec "
+        + "ON collect.query_store_interval_latest (server_id, database_name, query_id, first_execution_time);",
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_latest_db_query_first_exec;",
+        IndexDefinition: "(server_id, database_name, query_id, first_execution_time)");
+
     /// <summary>Every background index, in the order the one delayed task ensures them.</summary>
     public static readonly IReadOnlyList<IndexSpec> All = new[]
     {
@@ -206,6 +242,7 @@ public static class QueryStoreBackgroundIndexes
         WideServerFirstExec,
         LatestServerFirstExec,
         WideDatabaseQueryFirstExec,
+        LatestDatabaseQueryFirstExec,
     };
 
     /* One read of everything the decision needs. The names are bound, never interpolated. */
