@@ -57,7 +57,7 @@ public sealed class DarlingMcpThresholdOverrideTools
         "Darling/tools/provision-roles.sql re-run (it is idempotent; single-table grants only reach a store when the script " +
         "runs again) as a superuser. Managed and compose stores grant it themselves on start. Call again after the script has run.";
 
-    [McpServerTool(Name = ToolName), Description(
+    [McpServerTool(Name = "set_alert_threshold_override"), Description(
         "Sets or clears a threshold for ONE server (or one database on it), leaving the global value alone. Changes the " +
         "monitoring store only; the service picks it up within its reload interval. <<GUIDE>> " +
         "key is a tunable integer threshold named as get_alert_settings names it (for example cpu.threshold_percent, " +
@@ -65,7 +65,9 @@ public sealed class DarlingMcpThresholdOverrideTools
         "and where it comes from. value is an integer inside the same bounds the global setting has. clear: true removes the " +
         "override so the global value applies again. database_name applies only to pvs.* and file_growth.rise_mb / " +
         "file_growth.volume_percent. Refused: a key outside that list, a self_alerts.*, enable, cooldown or route key, an " +
-        "out-of-bounds value. To silence an alert, mute it: an override moves a threshold and never turns an alert off. " +
+        "out-of-bounds value. To silence an alert, mute it. An agent cannot set a threshold to the value that turns its alert off (the top of the " +
+        "key's range, or zero for the low_disk.* keys); that value is refused as threshold_disables_alert. A very high count below " +
+        "the top is allowed, and its alert still fires if that count is reached. " +
         "set_by names who made the change (writes arm; default mcp). On an investigation request's agent arm, agent_action is " +
         "REQUIRED and the change is for the request's server only; the writes arm ignores agent_action. " +
         "status ok, cleared, refused, precondition (the store role lacks the grant; the message names provision-roles.sql).")]
@@ -177,7 +179,7 @@ public sealed class DarlingMcpThresholdOverrideTools
                 key = wire,
                 database = database,
                 value = clear ? (int?)null : value,
-                previous_override = applied.Previous is { } p ? (int?)(int)p : null,
+                previous_override = applied.Previous,
                 set_by = applied.SetBy,
                 request_id = applied.RequestId,
                 message = clear
@@ -188,6 +190,13 @@ public sealed class DarlingMcpThresholdOverrideTools
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
             return McpHelpers.Status("precondition", PreconditionMessage);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+        {
+            /* The only foreign key on the table is the server's registry row: the server was removed from the configuration and
+               the reload that drops it from collect.servers has not run yet, so the name still resolved. */
+            return Refused("server_not_registered",
+                "That server is no longer in the monitored-server configuration, so it cannot hold an override. Check list_servers; the registry catches up within its reload interval.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -203,16 +212,16 @@ public sealed class DarlingMcpThresholdOverrideTools
     }
 
     /// <summary>
-    /// Check 7, the kind rule: an agent never turns an alert off by a threshold. A value no reading can reach (a percent bar at
-    /// 100 for CPU and tempdb, or the integer ceiling) is a mute by another name, so the agent is told to mute instead.
+    /// Check 7, the kind rule: an agent turns an alert off only by a mute, never by a threshold. Every key has one off end
+    /// (<see cref="DarlingThresholdKeys.Entry.OffEnd"/>: the top of its range, or zero for the Low Disk bars) and the agent
+    /// is refused a value AT that end, whatever the key. There is no cap and no band: a very high count one below the top
+    /// still fires when that count is reached, and is allowed.
     /// </summary>
     internal static AgentActionRefusal? AgentKindRule(DarlingThresholdKeys.Entry entry, int value)
     {
-        var unreachable = value == int.MaxValue
-            || (value == 100 && (entry.Wire == "cpu.threshold_percent" || entry.Wire == "tempdb_space.threshold_percent"));
-        return unreachable
+        return entry.OffEnd is { } off && value == off
             ? new AgentActionRefusal("threshold_disables_alert",
-                $"{value.ToString(CultureInfo.InvariantCulture)} on '{entry.Wire}' would turn the alert off. A threshold override only moves the bar; to silence an alert, create a mute rule.")
+                $"{value.ToString(CultureInfo.InvariantCulture)} on '{entry.Wire}' is the value that turns the alert off. A threshold override only moves the bar; to silence an alert, create a mute rule.")
             : null;
     }
 
@@ -261,22 +270,32 @@ public sealed class DarlingMcpThresholdOverrideTools
             note = PreconditionMessage;
         }
 
+        /* One number per key, read the way the engine reads it (#5916): the global value and the value with this server's
+           override applied each go through the same pair clamp the enclosing get_alert_settings payload applies, so an
+           override that inverts a warning/critical pair shows the pair the engine evaluates, not the stored one. */
+        int? ServerOverride(string wire)
+        {
+            foreach (var r in rows)
+            {
+                if (r.Database is null && r.Key == wire)
+                    return (int)r.Value;
+            }
+
+            return null;
+        }
+
         var thresholds = new System.Collections.Generic.List<object>();
         foreach (var entry in DarlingThresholdKeys.Entries)
         {
-            var global = GlobalValue(s, entry.Wire);
-            double? server = null;
-            foreach (var r in rows)
-            {
-                if (r.Database is null && r.Key == entry.Wire)
-                    server = r.Value;
-            }
+            var global = GlobalValueAsEngineReadsIt(s, entry.Wire);
+            var server = ServerOverride(entry.Wire);
+            var effective = Evaluated(entry.Wire, w => ServerOverride(w) ?? GlobalValue(s, w));
 
             thresholds.Add(new
             {
                 key = entry.Wire,
                 global_value = global,
-                effective_value = server ?? global,
+                effective_value = effective,
                 source = server is null ? "global" : "server_override",
                 database_scope = entry.Scope == PerformanceMonitor.Alerting.AlertThresholdScope.ServerAndDatabase
             });
@@ -305,6 +324,24 @@ public sealed class DarlingMcpThresholdOverrideTools
         };
     }
 
+    /// <summary>The global value of <paramref name="wire"/> as the engine evaluates it: the stored column, with the two
+    /// warning/critical pairs through their evaluator's clamp. The one definition both the <c>get_alert_settings</c> payload
+    /// and the per-server view read.</summary>
+    internal static int GlobalValueAsEngineReadsIt(DarlingAlertReader.AlertSettingsReadRow s, string wire) =>
+        Evaluated(wire, w => GlobalValue(s, w));
+
+    /// <summary>A bar as the engine evaluates it: <paramref name="read"/> supplies the raw number for a key, and the four
+    /// paired bars go through <c>ClampBars</c> (Warning at least 1, Critical never below Warning).</summary>
+    private static int Evaluated(string wire, Func<string, int> read) => wire switch
+    {
+        "runnable_queue.warning_per_scheduler" => RunnableQueueEvaluator.ClampBars(read(wire), read("runnable_queue.critical_per_scheduler")).Warning,
+        "runnable_queue.critical_per_scheduler" => RunnableQueueEvaluator.ClampBars(read("runnable_queue.warning_per_scheduler"), read(wire)).Critical,
+        "client_timeouts.warning_per_minute" => AttentionEvaluator.ClampBars(read(wire), read("client_timeouts.critical_per_minute")).Warning,
+        "client_timeouts.critical_per_minute" => AttentionEvaluator.ClampBars(read("client_timeouts.warning_per_minute"), read(wire)).Critical,
+        _ => read(wire),
+    };
+
+    /// <summary>The stored column for <paramref name="wire"/>, unclamped.</summary>
     private static int GlobalValue(DarlingAlertReader.AlertSettingsReadRow s, string wire) => wire switch
     {
         "cpu.threshold_percent" => s.CpuThresholdPercent,

@@ -161,6 +161,58 @@ public sealed class ThresholdOverrideLiveTests
         });
     }
 
+    /* #5916 ruling: an agent turns an alert off only by a mute, never by a threshold. The value at each key's off end (the top
+       of its range, or zero for the four Low Disk bars) is written out here by hand, so a mistake in the registry's own
+       definition of that end does not pass by agreeing with itself. */
+    [Fact]
+    public async Task AnAgent_IsRefusedEachKeysOffEndValue_AndStillMayUseOneBelowIt()
+    {
+        string[] keys =
+        [
+            "cpu.threshold_percent", "blocking.count_threshold", "blocking.wait_threshold_seconds", "deadlocks.count_threshold",
+            "runnable_queue.warning_per_scheduler", "runnable_queue.critical_per_scheduler", "client_timeouts.warning_per_minute",
+            "client_timeouts.critical_per_minute", "long_running_query.threshold_minutes", "tempdb_space.threshold_percent",
+            "low_disk.threshold_percent", "low_disk.threshold_gb", "low_disk.critical_free_percent", "low_disk.critical_free_gb",
+            "pvs.threshold_percent", "pvs.floor_gb", "file_growth.rise_mb", "file_growth.volume_percent",
+            "long_running_job.multiplier", "failed_job.lookback_minutes", "blocking.pg_count_threshold", "deadlocks.pg_count_threshold"
+        ];
+        int[] offEnds =
+        [
+            100, int.MaxValue, int.MaxValue, int.MaxValue,
+            int.MaxValue, int.MaxValue, int.MaxValue,
+            int.MaxValue, int.MaxValue, 100,
+            0, 0, 0, 0,
+            100, int.MaxValue, int.MaxValue, 100,
+            20, 1, int.MaxValue, int.MaxValue
+        ];
+        Assert.Equal(keys.Length, offEnds.Length);
+
+        await RunAsync(async (ds, connection, store, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 2)", ct);
+            var opened = await store.OpenOrJoinAsync(
+                new InvestigationAlert(1, 7, "srv-7", "blocking", "Blocking", T0, Array.Empty<string>(), null, 20, 100,
+                    LeaseMinutes: 15, ExpiryMinutes: 240) { AutonomyLevel = 2 }, ct);
+            var request = opened.RequestId!.Value;
+            var claim = (await store.ClaimAsync(request, "agent-a", ct)).ClaimId!.Value;
+            var arg = AgentActionArgumentTests.Arg(request.ToString(), claim.ToString());
+
+            for (var i = 0; i < keys.Length; i++)
+            {
+                var answer = await Set(ds, store, AgentArm, "srv-7", keys[i], offEnds[i], agentAction: arg);
+                Assert.True(Reason(answer) == "threshold_disables_alert", $"{keys[i]} = {offEnds[i]} was not refused: {answer}");
+            }
+
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.config_threshold_overrides", ct));
+
+            /* The rule is the off end and nothing else: a very high count that can still be reached is allowed. */
+            Assert.Equal("ok", Status(await Set(ds, store, AgentArm, "srv-7", "blocking.count_threshold", int.MaxValue - 1, agentAction: arg)));
+            /* The File Growth window only averages the rate, so no value of it turns the alert off. */
+            Assert.Equal("ok", Status(await Set(ds, store, AgentArm, "srv-7", "file_growth.lookback_minutes", 1440, agentAction: arg)));
+            Assert.Equal("2", await ScalarAsync(connection, "SELECT count(*) FROM config.config_threshold_overrides", ct));
+        });
+    }
+
     [Fact]
     public async Task WithoutTheGrant_TheToolAnswersPrecondition_AndNamesProvisionRolesSql()
     {
@@ -212,6 +264,34 @@ public sealed class ThresholdOverrideLiveTests
 
             /* No server_name: the payload is the one it always was. */
             Assert.Null(JsonNode.Parse(await DarlingMcpAlertTools.GetAlertSettings(ds, null, ct))!["server_view"]);
+        });
+    }
+
+    [Fact]
+    public async Task ServerView_ShowsTheWarningAndCriticalPairTheEngineEvaluates_NotTheStoredOne()
+    {
+        await RunAsync(async (ds, connection, store, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO config.config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
+            await ExecAsync(connection, "INSERT INTO config.config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
+            await ExecAsync(connection, "UPDATE config.config_alert_settings SET runnable_queue_warning_per_scheduler = 8, runnable_queue_critical_per_scheduler = 16 WHERE id = 1", ct);
+
+            /* Each bar's bounds are checked alone, so an override can put Warning above Critical; the engine's ClampBars then
+               raises Critical to Warning, and the view must show that pair, as the enclosing payload does for the global one. */
+            Assert.Equal("ok", Status(await Set(ds, store, WritesArm, "srv-7", "runnable_queue.warning_per_scheduler", 20)));
+
+            var json = JsonNode.Parse(await DarlingMcpAlertTools.GetAlertSettings(ds, "srv-7", ct))!;
+            JsonNode? Row(JsonNode? view, string key) => System.Linq.Enumerable.First(view!["thresholds"]!.AsArray(), n => n!["key"]!.GetValue<string>() == key);
+            var view = json["server_view"];
+            Assert.Equal(20, Row(view, "runnable_queue.warning_per_scheduler")!["effective_value"]!.GetValue<int>());
+            Assert.Equal(20, Row(view, "runnable_queue.critical_per_scheduler")!["effective_value"]!.GetValue<int>());
+
+            /* The global number in the view is the one the payload reports; another server sees the unclamped global pair. */
+            Assert.Equal(json["runnable_queue"]!["warning_per_scheduler"]!.GetValue<int>(),
+                Row(view, "runnable_queue.warning_per_scheduler")!["global_value"]!.GetValue<int>());
+            var other = JsonNode.Parse(await DarlingMcpAlertTools.GetAlertSettings(ds, "srv-8", ct))!["server_view"];
+            Assert.Equal(8, Row(other, "runnable_queue.warning_per_scheduler")!["effective_value"]!.GetValue<int>());
+            Assert.Equal(16, Row(other, "runnable_queue.critical_per_scheduler")!["effective_value"]!.GetValue<int>());
         });
     }
 

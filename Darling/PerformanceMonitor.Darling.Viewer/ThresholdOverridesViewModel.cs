@@ -55,8 +55,8 @@ public sealed record ThresholdOverrideOutcome(bool Ok, string Message);
 /// <summary>
 /// The threshold-overrides window's logic (#5916 part 4), with no WPF in it. Save checks the key and the bounds with the same
 /// registry and rules the <c>set_alert_threshold_override</c> tool applies (<see cref="DarlingThresholdKeys"/>) before it
-/// calls the store, so a refused entry never reaches a write; Remove checks that a row is chosen. The store's own refusals
-/// (a read-only role) surface as a sentence, never as an exception to the window.
+/// calls the store, so a refused entry never reaches a write; Remove checks that a row is chosen. A read-only role's refusal
+/// surfaces here as a sentence; any other store failure (a dropped connection, a timeout) is caught by the window's own handlers.
 /// </summary>
 public sealed class ThresholdOverridesViewModel
 {

@@ -94,12 +94,12 @@ public static class ThresholdOverrideStore
     /// registry the override's foreign key points at, so a row always has one.</summary>
     public const string ListSql =
         "SELECT o.server_id, s.name, o.database_name, o.threshold_key, o.value, o.set_by, o.request_id, o.updated_at " +
-        "FROM " + Table + " o JOIN config.config_monitored_servers s ON s.server_id = o.server_id " +
+        "FROM " + Table + " AS o JOIN config.config_monitored_servers AS s ON s.server_id = o.server_id " +
         "ORDER BY s.name, o.database_name NULLS FIRST, o.threshold_key";
 
     /// <summary>The global row as JSON, so each key's own column is read by name and a column an older store lacks reads as absent
     /// rather than failing the whole list.</summary>
-    public const string GlobalRowSql = "SELECT to_jsonb(a) FROM config.config_alert_settings a WHERE id = 1";
+    public const string GlobalRowSql = "SELECT to_jsonb(a) FROM config.config_alert_settings AS a WHERE id = 1";
 
     /// <summary>
     /// Every override with the global value it replaces. <paramref name="columnFor"/> maps a wire name to the global setting's

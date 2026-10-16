@@ -57,9 +57,7 @@ internal sealed class DarlingThresholdOverrides : IAlertThresholdOverrides
             var raw = reader.GetDouble(3);
             if (Accept(key, raw, database, out var value) is { } problem)
             {
-                _logger?.LogWarning(
-                    "Threshold override for server {ServerId} key '{Key}' database '{Database}' was skipped: {Problem}",
-                    serverId, key, database, problem);
+                LogSkipped(serverId, key, database, problem);
                 continue;
             }
 
@@ -69,14 +67,22 @@ internal sealed class DarlingThresholdOverrides : IAlertThresholdOverrides
         _snapshot = next;
     }
 
-    /// <summary>Replaces the snapshot from rows already in hand (the loader's own tests, and any caller that read the table).</summary>
+    private void LogSkipped(int serverId, string key, string database, string problem) =>
+        _logger?.LogWarning(
+            "Threshold override for server {ServerId} key '{Key}' database '{Database}' was skipped: {Problem}",
+            serverId, key, database, problem);
+
+    /// <summary>Replaces the snapshot from rows already in hand (the loader's own tests, and any caller that read the table). A
+    /// skipped row is logged the way <see cref="LoadAsync"/> logs it.</summary>
     internal void Replace(IEnumerable<(int ServerId, string? Database, string Key, double Value)> rows)
     {
         var next = new Dictionary<(int, string, string), int>();
         foreach (var (serverId, database, key, raw) in rows)
         {
             var db = database ?? string.Empty;
-            if (Accept(key, raw, db, out var value) is null)
+            if (Accept(key, raw, db, out var value) is { } problem)
+                LogSkipped(serverId, key, db, problem);
+            else
                 next[(serverId, db, key)] = value;
         }
 

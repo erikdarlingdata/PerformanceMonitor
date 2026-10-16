@@ -210,8 +210,9 @@ public sealed class CrossSkuSurfaceSourceTests
            rather than red. Twelfth since #4215: the store settings self-alert's managed-conf verdicts read,
            Darling-only like the other store self-alerts. Thirteenth since #5450: the daily
            collection-history audit's rollup read, Darling-only for the same reason. Fourteenth since #5654: the
-           external-alert delivery self-alert's undelivered-row count, Darling-only like the other store self-alerts. */
-        Assert.Equal(14, nullKeyReads.Count);
+           external-alert delivery self-alert's undelivered-row count, Darling-only like the other store self-alerts. Fifteenth since #5916: the
+           threshold-override reload, Darling-only (Lite has no override path). */
+        Assert.Equal(15, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -234,13 +235,14 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains(nullKeyReads, r => r.Contains("managed-conf verdicts", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("collection-history audit", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("external alert self-alert", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("threshold-override reload", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
            point rather than a duplicate: both SKUs perform this read, the counters are per-process, and a
-           SKU that named it without recording it would promise a reading it cannot produce. The other eleven
-           entries are Darling-only with no Lite equivalent — ten store self-alerts and the background-job
-           health read. */
+           SKU that named it without recording it would promise a reading it cannot produce. The other twelve
+           entries are Darling-only with no Lite equivalent — ten store self-alerts, the background-job
+           health read and the threshold-override reload. */
         Assert.Equal(
             2,
             nullKeyReads.Count(r => r.Contains("mute-rule reload", StringComparison.Ordinal)));
@@ -257,6 +259,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("managed-conf verdicts", inventory, StringComparison.Ordinal);
         Assert.Contains("collection-history audit", inventory, StringComparison.Ordinal);
         Assert.Contains("external-alert delivery", inventory, StringComparison.Ordinal);
+        Assert.Contains("threshold-override reload", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

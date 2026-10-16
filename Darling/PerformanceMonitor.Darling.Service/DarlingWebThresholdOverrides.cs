@@ -39,7 +39,8 @@ internal static class DarlingWebThresholdOverrides
     internal const string RefusedMessage =
         "Changing a threshold override needs a store login with the admin role. Managed and compose stores connect the web dashboard as the "
         + "viewer role, which lists overrides but cannot change them: change them in the desktop Viewer, or (bring-your-own store) set "
-        + "postgres.webConnectionString to an admin login.";
+        + "postgres.webConnectionString to an admin login. If this login already is the admin role, the store has not had "
+        + "Darling/tools/provision-roles.sql re-run since the upgrade that added threshold overrides: run it once as a superuser (it is idempotent).";
 
     /// <summary>The list body: <c>{overrides: [{server_id, server_name, database, key, value, global_value, set_by, request_id,
     /// updated_at}], keys: [{key, min, max, database_scope}], servers: [{server_id, server_name}], can_edit, note}</c>.

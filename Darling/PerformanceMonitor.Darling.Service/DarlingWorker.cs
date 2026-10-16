@@ -6767,6 +6767,23 @@ LIMIT 1";
     /// a stale mute set. The elapsed is the store read's alone — <c>LoadAsync</c>'s expiry purge runs only
     /// after a read that succeeded, and swallows its own write failures.</para>
     /// </summary>
+    private async Task LoadMuteRulesAsync(MuteRuleService muteRuleService)
+    {
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            await muteRuleService.LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Could not reload mute rules after {ElapsedMs} ms — the {Rules} rule(s) already in force "
+                + "stay in force until a read succeeds: {Message}",
+                readClock.ElapsedMilliseconds, muteRuleService.GetRules().Count, ex.Message);
+            _readFailures.RecordReadFailure(null, "mute-rule reload", readClock.ElapsedMilliseconds);
+        }
+    }
+
     /// <summary>
     /// Reloads the threshold overrides (#5916). A failed read keeps the overrides already in force and is counted, as the
     /// mute-rule reload is, so a store blip never drops a tuned threshold back to the global one.
@@ -6791,23 +6808,6 @@ LIMIT 1";
                 + "stay in force until a read succeeds: {Message}",
                 readClock.ElapsedMilliseconds, _thresholdOverrides.Count, ex.Message);
             _readFailures.RecordReadFailure(null, "threshold-override reload", readClock.ElapsedMilliseconds);
-        }
-    }
-
-    private async Task LoadMuteRulesAsync(MuteRuleService muteRuleService)
-    {
-        var readClock = Stopwatch.StartNew();
-        try
-        {
-            await muteRuleService.LoadAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                "Could not reload mute rules after {ElapsedMs} ms — the {Rules} rule(s) already in force "
-                + "stay in force until a read succeeds: {Message}",
-                readClock.ElapsedMilliseconds, muteRuleService.GetRules().Count, ex.Message);
-            _readFailures.RecordReadFailure(null, "mute-rule reload", readClock.ElapsedMilliseconds);
         }
     }
 

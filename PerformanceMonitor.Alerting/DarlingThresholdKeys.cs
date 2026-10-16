@@ -24,37 +24,42 @@ namespace PerformanceMonitor.Alerting;
 public static class DarlingThresholdKeys
 {
     /// <summary>One tunable threshold: its wire name, the engine key (null for a PostgreSQL count threshold), the scope it
-    /// can take and its bounds.</summary>
-    public sealed record Entry(string Wire, AlertThresholdKey? Engine, AlertThresholdScope Scope, int Min, int Max, string Column);
+    /// can take, its bounds, its <c>config_alert_settings</c> column and its off end. The off end is the one value inside the
+    /// bounds at which the alert can no longer fire: the top of the range where a higher value means fewer alerts (the counts,
+    /// minutes and percent bars), zero for the four Low Disk bars where a lower value means fewer alerts, the shortest window
+    /// for the Failed Job look-back. It is null where no value turns the alert off (the File Growth rate window only averages).
+    /// An agent is never allowed to set a threshold to its off end (<c>threshold_disables_alert</c>); that is the whole rule,
+    /// so a very high count that is still reachable is allowed.</summary>
+    public sealed record Entry(string Wire, AlertThresholdKey? Engine, AlertThresholdScope Scope, int Min, int Max, string Column, int? OffEnd);
 
     public const string PgBlockingCount = "blocking.pg_count_threshold";
     public const string PgDeadlockCount = "deadlocks.pg_count_threshold";
 
     private static readonly Entry[] All =
     [
-        new("cpu.threshold_percent", AlertThresholdKey.CpuThresholdPercent, AlertThresholdScope.Server, 1, 100, "cpu_threshold_percent"),
-        new("blocking.count_threshold", AlertThresholdKey.BlockingCountThreshold, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "blocking_count_threshold"),
-        new("blocking.wait_threshold_seconds", AlertThresholdKey.BlockingWaitSecondsThreshold, AlertThresholdScope.Server, 0, int.MaxValue, "blocking_wait_seconds_threshold"),
-        new("deadlocks.count_threshold", AlertThresholdKey.DeadlockCountThreshold, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "deadlock_count_threshold"),
-        new("runnable_queue.warning_per_scheduler", AlertThresholdKey.RunnableQueueWarningPerScheduler, AlertThresholdScope.Server, 1, int.MaxValue, "runnable_queue_warning_per_scheduler"),
-        new("runnable_queue.critical_per_scheduler", AlertThresholdKey.RunnableQueueCriticalPerScheduler, AlertThresholdScope.Server, 1, int.MaxValue, "runnable_queue_critical_per_scheduler"),
-        new("client_timeouts.warning_per_minute", AlertThresholdKey.ClientTimeoutsWarningPerMinute, AlertThresholdScope.Server, 1, int.MaxValue, "client_timeouts_warning_per_minute"),
-        new("client_timeouts.critical_per_minute", AlertThresholdKey.ClientTimeoutsCriticalPerMinute, AlertThresholdScope.Server, 1, int.MaxValue, "client_timeouts_critical_per_minute"),
-        new("long_running_query.threshold_minutes", AlertThresholdKey.LongRunningQueryThresholdMinutes, AlertThresholdScope.Server, 1, int.MaxValue, "long_running_query_threshold_minutes"),
-        new("tempdb_space.threshold_percent", AlertThresholdKey.TempDbSpaceThresholdPercent, AlertThresholdScope.Server, 1, 100, "tempdb_space_threshold_percent"),
-        new("low_disk.threshold_percent", AlertThresholdKey.LowDiskThresholdPercent, AlertThresholdScope.Server, 0, 100, "low_disk_threshold_percent"),
-        new("low_disk.threshold_gb", AlertThresholdKey.LowDiskThresholdGb, AlertThresholdScope.Server, 0, int.MaxValue, "low_disk_threshold_gb"),
-        new("low_disk.critical_free_percent", AlertThresholdKey.DiskCriticalFreePercent, AlertThresholdScope.Server, 0, 100, "disk_critical_free_percent"),
-        new("low_disk.critical_free_gb", AlertThresholdKey.DiskCriticalFreeGb, AlertThresholdScope.Server, 0, int.MaxValue, "disk_critical_free_gb"),
-        new("pvs.threshold_percent", AlertThresholdKey.PvsThresholdPercent, AlertThresholdScope.ServerAndDatabase, 0, 100, "pvs_threshold_percent"),
-        new("pvs.floor_gb", AlertThresholdKey.PvsFloorGb, AlertThresholdScope.ServerAndDatabase, 0, int.MaxValue, "pvs_floor_gb"),
-        new("file_growth.rise_mb", AlertThresholdKey.FileGrowthRiseMb, AlertThresholdScope.ServerAndDatabase, 0, int.MaxValue, "file_growth_rise_mb"),
-        new("file_growth.volume_percent", AlertThresholdKey.FileGrowthVolumePercent, AlertThresholdScope.ServerAndDatabase, 0, 100, "file_growth_volume_percent"),
-        new("file_growth.lookback_minutes", AlertThresholdKey.FileGrowthLookbackMinutes, AlertThresholdScope.Server, 5, 1440, "file_growth_lookback_minutes"),
-        new("long_running_job.multiplier", AlertThresholdKey.LongRunningJobMultiplier, AlertThresholdScope.Server, 2, 20, "long_running_job_multiplier"),
-        new("failed_job.lookback_minutes", AlertThresholdKey.FailedJobLookbackMinutes, AlertThresholdScope.Server, 1, 1440, "failed_job_lookback_minutes"),
-        new(PgBlockingCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_blocking_count_threshold"),
-        new(PgDeadlockCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_deadlock_count_threshold"),
+        new("cpu.threshold_percent", AlertThresholdKey.CpuThresholdPercent, AlertThresholdScope.Server, 1, 100, "cpu_threshold_percent", 100),
+        new("blocking.count_threshold", AlertThresholdKey.BlockingCountThreshold, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "blocking_count_threshold", int.MaxValue),
+        new("blocking.wait_threshold_seconds", AlertThresholdKey.BlockingWaitSecondsThreshold, AlertThresholdScope.Server, 0, int.MaxValue, "blocking_wait_seconds_threshold", int.MaxValue),
+        new("deadlocks.count_threshold", AlertThresholdKey.DeadlockCountThreshold, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "deadlock_count_threshold", int.MaxValue),
+        new("runnable_queue.warning_per_scheduler", AlertThresholdKey.RunnableQueueWarningPerScheduler, AlertThresholdScope.Server, 1, int.MaxValue, "runnable_queue_warning_per_scheduler", int.MaxValue),
+        new("runnable_queue.critical_per_scheduler", AlertThresholdKey.RunnableQueueCriticalPerScheduler, AlertThresholdScope.Server, 1, int.MaxValue, "runnable_queue_critical_per_scheduler", int.MaxValue),
+        new("client_timeouts.warning_per_minute", AlertThresholdKey.ClientTimeoutsWarningPerMinute, AlertThresholdScope.Server, 1, int.MaxValue, "client_timeouts_warning_per_minute", int.MaxValue),
+        new("client_timeouts.critical_per_minute", AlertThresholdKey.ClientTimeoutsCriticalPerMinute, AlertThresholdScope.Server, 1, int.MaxValue, "client_timeouts_critical_per_minute", int.MaxValue),
+        new("long_running_query.threshold_minutes", AlertThresholdKey.LongRunningQueryThresholdMinutes, AlertThresholdScope.Server, 1, int.MaxValue, "long_running_query_threshold_minutes", int.MaxValue),
+        new("tempdb_space.threshold_percent", AlertThresholdKey.TempDbSpaceThresholdPercent, AlertThresholdScope.Server, 1, 100, "tempdb_space_threshold_percent", 100),
+        new("low_disk.threshold_percent", AlertThresholdKey.LowDiskThresholdPercent, AlertThresholdScope.Server, 0, 100, "low_disk_threshold_percent", 0),
+        new("low_disk.threshold_gb", AlertThresholdKey.LowDiskThresholdGb, AlertThresholdScope.Server, 0, int.MaxValue, "low_disk_threshold_gb", 0),
+        new("low_disk.critical_free_percent", AlertThresholdKey.DiskCriticalFreePercent, AlertThresholdScope.Server, 0, 100, "disk_critical_free_percent", 0),
+        new("low_disk.critical_free_gb", AlertThresholdKey.DiskCriticalFreeGb, AlertThresholdScope.Server, 0, int.MaxValue, "disk_critical_free_gb", 0),
+        new("pvs.threshold_percent", AlertThresholdKey.PvsThresholdPercent, AlertThresholdScope.ServerAndDatabase, 0, 100, "pvs_threshold_percent", 100),
+        new("pvs.floor_gb", AlertThresholdKey.PvsFloorGb, AlertThresholdScope.ServerAndDatabase, 0, int.MaxValue, "pvs_floor_gb", int.MaxValue),
+        new("file_growth.rise_mb", AlertThresholdKey.FileGrowthRiseMb, AlertThresholdScope.ServerAndDatabase, 0, int.MaxValue, "file_growth_rise_mb", int.MaxValue),
+        new("file_growth.volume_percent", AlertThresholdKey.FileGrowthVolumePercent, AlertThresholdScope.ServerAndDatabase, 0, 100, "file_growth_volume_percent", 100),
+        new("file_growth.lookback_minutes", AlertThresholdKey.FileGrowthLookbackMinutes, AlertThresholdScope.Server, 5, 1440, "file_growth_lookback_minutes", null),
+        new("long_running_job.multiplier", AlertThresholdKey.LongRunningJobMultiplier, AlertThresholdScope.Server, 2, 20, "long_running_job_multiplier", 20),
+        new("failed_job.lookback_minutes", AlertThresholdKey.FailedJobLookbackMinutes, AlertThresholdScope.Server, 1, 1440, "failed_job_lookback_minutes", 1),
+        new(PgBlockingCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_blocking_count_threshold", int.MaxValue),
+        new(PgDeadlockCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_deadlock_count_threshold", int.MaxValue),
     ];
 
     private static readonly Dictionary<string, Entry> ByWire = BuildByWire();

@@ -93,22 +93,38 @@ public partial class ThresholdOverridesWindow : Window
 
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
-        var server = ServerCombo.SelectedItem as ThresholdOverrideServerChoice;
-        var outcome = await _model.SaveAsync(server?.ServerId, KeyCombo.SelectedItem as string, ValueBox.Text, DatabaseBox.Text);
-        SetStatus(outcome.Message, !outcome.Ok);
-        if (outcome.Ok)
+        /* An async void handler's exception reaches the dispatcher and ends the process, so every failure the store raises
+           that is not the view-model's own refusal (a dropped connection, a timeout, a lock) becomes a status line. */
+        try
         {
-            await LoadAsync();
+            var server = ServerCombo.SelectedItem as ThresholdOverrideServerChoice;
+            var outcome = await _model.SaveAsync(server?.ServerId, KeyCombo.SelectedItem as string, ValueBox.Text, DatabaseBox.Text);
+            SetStatus(outcome.Message, !outcome.Ok);
+            if (outcome.Ok)
+            {
+                await LoadAsync();
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            SetStatus("Could not save the override: " + ex.Message, true);
         }
     }
 
     private async void Remove_Click(object sender, RoutedEventArgs e)
     {
-        var outcome = await _model.RemoveAsync(OverridesGrid.SelectedItem as ThresholdOverrideViewRow);
-        SetStatus(outcome.Message, !outcome.Ok);
-        if (outcome.Ok)
+        try
         {
-            await LoadAsync();
+            var outcome = await _model.RemoveAsync(OverridesGrid.SelectedItem as ThresholdOverrideViewRow);
+            SetStatus(outcome.Message, !outcome.Ok);
+            if (outcome.Ok)
+            {
+                await LoadAsync();
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            SetStatus("Could not remove the override: " + ex.Message, true);
         }
     }
 

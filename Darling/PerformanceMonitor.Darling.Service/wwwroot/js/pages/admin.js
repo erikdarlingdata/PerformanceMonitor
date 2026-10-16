@@ -1565,7 +1565,7 @@ export const OVERRIDE_COLUMNS = [
 
 const OVERRIDES_NOTE_EDITING =
   "A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only " +
-  "and applies a change within its reload interval. To silence an alert, mute it: an override moves a threshold and never turns an alert off.";
+  "and applies a change within its reload interval. To silence an alert, mute it.";
 const OVERRIDES_NOTE_READ_ONLY =
   "A threshold held for one server, or for one database on it, that differs from the global value. This sign-in lists them but cannot change them: " +
   "a managed or compose store connects this page as the viewer role. Change an override in the desktop Viewer, or (bring-your-own store) set " +

@@ -975,12 +975,16 @@ public sealed class AlertReadFailureSurfaceTests
            arriving in a new member of this file cannot inherit clean status, because the totals stop
            matching the moment its catch block is neither counted nor exempt. */
         "LoadMuteRulesAsync",
+        /* #5916: the threshold-override reload, the mute-rule reload's twin: a control-plane read whose swallowed failure keeps the
+           overrides already in force, so a changed override waits unseen. COUNTED. */
+        "LoadThresholdOverridesAsync",
     };
 
     /* 12th since #5654: EvaluateExternalAlertsAsync's catch, the external-alert delivery count. */
     /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
-    private const int WorkerCountedSites = 12;
+    /* 13th since #5916: LoadThresholdOverridesAsync's catch, the threshold-override reload. */
+    private const int WorkerCountedSites = 13;
     /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it.
        14th: the collection log hourly rollup's catch there (#5810), a maintenance write no alert is judged on.
        15th: EvaluateComposeHoursStuckAsync's catch (#5867), the compose builder's failure record read for its self-alert, which
@@ -1037,8 +1041,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// read ("runnable queue top requests"), counted because it IS a store read the alert pass swallowed, though only
     /// the card's request items go missing and the fire does not. And a FORTY-FIRST since #5640: the Client Timeouts window read ("client timeouts"), counted because a swallowed read neither fires nor clears the alert. And a FORTY-SECOND since #5654: the external-alert delivery self-alert's count of undelivered rows, counted because a
     /// swallowed read leaves the standing alert unjudged (the worker holds it rather than resolving it). And a FORTY-THIRD since #5715 part B: the escalation-tier seed read ("escalation tier seed"), counted because a swallowed read leaves a Warning delivered before a restart unknown to the engine, so the Critical that follows waits out the cooldown instead of escalating; it seeds nothing, never blocks a fire, and is retried on the next sweep.</para>
+    /// And a FORTY-FOURTH since #5916: the threshold-override reload ("threshold-override reload"), counted because a swallowed read keeps the overrides already in force, so a nonzero count says a changed override has not yet taken effect.
     /// </summary>
-    private const int CountedSites = 43;
+    private const int CountedSites = 44;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

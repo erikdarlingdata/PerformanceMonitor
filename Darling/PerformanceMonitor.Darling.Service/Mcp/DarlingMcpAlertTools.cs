@@ -465,8 +465,8 @@ public sealed class DarlingMcpAlertTools
         runnable_queue = new
         {
             enabled = s.RunnableQueueEnabled,
-            warning_per_scheduler = RunnableQueueEvaluator.ClampBars(s.RunnableQueueWarningPerScheduler, s.RunnableQueueCriticalPerScheduler).Warning,
-            critical_per_scheduler = RunnableQueueEvaluator.ClampBars(s.RunnableQueueWarningPerScheduler, s.RunnableQueueCriticalPerScheduler).Critical
+            warning_per_scheduler = DarlingMcpThresholdOverrideTools.GlobalValueAsEngineReadsIt(s, "runnable_queue.warning_per_scheduler"),
+            critical_per_scheduler = DarlingMcpThresholdOverrideTools.GlobalValueAsEngineReadsIt(s, "runnable_queue.critical_per_scheduler")
         },
         /* #5640 (V179): the Client Timeouts alert. Client attentions (a client cancelled a query or its timeout expired) per
            minute over the attention collector's last runs against two bars, OFF by default. Reported through
@@ -474,8 +474,8 @@ public sealed class DarlingMcpAlertTools
         client_timeouts = new
         {
             enabled = s.ClientTimeoutsEnabled,
-            warning_per_minute = AttentionEvaluator.ClampBars(s.ClientTimeoutsWarningPerMinute, s.ClientTimeoutsCriticalPerMinute).Warning,
-            critical_per_minute = AttentionEvaluator.ClampBars(s.ClientTimeoutsWarningPerMinute, s.ClientTimeoutsCriticalPerMinute).Critical
+            warning_per_minute = DarlingMcpThresholdOverrideTools.GlobalValueAsEngineReadsIt(s, "client_timeouts.warning_per_minute"),
+            critical_per_minute = DarlingMcpThresholdOverrideTools.GlobalValueAsEngineReadsIt(s, "client_timeouts.critical_per_minute")
         },
         long_running_query = new
         {
