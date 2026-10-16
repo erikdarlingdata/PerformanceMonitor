@@ -43,28 +43,12 @@ public sealed class AgentLevel2StoreRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == RungName);
 
     [Fact]
-    public void TheRungIsRegistered_AtTheTopOfTheLadder_AndTheViewerGateRequiresIt()
+    public void TheRungIsRegistered_AndTheViewerGateRequiresTheTopOfTheLadder()
     {
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.Equal(StorageVersion.SchemaVersion, Rung.Version);
+        Assert.True(Rung.Version <= StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-    }
-
-    [Fact]
-    public void TheProbeCarriesTheSentinel_AndAStoreBehindItMapsOneRungBack()
-    {
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var parameters = method.GetParameters();
-        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasAgentLevel2Store");
-        Assert.Equal(parameters.Length - 1, ownOrdinal);
-
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        var behind = (object[])all.Clone();
-        behind[ownOrdinal] = false;
-        Assert.Equal(StorageVersion.SchemaVersion - 1, (int)method.Invoke(null, behind)!);
     }
 
     /// <summary>A new store: the levels, the switch, the unique override scope, the beacon, the cascades and the practice link.</summary>

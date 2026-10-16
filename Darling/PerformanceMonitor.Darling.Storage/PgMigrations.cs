@@ -1507,6 +1507,163 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_feedback_author
     ON config.investigation_feedback (request_id, lower(author));";
 
     /// <summary>
+    /// V192 (#5997, Phase C of #5632): the store for investigation evidence, follow-ups and signed webhooks. This is the only
+    /// migration in Phase C; every later slice uses these tables and columns.
+    ///
+    /// <para><b>Journal.</b> <c>config.investigation_journal.event_id</c>, a <c>uuid</c> per event row, unique, sent as the
+    /// webhook's <c>webhook-id</c> (D6). Existing rows get one each when the column is added; the journal is a plain table.</para>
+    ///
+    /// <para><b>Requests.</b> <c>max_severity</c> (the highest severity any joined alert had, D6), <c>evidence_state</c> (D9),
+    /// and the follow-up trio <c>follow_up_of</c>, <c>follow_up_at</c>, <c>follow_up_condition</c> (D16). <c>follow_up_of</c> has
+    /// <b>no foreign key</b>, like <c>practice_of</c>: a follow-up outlives the request it follows. All nullable, no default,
+    /// so each <c>ADD COLUMN</c> is catalog-only.</para>
+    ///
+    /// <para><b>Evidence.</b> <c>config.investigation_evidence</c> (D10): one row per evidence section of a request, unique on
+    /// (request, section), <c>content</c> held to 32 KB like a report's evidence, plans by hash and never XML. A section not yet
+    /// collected is <c>pending</c>, one never collected is <c>not_collected</c> (D9). Deleted with its request
+    /// (<c>ON DELETE CASCADE</c>) and cleared with the brief at 90 days by retention.</para>
+    ///
+    /// <para><b>Deadlock signatures.</b> <c>config.investigation_signature_days</c> (D13): the daily rollup (server, signature,
+    /// day, count), purged at 30 days. <c>config.investigation_signature_merges</c> (D14): the journaled, undoable merge of one
+    /// signature into another, with its reason; undoing sets <c>undone_at</c> and the row stays as the record. At most one live
+    /// merge per (server, merged signature). Merges are decisions a person can read back and are never aged. Neither table has a
+    /// foreign key to the server, like the investigation tables.</para>
+    ///
+    /// <para><b>Reports.</b> <c>family_of</c> (D17), the first report's request id: a foreign key to the requests, <c>ON DELETE SET
+    /// NULL</c>, so a family id always names a request that existed. <c>queries_run</c> (D17): an array of at most 20 items,
+    /// no string over 2,000 characters.</para>
+    ///
+    /// <para><b>Signing.</b> D2 and D3: <c>signing_key</c> (sealed; #5998 seals it, this rung only stores text), the previous key
+    /// and when it stops being sent, on <b>both</b> the notification settings row and the routes, because D2 gives one key per
+    /// generic channel and per route with its own URL. The keys are secrets and are carved out of the read roles' column grants
+    /// in <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c>. <c>fallback_route_id</c> (D8) on the route: a route to use when
+    /// the agent route cannot deliver. Never the route itself (a CHECK), and <b>no foreign key</b>, like the route's scope
+    /// columns (V181): the reader treats an id that names no route as no fallback.</para>
+    ///
+    /// <para><b>Procedure stats.</b> <c>collect.procedure_stats.module_modify_date</c>, nullable: the module's <c>modify_date</c>
+    /// that D16's deploy condition compares. The collector fills it later (#6009); rows from before keep NULL.</para>
+    ///
+    /// <para>Grants are provisioning's (managed section 10f and provision-roles.sql step 3l). <b>No Lite twin here:</b> Lite's
+    /// schema step is #6010.</para>
+    /// </summary>
+    private const string V192Sql = @"
+ALTER TABLE config.investigation_journal
+    ADD COLUMN IF NOT EXISTS event_id uuid NOT NULL DEFAULT gen_random_uuid();
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_journal_event_id
+    ON config.investigation_journal (event_id);
+
+ALTER TABLE config.investigation_requests
+    ADD COLUMN IF NOT EXISTS max_severity text,
+    ADD COLUMN IF NOT EXISTS evidence_state text,
+    ADD COLUMN IF NOT EXISTS follow_up_of uuid,
+    ADD COLUMN IF NOT EXISTS follow_up_at timestamptz,
+    ADD COLUMN IF NOT EXISTS follow_up_condition text;
+
+ALTER TABLE config.investigation_reports
+    ADD COLUMN IF NOT EXISTS family_of uuid,
+    ADD COLUMN IF NOT EXISTS queries_run jsonb;
+
+DO $do$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'fk_investigation_reports_family'
+                     AND conrelid = 'config.investigation_reports'::regclass) THEN
+        ALTER TABLE config.investigation_reports
+            ADD CONSTRAINT fk_investigation_reports_family FOREIGN KEY (family_of)
+                REFERENCES config.investigation_requests (request_id) ON DELETE SET NULL;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_investigation_reports_queries_run'
+                     AND conrelid = 'config.investigation_reports'::regclass) THEN
+        ALTER TABLE config.investigation_reports
+            ADD CONSTRAINT ck_investigation_reports_queries_run CHECK (
+                queries_run IS NULL OR (
+                    jsonb_typeof(queries_run) = 'array'
+                    AND jsonb_array_length(queries_run) <= 20
+                    AND NOT jsonb_path_exists(queries_run, 'strict $.** ? (@.type() == ""string"" && @ like_regex ""^(?:.{200}){10}."" flag ""s"")')));
+    END IF;
+END $do$;
+
+CREATE TABLE IF NOT EXISTS config.investigation_evidence
+(
+    evidence_id bigint GENERATED ALWAYS AS IDENTITY,
+    request_id uuid NOT NULL,
+    section text NOT NULL,
+    state text NOT NULL DEFAULT 'pending',
+    content jsonb,
+    captured_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pk_investigation_evidence PRIMARY KEY (evidence_id),
+    CONSTRAINT uq_investigation_evidence_section UNIQUE (request_id, section),
+    CONSTRAINT fk_investigation_evidence_request FOREIGN KEY (request_id)
+        REFERENCES config.investigation_requests (request_id) ON DELETE CASCADE,
+    CONSTRAINT ck_investigation_evidence_section CHECK (section ~ '^[a-z][a-z0-9_]{1,40}$'),
+    CONSTRAINT ck_investigation_evidence_state CHECK (state IN ('pending', 'ready', 'not_collected')),
+    CONSTRAINT ck_investigation_evidence_content CHECK (content IS NULL OR octet_length(content::text) <= 32768)
+);
+
+CREATE TABLE IF NOT EXISTS config.investigation_signature_days
+(
+    server_id integer NOT NULL,
+    signature text NOT NULL,
+    day date NOT NULL,
+    count integer NOT NULL DEFAULT 0,
+    CONSTRAINT pk_investigation_signature_days PRIMARY KEY (server_id, signature, day),
+    CONSTRAINT ck_investigation_signature_days_signature CHECK (btrim(signature) <> ''),
+    CONSTRAINT ck_investigation_signature_days_count CHECK (count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS ix_investigation_signature_days_day
+    ON config.investigation_signature_days (day);
+
+CREATE TABLE IF NOT EXISTS config.investigation_signature_merges
+(
+    merge_id bigint GENERATED ALWAYS AS IDENTITY,
+    server_id integer NOT NULL,
+    signature text NOT NULL,
+    merged_into text NOT NULL,
+    reason text NOT NULL,
+    merged_by text NOT NULL,
+    merged_at timestamptz NOT NULL DEFAULT now(),
+    undone_at timestamptz,
+    undone_by text,
+    CONSTRAINT pk_investigation_signature_merges PRIMARY KEY (merge_id),
+    CONSTRAINT ck_investigation_signature_merges_signature CHECK (btrim(signature) <> '' AND btrim(merged_into) <> '' AND signature <> merged_into),
+    CONSTRAINT ck_investigation_signature_merges_reason CHECK (btrim(reason) <> '' AND length(reason) <= 2000),
+    CONSTRAINT ck_investigation_signature_merges_merged_by CHECK (merged_by ~ '^[A-Za-z0-9._:-]{1,64}$'),
+    CONSTRAINT ck_investigation_signature_merges_undone CHECK ((undone_at IS NULL) = (undone_by IS NULL))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_signature_merges_live
+    ON config.investigation_signature_merges (server_id, signature) WHERE undone_at IS NULL;
+
+ALTER TABLE config.config_notification
+    ADD COLUMN IF NOT EXISTS signing_key text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS previous_signing_key text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS previous_signing_key_until timestamptz;
+
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS signing_key text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS previous_signing_key text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS previous_signing_key_until timestamptz,
+    ADD COLUMN IF NOT EXISTS fallback_route_id integer;
+
+DO $do$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_config_notification_routes_fallback'
+                     AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_fallback CHECK (fallback_route_id IS NULL OR fallback_route_id <> route_id);
+    END IF;
+END $do$;
+
+ALTER TABLE collect.procedure_stats
+    ADD COLUMN IF NOT EXISTS module_modify_date timestamp;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1809,6 +1966,7 @@ $rung$;";
         new Migration(189, "query-store-compose-failures", V189Sql),
         new Migration(190, "store-metrics-size-estimated", V190Sql),
         new Migration(191, "agent-level-2-store", V191Sql),
+        new Migration(192, "phase-c-store", V192Sql),
     };
 
     /// <summary>

@@ -260,6 +260,17 @@ public sealed class MigrationDataMovingRungCensusPins
             + "runs only when the stored definition does not already name level 2. The ADD COLUMNs carry a constant default "
             + "or none and rewrite nothing; the two new tables are created empty. It does not move the lock-wait floor."),
         new(
+            192,
+            SetsTheFloor: false,
+            "ADD COLUMN event_id uuid NOT NULL DEFAULT gen_random_uuid() on config.investigation_journal (#5997, created V184) "
+            + "is a volatile default, so it rewrites the table once and fills every stored row, and the unique index on it "
+            + "builds over the same rows. The journal is a plain table of narrow rows kept InvestigationRetentionDays (a year): "
+            + "a few events per investigation request, so the rewrite and the build are milliseconds. The ADD CONSTRAINT ... "
+            + "CHECK on config.investigation_reports (created V184) validates the stored reports, whose new queries_run is NULL "
+            + "at this rung, one row per answered request; the family_of foreign key scans the same rows. The routes "
+            + "CHECK validates a handful of operator-written rows. The other ADD COLUMNs are nullable with no default or "
+            + "a constant default and rewrite nothing; the three new tables are created empty. It does not move the lock-wait floor."),
+        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "

@@ -229,7 +229,7 @@ SELECT (SELECT state FROM config.investigation_requests) || '|' || (SELECT state
         {
             /* #5918: practice_of arrives with V191. A store before it (no feedback table, the V191 sentinel, and no column) lists as it
                always did, not as a raw 42703 that empties the tab. */
-            await ExecAsync(owner, "DROP TABLE config.investigation_feedback CASCADE; ALTER TABLE config.investigation_requests DROP COLUMN practice_of CASCADE", ct);
+            await ExecAsync(owner, "DROP TABLE config.investigation_evidence CASCADE; DROP TABLE config.investigation_feedback CASCADE; ALTER TABLE config.investigation_requests DROP COLUMN practice_of CASCADE", ct);
             Assert.True(await viewer.GetStoreSchemaVersionAsync(ct) < ViewerDataService.PracticeStoreSchemaVersion);
 
             var row = Assert.Single(await viewer.GetInvestigationRequestsAsync(null, ct));
