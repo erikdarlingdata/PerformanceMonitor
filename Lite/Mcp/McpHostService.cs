@@ -29,7 +29,7 @@ public sealed class McpHostService : BackgroundService
     private readonly bool _allowWrites;
     private readonly bool _allowInvestigations;
     private readonly McpDataDetail _dataDetail;
-    private readonly IInvestigationRequestStore? _investigationStore;
+    private readonly IInvestigationRequestStore _investigationStore;
     private WebApplication? _app;
 
     /// <summary>
@@ -39,13 +39,15 @@ public sealed class McpHostService : BackgroundService
     /// </summary>
     public int Port => _port;
 
+    /// <param name="investigationStore">#5820: the one investigation store, required: <c>get_notification_routes</c> is served in every
+    /// configuration and takes it as a service parameter, so a host without it would advertise it as a tool argument nobody can fill.</param>
     /// <param name="scheduleManager">#3896: the collector schedules, so the analysis tools bound each
     /// latest-value read by the cadence its collector runs at. Null bounds by the shipped defaults.</param>
     /// <param name="allowWrites">Whether the write tools are served (<see cref="McpSettings.AllowWrites"/>, the
     /// <c>mcp_allow_writes</c> setting). Default off: a write tool is then absent from the served set and a call
     /// to it fails as an unknown tool. See <see cref="McpWritePolicy"/>.</param>
-    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, ScheduleManager? scheduleManager = null, bool allowWrites = false,
-        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IInvestigationRequestStore? investigationStore = null)
+    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore, ScheduleManager? scheduleManager = null, bool allowWrites = false,
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full)
     {
         _dataService = dataService;
         _serverManager = serverManager;
@@ -56,7 +58,7 @@ public sealed class McpHostService : BackgroundService
         _allowWrites = allowWrites;
         _allowInvestigations = allowInvestigations;
         _dataDetail = dataDetail;
-        _investigationStore = investigationStore;
+        _investigationStore = investigationStore ?? throw new ArgumentNullException(nameof(investigationStore));
 
         /* #4999: the health read judges each collector by the interval it is scheduled at on that server, the
            same answer the analysis tools bound their reads by (see RegisterAnalysisService below), not by the
@@ -253,10 +255,7 @@ public sealed class McpHostService : BackgroundService
             /* #5820: the investigation brief's reader and composer, for the claim tool (the composer's own file registers both). */
             PerformanceMonitorLite.Investigations.LiteInvestigationServices.AddInvestigationBrief(builder.Services, _duckDb);
             /* #5820: the one investigation store MainWindow built, as a singleton, for the four tools and get_notification_routes. */
-            if (_investigationStore is not null)
-            {
-                builder.Services.AddSingleton<IInvestigationRequestStore>(_investigationStore);
-            }
+            builder.Services.AddSingleton<IInvestigationRequestStore>(_investigationStore);
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */

@@ -118,14 +118,14 @@ internal static class DarlingMcpInstructions
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
         var families = adminServed
-            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding and investigation tools"
+            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding tools and `wait_for_investigation_requests`"
             : writesServed
-                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and investigation tools"
-                : "the Custom Views, custom-alert-rule and investigation reads";
+                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag tools and `wait_for_investigation_requests`"
+                : "the Custom Views and custom-alert-rule reads and `wait_for_investigation_requests`";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
-               "(`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, " +
+               "(`get_fleet_overview`, `get_ag_health`, `get_sweep_reports`, `get_store_metrics`, " +
                "`get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
     }
 
@@ -137,7 +137,7 @@ internal static class DarlingMcpInstructions
     private const string CatalogCensus =
         "This server exposes 187 tools. 95 are the same names Lite exposes. The remaining 92 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag, " +
-        "onboarding and investigation tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
+        "onboarding tools and `wait_for_investigation_requests`, and central-store-only reads (`get_fleet_overview`, `get_ag_health`, " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
     /// <summary>

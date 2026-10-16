@@ -120,7 +120,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
             $"monitoring configuration are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
             $"`mcp.allowInvestigations` with a token adds the {investigations} investigation tools. " +
             $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: thirty-five are the " +
-            "PostgreSQL reads (`get_pg_*`), plus the Custom Views, custom-alert-rule and investigation reads, and central-store-only reads",
+            "PostgreSQL reads (`get_pg_*`), plus the Custom Views and custom-alert-rule reads and `wait_for_investigation_requests`, and central-store-only reads",
             text, StringComparison.Ordinal);
         Assert.DoesNotContain($"This server exposes {catalog.Count} tools.", text, StringComparison.Ordinal);
         Assert.DoesNotContain("onboarding", text, StringComparison.Ordinal);
@@ -141,7 +141,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
             $"the {catalog.Count(DarlingMcpWritePolicy.IsInvestigation)} investigation tools stay off while `mcp.allowWrites` is on (one token " +
             $"cannot tell an agent from a person). {shared} are the same names Lite exposes. The remaining " +
             $"{served.Count - shared} are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +
-            "custom-alert-rule, alert-tuning, server-tag and investigation tools, and central-store-only reads",
+            "custom-alert-rule, alert-tuning, server-tag tools and `wait_for_investigation_requests`, and central-store-only reads",
             text, StringComparison.Ordinal);
         Assert.True(text.Length <= InstructionsBudget, $"the writes-on instructions are {text.Length} characters; D2's budget is {InstructionsBudget}");
     }

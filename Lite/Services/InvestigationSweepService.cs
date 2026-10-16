@@ -18,7 +18,8 @@ namespace PerformanceMonitorLite.Services;
 /// <summary>
 /// #5820: Lite's investigation expiry sweep, the twin of Darling's <c>RunInvestigationSweepLoopAsync</c>. Every
 /// <see cref="Interval"/> it runs the shared sweep pass (<see cref="InvestigationDispatchCore.SweepOnceAsync"/>): a lapsed
-/// claim is journaled once and goes back to open, and a request past its expiry is expired; nothing is ever reopened. It runs
+/// claim is journaled once and no row is rewritten (the claim simply reads as open again and can be claimed anew), and a request past
+/// its expiry, or one that has used up its claims, is marked expired. It runs
 /// whatever the MCP settings say, because requests open from alerts whether or not an agent can reach Lite. A pass that
 /// swept something logs one line (the shared pass writes it); an empty pass logs nothing. A failed pass is logged and tried
 /// again next tick; only the stopping token ends the loop.

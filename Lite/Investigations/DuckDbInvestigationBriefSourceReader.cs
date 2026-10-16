@@ -99,7 +99,7 @@ WHERE rp.server_id = $1
   AND rq.family = $2
   AND rp.request_id <> $3
 ORDER BY rp.submitted_at DESC
-LIMIT 10";
+LIMIT $4";
 
     /* The server's notes AND the fleet's (server_id NULL), the server's own first so fleet notes never crowd them out of
        the ten; a note has no tag scope. Only approved, unexpired notes. */
@@ -144,7 +144,7 @@ FROM (
       AND am.muted_date >= $3
 ) AS c
 ORDER BY at_utc DESC
-LIMIT 15";
+LIMIT $4";
 
     private readonly DuckDbInitializer _duckDb;
     private readonly FindingStore _findings;
@@ -213,7 +213,7 @@ LIMIT 15";
                 }
             }
 
-            using (var command = Command(connection, EarlierReportsSql, request.ServerId, request.Family, requestId))
+            using (var command = Command(connection, EarlierReportsSql, request.ServerId, request.Family, requestId, MaxEarlierReports))
             using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             {
                 while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -249,7 +249,7 @@ LIMIT 15";
                     profiles.Add(new InvestigationProfileText(reader.GetString(0), reader.GetString(1)));
             }
 
-            using (var command = Command(connection, ChangesSql, request.ServerId, request.ServerName, Micros(now - ChangeWindow)))
+            using (var command = Command(connection, ChangesSql, request.ServerId, request.ServerName, Micros(now - ChangeWindow), MaxChanges))
             using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             {
                 while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
