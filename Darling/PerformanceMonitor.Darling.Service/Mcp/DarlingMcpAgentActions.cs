@@ -38,10 +38,13 @@ public sealed class DarlingAgentActionSeat
     internal static bool IsGated(DarlingAgentActionSeat? seat) => seat is not null && !seat.Policy.Writes;
 }
 
-/// <summary>A tool's own refusal or failure inside the write hook: the gate journals <c>action_failed</c>, the tool answers <see cref="Outcome"/>.</summary>
+/// <summary>
+/// A tool's own refusal or failure inside the write hook: the change rolls back with the gate's transaction, the gate journals
+/// <c>action_failed</c> with <see cref="Exception.Message"/> (the same answer text), and the tool answers <see cref="Outcome"/>.
+/// </summary>
 internal sealed class AgentToolOutcomeException : Exception
 {
-    internal AgentToolOutcomeException(string outcome) : base("agent tool outcome") => Outcome = outcome;
+    internal AgentToolOutcomeException(string outcome) : base(outcome) => Outcome = outcome;
 
     internal string Outcome { get; }
 }
@@ -109,8 +112,20 @@ internal static class DarlingMcpAgentActions
     internal static string ReasonSuffix(AgentAction action) =>
         string.Create(CultureInfo.InvariantCulture, $"[agent:{action.AgentId} request {action.RequestId}]");
 
-    internal static string WithSuffix(string? reason, AgentAction action) =>
-        string.IsNullOrWhiteSpace(reason) ? ReasonSuffix(action) : reason.Trim() + " " + ReasonSuffix(action);
+    /// <summary>Any trailing <c>[agent:&lt;id&gt; request &lt;uuid&gt;]</c> suffixes (this agent's or another's), so a reason read back from the rule is not suffixed twice.</summary>
+    private static readonly System.Text.RegularExpressions.Regex TrailingSuffix = new(
+        @"(\s*\[agent:[^\]\s]+ request [0-9a-fA-F-]{36}\])+\s*$",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>
+    /// The reason with exactly one attribution suffix, this action's: a trailing suffix already on it (the reason stored by an
+    /// earlier agent change, sent back whole or left as the fallback) is dropped first, so repeated updates do not stack them.
+    /// </summary>
+    internal static string WithSuffix(string? reason, AgentAction action)
+    {
+        var bare = string.IsNullOrWhiteSpace(reason) ? "" : TrailingSuffix.Replace(reason.Trim(), "").Trim();
+        return bare.Length == 0 ? ReasonSuffix(action) : bare + " " + ReasonSuffix(action);
+    }
 
     private static string Json(string status, string message) =>
         JsonSerializer.Serialize(new { status, message }, McpHelpers.JsonOptions);
@@ -182,9 +197,9 @@ internal static class DarlingMcpAgentActions
         return await RunAsync(seat, postgres, logger, tool, "mute", agentAction, target,
             (_, _, _, _) => Task.FromResult(metric_name is null ? NeedsMetric : MetricRefusal(metric_name)),
             NoBefore,
-            async (_, _, _) =>
+            async (connection, transaction, _) =>
             {
-                var answer = await DarlingMcpAlertTools.CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name,
+                var answer = await DarlingMcpAlertTools.CreateMuteRuleOver(new PgMuteRuleStore(connection, transaction), server_name, metric_name,
                     database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, WithSuffix(reason, action!), expires_at,
                     server_id, id => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern,
                     external_source);
@@ -205,13 +220,28 @@ internal static class DarlingMcpAgentActions
             ? ServerTargetAsync(postgres, id, before.Id)
             : Task.FromResult(new AgentActionTarget(-1, "every server (the rule names no server_id)", before.Id, null));
 
-    /// <summary>The write hook's recheck: the stored rule is still the one the gate read, on the request's server.</summary>
-    private static async Task StillOnServerAsync(NpgsqlDataSource postgres, string ruleId, int? serverId)
+    /// <summary>
+    /// The write hook's recheck, in the gate's transaction: the stored rule is locked <c>FOR UPDATE</c> and is still the one the
+    /// gate read, on the same server and the same metric (a rule re-pointed at a protected metric after the kind rule ran is
+    /// refused here), so the recheck and the write are one transaction.
+    /// </summary>
+    internal static async Task StillTheSameMuteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string ruleId,
+        MuteRule before, CancellationToken ct)
     {
-        var now = await DarlingMcpAlertTools.FindRuleAsync(new PgMuteRuleStore(postgres), ruleId);
-        if (now is null)
-            throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No mute rule with id '{ruleId}'."));
-        if (now.ServerId != serverId)
+        await using var command = new NpgsqlCommand("SELECT server_id, metric_name FROM config_mute_rules WHERE id = $1 FOR UPDATE",
+            connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = ruleId });
+        int? serverId;
+        string? metric;
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            if (!await reader.ReadAsync(ct))
+                throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No mute rule with id '{ruleId}'."));
+            serverId = reader.IsDBNull(0) ? null : reader.GetInt32(0);
+            metric = reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+
+        if (serverId != before.ServerId || !string.Equals(metric, before.MetricName, StringComparison.Ordinal))
             throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("conflict",
                 "The mute rule changed since it was read; read it again."));
     }
@@ -253,10 +283,10 @@ internal static class DarlingMcpAgentActions
         return await RunAsync(seat, postgres, logger, tool, "mute", agentAction, target,
             (_, _, ctx, _) => Task.FromResult(after is null ? null : MuteAfterImageRefusal(after, ctx.RequestServerId)),
             (_, _, _) => Task.FromResult(Serialize(before)),
-            async (_, _, _) =>
+            async (connection, transaction, token) =>
             {
-                await StillOnServerAsync(postgres, rule_id, before!.ServerId);
-                var answer = await DarlingMcpAlertTools.UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, body!.ToJsonString(),
+                await StillTheSameMuteAsync(connection, transaction, rule_id, before!, token);
+                var answer = await DarlingMcpAlertTools.UpdateMuteRuleCore(new PgMuteRuleStore(connection, transaction), rule_id, body!.ToJsonString(),
                     id => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id));
                 RequireSuccess(answer);
                 return answer;
@@ -273,10 +303,10 @@ internal static class DarlingMcpAgentActions
         var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
         return await RunAsync(seat, postgres, logger, tool, "mute", agentAction, target, null,
             (_, _, _) => Task.FromResult(Serialize(before)),
-            async (_, _, _) =>
+            async (connection, transaction, token) =>
             {
-                await StillOnServerAsync(postgres, rule_id, before!.ServerId);
-                var answer = await DarlingMcpAlertTools.DeleteMuteRuleCore(new PgMuteRuleStore(postgres), rule_id);
+                await StillTheSameMuteAsync(connection, transaction, rule_id, before!, token);
+                var answer = await DarlingMcpAlertTools.DeleteMuteRuleCore(new PgMuteRuleStore(connection, transaction), rule_id);
                 RequireSuccess(answer);
                 return answer;
             }, ct);
@@ -294,10 +324,10 @@ internal static class DarlingMcpAgentActions
             /* Turning a mute ON is an after image that mutes: the same rule as a create. Turning it off is always allowed. */
             (_, _, ctx, _) => Task.FromResult(enabled && before is not null ? MuteAfterImageRefusal(before, ctx.RequestServerId) : null),
             (_, _, _) => Task.FromResult(Serialize(before)),
-            async (_, _, _) =>
+            async (connection, transaction, token) =>
             {
-                await StillOnServerAsync(postgres, rule_id, before!.ServerId);
-                var answer = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(new PgMuteRuleStore(postgres), rule_id, enabled);
+                await StillTheSameMuteAsync(connection, transaction, rule_id, before!, token);
+                var answer = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(new PgMuteRuleStore(connection, transaction), rule_id, enabled);
                 RequireSuccess(answer);
                 return answer;
             }, ct);
@@ -306,14 +336,16 @@ internal static class DarlingMcpAgentActions
     /* ------------------------------------------------------------------ custom alert rules */
 
     /// <summary>The request's server, read before the gate so the target is the request's own (the rule's scope is what the kind rule judges).</summary>
-    private static async Task<AgentActionTarget> RequestServerTargetAsync(NpgsqlDataSource postgres, string? agentAction, string? id)
+    private static async Task<AgentActionTarget> RequestServerTargetAsync(NpgsqlDataSource postgres, string? agentAction, string? id,
+        CancellationToken ct)
     {
         if (InvestigationToolCore.ParseAgentAction(agentAction, out var action) is null)
         {
             await using var command = postgres.CreateCommand("SELECT server_id, server_name FROM config.investigation_requests WHERE request_id = $1");
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Uuid, Value = action!.RequestId });
-            await using var reader = await command.ExecuteReaderAsync();
-            if (await reader.ReadAsync())
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
                 return new AgentActionTarget(reader.GetInt32(0), reader.GetString(1), id, null);
         }
 
@@ -324,7 +356,12 @@ internal static class DarlingMcpAgentActions
     internal static async Task<AgentActionRefusal?> RuleScopeRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         string definitionJson, int requestServerId, string which, CancellationToken ct)
     {
-        var (definition, _) = CustomAlertRuleDefinition.TryParse(definitionJson);
+        var (definition, parseError) = CustomAlertRuleDefinition.TryParse(definitionJson);
+        /* A definition that does not parse has no scope to judge: refuse it as invalid, naming the field, so the agent fixes the
+           JSON rather than rewriting a scope that was never the problem. (A stored rule that does not parse is rule_scope.) */
+        if (definition is null && which == "after")
+            return new AgentActionRefusal(AgentActionCodes.Invalid,
+                $"definition is not valid: {(parseError ?? "it does not parse").TrimEnd('.', ' ')}. Fix the definition field; it was not judged for scope.");
         string? storageName;
         await using (var command = new NpgsqlCommand("SELECT server_name FROM servers WHERE server_id = $1", connection, transaction))
         {
@@ -347,18 +384,40 @@ internal static class DarlingMcpAgentActions
     {
         const string tool = "create_custom_alert_rule";
         InvestigationToolCore.ParseAgentAction(agentAction, out var action);
-        var target = await RequestServerTargetAsync(postgres, agentAction, null);
+        var target = await RequestServerTargetAsync(postgres, agentAction, null, ct);
         return await RunAsync(seat, postgres, logger, tool, "custom_rule", agentAction, target,
             (connection, transaction, ctx, token) => RuleScopeRefusalAsync(connection, transaction, definition, ctx.RequestServerId, "after", token),
             NoBefore,
-            async (_, _, token) =>
+            async (connection, transaction, token) =>
             {
                 var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
                 if (parsed is null || error is not null)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", error ?? "definition is invalid."));
-                var result = await new CustomAlertRuleStore(postgres).CreateAsync(name, description, definition, enabled, "agent:" + action!.AgentId, token);
+                var result = await new CustomAlertRuleStore(connection, transaction).CreateAsync(name, description, definition, enabled, "agent:" + action!.AgentId, token);
                 return CustomRuleAnswer(result);
             }, ct);
+    }
+
+    /// <summary>
+    /// The custom-rule write hooks' recheck, in the gate's transaction: the stored rule is locked <c>FOR UPDATE</c> and its
+    /// definition as stored now is still scoped to exactly the request's server (a rule re-scoped after the kind rule read it
+    /// is refused here, not changed).
+    /// </summary>
+    internal static async Task StillInScopeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, long ruleId,
+        int requestServerId, CancellationToken ct)
+    {
+        string? stored;
+        await using (var command = new NpgsqlCommand("SELECT definition::text FROM custom_alert_rules WHERE id = $1 FOR UPDATE",
+            connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = ruleId });
+            stored = await command.ExecuteScalarAsync(ct) as string;
+        }
+
+        if (stored is null)
+            throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {ruleId}."));
+        if (await RuleScopeRefusalAsync(connection, transaction, stored, requestServerId, "before", ct) is { } refusal)
+            throw new AgentToolOutcomeException(DarlingAgentActionGate.RefusalAnswer(refusal));
     }
 
     private static string CustomRuleAnswer(CustomAlertRuleResult result) => result switch
@@ -381,14 +440,15 @@ internal static class DarlingMcpAgentActions
         var row = (current as CustomAlertRuleResult.Ok)?.Rule;
         if (row is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {rule_id}.");
-        var target = await RequestServerTargetAsync(postgres, agentAction, rule_id.ToString(CultureInfo.InvariantCulture));
+        var target = await RequestServerTargetAsync(postgres, agentAction, rule_id.ToString(CultureInfo.InvariantCulture), ct);
         return await RunAsync(seat, postgres, logger, tool, "custom_rule", agentAction, target,
             async (connection, transaction, ctx, token) =>
                 await RuleScopeRefusalAsync(connection, transaction, row!.DefinitionJson, ctx.RequestServerId, "before", token)
                 ?? await RuleScopeRefusalAsync(connection, transaction, definition ?? row.DefinitionJson, ctx.RequestServerId, "after", token),
             (_, _, _) => Task.FromResult<string?>(DarlingWebEndpoints.BuildFullRuleNode(row!).ToJsonString(McpHelpers.JsonOptions)),
-            async (_, _, token) =>
+            async (connection, transaction, token) =>
             {
+                await StillInScopeAsync(connection, transaction, rule_id, target.ServerId, token);
                 if (definition is not null)
                 {
                     var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
@@ -396,7 +456,7 @@ internal static class DarlingMcpAgentActions
                         throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", error ?? "definition is invalid."));
                 }
 
-                var result = await store.UpdateAsync(rule_id, name ?? row!.Name,
+                var result = await new CustomAlertRuleStore(connection, transaction).UpdateAsync(rule_id, name ?? row!.Name,
                     DarlingMcpCustomAlertTools.ResolveOptionalText(description, row!.Description), definition ?? row.DefinitionJson,
                     enabled ?? row.Enabled, version, "agent:" + action!.AgentId, token);
                 return CustomRuleAnswer(result);
@@ -411,13 +471,15 @@ internal static class DarlingMcpAgentActions
         var row = (current as CustomAlertRuleResult.Ok)?.Rule;
         if (row is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {rule_id}.");
-        var target = await RequestServerTargetAsync(postgres, agentAction, rule_id.ToString(CultureInfo.InvariantCulture));
+        var target = await RequestServerTargetAsync(postgres, agentAction, rule_id.ToString(CultureInfo.InvariantCulture), ct);
         return await RunAsync(seat, postgres, logger, tool, "custom_rule", agentAction, target,
             (connection, transaction, ctx, token) => RuleScopeRefusalAsync(connection, transaction, row!.DefinitionJson, ctx.RequestServerId, "before", token),
             (_, _, _) => Task.FromResult<string?>(DarlingWebEndpoints.BuildFullRuleNode(row!).ToJsonString(McpHelpers.JsonOptions)),
-            async (_, _, token) =>
+            async (connection, transaction, token) =>
             {
-                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, rule_id, logger, token);
+                await StillInScopeAsync(connection, transaction, rule_id, target.ServerId, token);
+                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, new CustomAlertRuleStore(connection, transaction),
+                    rule_id, logger, token);
                 if (result is not CustomAlertRuleResult.Ok)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {rule_id}."));
                 return JsonSerializer.Serialize(new { status = "deleted", rule_id }, McpHelpers.JsonOptions);

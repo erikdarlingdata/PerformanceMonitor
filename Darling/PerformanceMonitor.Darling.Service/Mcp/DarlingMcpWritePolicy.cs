@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -111,19 +112,11 @@ internal static class DarlingMcpWritePolicy
     /// The Level 2 action tools (#5632 Phase B, #5912): write tools an agent may also call under the investigations arm
     /// (writes off, investigations on, token set), each through the one gate (<see cref="DarlingAgentActionGate"/>) with an
     /// <c>agent_action</c>. Under the writes arm they are ordinary write tools and the gate is not asked. The mute and custom-rule tools (#5915) are in it;
-    /// the threshold override tools add to it (#5916). A name in <see cref="NeverAgentTools"/> is
+    /// the threshold override tools add to it (#5916), in <see cref="InvestigationRules.AgentActionToolNames"/>, the one definition the brief composer names from too (#3684). A name in <see cref="NeverAgentTools"/> is
     /// never offered under the investigations arm, even if listed here.
     /// </summary>
-    internal static readonly IReadOnlySet<string> AgentActionTools = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "create_mute_rule",
-        "update_mute_rule",
-        "delete_mute_rule",
-        "set_mute_rule_enabled",
-        "create_custom_alert_rule",
-        "update_custom_alert_rule",
-        "delete_custom_alert_rule",
-    };
+    internal static readonly IReadOnlySet<string> AgentActionTools =
+        new HashSet<string>(InvestigationRules.AgentActionToolNames, StringComparer.Ordinal);
 
     /// <summary>
     /// The write tools never offered to agents (#5912): the one global alert settings row, the analysis finding mute,

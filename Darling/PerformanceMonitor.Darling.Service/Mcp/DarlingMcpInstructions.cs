@@ -103,7 +103,7 @@ internal static class DarlingMcpInstructions
         var off = new List<string>();
         if (!writesServed)
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
-                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
+                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
                         ? $"; the {agentActionServed} mute and custom-rule tools are served only to an agent with an `agent_action` at Level 2"
                         : string.Empty));

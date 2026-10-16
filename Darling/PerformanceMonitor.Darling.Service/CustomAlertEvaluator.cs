@@ -787,11 +787,18 @@ public sealed class CustomAlertEvaluator
     /// evaluator's in-memory no-data map is pruned lazily on its next cache refresh. The resolve is best-effort
     /// (its own failure isolation) so a resolve blip never blocks the delete the operator asked for.
     /// </summary>
-    public static async Task<CustomAlertRuleResult> ResolveAndDeleteRuleAsync(
-        NpgsqlDataSource postgres, long ruleId, ILogger? logger, CancellationToken cancellationToken)
-    {
-        var ruleStore = new CustomAlertRuleStore(postgres);
+    public static Task<CustomAlertRuleResult> ResolveAndDeleteRuleAsync(
+        NpgsqlDataSource postgres, long ruleId, ILogger? logger, CancellationToken cancellationToken) =>
+        ResolveAndDeleteRuleAsync(postgres, new CustomAlertRuleStore(postgres), ruleId, logger, cancellationToken);
 
+    /// <summary>
+    /// The same resolve-then-delete over <paramref name="ruleStore"/> (#5915): a Level 2 agent delete passes a store bound to
+    /// the gate's transaction, so the delete commits with the journal row. The resolution rows are written on their own
+    /// connections before the delete, as they always were, so they stand if that transaction is later abandoned.
+    /// </summary>
+    internal static async Task<CustomAlertRuleResult> ResolveAndDeleteRuleAsync(
+        NpgsqlDataSource postgres, CustomAlertRuleStore ruleStore, long ruleId, ILogger? logger, CancellationToken cancellationToken)
+    {
         var current = await ruleStore.GetAsync(ruleId, cancellationToken);
         if (current is CustomAlertRuleResult.Ok ok && ok.Rule is not null)
         {

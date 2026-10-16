@@ -172,6 +172,25 @@ public sealed class AgentLevel2ToolPolicyTests
         Assert.Contains(one["read_rules"]!.AsArray().Select(n => (string)n!), r => r.StartsWith("You only read and report.", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("known batch", "known batch [agent:agent-a request {R}]")]
+    [InlineData(null, "[agent:agent-a request {R}]")]
+    [InlineData("  ", "[agent:agent-a request {R}]")]
+    /* The reason read back from the rule already ends with an agent suffix (this agent's, another's, or two stacked by the old
+       build): one suffix, this action's, comes out. */
+    [InlineData("known batch [agent:agent-a request {R}]", "known batch [agent:agent-a request {R}]")]
+    [InlineData("known batch [agent:agent-b request 7f3a9c1e-0000-4000-8000-000000000001]", "known batch [agent:agent-a request {R}]")]
+    [InlineData("known batch [agent:agent-a request {R}] [agent:agent-a request {R}]", "known batch [agent:agent-a request {R}]")]
+    [InlineData("[agent:agent-a request {R}]", "[agent:agent-a request {R}]")]
+    /* A bracket in the middle of the reason is the agent's own text, not a suffix. */
+    [InlineData("see [agent:x request y] note", "see [agent:x request y] note [agent:agent-a request {R}]")]
+    public void WithSuffix_PutsExactlyOneAttributionSuffix_OnTheReason(string? reason, string expected)
+    {
+        var request = Guid.NewGuid();
+        Assert.Null(InvestigationToolCore.ParseAgentAction(AgentActionArgumentTests.Arg(request.ToString()), out var action));
+        Assert.Equal(expected.Replace("{R}", request.ToString()), DarlingMcpAgentActions.WithSuffix(reason?.Replace("{R}", request.ToString()), action!));
+    }
+
     [Fact]
     public void AReportWithActionProposals_IsStillRefused()
     {
@@ -523,6 +542,132 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
             var other = await SeedRuleAsync(c, Scope8);
             Assert.Equal("rule_scope", (string?)Parse(await DarlingMcpCustomAlertTools.DeleteCustomAlertRule(c.Source, other, c.Arg, AgentSeat))["reason"]);
             Assert.Equal("1", await ScalarAsync(c.Connection, "SELECT count(*) FROM config.custom_alert_rules", c.Ct));
+        });
+    }
+
+    private static async Task<string?> JournalAsync(Ctx c, string select) =>
+        await ScalarAsync(c.Connection, $"SELECT {select} FROM config.investigation_journal WHERE request_id = '{c.Request}' AND event LIKE 'action_%'", c.Ct);
+
+    [Fact]
+    public async Task ASecondUpdate_NeverStacksTheAttributionSuffix_WhetherTheReasonIsOmittedOrSentBackWhole()
+    {
+        await RunAsync(async c =>
+        {
+            var id = await SeedMuteAsync(c, 7, "Blocking Detected");
+            async Task<string?> Stored() => await ScalarAsync(c.Connection, $"SELECT reason FROM config_mute_rules WHERE id = '{id}'", c.Ct);
+            async Task<string> Update(string changes) => await DarlingMcpAlertTools.UpdateMuteRule(c.Source, id, changes, c.Arg, AgentSeat);
+            var suffix = $"[agent:agent-a request {c.Request}]";
+
+            Assert.Equal("updated", (string?)Parse(await Update("{\"reason\":\"known batch\"}"))["status"]);
+            Assert.Equal($"known batch {suffix}", await Stored());
+
+            /* No reason in the body: the stored reason is the fallback, and it already ends with the suffix. */
+            Assert.Equal("updated", (string?)Parse(await Update("{\"expires_at_utc\":\"2099-11-01T00:00:00Z\"}"))["status"]);
+            Assert.Equal($"known batch {suffix}", await Stored());
+
+            /* The read-modify-write an agent does: get_mute_rules shows the suffix, the agent edits a word and sends it all back. */
+            Assert.Equal("updated", (string?)Parse(await Update($"{{\"reason\":\"known batch, fixed {suffix}\"}}"))["status"]);
+            Assert.Equal($"known batch, fixed {suffix}", await Stored());
+        });
+    }
+
+    [Fact]
+    public async Task AChangeThatSucceeds_IsJournaledActionDone_WithItsAfterImage_AndNeverActionFailed()
+    {
+        await RunAsync(async c =>
+        {
+            var created = Parse(await CreateMute(c));
+            var muteId = (string)created["mute_rule"]!["id"]!;
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, muteId, "{\"reason\":\"r2\"}", c.Arg, AgentSeat))["status"]);
+            Assert.Equal("agent rule", (string?)Parse(await CreateRule(c, Scope7))["name"]);
+
+            /* Every called row has its done row, none failed, and each done row carries the after image the tool answered. */
+            Assert.Equal("action_called|action_done|action_called|action_done|action_called|action_done",
+                await JournalAsync(c, "string_agg(event, '|' ORDER BY journal_id)"));
+            Assert.Equal("0", await ScalarAsync(c.Connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{c.Request}' AND event = 'action_failed'", c.Ct));
+            Assert.Equal(muteId, await ScalarAsync(c.Connection,
+                $"SELECT detail->'after'->'mute_rule'->>'id' FROM config.investigation_journal WHERE request_id = '{c.Request}' AND event = 'action_done' ORDER BY journal_id LIMIT 1", c.Ct));
+            Assert.Equal("agent rule", await ScalarAsync(c.Connection,
+                $"SELECT detail->'after'->>'name' FROM config.investigation_journal WHERE request_id = '{c.Request}' AND event = 'action_done' ORDER BY journal_id DESC LIMIT 1", c.Ct));
+            Assert.Equal("True", await ScalarAsync(c.Connection,
+                $"SELECT bool_and(detail ? 'called_id') FROM config.investigation_journal WHERE request_id = '{c.Request}' AND event = 'action_done'", c.Ct));
+        });
+    }
+
+    [Fact]
+    public async Task AWriteThatFails_RollsBackWithTheGatesTransaction_AndJournalsActionFailed_WithTheRealRefusal()
+    {
+        await RunAsync(async c =>
+        {
+            Assert.Equal("agent rule", (string?)Parse(await CreateRule(c, Scope7))["name"]);
+            /* A duplicate name is the store's conflict, answered inside the write: nothing new is stored, and the failed row
+               says why (the answer text), not a constant. */
+            var again = Parse(await CreateRule(c, Scope7));
+            Assert.Equal("conflict", (string?)again["status"]);
+            Assert.Equal("1", await ScalarAsync(c.Connection, "SELECT count(*) FROM config.custom_alert_rules", c.Ct));
+            Assert.Equal("1", await ScalarAsync(c.Connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{c.Request}' AND event = 'action_failed' AND detail->>'error' LIKE '%already exists%'", c.Ct));
+            Assert.Equal("action_called|action_done|action_called|action_failed",
+                await JournalAsync(c, "string_agg(event, '|' ORDER BY journal_id)"));
+        });
+    }
+
+    [Fact]
+    public async Task ACustomRuleDefinitionThatDoesNotParse_IsRefused_AgentActionInvalid_NamingTheField_NotRuleScope()
+    {
+        await RunAsync(async c =>
+        {
+            var refused = Parse(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(c.Source, "broken", "{\"metric\":", null, true, c.Arg, AgentSeat));
+            Assert.Equal(AgentActionCodes.Invalid, (string?)refused["reason"]);
+            Assert.Contains("definition", (string?)refused["message"], StringComparison.Ordinal);
+            Assert.DoesNotContain("exactly the request's server", (string?)refused["message"], StringComparison.Ordinal);
+
+            var own = await SeedRuleAsync(c, Scope7);
+            var update = Parse(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(c.Source, own, 1, null, "not json", null, null, c.Arg, AgentSeat));
+            Assert.Equal(AgentActionCodes.Invalid, (string?)update["reason"]);
+            Assert.Equal("0", await ScalarAsync(c.Connection, "SELECT count(*) FROM config.custom_alert_rules WHERE name = 'broken'", c.Ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheMuteRecheck_InTheGatesTransaction_RefusesARuleRePointedSinceItWasRead()
+    {
+        await RunAsync(async c =>
+        {
+            var id = await SeedMuteAsync(c, 7, "Blocking Detected");
+            var before = new MuteRule { Id = id, ServerId = 7, MetricName = "Blocking Detected" };
+            await using var connection = await c.Source.OpenConnectionAsync(c.Ct);
+            await using var transaction = await connection.BeginTransactionAsync(c.Ct);
+
+            await DarlingMcpAgentActions.StillTheSameMuteAsync(connection, transaction, id, before, c.Ct);
+
+            await ExecAsync(connection, $"UPDATE config_mute_rules SET metric_name = 'Collection Stopped' WHERE id = '{id}'", c.Ct);
+            var changed = await Assert.ThrowsAsync<AgentToolOutcomeException>(() =>
+                DarlingMcpAgentActions.StillTheSameMuteAsync(connection, transaction, id, before, c.Ct));
+            Assert.Equal("conflict", (string?)Parse(changed.Outcome)["status"]);
+
+            var gone = await Assert.ThrowsAsync<AgentToolOutcomeException>(() =>
+                DarlingMcpAgentActions.StillTheSameMuteAsync(connection, transaction, "no-such-id", before, c.Ct));
+            Assert.Equal("not_found", (string?)Parse(gone.Outcome)["status"]);
+        });
+    }
+
+    [Fact]
+    public async Task TheCustomRuleRecheck_InTheGatesTransaction_RefusesARuleRescopedSinceItWasRead()
+    {
+        await RunAsync(async c =>
+        {
+            var id = await SeedRuleAsync(c, Scope7);
+            await using var connection = await c.Source.OpenConnectionAsync(c.Ct);
+            await using var transaction = await connection.BeginTransactionAsync(c.Ct);
+
+            await DarlingMcpAgentActions.StillInScopeAsync(connection, transaction, id, 7, c.Ct);
+
+            await ExecAsync(connection, $"UPDATE config.custom_alert_rules SET definition = '{Definition(Scope8)}'::jsonb WHERE id = {id}", c.Ct);
+            var moved = await Assert.ThrowsAsync<AgentToolOutcomeException>(() =>
+                DarlingMcpAgentActions.StillInScopeAsync(connection, transaction, id, 7, c.Ct));
+            Assert.Equal("rule_scope", (string?)Parse(moved.Outcome)["reason"]);
         });
     }
 }

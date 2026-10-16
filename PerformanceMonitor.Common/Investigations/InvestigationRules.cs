@@ -48,6 +48,23 @@ public static class InvestigationRules
     /// <c>journal_capped</c> row records it.</summary>
     public const int MaxAgentJournalRows = 200;
 
+    /// <summary>
+    /// The Level 2 action tools (#5915): write tools an agent may call under the investigations arm, each through the one
+    /// gate with an <c>agent_action</c>. The ONE definition (#3684): the service's write policy builds its served set from
+    /// it and the brief composer names these in <c>allowed_actions</c>, so a tool added here (#5916) is both served and
+    /// named with no second edit. Mutes and custom alert rules, on the request's server only.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AgentActionToolNames = new[]
+    {
+        "create_mute_rule",
+        "update_mute_rule",
+        "delete_mute_rule",
+        "set_mute_rule_enabled",
+        "create_custom_alert_rule",
+        "update_custom_alert_rule",
+        "delete_custom_alert_rule",
+    };
+
     /// <summary>What a valid agent id is (#5632 review round 2, L4).</summary>
     public const string AgentIdRule =
         "agent_id is required: 1 to 64 characters, each a letter, a digit, '.', '_', ':' or '-'.";

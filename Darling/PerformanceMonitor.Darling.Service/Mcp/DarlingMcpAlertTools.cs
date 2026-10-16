@@ -1145,7 +1145,7 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "create_mute_rule"), Description(
-        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
+        "Agent arm: needs agent_action, request's server only. Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
         "<<GUIDE>>" +
         "Creates an alert mute rule that suppresses matching alerts (they are still logged, just not delivered) — " +
         "the same rules get_mute_rules lists and the Viewer's Manage Mute Rules surface writes. Provide any " +
@@ -1412,7 +1412,7 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "delete_mute_rule"), Description(
-        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
+        "Agent arm: needs agent_action, request's server only. Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
         "{status:\"deleted\", rule_id} on success, or {status:\"not_found\"} when no rule has that id. Permanent. " +
         "The running service stops honoring the rule on its next collection sweep, when the delete's " +
         "config_version bump makes it reload its mute cache.")]
@@ -1458,7 +1458,7 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "set_mute_rule_enabled"), Description(
-        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
+        "Agent arm: needs agent_action, request's server only. Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
         "<<GUIDE>>" +
         "Enables or disables an existing alert mute rule by its id (from get_mute_rules or create_mute_rule) " +
         "WITHOUT deleting it. A disabled rule suppresses nothing while keeping its id, its scope, its reason " +
@@ -1556,12 +1556,12 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_mute_rule"), Description(
-        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
+        "Agent arm: needs agent_action, request's server only. Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
         "update: send only the fields to change, in the same shape get_mute_rules returns; a field you do NOT " +
         "send stays exactly as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable " +
-        "here — use set_mute_rule_enabled instead. created_at_utc never moves, whatever changes. Clearing " +
-        "scope fields WIDENS the rule — one left with none mutes EVERY alert. Returns updated, unchanged " +
-        "(nothing to write), not_found, or invalid (nothing written)." +
+        "here — use set_mute_rule_enabled instead. created_at_utc never moves. Clearing " +
+        "scope fields WIDENS the rule — one left with none mutes EVERY alert. Returns updated, unchanged, " +
+        "not_found, or invalid (nothing written)." +
         "<<GUIDE>>" +
         "Edits an existing alert mute rule IN PLACE by its id (from get_mute_rules or create_mute_rule) — the " +
         "changes the enabled flag cannot express: narrowing or correcting a pattern, rewording a reason, adding " +
@@ -1731,23 +1731,6 @@ public sealed class DarlingMcpAlertTools
     private sealed record MuteRuleFieldChange(string Field, Action<MuteRule> Apply);
 
     /// <summary>
-    /// Parses a PARTIAL mute-rule update — the per-rule JSON shape get_mute_rules RETURNS, carrying only the
-    /// fields to change — into appliers over a <see cref="MuteRule"/> clone. Returns a non-null error — and
-    /// the caller writes nothing — on the FIRST bad field, mirroring <see cref="BuildAlertSettingsUpdate"/>'s
-    /// whitelist-and-first-error discipline.
-    ///
-    /// <para>An explicit JSON null is the ONE spelling of "clear". A blank string is refused rather than
-    /// treated as a second one: create_mute_rule folds whitespace to null because omission is available
-    /// there, but on a partial update "" is far more likely a caller who meant to clear (or meant nothing)
-    /// than a value, and two spellings of clear would make one of them always accidental.</para>
-    ///
-    /// <para>The four read-payload keys that are NOT editable each get a pointed refusal rather than the
-    /// generic unknown-field text, because feeding a get_mute_rules row back with edits is the natural
-    /// mistake: <c>id</c> is the rule's identity, <c>created_at_utc</c> is the #3306 clock this verb exists
-    /// to preserve, <c>enabled</c> belongs to set_mute_rule_enabled, and <c>summary</c> is derived, not
-    /// stored.</para>
-    /// </summary>
-    /// <summary>
     /// The mute rule an <c>update_mute_rule</c> body would leave stored: <paramref name="before"/> cloned with the body's
     /// changes applied, through the same parser the tool runs (#5915). Null with an <paramref name="error"/> when the body
     /// is invalid. The Level 2 kind rule reads the after image from this, so it cannot disagree with the write.
@@ -1764,6 +1747,23 @@ public sealed class DarlingMcpAlertTools
         return after;
     }
 
+    /// <summary>
+    /// Parses a PARTIAL mute-rule update — the per-rule JSON shape get_mute_rules RETURNS, carrying only the
+    /// fields to change — into appliers over a <see cref="MuteRule"/> clone. Returns a non-null error — and
+    /// the caller writes nothing — on the FIRST bad field, mirroring <see cref="BuildAlertSettingsUpdate"/>'s
+    /// whitelist-and-first-error discipline.
+    ///
+    /// <para>An explicit JSON null is the ONE spelling of "clear". A blank string is refused rather than
+    /// treated as a second one: create_mute_rule folds whitespace to null because omission is available
+    /// there, but on a partial update "" is far more likely a caller who meant to clear (or meant nothing)
+    /// than a value, and two spellings of clear would make one of them always accidental.</para>
+    ///
+    /// <para>The four read-payload keys that are NOT editable each get a pointed refusal rather than the
+    /// generic unknown-field text, because feeding a get_mute_rules row back with edits is the natural
+    /// mistake: <c>id</c> is the rule's identity, <c>created_at_utc</c> is the #3306 clock this verb exists
+    /// to preserve, <c>enabled</c> belongs to set_mute_rule_enabled, and <c>summary</c> is derived, not
+    /// stored.</para>
+    /// </summary>
     private static (List<MuteRuleFieldChange> Changes, string? Error) BuildMuteRuleUpdate(JsonObject body)
     {
         var changes = new List<MuteRuleFieldChange>();

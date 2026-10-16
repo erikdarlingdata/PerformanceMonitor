@@ -45,7 +45,13 @@ public sealed class DarlingMcpInvestigationToolsTests
         Assert.False(effective.Writes);
         Assert.True(effective.Offers("claim_investigation_request"));
         Assert.True(effective.Offers("submit_investigation_report"));
-        Assert.False(effective.Offers("create_mute_rule"));
+        /* #5915: the Level 2 action tools are offered to an agent (each through the gate); every other write is not. */
+        Assert.True(effective.Offers("create_mute_rule"));
+        Assert.True(effective.Offers("delete_custom_alert_rule"));
+        Assert.False(effective.Offers("update_alert_settings"));
+        Assert.False(effective.Offers("mute_analysis_finding"));
+        Assert.False(effective.Offers("set_notification_route_enabled"));
+        Assert.False(effective.Offers("edit_server"));
     }
 
     [Fact]
@@ -138,7 +144,30 @@ public sealed class DarlingMcpInvestigationToolsTests
             Assert.False(byName[name].DestructiveHint);
         }
 
-        Assert.DoesNotContain(byName.Keys, DarlingMcpWritePolicy.IsWrite);
+        /* #5915: the investigations arm serves exactly the seven Level 2 action tools of the writes, each through the gate. The
+           literal is the behaviour pin: a write added to or dropped from the served set changes this list on purpose. */
+        var servedWrites = byName.Keys.Where(DarlingMcpWritePolicy.IsWrite).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        Assert.Equal(
+            new[]
+            {
+                "create_custom_alert_rule", "create_mute_rule", "delete_custom_alert_rule", "delete_mute_rule",
+                "set_mute_rule_enabled", "update_custom_alert_rule", "update_mute_rule",
+            },
+            servedWrites);
+        /* Every other write stays unserved: alert settings, the finding mute, routes, Custom Views, server tags, server admin. */
+        foreach (var never in new[]
+        {
+            "update_alert_settings", "mute_analysis_finding", "set_notification_route_enabled", "delete_notification_route",
+            "create_custom_view", "update_custom_view", "delete_custom_view", "create_server_tag", "update_server_tag",
+            "delete_server_tag", "assign_server_tag", "unassign_server_tag", "add_servers", "edit_server", "remove_server",
+        })
+            Assert.DoesNotContain(never, byName.Keys);
+        /* Served to an agent, they are still changes to configuration: not read-only, and flagged destructive. */
+        foreach (var name in servedWrites)
+        {
+            Assert.False(byName[name].ReadOnlyHint, $"{name} changes configuration");
+            Assert.True(byName[name].DestructiveHint, $"{name} is a destructive change");
+        }
     }
 
     [Fact]

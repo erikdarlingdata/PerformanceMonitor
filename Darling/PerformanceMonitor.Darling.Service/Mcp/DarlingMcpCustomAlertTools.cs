@@ -145,7 +145,7 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [McpServerTool(Name = "create_custom_alert_rule"), Description(
-        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Creates a new saved custom alert rule. The definition is VALIDATED first (same as " +
+        "Agent arm: needs agent_action, request's server only. Creates a new saved custom alert rule. The definition is VALIDATED first (same as " +
         "validate_custom_alert_rule); an invalid definition returns {status:\"invalid\", ...} and saves " +
         "nothing. On success returns the stored rule (id, version 1, and the definition). A name collision " +
         "returns {status:\"conflict\", ...}. The rule is stamped as MCP-authored. A rule created enabled starts " +
@@ -192,9 +192,9 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [McpServerTool(Name = "update_custom_alert_rule"), Description(
-        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Partial update of an existing rule: send only the fields to change (name, description, definition, enabled); an " +
+        "Agent arm: needs agent_action, request's server only. Partial update of an existing rule: send only the fields to change (name, description, definition, enabled); an " +
         "omitted field keeps its current value. description ALSO accepts an empty string \"\" to clear it (vocabulary " +
-        "shared with update_custom_view). A new definition is validated first; an invalid one changes nothing. Pass the " +
+        "shared with update_custom_view). An invalid definition changes nothing. Pass the " +
         "'version' last read from get_custom_alert_rule: a mismatch returns {status:\"conflict\"} rather than overwriting. " +
         "Setting enabled:true is refused as {status:\"invalid\"} if it would push the fleet-wide enabled-rule count over " +
         "its cap. " +
@@ -282,7 +282,7 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [McpServerTool(Name = "delete_custom_alert_rule"), Description(
-        "Level 2 (investigations arm): needs agent_action; changes only the request's server. Deletes a saved custom alert rule by id. Returns {status:\"deleted\", rule_id:N} on success, or " +
+        "Agent arm: needs agent_action, request's server only. Deletes a saved custom alert rule by id. Returns {status:\"deleted\", rule_id:N} on success, or " +
         "{status:\"not_found\", ...} when no rule has that id. This is permanent, and it also drops the rule's " +
         "accumulated per-server alert state. Any OPEN incident for the rule is force-resolved first (a recovery " +
         "row is written to alert history) so nothing is left showing as firing forever. To pause a rule without " +
