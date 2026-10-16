@@ -1709,6 +1709,8 @@ END $do$;
 --     admin (the desktop Viewer) writes the threshold overrides and the report feedback. viewer reads both and writes
 --     neither. mcp (the agent's change tools) writes the overrides only and reads the feedback; the overrides' reload
 --     beacon trigger UPDATEs config_service.config_version as the caller, which mcp's two-column grant in step 3d covers.
+--     The mcp write grant on the overrides is table-level on purpose (an override IS the agent's action, and the table has
+--     no authority column to protect, unlike the notes' state column); see managed section 10e.
 --     The two tables are created by V191: on a store below it the block warns and skips, so the rest of the script still
 --     runs; re-run the script once the service has migrated the store to V191.
 DO $do$

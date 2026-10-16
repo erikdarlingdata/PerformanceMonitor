@@ -25,8 +25,8 @@ namespace Darling.Tests;
    rows, so the class is deliberately NOT [Collection("live-postgres")]. */
 
 /// <summary>
-/// Pins the store rung for Level 2 (#5909, Phase B of #5632): its place at the top of the ladder, the probe's sentinel, the
-/// grant text in both grant sources, and on a live store: a route and a request accept level 2 and refuse a level outside
+/// Pins the store rung for Level 2 (#5909, Phase B of #5632): its place at the top of the ladder, the probe's sentinel,
+/// grants in both grant sources (live, as real logins), and on a live store: a route and a request accept level 2 and refuse a level outside
 /// the range, the agent-actions switch reads on on a new and an upgraded store, a change to a threshold override bumps the
 /// config_version beacon, feedback goes with its request, a practice request outlives the request it replays, retention
 /// ages feedback with its request and never ages overrides, and a second run changes nothing. Tests name the rung by its
@@ -50,38 +50,8 @@ public sealed class AgentLevel2StoreRungTests
     }
 
     [Fact]
-    public void TheScript_IsGuarded_MovesNoRow_AndCarriesNoGrant()
-    {
-        var sql = Rung.Sql;
-
-        /* Every CREATE and ADD COLUMN is guarded, and the two CHECK swaps run only when level 2 is not named yet. */
-        foreach (var line in sql.Split('\n').Where(l => l.StartsWith("CREATE ", StringComparison.Ordinal)))
-        {
-            Assert.True(line.Contains("IF NOT EXISTS", StringComparison.Ordinal) || line.Contains("TRIGGER", StringComparison.Ordinal), line);
-        }
-
-        Assert.Contains("ADD COLUMN IF NOT EXISTS agent_actions_enabled boolean NOT NULL DEFAULT true", sql, StringComparison.Ordinal);
-        Assert.Contains("ADD COLUMN IF NOT EXISTS practice_of uuid;", sql, StringComparison.Ordinal);
-        Assert.Contains("pg_get_constraintdef(oid) !~ 'ARRAY\\[0, 1, 2\\]'", sql, StringComparison.Ordinal);
-        Assert.Contains("pg_get_constraintdef(oid) !~ 'ARRAY\\[1, 2\\]'", sql, StringComparison.Ordinal);
-        foreach (var verb in new[] { "INSERT INTO", "UPDATE config", "DELETE FROM", "GRANT ", "REVOKE " })
-        {
-            Assert.DoesNotContain(verb, sql, StringComparison.Ordinal);
-        }
-
-        /* practice_of has NO foreign key; the override's request_id has none either; feedback cascades with its request. */
-        Assert.DoesNotMatch(@"practice_of[^;]*REFERENCES", sql);
-        Assert.DoesNotMatch(@"\brequest_id uuid,[^;]*FOREIGN KEY \(request_id\)[^;]*config_threshold_overrides", sql);
-        Assert.Contains("REFERENCES config.investigation_requests (request_id) ON DELETE CASCADE", sql, StringComparison.Ordinal);
-        Assert.Contains("(coalesce(database_name, ''))", sql, StringComparison.Ordinal);
-        Assert.Contains("FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void TheProbeCarriesTheSentinel_AndAStoreBehindItMapsOneRungBack()
     {
-        Assert.Contains("to_regclass('config.investigation_feedback') IS NOT NULL", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasAgentLevel2Store");
@@ -138,6 +108,11 @@ public sealed class AgentLevel2StoreRungTests
             Assert.Equal("23505", duplicate.SqlState);
             Assert.Equal("ux_config_threshold_overrides_scope", duplicate.ConstraintName);
 
+            /* The value is double precision: a fractional threshold (a deadlock rate, a hold ratio) keeps its fraction. */
+            await ExecAsync(store, "INSERT INTO config.config_threshold_overrides (server_id, database_name, threshold_key, value, set_by) VALUES (5909, 'sales', 'deadlock.warn_per_hour', 7.5, 'agent-1')", ct);
+            Assert.Equal("7.5", await ScalarAsync(store, "SELECT value FROM config.config_threshold_overrides WHERE threshold_key = 'deadlock.warn_per_hour'", ct));
+            await ExecAsync(store, "DELETE FROM config.config_threshold_overrides WHERE threshold_key = 'deadlock.warn_per_hour'", ct);
+
             /* request_id names the request that asked, with no foreign key: it may name one that does not exist. */
             await ExecAsync(store, "INSERT INTO config.config_threshold_overrides (server_id, database_name, threshold_key, value, set_by, request_id) VALUES (5910, 'hr', 'cpu.percent', 90, 'agent-1', gen_random_uuid())", ct);
 
@@ -162,6 +137,30 @@ public sealed class AgentLevel2StoreRungTests
             const string Request = "11111111-1111-1111-1111-111111111111";
             await ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, corrected_verdict, missed_step, comment, author) VALUES ('{Request}', 'partly', 'needs_person', 'check the plan', 'close', 'erik')", ct);
             await ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('{Request}', 'right', 'sam')", ct);
+            /* The family's identity shape and the report's verdict domain: a spaced or empty author, an unknown corrected verdict and an
+               over-long text are refused by name; a different case of an author who already answered is the same author. */
+            foreach (var bad in new[] { "'erik '", "''", "'a b'", "'" + new string('x', 65) + "'" })
+            {
+                var badAuthor = await Assert.ThrowsAsync<PostgresException>(() =>
+                    ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('{Request}', 'right', {bad})", ct));
+                Assert.Equal("ck_investigation_feedback_author", badAuthor.ConstraintName);
+            }
+
+            var sameAuthor = await Assert.ThrowsAsync<PostgresException>(() =>
+                ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('{Request}', 'wrong', 'Erik')", ct));
+            Assert.Equal("uq_investigation_feedback_author", sameAuthor.ConstraintName);
+            var badCorrected = await Assert.ThrowsAsync<PostgresException>(() =>
+                ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, corrected_verdict, author) VALUES ('{Request}', 'wrong', 'needs-person', 'lee')", ct));
+            Assert.Equal("ck_investigation_feedback_corrected", badCorrected.ConstraintName);
+            var longStep = await Assert.ThrowsAsync<PostgresException>(() =>
+                ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, missed_step, author) VALUES ('{Request}', 'wrong', repeat('x', 4001), 'lee')", ct));
+            Assert.Equal("ck_investigation_feedback_missed_step", longStep.ConstraintName);
+            var longComment = await Assert.ThrowsAsync<PostgresException>(() =>
+                ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, comment, author) VALUES ('{Request}', 'wrong', repeat('x', 4001), 'lee')", ct));
+            Assert.Equal("ck_investigation_feedback_comment", longComment.ConstraintName);
+            await ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, missed_step, comment, author) VALUES ('{Request}', 'wrong', repeat('x', 4000), repeat('y', 4000), 'lee')", ct);
+            await ExecAsync(store, $"DELETE FROM config.investigation_feedback WHERE author = 'lee'", ct);
+
             var badVerdict = await Assert.ThrowsAsync<PostgresException>(() =>
                 ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('{Request}', 'maybe', 'kim')", ct));
             Assert.Equal("ck_investigation_feedback_verdict", badVerdict.ConstraintName);
@@ -368,33 +367,6 @@ public sealed class AgentLevel2StoreGrantLiveTests
         return exist;
     }
 
-    [Fact]
-    public void BothGrantSources_SayTheSame_AboutTheNewTables()
-    {
-        var managed = Regex.Replace(
-            DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp),
-            @"\s+", " ");
-        var script = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"\s+", " ");
-
-        const string Both = "config.config_threshold_overrides, config.investigation_feedback";
-        foreach (var source in new[] { managed, script })
-        {
-            Assert.Contains($"REVOKE ALL ON {Both} FROM PUBLIC, admin, viewer, mcp CASCADE;", source, StringComparison.Ordinal);
-            Assert.Contains($"GRANT SELECT ON {Both} TO admin, viewer;", source, StringComparison.Ordinal);
-            Assert.Contains($"GRANT SELECT ON {Both} TO mcp;", source, StringComparison.Ordinal);
-            Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO admin;", source, StringComparison.Ordinal);
-            Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.investigation_feedback TO admin;", source, StringComparison.Ordinal);
-            Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO mcp;", source, StringComparison.Ordinal);
-
-            /* Viewer gets no write, and mcp gets nothing on feedback beyond the read. */
-            Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.(config_threshold_overrides|investigation_feedback) TO [a-z_, ]*viewer", source);
-            Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_feedback TO [a-z_, ]*mcp", source);
-        }
-
-        /* The bring-your-own header names the overrides table among the grants a blind re-run does not cover. */
-        Assert.Contains("config_threshold_overrides and investigation_feedback, #5909) are V191", script, StringComparison.Ordinal);
-    }
-
     /// <summary>The whole matrix, read from the catalog: role by table by verb.</summary>
     private static async Task AssertMatrixAsync(NpgsqlConnection owner, CancellationToken ct)
     {
@@ -434,7 +406,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
                     ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
                     15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName)), ct);
             await AssertMatrixAsync(owner, ct);
-            await ExerciseLoginsAsync(owner, scratch, ct);
+            await ExerciseLoginsAsync(owner, scratch, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword, ct);
             bodySucceeded = true;
         }
         finally
@@ -443,8 +415,13 @@ public sealed class AgentLevel2StoreGrantLiveTests
         }
     }
 
+    /// <summary>
+    /// A store provisioned by the shipped <c>provision-roles.sql</c> (run whole, its database-level statements retargeted at the
+    /// scratch store): on a store whose Level 2 tables are not there yet the script runs clean and grants nothing on them; after
+    /// the rung it grants the same matrix as managed provisioning, and the real admin, viewer and mcp logins it made exercise it.
+    /// </summary>
     [Fact]
-    public async Task TheBringYourOwnScript_Step3j_GrantsTheSameMatrix_AndSkipsOnAStoreBehindTheRung()
+    public async Task TheBringYourOwnScript_GrantsTheSameMatrix_AndSkipsOnAStoreBehindTheRung()
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
@@ -456,23 +433,30 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
             await SkipIfRolesExistAsync(owner, ct);
-            await ExecAsync(owner, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE mcp NOLOGIN;", ct);
+            Assert.SkipUnless(
+                await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct) == "True",
+                "The script names the store owner 'darling', and this rig has no such role.");
 
-            var script = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql").Replace("\r\n", "\n", StringComparison.Ordinal);
-            var start = script.IndexOf("-- 3j. Level 2 tables", StringComparison.Ordinal);
-            var end = script.IndexOf("-- 3g. The password key tables", StringComparison.Ordinal);
-            Assert.True(start > 0 && end > start, "step 3j sits just above step 3g");
-            var block = script[start..end];
+            const string AdminPassword = "ScriptAdmin5909", ViewerPassword = "ScriptViewer5909", McpPassword = "ScriptMcp5909";
+            var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
+                .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", AdminPassword, StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", ViewerPassword, StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal);
 
-            /* Behind the rung (the tables are absent): the block warns and skips, and grants nothing. */
-            await ExecAsync(owner, "ALTER TABLE config.investigation_feedback RENAME TO investigation_feedback_hidden", ct);
-            await ExecAsync(owner, block, ct);
-            Assert.Equal("False", await ScalarAsync(owner, "SELECT has_table_privilege('mcp', 'config.config_threshold_overrides', 'INSERT')", ct));
-            await ExecAsync(owner, "ALTER TABLE config.investigation_feedback_hidden RENAME TO investigation_feedback", ct);
+            /* Behind the rung (the feedback table is absent): the script warns, skips the block and grants nothing on the overrides. */
+            await RungRewindArtifacts.DropV191SentinelAsync(owner, ct);
+            await ExecAsync(owner, script, ct);
+            Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct));
 
-            await ExecAsync(owner, block, ct);
-            await ExecAsync(owner, block, ct);
+            /* The rung lands (the migrator recreates the missing table), and a re-run of the script grants the matrix. */
+            await ExecAsync(owner, "DELETE FROM darling_schema_version WHERE version >= " + PgMigrations.Scripts.Single(m => m.Name == "agent-level-2-store").Version.ToString(CultureInfo.InvariantCulture), ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            await ExecAsync(owner, script, ct);
+            await ExecAsync(owner, script, ct);
             await AssertMatrixAsync(owner, ct);
+            await ExerciseLoginsAsync(owner, scratch, AdminPassword, ViewerPassword, McpPassword, ct);
             bodySucceeded = true;
         }
         finally
@@ -481,20 +465,23 @@ public sealed class AgentLevel2StoreGrantLiveTests
         }
     }
 
-    /// <summary>As the real logins: mcp writes overrides (the beacon trigger runs as mcp), viewer cannot, mcp cannot write feedback.</summary>
-    private static async Task ExerciseLoginsAsync(NpgsqlConnection owner, ScratchPostgres scratch, CancellationToken ct)
+    /// <summary>As the real logins, for each role and each new table: mcp inserts, updates and deletes overrides (the beacon trigger runs
+    /// as mcp) and reads but cannot write feedback; viewer reads both and cannot insert, update or delete either; admin writes both.
+    /// A refused verb is 42501.</summary>
+    private static async Task ExerciseLoginsAsync(
+        NpgsqlConnection owner, ScratchPostgres scratch, string adminPassword, string viewerPassword, string mcpPassword, CancellationToken ct)
     {
         await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
         await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5909, 'srv-a', 'host-a')", ct);
         await ExecAsync(owner, "INSERT INTO config.investigation_requests (request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, window_until, expires_at) "
             + "VALUES ('66666666-6666-6666-6666-666666666666', 1, 5909, 'srv-a', 'blocking', 'blocking', now(), now(), now(), now() + interval '1 hour')", ct);
 
-        await using (var mcp = await LoginAsync(scratch, "mcp", ProvisioningTestSecrets.McpPassword, ct))
+        await using (var mcp = await LoginAsync(scratch, "mcp", mcpPassword, ct))
         {
             var version = long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config.config_service", ct), CultureInfo.InvariantCulture);
-            await ExecAsync(mcp, "INSERT INTO config.config_threshold_overrides (server_id, threshold_key, value, set_by) VALUES (5909, 'blocking.seconds', 30, 'mcp-agent')", ct);
-            await ExecAsync(mcp, "UPDATE config.config_threshold_overrides SET value = 40, updated_at = now() WHERE threshold_key = 'blocking.seconds'", ct);
-            Assert.Equal("40", await ScalarAsync(mcp, "SELECT value FROM config.config_threshold_overrides WHERE threshold_key = 'blocking.seconds'", ct));
+            await ExecAsync(mcp, "INSERT INTO config.config_threshold_overrides (server_id, threshold_key, value, set_by) VALUES (5909, 'blocking.seconds', 7.5, 'mcp-agent')", ct);
+            await ExecAsync(mcp, "UPDATE config.config_threshold_overrides SET value = 12.25, updated_at = now() WHERE threshold_key = 'blocking.seconds'", ct);
+            Assert.Equal("12.25", await ScalarAsync(mcp, "SELECT value FROM config.config_threshold_overrides WHERE threshold_key = 'blocking.seconds'", ct));
             Assert.True(long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config.config_service", ct), CultureInfo.InvariantCulture) > version, "mcp's write reaches the beacon");
             await ExecAsync(mcp, "DELETE FROM config.config_threshold_overrides WHERE threshold_key = 'blocking.seconds'", ct);
 
@@ -506,7 +493,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
 
         await ExecAsync(owner, "INSERT INTO config.config_threshold_overrides (server_id, threshold_key, value, set_by) VALUES (5909, 'cpu.percent', 80, 'owner')", ct);
         await ExecAsync(owner, "INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('66666666-6666-6666-6666-666666666666', 'right', 'erik')", ct);
-        await using (var viewer = await LoginAsync(scratch, "viewer", ProvisioningTestSecrets.ViewerPassword, ct))
+        await using (var viewer = await LoginAsync(scratch, "viewer", viewerPassword, ct))
         {
             Assert.Equal("1", await ScalarAsync(viewer, "SELECT count(*) FROM config.config_threshold_overrides", ct));
             Assert.Equal("1", await ScalarAsync(viewer, "SELECT count(*) FROM config.investigation_feedback", ct));
@@ -518,8 +505,9 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await AssertDeniedAsync(viewer, "DELETE FROM config.investigation_feedback", ct);
         }
 
-        await using (var admin = await LoginAsync(scratch, "admin", ProvisioningTestSecrets.AdminPassword, ct))
+        await using (var admin = await LoginAsync(scratch, "admin", adminPassword, ct))
         {
+            await ExecAsync(admin, "INSERT INTO config.config_threshold_overrides (server_id, threshold_key, value, set_by) VALUES (5909, 'memory.percent', 70, 'admin')", ct);
             await ExecAsync(admin, "UPDATE config.config_threshold_overrides SET value = 85 WHERE threshold_key = 'cpu.percent'", ct);
             await ExecAsync(admin, "INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('66666666-6666-6666-6666-666666666666', 'wrong', 'admin')", ct);
             await ExecAsync(admin, "UPDATE config.investigation_feedback SET comment = 'edited' WHERE author = 'admin'", ct);

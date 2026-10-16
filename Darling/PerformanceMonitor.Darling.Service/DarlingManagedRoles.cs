@@ -1723,7 +1723,12 @@ GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
 --     mcp (the agent's change tools) writes the overrides only, and reads the feedback. The overrides carry V191's reload
 --     beacon trigger, which UPDATEs config_service.config_version as the caller, and mcp already holds the two-column
 --     UPDATE grant on config_service that it needs (the mute rules use it too), so no grant moves there. An identity
---     column needs no sequence grant. It runs after every blanket grant above, and before 10a.
+--     column needs no sequence grant. The mcp write grant on the overrides is table-level on purpose, unlike 10d's column
+--     list on the notes: a note's state column carries authority (a person decides it), while an override IS the agent's
+--     action, taking effect when the engine reloads, so the agent sets, changes and withdraws overrides, including one a
+--     person made. set_by names who set the row and is not a guard; the Level 2 loader's rules (#5910) decide which keys
+--     and values the agent may write, and the table has no authority column to protect. It runs after every blanket grant
+--     above, and before 10a.
 REVOKE ALL ON {config}.config_threshold_overrides, {config}.investigation_feedback
    FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
 GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feedback TO {admin}, {viewer};

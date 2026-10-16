@@ -1403,10 +1403,18 @@ ALTER TABLE collect.store_metrics
     /// NULL database name through <c>coalesce(database_name, '')</c>. It joins the <c>config_version</c> reload beacon with
     /// V117's trigger shape (statement level, <c>config.config_bump_version()</c> verbatim), so a change reaches the engine
     /// the way every other config change does. <c>request_id</c> names the request that asked for the change and has no
-    /// foreign key: the override outlives the request. Overrides are configuration and are never aged.</para>
+    /// foreign key: the override outlives the request. Overrides are configuration and are never aged. <c>value</c> is <c>double
+    /// precision</c>, the type of the store's own thresholds (<c>config_alert_log.threshold_value</c> and five
+    /// <c>config_alert_settings</c> columns: <c>analysis_notify_severity</c>, the two retention-hold ratios and the two
+    /// deadlock per-hour rates), so a fractional threshold is representable; an integer threshold is exact in it, and
+    /// widening the column later would have been a table rewrite. Which keys Level 2 may touch is the engine registry's
+    /// (#5910), not this table's.</para>
     ///
     /// <para><b>Feedback.</b> <c>config.investigation_feedback</c>: a person's verdict on a report (right, partly or wrong),
-    /// the corrected verdict, the step the agent missed, a comment and the author; one row per request per author. It is
+    /// the corrected verdict, the step the agent missed, a comment and the author; one row per request per author, compared
+    /// case-insensitively (<c>lower(author)</c>), with the author held to the family's identity shape
+    /// (<c>^[A-Za-z0-9._:-]{1,64}$</c>, as <c>claimed_by</c> and <c>agent_id</c>), the corrected verdict to the report
+    /// verdicts and the free text to 4000 characters, as the report's summary. It is
     /// deleted with its request (<c>ON DELETE CASCADE</c>), so it ages with the request through retention's DELETE.</para>
     ///
     /// <para><b>Practice.</b> <c>config.investigation_requests.practice_of</c>, nullable with no default and <b>no foreign
@@ -1455,7 +1463,7 @@ CREATE TABLE IF NOT EXISTS config.config_threshold_overrides
     server_id integer NOT NULL,
     database_name text,
     threshold_key text NOT NULL,
-    value integer NOT NULL,
+    value double precision NOT NULL,
     set_by text NOT NULL,
     request_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -1488,9 +1496,15 @@ CREATE TABLE IF NOT EXISTS config.investigation_feedback
     CONSTRAINT pk_investigation_feedback PRIMARY KEY (id),
     CONSTRAINT fk_investigation_feedback_request FOREIGN KEY (request_id)
         REFERENCES config.investigation_requests (request_id) ON DELETE CASCADE,
-    CONSTRAINT uq_investigation_feedback_author UNIQUE (request_id, author),
-    CONSTRAINT ck_investigation_feedback_verdict CHECK (verdict IN ('right', 'partly', 'wrong'))
-);";
+    CONSTRAINT ck_investigation_feedback_verdict CHECK (verdict IN ('right', 'partly', 'wrong')),
+    CONSTRAINT ck_investigation_feedback_corrected CHECK (corrected_verdict IS NULL OR corrected_verdict IN ('real', 'false_positive', 'needs_person')),
+    CONSTRAINT ck_investigation_feedback_author CHECK (author ~ '^[A-Za-z0-9._:-]{1,64}$'),
+    CONSTRAINT ck_investigation_feedback_missed_step CHECK (missed_step IS NULL OR length(missed_step) <= 4000),
+    CONSTRAINT ck_investigation_feedback_comment CHECK (comment IS NULL OR length(comment) <= 4000)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_feedback_author
+    ON config.investigation_feedback (request_id, lower(author));";
 
     /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
