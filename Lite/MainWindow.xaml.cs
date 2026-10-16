@@ -120,6 +120,9 @@ public partial class MainWindow : Window
     /// <summary>The Level 1 investigation store (#5820): Lite's DuckDB twin of Darling's, behind the shared interface the
     /// route list (its use counts), the dispatcher and the MCP tools read.</summary>
     internal IInvestigationRequestStore InvestigationStore { get; private set; } = null!;
+
+    /// <summary>The approve screen's store (#5903): the same DuckDB store, reached by the Settings window only.</summary>
+    internal IInvestigationNoteStore InvestigationNoteStore { get; private set; } = null!;
     /* #5820: the mcp_data_detail level of the running MCP host, for the webhook token's brief; the setting's default (full)
        while no host runs. Set when the host starts and reset when it stops. */
     private McpDataDetail _mcpDataDetail = McpDataDetail.Full;
@@ -155,7 +158,9 @@ public partial class MainWindow : Window
            dispatch core. The core reads the agent routes through _alertSettings (the route cache the route store below
            fills); Lite has no wait tool, so the open signal is null. The webhook token's brief is masked at the running
            MCP host's mcp_data_detail, and at that setting's default (full) while no host runs. */
-        InvestigationStore = new DuckDbInvestigationStore(_databaseInitializer);
+        var duckInvestigationStore = new DuckDbInvestigationStore(_databaseInitializer);
+        InvestigationStore = duckInvestigationStore;
+        InvestigationNoteStore = duckInvestigationStore;
         var investigationStore = InvestigationStore;
         _emailAlertService = new EmailAlertService(
             _alertSettings,
@@ -1801,7 +1806,7 @@ public partial class MainWindow : Window
 
     private async void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
-        var window = new SettingsWindow(_scheduleManager, _serverManager, _backgroundService, _mcpService, _muteRuleService, NotificationRouteStore, _dataService) { Owner = this };
+        var window = new SettingsWindow(_scheduleManager, _serverManager, _backgroundService, _mcpService, _muteRuleService, NotificationRouteStore, _dataService, InvestigationNoteStore) { Owner = this };
         window.ShowDialog();
         UpdateStatusBar();
 

@@ -1,0 +1,75 @@
+<Window x:Class="PerformanceMonitorLite.Windows.InvestigationNotesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Agent Notes"
+        Height="520" Width="1160"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip"
+        Icon="/EDD.ico"
+        Background="{DynamicResource BackgroundBrush}">
+    <!-- #5903: the approve screen for notes agents propose with an investigation report. Shape of NotificationRoutesWindow
+         (a grid and buttons over the DuckDB store). A note waits here as pending until a person approves or rejects it; the
+         brief carries approved notes only. The text is shown, never edited. -->
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Agent Notes" FontSize="18" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,0,0,12"
+                   Text="Notes an agent proposed with its investigation report. A note reaches later briefs only after you approve it. A rejected note is kept with your decision and never reaches a brief. The text can't be edited here."/>
+
+        <Grid Grid.Row="2">
+            <DataGrid x:Name="NotesGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      SelectionMode="Single"
+                      CanUserAddRows="False"
+                      CanUserDeleteRows="False"
+                      HeadersVisibility="Column"
+                      GridLinesVisibility="Horizontal">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Proposed" Binding="{Binding ProposedDisplay}" Width="130"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Server" Binding="{Binding ServerDisplay}" Width="130"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Metric" Binding="{Binding MetricDisplay}" Width="110"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Family" Binding="{Binding FamilyDisplay}" Width="90"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTemplateColumn Header="Note" Width="*">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding NoteText}" TextWrapping="Wrap"
+                                           Style="{StaticResource DataGridCellText}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="Agent" Binding="{Binding Author}" Width="120"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Request" Binding="{Binding RequestDisplay}" Width="240"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="NoNotesMessage"
+                       Text="No notes are waiting. A note an agent proposes with its report appears here until you approve or reject it."
+                       Foreground="{DynamicResource ForegroundDimBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="460"
+                       Visibility="Collapsed" IsHitTestVisible="False"/>
+        </Grid>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,12,0,0">
+            <Button x:Name="ApproveButton" Content="_Approve" Width="90" Height="28" Margin="0,0,8,0"
+                    Click="Approve_Click" Style="{StaticResource AccentButton}"/>
+            <Button x:Name="RejectButton" Content="_Reject" Width="90" Height="28" Margin="0,0,8,0" Click="Reject_Click"/>
+            <Button Content="Re_fresh" Width="80" Height="28" Margin="0,0,8,0" Click="Refresh_Click"/>
+        </StackPanel>
+        <Button Grid.Row="3" Content="_Close" Width="80" Height="28" Margin="0,12,0,0"
+                HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
+    </Grid>
+</Window>

@@ -35,7 +35,7 @@ namespace PerformanceMonitorLite.Database;
 /// <para><b>Times.</b> Every time is bound from the injected clock, truncated to the microsecond DuckDB keeps, and read
 /// back with <see cref="DateTimeKind.Utc"/>. DuckDB's <c>current_timestamp</c> is never used: it is local-zone.</para>
 /// </summary>
-public sealed class DuckDbInvestigationStore : IInvestigationRequestStore
+public sealed class DuckDbInvestigationStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
     /* Darling's GroupLockSql and RouteLockSql (pg_advisory_xact_lock) have no twin: the write lock each write holds for its
        whole transaction covers them. SubmitLockSql keeps its name; its FOR UPDATE is the write lock. */
@@ -205,6 +205,25 @@ SELECT (SELECT coalesce(max(note_id), 0) FROM investigation_notes) + 1,
        $4 + INTERVAL 90 DAY
 FROM investigation_requests AS r
 WHERE r.request_id = $1";
+
+    /* #5903: the pending notes for the approve screen, oldest first, with the request that proposed each (server name,
+       family). Mirrors Darling's PendingNotesSql; created_at is naive UTC. */
+    internal const string PendingNotesSql = @"
+SELECT n.note_id, n.server_id, r.server_name, n.metric_name, r.family, n.story_path_hash, n.note_text, n.author,
+       n.source_request_id, n.created_at
+FROM investigation_notes AS n
+LEFT JOIN investigation_requests AS r ON r.request_id = n.source_request_id
+WHERE n.state = 'pending'
+ORDER BY n.created_at, n.note_id
+LIMIT $1";
+
+    /* #5903: a decision lands only on a pending note, so a second click changes nothing. $1 note, $2 the new state, $3 who,
+       $4 when (bound naive UTC, as the rest of the store binds it). */
+    internal const string DecideNoteSql = @"
+UPDATE investigation_notes
+SET state = $2, decided_by = $3, decided_at = $4
+WHERE note_id = $1 AND state = 'pending'
+RETURNING source_request_id, server_id";
 
     internal const string ReportsRequestsSql = @"
 SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.last_alert_at,
@@ -795,6 +814,68 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         await ExecAsync(connection, RetentionJournalSql, cancellationToken, cutoff);
         transaction.Commit();
         return requests;
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default)
+    {
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, PendingNotesSql, Math.Clamp(limit, 1, 1000));
+        var rows = new List<PendingInvestigationNote>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new PendingInvestigationNote(
+                reader.GetInt64(0),
+                reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetGuid(8),
+                Utc(reader.GetDateTime(9))));
+        }
+
+        return rows;
+    }
+
+    /// <inheritdoc />
+    public Task<bool> ApproveNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, "approved", "note_approved", decidedBy, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> RejectNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, "rejected", "note_rejected", decidedBy, cancellationToken);
+
+    /* The update and its journal row share one transaction under the write lock: a decision is never stamped without its
+       audit row. Only a person's action in the viewer reaches this; no MCP tool does. */
+    private async Task<bool> DecideNoteAsync(long noteId, string state, string journalEvent, string decidedBy, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(decidedBy);
+        var now = Now();
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+        Guid? sourceRequest;
+        int? serverId;
+        using (var command = Command(connection, DecideNoteSql, noteId, state, decidedBy, now))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            sourceRequest = reader.IsDBNull(0) ? null : reader.GetGuid(0);
+            serverId = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        }
+
+        await JournalAsync(connection, now, sourceRequest, null, serverId, journalEvent, decidedBy,
+            "note " + noteId.ToString(CultureInfo.InvariantCulture), null, null, cancellationToken);
+        transaction.Commit();
+        return true;
     }
 
     private static InvestigationRequestRow RequestRow(System.Data.Common.DbDataReader reader) => new(

@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Common;
 /// <summary>
 /// The note decisions of Level 1 investigations (#5903): an agent proposes a note with its report and it waits as pending
 /// until a person approves or rejects it. Kept apart from <see cref="IInvestigationRequestStore"/> so each product's store
-/// takes it on when its screen does: Darling's PostgreSQL <c>InvestigationRequestStore</c> now and Lite's DuckDB store later.
+/// takes it on when its screen does: Darling's PostgreSQL <c>InvestigationRequestStore</c> and Lite's DuckDB store.
 /// The brief composer reads approved notes only; a rejected note stays stored with who rejected it and when.
 /// </summary>
 public interface IInvestigationNoteStore

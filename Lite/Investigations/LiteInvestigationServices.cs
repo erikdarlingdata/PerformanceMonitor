@@ -15,7 +15,7 @@ namespace PerformanceMonitorLite.Investigations;
 
 /// <summary>
 /// Registers what composes a brief (#5820), as Darling's host does: the reader over Lite's store and the composer that
-/// masks at the host's <c>mcp.dataDetail</c> level. The claim tool takes the composer as a service parameter, so it must
+/// masks at the host's <c>mcp.dataDetail</c> level, and the note-decision store of the approve screen (#5903). The claim tool takes the composer as a service parameter, so it must
 /// be registered wherever the tools are.
 /// </summary>
 internal static class LiteInvestigationServices
@@ -36,5 +36,9 @@ internal static class LiteInvestigationServices
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
             LiteInvestigationBriefTools.Tools));
+
+        /* #5903: the approve screen's store. Registered for the viewer's reach only: no MCP tool takes it, because approving
+           or rejecting a note is a person's action (Lite stays advise-only for agents). */
+        services.AddSingleton<IInvestigationNoteStore>(_ => new DuckDbInvestigationStore(duckDb));
     }
 }
