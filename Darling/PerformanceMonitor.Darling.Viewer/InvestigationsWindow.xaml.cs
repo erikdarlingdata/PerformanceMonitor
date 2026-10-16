@@ -59,6 +59,8 @@ public partial class InvestigationsWindow : Window
         IsEditable = !readOnly;
         RequestsGrid.ItemsSource = _requests;
         NotesGrid.ItemsSource = _notes;
+        AgentChangesView.Initialize(_dataService, readOnly, login);
+        AgentChangesView.Status += ShowStatus;
         SetScopes(null);
 
         if (readOnly)
@@ -133,6 +135,7 @@ public partial class InvestigationsWindow : Window
         await LoadRequestsAsync();
         await LoadNotesAsync();
         await LoadProfilesAsync();
+        await AgentChangesView.LoadAsync();
     }
 
     private void SetScopes(ViewerRouteScopeInputs? inputs)

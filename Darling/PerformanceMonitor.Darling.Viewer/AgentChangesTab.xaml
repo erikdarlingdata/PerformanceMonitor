@@ -1,0 +1,45 @@
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.AgentChangesTab"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- #5917: what agents changed and were refused, a one-click Undo (only when nobody has changed the setting since), and the
+         switch that turns every agent change off. A call with no result row reads "result unknown" and has no Undo. -->
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"
+                   Text="What agents changed, newest first. Undo restores what the setting was before the agent's change, but only if nobody has changed it since; otherwise it says so and leaves the setting alone. Undo works for 365 days."/>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock x:Name="SwitchText" VerticalAlignment="Center" Margin="0,0,12,0" AutomationProperties.Name="Agent changes switch state"/>
+            <Button x:Name="SwitchButton" Content="Turn off agent changes" Height="26" Padding="10,0" Click="Switch_Click"/>
+        </StackPanel>
+        <DataGrid Grid.Row="2" x:Name="ChangesGrid" Style="{DynamicResource DarkGrid}" IsReadOnly="True" SelectionMode="Single" AutomationProperties.Name="Agent changes">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="When" Binding="{Binding WhenDisplay}" Width="130" SortMemberPath="CalledAtUtc"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="90"/>
+                <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="80"/>
+                <DataGridTextColumn Header="Tool" Binding="{Binding Tool}" Width="140"/>
+                <DataGridTextColumn Header="Agent" Binding="{Binding Agent}" Width="120"/>
+                <DataGridTextColumn Header="Why" Binding="{Binding Why}" Width="*"/>
+                <DataGridTextColumn Header="Result" Binding="{Binding ResultDisplay}" Width="130"/>
+                <DataGridTextColumn Header="Muted" Binding="{Binding MutedDisplay}" Width="150"/>
+            </DataGrid.Columns>
+        </DataGrid>
+        <StackPanel x:Name="UndoPanel" Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,8">
+            <Button Content="_Undo Selected Change" Height="26" Padding="10,0" Click="Undo_Click"/>
+        </StackPanel>
+        <DataGrid Grid.Row="4" x:Name="RefusalsGrid" Style="{DynamicResource DarkGrid}" IsReadOnly="True" AutomationProperties.Name="Refused agent changes">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Refused at" Binding="{Binding WhenDisplay}" Width="130" SortMemberPath="AtUtc"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="90"/>
+                <DataGridTextColumn Header="Tool" Binding="{Binding Tool}" Width="160"/>
+                <DataGridTextColumn Header="Agent" Binding="{Binding Agent}" Width="140"/>
+                <DataGridTextColumn Header="Refused because" Binding="{Binding Code}" Width="*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>

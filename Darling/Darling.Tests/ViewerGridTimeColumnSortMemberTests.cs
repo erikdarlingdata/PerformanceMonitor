@@ -195,6 +195,8 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "InvestigationsWindow.xaml", "JournalGrid", "TimeDisplay", Name(typeof(InvestigationJournalViewRow)), "EventTimeUtc" },
         { "InvestigationsWindow.xaml", "NotesGrid", "CreatedDisplay", Name(typeof(InvestigationNoteViewRow)), "CreatedAtUtc" },
         { "InvestigationsWindow.xaml", "NotesGrid", "ExpiresDisplay", Name(typeof(InvestigationNoteViewRow)), "ExpiresAtUtc" },
+        { "AgentChangesTab.xaml", "ChangesGrid", "WhenDisplay", Name(typeof(AgentChangeViewRow)), "CalledAtUtc" },
+        { "AgentChangesTab.xaml", "RefusalsGrid", "WhenDisplay", Name(typeof(AgentRefusalViewRow)), "AtUtc" },
     };
 
     /// <summary>

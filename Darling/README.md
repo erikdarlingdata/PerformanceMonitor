@@ -1552,6 +1552,18 @@ SELECT coalesce(
 
 ---
 
+## Agent Changes: List, Undo and the Switch
+
+When a notification route is set to Level 2, an investigating agent may change monitoring settings (a mute rule, a custom alert rule, a threshold override) through the gate. Every call is journaled, so every change can be seen and taken back.
+
+**The list.** The Viewer's Investigations window has an **Agent changes** tab, and the web dashboard's Admin page has an **Agent changes** tab. Each row is one agent call: when, server, kind, tool, agent, why and the result. A call that was journaled with neither a "done" nor a "failed" result shows **result unknown**: the change may or may not have happened, so it has no Undo. Below the calls, the refusals list what an agent asked for and the code it was told (for example `actions_off`). A mute row shows how many alerts were muted since the change.
+
+**Undo.** One click restores what the setting was before the agent's change, and only when nobody has changed it since. Undo compares the setting as it is now with what the agent left; it looks at the settings an agent can change and ignores the updated-at and updated-by stamps. If they match, the before image is restored and the undo is journaled as `action_undone` by `person:<login>`, in one transaction. If a person edited it since, Undo says **changed since** and leaves the setting alone. A rule the agent deleted comes back with its own `Custom:<id>`; if a rule with that name exists now, Undo refuses. A change the agent created is deleted; one it changed is put back. Undo works for 365 days from the change.
+
+**The switch.** `config_service.agent_actions_enabled` is on by default: a route set to Level 2 is the opt-in. **Turn off agent changes** (Viewer or web) makes the gate refuse every agent change as `actions_off` at once; nothing already made is undone. There is no MCP tool for the switch, so an agent cannot turn it back on.
+
+**Who can decide.** The Viewer signs in as the store admin and can undo and switch. The web decides only under the admin store login. On managed and compose stores the web login is derived (the viewer role), so there the web page lists only, and an undo or switch answers 403: "This dashboard signs in to the store as the viewer role, so it cannot undo or switch off agent changes. Use the Viewer app, or run the web under the admin login." On a bring-your-own store, set `postgres.webConnectionString` to an admin login to decide from the web.
+
 ## Connect a Remote Viewer
 
 For the person sitting at a machine with **nothing installed on it**, whose only goal is looking at a Darling service that already runs somewhere else. Three steps, nothing to hand-edit.
