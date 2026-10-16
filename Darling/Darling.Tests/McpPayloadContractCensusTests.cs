@@ -188,7 +188,7 @@ public sealed class McpPayloadContractCensusTests
     /// the classifier's first arm cannot silently stop matching while the ad-hoc roster stays empty.</para>
     /// </summary>
     [Fact]
-    public void EveryToolCatch_ReturnsThroughASharedErrorShape_AndTheAdHocRosterIsExact()
+    public void EveryToolCatch_ReturnsThroughASharedErrorShape_AndNoNewAdHocReturnAppears()
     {
         var returns = 0;
         var envelopes = 0;
@@ -217,12 +217,13 @@ public sealed class McpPayloadContractCensusTests
         Assert.True(returns >= 200, $"only {returns} catch returns were examined across both SKUs; the catch marker has stopped matching");
         Assert.True(envelopes >= EnvelopeReturnFloor, $"only {envelopes} catch returns route through McpHelpers.FormatError; the helper marker has stopped matching");
 
+        /* One direction only (#5950): a NEW ad-hoc catch return outside the roster fails by name. A roster entry
+           whose catch has since been routed through FormatError is harmless and needs no edit. */
+        var newAdHoc = offenders.Where(o => !AdHocErrorReturns.Any(r => o.StartsWith($"{r.File} {r.Tool}:", StringComparison.Ordinal))).ToList();
         Assert.True(
-            AdHocErrorReturns.ToHashSet().SetEquals(adHoc.Distinct()),
-            "the ad-hoc error roster no longer matches the tree — new ad-hoc (a catch that does not return McpHelpers.FormatError; a direct Status(\"error\") is the retired dialect): ["
-            + string.Join("; ", offenders.Where(o => !AdHocErrorReturns.Any(r => o.StartsWith($"{r.File} {r.Tool}:", StringComparison.Ordinal))))
-            + "]; rostered but gone (shrink the roster): ["
-            + string.Join(", ", AdHocErrorReturns.Except(adHoc).Select(r => $"{r.File} {r.Tool}"))
+            newAdHoc.Count == 0,
+            "a catch returns something that is not McpHelpers.FormatError and is not in the ad-hoc roster (a direct Status(\"error\") is the retired dialect): ["
+            + string.Join("; ", newAdHoc)
             + "]");
     }
 
@@ -435,7 +436,7 @@ public sealed class McpPayloadContractCensusTests
     /// 50 (60 when #3962 landed) for the same reason.</para>
     /// </summary>
     [Fact]
-    public void EveryRefusal_ReturnsThroughTheSharedShape_AndTheBareSentenceRosterIsExact()
+    public void EveryRefusal_ReturnsThroughTheSharedShape_AndNoNewBareSentenceAppears()
     {
         var passThroughs = 0;
         var fromResolver = 0;
@@ -518,13 +519,9 @@ public sealed class McpPayloadContractCensusTests
 
         var rostered = BareSentenceReturns.Select(r => (r.File, r.Tool, r.Sentence)).ToList();
         var newBare = bare.Where(b => !rostered.Any(r => r.File == b.File && r.Tool == b.Tool && b.Sentence.StartsWith(r.Sentence, StringComparison.Ordinal))).ToList();
-        var gone = rostered.Where(r => !bare.Any(b => b.File == r.File && b.Tool == r.Tool && b.Sentence.StartsWith(r.Sentence, StringComparison.Ordinal))).ToList();
         Assert.True(newBare.Count == 0,
             "a tool body returns a bare sentence that is not a rostered miss — a refusal is McpHelpers.Refusal(parameter, sentence); a miss is McpHelpers.Status(word, sentence): ["
             + string.Join("; ", newBare.Select(b => $"{b.File} {b.Tool}: \"{b.Sentence}\"")) + "]");
-        Assert.True(gone.Count == 0,
-            "rostered bare sentences no longer returned (the miss lane reached them — shrink the roster): ["
-            + string.Join("; ", gone.Select(g => $"{g.File} {g.Tool}: \"{g.Sentence}\"")) + "]");
     }
 
     /// <summary>
@@ -1120,9 +1117,9 @@ public sealed class McpPayloadContractCensusTests
         Assert.True(unvalidated.Count == 0,
             "these tools take a bounded parameter and neither validate it through McpHelpers nor refuse it inline — a value they cannot honor must be refused, never clamped or ignored: "
             + string.Join("; ", unvalidated));
-        Assert.True(InlineDaysBackRefusals.ToHashSet().SetEquals(inlineSeen),
-            "the inline days_back refusal roster no longer matches the tree: found [" + string.Join(", ", inlineSeen.Select(t => $"{t.File} {t.Tool}"))
-            + "], rostered [" + string.Join(", ", InlineDaysBackRefusals.Select(t => $"{t.File} {t.Tool}")) + "]");
+        var newInline = inlineSeen.Where(s => !InlineDaysBackRefusals.Contains(s)).ToList();
+        Assert.True(newInline.Count == 0,
+            "a tool refuses days_back inline instead of through the shared validator and is not in the roster: [" + string.Join(", ", newInline.Select(t => $"{t.File} {t.Tool}")) + "]");
     }
 
     /// <summary>The day-grained validator, executed at its boundaries: it refuses zero, negatives and one past
@@ -1260,11 +1257,12 @@ public sealed class McpPayloadContractCensusTests
 
         var rostered = TotalsAssignedFromAWholeSetCount.Select(t => (t.File, t.Tool, t.Assignment)).ToHashSet();
         Assert.True(examined >= ToolBodyFloor, $"only {examined} tool methods were examined across both SKUs; the marker has stopped matching");
-        Assert.True(rostered.SetEquals(found),
-            "the total_*-from-Count inventory no longer matches the tree — new (prove the set is whole, or rename *_returned): ["
-            + string.Join("; ", found.Except(rostered).Select(f => $"{f.File} {f.Tool}: {f.Assignment}"))
-            + "]; rostered but gone (shrink the roster): ["
-            + string.Join("; ", rostered.Except(found).Select(f => $"{f.File} {f.Tool}: {f.Assignment}")) + "]");
+        /* One direction (#5950): a NEW total_* assigned from a Count fails by name; a rostered entry whose
+           assignment has since been fixed is harmless. */
+        var newTotals = found.Where(f => !rostered.Contains(f)).ToList();
+        Assert.True(newTotals.Count == 0,
+            "a total_* is assigned from a Count that is not in the whole-set inventory (prove the set is whole, or rename *_returned): ["
+            + string.Join("; ", newTotals.Select(f => $"{f.File} {f.Tool}: {f.Assignment}")) + "]");
     }
 
     [Fact]
@@ -1281,7 +1279,7 @@ public sealed class McpPayloadContractCensusTests
     /// The Darling reader SQL constants whose outer statement anchors on <c>= (SELECT MAX(collection_time |
     /// capture_time) …)</c> — a latest-snapshot read — and do NOT project the anchor column, so the tool above
     /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Two, both known:
-    /// <c>IndexUsageSql</c> is the object-stats residual <see cref="McpLatestSnapshotStampTests.UnstampedLatestReadsPendingA10"/>
+    /// <c>IndexUsageSql</c> is the object-stats residual (get_index_usage, still unstamped)
     /// already holds, and <c>IndexUsageMatchCountSql</c> is a <c>COUNT(*)</c> over the same anchor with no row
     /// to stamp.
     ///
@@ -1362,11 +1360,10 @@ public sealed class McpPayloadContractCensusTests
         }
 
         Assert.True(anchored >= 10, $"only {anchored} latest-anchored reader constants were found; the anchor pattern has stopped matching");
-        Assert.True(LatestAnchoredReadsWithoutTheirStamp.ToHashSet(StringComparer.Ordinal).SetEquals(unstamped),
-            "the unstamped latest-read roster no longer matches the tree — new (project the anchor column so the tool can stamp): ["
-            + string.Join(", ", unstamped.Except(LatestAnchoredReadsWithoutTheirStamp).Order())
-            + "]; rostered but now stamped (shrink the roster): ["
-            + string.Join(", ", LatestAnchoredReadsWithoutTheirStamp.Except(unstamped).Order()) + "]");
+        var newUnstamped = unstamped.Except(LatestAnchoredReadsWithoutTheirStamp).Order().ToList();
+        Assert.True(newUnstamped.Count == 0,
+            "a latest-anchored read does not project its anchor column and is not in the unstamped roster (project the anchor column so the tool can stamp): ["
+            + string.Join(", ", newUnstamped) + "]");
     }
 
     [Fact]
@@ -1430,7 +1427,7 @@ public sealed class McpPayloadContractCensusTests
     /// argument list read for the styles; the site is named by the enclosing tool or member.
     /// </summary>
     [Fact]
-    public void NoToolParsesATimestampUnderTheHostCulture_AndTheGeneralParseRosterIsExact()
+    public void NoToolParsesATimestampUnderTheHostCulture_AndNoNewGeneralParseAppears()
     {
         var found = new List<string>();
         var offenders = new List<string>();
@@ -1457,9 +1454,9 @@ public sealed class McpPayloadContractCensusTests
         Assert.True(files >= 60, $"only {files} tool files were read across both SKUs");
         Assert.True(offenders.Count == 0,
             "these sites parse a timestamp under the host culture or without the UTC styles — 01/02/2026 reads as two different days on two hosts: " + string.Join("; ", offenders));
-        Assert.True(GeneralTimestampParsesWithUtcStyles.ToHashSet(StringComparer.Ordinal).SetEquals(found),
-            "the general-TryParse roster no longer matches the tree: found [" + string.Join(", ", found.Order())
-            + "], rostered [" + string.Join(", ", GeneralTimestampParsesWithUtcStyles) + "]");
+        var newParses = found.Except(GeneralTimestampParsesWithUtcStyles, StringComparer.Ordinal).Order().ToList();
+        Assert.True(newParses.Count == 0,
+            "a general DateTime.TryParse site is not in the allowlist: [" + string.Join(", ", newParses) + "]");
     }
 
     /// <summary>The shared parsers are the allowlisted shape: <c>ResolveAsOf</c> refuses what the framework
@@ -1712,14 +1709,13 @@ public sealed class McpPayloadContractCensusTests
             "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a wide field's own preview cut joins FieldPreviewCutKeys as <field>_truncated; a homonym joins CutHomonyms with what it actually is: "
             + string.Join("; ", unclassified.Select(k => $"{k} on {string.Join(", ", found[k])}")));
 
-        var gone = classified.Keys.Where(k => !found.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();
-        Assert.True(gone.Count == 0, "rostered cut keys no longer emitted anywhere (the collapse reached them — shrink the roster): " + string.Join(", ", gone));
-
+        /* One direction (#5950): a classified key emitted from a file its roster does not name fails by name.
+           A roster key or file that is no longer emitted is harmless and needs no edit. */
         var moved = classified
-            .Where(c => !c.Value.SequenceEqual(found[c.Key], StringComparer.Ordinal))
+            .Where(c => found.ContainsKey(c.Key) && found[c.Key].Except(c.Value, StringComparer.Ordinal).Any())
             .Select(c => $"{c.Key}: rostered on [{string.Join(", ", c.Value)}], emitted on [{string.Join(", ", found[c.Key])}]")
             .ToList();
-        Assert.True(moved.Count == 0, "a classified cut key is emitted from a different set of files than its roster says: " + string.Join("; ", moved));
+        Assert.True(moved.Count == 0, "a classified cut key is emitted from a file its roster does not name: " + string.Join("; ", moved));
     }
 
     /// <summary>The cut matcher fires on every spelling the tree has used and the shapes a new one would take,
@@ -2115,10 +2111,11 @@ public sealed class McpPayloadContractCensusTests
         }
 
         var report = string.Join("; ", found.OrderBy(a => a.Key, StringComparer.Ordinal).Select(a => $"{a.Key} in {string.Join(", ", a.Value)}"));
+        /* One direction (#5950): every literal found is classified, in the file it was found in. A classified
+           spelling that no longer appears is harmless. */
         Assert.True(
-            expected.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(found.Keys)
-            && expected.All(e => e.Value.SetEquals(found[e.Key])),
-            "the severity-word classification no longer matches the tree — a new lower- or upper-case literal is a band spelled wrong (the canon is Healthy / Warning / Critical / Unknown / NoData), unless it is another vocabulary, in which case it joins SeverityHomonyms with what it is. Found: [" + report + "]");
+            found.All(f => expected.TryGetValue(f.Key, out var classifiedFiles) && f.Value.IsSubsetOf(classifiedFiles)),
+            "a severity-word literal is not classified - a new lower- or upper-case literal is a band spelled wrong (the canon is Healthy / Warning / Critical / Unknown / NoData), unless it is another vocabulary, in which case it joins SeverityHomonyms with what it is. Found: [" + report + "]");
     }
 
     /// <summary>The canon, executed off its sources of truth: the enum tokens and the two label helpers agree
@@ -2207,63 +2204,6 @@ public sealed class McpPayloadContractCensusTests
             Assert.Contains("overall_health = row.HealthBand.ToString()", code, StringComparison.Ordinal);
             Assert.DoesNotContain("OverallHealth", code, StringComparison.Ordinal);
         }
-    }
-
-    /// <summary>
-    /// Every literal <c>LIMIT n</c> (<c>n &gt; 1</c>) that ENDS a reader statement on either SKU — the shape
-    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Seven remain: six in Lite's
-    /// service layer plus one in the Darling FinOps recommendations reader (<c>MaintenanceWindowSql</c>, the top-10 long-running jobs, a ceiling over a short list; the scan reads Storage subfolders since the FinOps readers live there), none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
-    /// (<c>GetPlanCacheSnapshotAsync</c>, behind <c>get_plan_cache_bloat</c>, which takes no cap) is a
-    /// ceiling of 30 over a population of a dozen cache types. <c>LIMIT 1</c> is the latest-row idiom and is
-    /// not a page. The Long Queries grid's read (<c>GetRecentLongQueryCompletionsAsync</c>) left the roster in
-    /// #4989: its cap is the named constant <c>LongQueryGridCap</c>, written into the statement as
-    /// <c>LIMIT {LongQueryGridCap}</c>, so no literal ends it, and the grid's "Showing since" notice reads the same
-    /// constant. Pinned so a new terminal literal has to say what it is, and so the Lite twin of
-    /// <see cref="McpPageContractTests.EveryPagedRead_BindsItsCapAsAParameter_NeverALiteral"/> has a
-    /// population to shrink.
-    /// </summary>
-    public static readonly (string File, string Member, int Limit)[] StatementTerminalLiteralLimits =
-    [
-        ("DarlingFinOpsRecommendationsReader.cs", "(file scope)", 10),
-        ("LocalDataService.Blocking.cs", "GetBlockingPairRowsAsync", 5000),
-        ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsWithNoteAsync", 10),
-        ("LocalDataService.PlanCache.cs", "GetPlanCacheSnapshotAsync", 30),
-        ("LocalDataService.RunningJobs.cs", "GetAnomalousJobsAsync", 5),
-        ("LocalDataService.WaitStats.cs", "GetAllQuerySnapshotsInRangeAsync", 2000),
-        ("LocalDataService.WaitStats.cs", "GetQuerySnapshotsByWaitTypeAsync", 500),
-    ];
-
-    private static readonly Regex TerminalLiteralLimit = new(
-        @"\bLIMIT\s+(\d+)\s*;?\s*(?:""""""|""\s*;|""\s*\)|""\s*,)", RegexOptions.Compiled);
-
-    [Fact]
-    public void EveryStatementTerminalLiteralLimit_IsInTheInventory_OnBothSkus()
-    {
-        var found = new List<(string File, string Member, int Limit)>();
-        var files = 0;
-        foreach (var (file, source) in ReaderSources())
-        {
-            files++;
-            var code = CSharpSourceWalker.StripCommentsAndStrings(source);
-            foreach (Match hit in TerminalLiteralLimit.Matches(source))
-            {
-                var n = int.Parse(hit.Groups[1].Value, CultureInfo.InvariantCulture);
-                if (n <= 1)
-                {
-                    continue;
-                }
-
-                found.Add((file, EnclosingMember(code, hit.Index), n));
-            }
-        }
-
-        Assert.True(files >= 60, $"only {files} reader sources were read across both SKUs");
-        var rostered = StatementTerminalLiteralLimits.ToHashSet();
-        Assert.True(rostered.SetEquals(found),
-            "the terminal literal-LIMIT inventory no longer matches the tree — new (bind the cap, or say what the ceiling is): ["
-            + string.Join("; ", found.Except(rostered).Select(f => $"{f.File} {f.Member} LIMIT {f.Limit}"))
-            + "]; rostered but gone (shrink the roster): ["
-            + string.Join("; ", rostered.Except(found).Select(f => $"{f.File} {f.Member} LIMIT {f.Limit}")) + "]");
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */

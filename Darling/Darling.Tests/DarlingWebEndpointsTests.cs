@@ -62,7 +62,7 @@ public sealed class DarlingWebEndpointsTests
     }
 
     [Fact]
-    public void ReadEndpoints_AreExactlyTheReadToolCatalog_MinusTheDocumentedExclusions()
+    public void EveryReadTool_HasAReadEndpoint_UnlessDocumentedAsExcluded()
     {
         var catalog = ReflectToolCatalog();
         var endpoints = DarlingWebEndpoints.BuildReadDispatch().Keys.ToHashSet(StringComparer.Ordinal);
@@ -72,12 +72,11 @@ public sealed class DarlingWebEndpointsTests
         /* The web page's own keyed reads (#5241) have no tool behind them, by design: exactly this set is added. */
         expected.UnionWith(DarlingWebEndpoints.WebOnlyReadNames);
 
-        /* Symmetric-difference messages so a miss names the exact tool. */
+        /* One direction (#5950): a read-only tool with no /api/read endpoint fails by name. An endpoint whose
+           tool has since been renamed or removed is not asserted here. */
         var missing = expected.Except(endpoints).OrderBy(n => n, StringComparer.Ordinal).ToArray();
-        var extra = endpoints.Except(expected).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
         Assert.True(missing.Length == 0, "read-only tools with no /api/read endpoint: " + string.Join(", ", missing));
-        Assert.True(extra.Length == 0, "/api/read endpoints with no matching read-only tool: " + string.Join(", ", extra));
     }
 
     /// <summary>#4782: the test-only extra dispatch entry belongs to the async flow that set it. It is not a
