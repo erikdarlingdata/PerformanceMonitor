@@ -1464,6 +1464,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #5632 Phase A: the Level 1 investigation tools. The two reads are ordinary reads; claim and submit are
                served only under DarlingMcpWritePolicy's investigations arm (a token, mcp.allowWrites off). */
             .WithGeminiCompatibleTools<DarlingMcpInvestigationTools>()
+            .WithGeminiCompatibleTools<DarlingMcpThresholdOverrideTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
             .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
             /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central

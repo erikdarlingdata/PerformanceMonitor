@@ -138,7 +138,8 @@ public sealed class DarlingMcpInvestigationToolsTests
             Assert.False(byName[name].DestructiveHint);
         }
 
-        Assert.DoesNotContain(byName.Keys, DarlingMcpWritePolicy.IsWrite);
+        /* The Level 2 action tools (#5912, #5916) are the writes an agent may call under this arm, through the gate. */
+        Assert.DoesNotContain(byName.Keys.Where(n => !DarlingMcpWritePolicy.AgentActionTools.Contains(n)), DarlingMcpWritePolicy.IsWrite);
     }
 
     [Fact]

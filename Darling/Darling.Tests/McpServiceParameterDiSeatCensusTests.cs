@@ -96,9 +96,9 @@ public sealed class McpServiceParameterDiSeatCensusTests
            AddSingleton<InvestigationBriefComposer> overload (its reader behind it, AddSingleton<IInvestigationBriefSourceReader>).
            ReadAdmission added by #5506 part 3: get_read_latency's live admission counts, registered via the
            typed-generic AddSingleton<ReadAdmission> overload. InvestigationOpenSignal added by #5822: the long poll waits on
-           the process's one open signal, registered via the typed-generic AddSingleton<InvestigationOpenSignal> overload. */
+           the process's one open signal, registered via the typed-generic AddSingleton<InvestigationOpenSignal> overload. DarlingMcpServedPolicy added by #5916: set_alert_threshold_override tells its two arms apart by the served policy, registered via the typed-generic AddSingleton<DarlingMcpServedPolicy> overload. */
         Assert.Equal(
-            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "InvestigationBriefComposer", "InvestigationOpenSignal", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadAdmission", "ReadLatencyRecorder", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "DarlingMcpServedPolicy", "ILogger", "InvestigationBriefComposer", "InvestigationOpenSignal", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadAdmission", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

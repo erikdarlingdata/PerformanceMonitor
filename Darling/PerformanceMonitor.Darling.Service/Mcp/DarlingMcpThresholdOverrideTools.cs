@@ -26,7 +26,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// What the MCP host serves, as a service parameter a tool can take (#5916): the one <see cref="DarlingMcpWritePolicy.Effective"/>
 /// the host started with. A Level 2 action tool needs it to tell its two arms apart.
 /// </summary>
-internal sealed record DarlingMcpServedPolicy(DarlingMcpWritePolicy.Effective Policy);
+public sealed class DarlingMcpServedPolicy
+{
+    internal DarlingMcpServedPolicy(DarlingMcpWritePolicy.Effective policy) => Policy = policy;
+
+    internal DarlingMcpWritePolicy.Effective Policy { get; }
+}
 
 /// <summary>
 /// <c>set_alert_threshold_override</c> (#5916): set or clear a threshold for one server, or one database on it, without
@@ -36,7 +41,7 @@ internal sealed record DarlingMcpServedPolicy(DarlingMcpWritePolicy.Effective Po
 /// agent and the request. An agent changes a threshold by override only; <c>update_alert_settings</c> is never offered to it.
 /// </summary>
 [McpServerToolType]
-internal static class DarlingMcpThresholdOverrideTools
+public sealed class DarlingMcpThresholdOverrideTools
 {
     internal const string ToolName = "set_alert_threshold_override";
     internal const string Kind = "threshold_override";
@@ -327,36 +332,36 @@ internal static class DarlingMcpThresholdOverrideTools
         _ => throw new ArgumentOutOfRangeException(nameof(wire), wire, "Not a tunable threshold."),
     };
 
-    private static NpgsqlCommand Command(NpgsqlConnection c, NpgsqlTransaction t, string sql, int serverId, string? database, string wire)
+    private static NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, int serverId, string? database, string wire)
     {
-        var command = new NpgsqlCommand(sql, c, t) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+        var command = new NpgsqlCommand(sql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)database ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = wire });
         return command;
     }
 
-    internal static async Task<double?> ReadValueAsync(NpgsqlConnection c, NpgsqlTransaction t, int serverId, string? database, string wire,
+    internal static async Task<double?> ReadValueAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string? database, string wire,
         CancellationToken ct)
     {
-        await using var command = Command(c, t,
+        await using var command = Command(connection, transaction,
             "SELECT value FROM " + Table + " WHERE server_id = $1 AND coalesce(database_name, '') = coalesce($2::text, '') AND threshold_key = $3",
             serverId, database, wire);
         return await command.ExecuteScalarAsync(ct) is double d ? d : null;
     }
 
-    private static async Task DeleteAsync(NpgsqlConnection c, NpgsqlTransaction t, int serverId, string? database, string wire, CancellationToken ct)
+    private static async Task DeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string? database, string wire, CancellationToken ct)
     {
-        await using var command = Command(c, t,
+        await using var command = Command(connection, transaction,
             "DELETE FROM " + Table + " WHERE server_id = $1 AND coalesce(database_name, '') = coalesce($2::text, '') AND threshold_key = $3",
             serverId, database, wire);
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    internal static async Task UpsertAsync(NpgsqlConnection c, NpgsqlTransaction t, int serverId, string? database, string wire, int value,
+    internal static async Task UpsertAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string? database, string wire, int value,
         string setBy, Guid? requestId, CancellationToken ct)
     {
-        await using var command = Command(c, t,
+        await using var command = Command(connection, transaction,
             "INSERT INTO " + Table + " (server_id, database_name, threshold_key, value, set_by, request_id) " +
             "VALUES ($1, $2, $3, $4, $5, $6) " +
             "ON CONFLICT (server_id, (coalesce(database_name, '')), threshold_key) DO UPDATE " +

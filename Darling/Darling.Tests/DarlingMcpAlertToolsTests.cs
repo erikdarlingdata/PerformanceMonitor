@@ -113,10 +113,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void ParamContract_AlertSettings_TakesNoInputParameters()
+    public void ParamContract_AlertSettings_TakesOnlyTheOptionalServerName()
     {
-        /* Only the injected NpgsqlDataSource, which is not [Description]-decorated — an empty input schema. */
-        Assert.Empty(McpParams("get_alert_settings"));
+        /* The injected NpgsqlDataSource is not [Description]-decorated; the one input is the optional server_name (#5916). */
+        Assert.Equal(new[] { "server_name" }, McpParams("get_alert_settings").Select(p => p.Name).ToArray());
     }
 
     [Fact]
