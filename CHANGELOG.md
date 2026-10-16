@@ -24,6 +24,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 ### Added
 
 - **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
+- **The alert engine can take per-server and per-database threshold overrides** ([#5921]) - the engine read every alert threshold as one global value, so a threshold could not be tuned for one server. Each tunable integer threshold now has a registered key and a scope (server, or server and database), and the engine reads every one of them through an optional overrides object. The version store (PVS) percent and floor and the file growth rise and level bars can also take a per-database value, because those alerts grade each database on its own. Nothing supplies overrides yet: Lite passes none and Darling passes none until a later release adds the store-backed overrides, so every alert behaves exactly as before.
 
 ### Fixed
 
@@ -5213,3 +5214,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
 [#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
 [#5682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5682
+[#5921]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5921
