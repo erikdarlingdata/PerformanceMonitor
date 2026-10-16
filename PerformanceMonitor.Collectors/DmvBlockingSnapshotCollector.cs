@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -291,4 +292,13 @@ OPTION(RECOMPILE);";
             .Value(row.BlockingHostName)
             .Value(row.BlockingClientApp);
     }
+
+    /// <summary>
+    /// #5980: a caller sighting for the blocked side and one for the blocking side, each with its own
+    /// application, login, host and statement text. A side that names no application, login or host is left out.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(
+            QueryTagSightings.Caller(row.DatabaseName, row.BlockedClientApp, row.BlockedLoginName, row.BlockedHostName, row.BlockedSqlText),
+            QueryTagSightings.Caller(row.DatabaseName, row.BlockingClientApp, row.BlockingLoginName, row.BlockingHostName, row.BlockingSqlText));
 }

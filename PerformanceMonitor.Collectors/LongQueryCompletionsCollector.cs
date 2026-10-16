@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -696,4 +697,13 @@ BEGIN
     DROP EVENT SESSION [{sessionName}] ON SERVER;
 END;";
     }
+
+    /// <summary>
+    /// #5980: one hash sighting for a long-query completion, carrying the client application, server principal,
+    /// database and the module (object_name) it ran. Null when the event has no query_hash.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(QueryTagSightings.Hash(
+            row.QueryHash, row.DatabaseName, QueryTagSightings.NamedObject(row.DatabaseName, row.ObjectName),
+            row.ClientAppName, row.ServerPrincipalName, null, row.StatementText));
 }
