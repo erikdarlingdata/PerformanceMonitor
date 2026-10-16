@@ -71,14 +71,26 @@ public sealed class InvestigationBriefComposerTests
         IReadOnlyList<InvestigationRecentChange>? changes = null,
         IReadOnlyList<InvestigationBriefNote>? notes = null,
         IReadOnlyList<InvestigationProfileText>? profiles = null,
-        InvestigationBriefRequest? request = null) =>
+        InvestigationBriefRequest? request = null,
+        IReadOnlyList<InvestigationAlertRecurrence>? recurrence = null,
+        IReadOnlyList<InvestigationPriorLink>? priorLinks = null) =>
         new(request ?? Request(),
             alerts ?? new[] { Alert(Now.AddMinutes(-20)), Alert(Now.AddMinutes(-1)) },
             findings ?? new[] { Finding() },
             reports ?? new[] { Report(600) },
             changes ?? new[] { new InvestigationRecentChange(Now.AddDays(-1), "mute_rule", "enabled mute rule for Blocking", "%WHERE id = " + LiteralCanary + "%") },
             notes ?? new[] { new InvestigationBriefNote(LoginCanary, "dba-lead", Now.AddDays(30), "Nightly ETL holds locks from 01:00 to 02:00.") },
-            profiles ?? new[] { new InvestigationProfileText("server", "Production OLTP. Never restart during business hours.") });
+            profiles ?? new[] { new InvestigationProfileText("server", "Production OLTP. Never restart during business hours.") },
+            priorLinks, null, false, recurrence);
+
+    /// <summary>A recurrence entry (#6000) for a metric named by <paramref name="i"/>: 4 fired dates, 1 muted date.</summary>
+    private static InvestigationAlertRecurrence Recurrence(int i) =>
+        new("Metric" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), new DateTime(2026, 10, 14, 2, 10, 0, DateTimeKind.Utc), 4, 1,
+            new[] { new DateOnly(2026, 10, 13), new DateOnly(2026, 10, 12), new DateOnly(2026, 10, 11), new DateOnly(2026, 10, 10) },
+            new[] { new DateOnly(2026, 10, 9) });
+
+    private static InvestigationPriorLink PriorLink(int i) =>
+        new(Guid.NewGuid(), Now.AddHours(-i - 1), "ticket", "https://tickets.example.com/browse/OPS-" + new string('9', 150) + i.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
 
     private static JsonObject Brief(InvestigationBriefSources sources, McpDataDetail mode = McpDataDetail.Full) =>
         JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, mode, Now))!.AsObject();
@@ -246,6 +258,82 @@ public sealed class InvestigationBriefComposerTests
         Assert.Contains(cuts, c => (string?)c!["section"] == "earlier_reports");
         Assert.True((int)brief["truncated"]!["fields_cut"]! > 0);
         Assert.True((int)brief["truncated"]!["chars"]! > 0);
+    }
+
+    /* ---- #6000 recurrence: the pure half, no store ---- */
+
+    [Fact]
+    public void Recurrence_AFewEntriesComeBackWhole_InOrder_WithTheWindowAsWritten()
+    {
+        var entries = new[] { Recurrence(1), Recurrence(2), Recurrence(3) };
+        var brief = Brief(Sources(recurrence: entries));
+
+        var nodes = brief["recurrence"]!.AsArray();
+        Assert.Equal(new[] { "Metric1", "Metric2", "Metric3" }, nodes.Select(n => (string?)n!["metric"]));
+        var first = nodes[0]!;
+        Assert.Equal("02:10", (string?)first["around_utc"]);
+        Assert.Equal(InvestigationAlertRecurrence.WindowMinutes, (int)first["window_minutes"]!);
+        Assert.Equal(InvestigationAlertRecurrence.Days, (int)first["days"]!);
+        Assert.Equal(4, (int)first["fired"]!);
+        Assert.Equal(1, (int)first["muted"]!);
+        Assert.Equal(new[] { "2026-10-13", "2026-10-12", "2026-10-11", "2026-10-10" }, first["fired_dates"]!.AsArray().Select(d => (string?)d));
+        Assert.Equal(new[] { "2026-10-09" }, first["muted_dates"]!.AsArray().Select(d => (string?)d));
+        Assert.DoesNotContain(brief["truncated"]!["sections"]!.AsArray(), c => (string?)c!["section"] == "recurrence");
+    }
+
+    [Fact]
+    public void Recurrence_MoreThanTheCapAdmits_IsCutFromTheTail_AndNamesTheCut()
+    {
+        var entries = Enumerable.Range(1, 30).Select(Recurrence).ToList();
+        var brief = Brief(Sources(recurrence: entries));
+
+        var nodes = brief["recurrence"]!.AsArray();
+        Assert.InRange(nodes.Count, 1, 29);
+        Assert.Equal(entries.Take(nodes.Count).Select(e => e.MetricName), nodes.Select(n => (string?)n!["metric"])); // the head survives
+        Assert.True(nodes.Sum(n => n!.ToJsonString().Length + 1) <= InvestigationBriefComposer.RecurrenceCap);
+
+        var cut = brief["truncated"]!["sections"]!.AsArray().Single(c => (string?)c!["section"] == "recurrence")!;
+        Assert.Equal(nodes.Count, (int)cut["kept"]!);
+        Assert.Equal(entries.Count - nodes.Count, (int)cut["dropped"]!);
+        Assert.Equal(entries.Count, (int)cut["kept"]! + (int)cut["dropped"]!);
+        Assert.Equal("get_alert_history", (string?)cut["fetch"]);
+        Assert.Contains("get_alert_history", RegisteredToolNames());
+    }
+
+    /* The recurrence block subtracts what it spent from what the sections left, so prior_links reads the rest. Fill the sections
+       until about 3,000 characters are left (found by composing, not by hand): recurrence takes up to its 2,000 and prior_links
+       may take only what remains. Without the subtraction both would take their full caps and the brief would pass the total. */
+    [Fact]
+    public void Recurrence_AndPriorLinks_TogetherStayInsideTheTotalCap()
+    {
+        var bigQuery = "SELECT " + new string('x', 900);
+        var alerts = Enumerable.Range(0, 40).Select(i => Alert(Now.AddMinutes(-i), bigQuery)).ToList();
+        var recurrence = Enumerable.Range(1, 30).Select(Recurrence).ToList();
+        var links = Enumerable.Range(0, 20).Select(PriorLink).ToList();
+
+        var reports = Enumerable.Range(0, 12).Select(i => Report(i * 60, new string('r', 300))).ToList();
+        IReadOnlyList<InvestigationBriefFinding>? findings = null;
+        var notes = Enumerable.Range(0, 6).Select(i => new InvestigationBriefNote(LoginCanary, "dba-lead", Now.AddDays(30), new string('n', 400))).ToList();
+        var rooms = new List<int>();
+        for (var count = 1; count <= 12 && findings is null; count++)
+        {
+            var candidate = Enumerable.Range(0, count).Select(_ => Finding()).ToList();
+            var room = InvestigationBriefComposer.TotalCharCap -
+                InvestigationBriefComposer.Compose(Sources(alerts: alerts, findings: candidate, reports: reports, notes: notes), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now).Length;
+            rooms.Add(room);
+            if (room is >= 3_000 and <= 3_700) findings = candidate;
+        }
+
+        Assert.True(findings is not null, string.Join(",", rooms));
+        var json = InvestigationBriefComposer.Compose(
+            Sources(alerts: alerts, findings: findings, reports: reports, notes: notes, recurrence: recurrence, priorLinks: links), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+        Assert.True(json.Length <= InvestigationBriefComposer.TotalCharCap, json.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+        var brief = JsonNode.Parse(json)!.AsObject();
+        Assert.True(brief["recurrence"]!.AsArray().Count > 0);
+        var cuts = brief["truncated"]!["sections"]!.AsArray();
+        Assert.Contains(cuts, c => (string?)c!["section"] == "recurrence");
+        Assert.Contains(cuts, c => (string?)c!["section"] == "prior_links");
     }
 
     /* #5834: a field whose cut index lands between the halves of an emoji's surrogate pair. The raw UTF-16 cut kept the
