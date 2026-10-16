@@ -23,6 +23,14 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Added
 
+- **Investigations panel in the Darling viewer and Lite** ([#5907]) - the Darling web viewer gets an Investigations page, and Lite gets an Investigations window (sidebar button), both read-only: agent investigation requests by state and family (opened, server, metric, family, agent, lease, reported, route) and, for a picked request, its reports, stored brief and journal. In Lite the reports, brief and journal text are masked at the level the MCP investigation tools serve.
+- **Agent notes can be approved or rejected in the Darling web dashboard and in Lite** ([#5908]) - A note an agent proposes with its investigation report waited as pending with no way to approve it, so no brief ever carried one. The Darling web dashboard's Admin page has a Pending Notes tab (server, metric, family, the proposed text, the agent and the request) with Approve and Reject, and Lite has an Agent Notes screen under Settings (Review Agent Notes) over its local database. An approved note goes into later briefs; a rejected note is kept with who decided and when, and never reaches a brief. Each decision is stamped with the person and the time and journaled. On Darling, managed and compose stores connect the web dashboard as the viewer role, which can list notes but cannot decide them, so there the page says to decide in the desktop Viewer or to set postgres.webConnectionString to an admin login. Lite stays advise-only for agents: a person decides notes, and the note text can't be edited.
+- **A new Darling MCP tool, `backtest_custom_alert_rule`, shows where a custom alert rule would have fired and cleared over stored history** ([#5919]) - there was no way to see how often a rule would fire before saving or changing it: `test_custom_alert_rule` reads only the current value and skips the breach and clear samples. The new tool replays a saved rule or a draft definition over up to 7 days (default 24 hours) on up to 10 servers. At each step it reads the rule's own panel as of that step and applies the same breach and clear samples the live engine applies, so the fire and clear points match what the live engine would do on the same samples. It writes and sends nothing. One call runs at most 2,880 queries and 60 seconds, and a call a cap stops answers `partial` with `stopped_at` and what it covered. A server with no stored samples answers `unavailable`, never 0 fires. The MCP catalog grows from 187 to 188 tools.
+- **Store schema for Level 2 agent investigations** ([#5920]) - the store gains the tables and columns Level 2 needs, in one migration (store schema version 191). A notification route may now be set to agent level 2 (0 to 2) and an investigation request may carry autonomy level 2; any level outside the range is still refused. `config_service` gets an `agent_actions_enabled` switch that reads as on on a new and an upgraded store. A new `config_threshold_overrides` table holds per-server, per-database threshold overrides, is deleted with its server and bumps the `config_version` reload beacon on every change. A new `investigation_feedback` table holds a person's verdict (right, partly or wrong), corrected verdict, missed step and comment on a report, one per request per author, and goes with its request. Investigation requests gain a nullable `practice_of` column with no foreign key. The admin role can write both new tables, the viewer role can only read them, and the mcp role can write the overrides table and read feedback, in both the managed roles and `provision-roles.sql` (a bring-your-own store needs the script re-run after upgrading). Retention needs no new pass: feedback ages with its request and overrides are never aged. Nothing reads or writes the new tables yet; later Phase B slices do.
+- **The alert engine can take per-server and per-database threshold overrides** ([#5921]) - the engine read every alert threshold as one global value, so a threshold could not be tuned for one server. Each tunable integer threshold now has a registered key and a scope (server, or server and database), and the engine reads every one of them through an optional overrides object. The version store (PVS) percent and floor and the file growth rise and level bars can also take a per-database value, because those alerts grade each database on its own. Nothing supplies overrides yet: Lite passes none and Darling passes none until a later release adds the store-backed overrides, so every alert behaves exactly as before.
+- **Investigation reports can record Jira, pull request and bug report links** ([#5914]) - An agent's report may carry up to 10 links, which must be https with no user name or password (http, file and UNC links are refused, and are checked again whenever a link is shown). Later briefs for the same server and alert family list the last 30 days of links, and the viewer and web dashboard show a report's links.
+- **The Level 2 agent action gate and its journal** ([#5912]) - Darling now has the one gate every Level 2 agent change will go through: a live claim on the request, the request's server only, a reason and evidence, with each refusal journaled at most once an hour and each change journaled before and after with its evidence masked at `mcp.dataDetail`. Requests now record the lowest agent level among their routes, and an alert from a custom rule an agent last wrote stays at Level 1.
+- **People can give feedback on investigation reports** ([#5913]) - A report can be marked right, partly right or wrong, with a corrected verdict, the step the agent missed and a comment, from the Viewer's Investigations window (Report Feedback tab, admin login) or the web Admin page's new Report Feedback tab (recorded only under an admin store login; list-only otherwise). `get_investigation_reports` now returns each report's feedback and, per alert family, how many investigations ended as false positives before and after people's corrections.
 - **Lite: Level 1 agent investigations** ([#5820]) - when an alert fires on a notification route whose agent level is 1, Lite opens an investigation request for it, and when `mcp_allow_investigations` is on with MCP writes off it serves four tools (`list_investigation_requests`, `claim_investigation_request`, `submit_investigation_report`, `get_investigation_reports`) so a local agent can claim the request, read its brief, and file a report that Lite keeps beside the alert. Requests, reports, notes and the journal live in Lite's own DuckDB file; nothing writes to a monitored server; with both MCP settings on the investigation tools stay off and Lite logs one Critical line saying so.
 - **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
 
@@ -860,7 +868,10 @@ Full entries: [docs/changelog/3.9.md](docs/changelog/3.9.md)
 - **job_history collection survives an msdb reseed** ([#3886])
 - **The compression-stuck self-alert no longer pages on a healthy job's own run instant** ([#3588])
 - **pg_deadlocks reads a self-hosted target's csvlog file, closing the same forged-line hole #4124 closed for pg_log_events** ([#4136])
+- **README no longer lists community tools as installed automatically** ([#4159])
+- **README corrected for Darling on Linux and PostgreSQL** ([#4158])
 - **pg_plan_capture reads a self-hosted target's csvlog file** ([#4137])
+- **pg_log_events on RDS and Aurora now reads the csvlog file too** ([#4135])
 - **Darling's daily retention purge no longer holds up collection** ([#4133])
 - **Lite's get_index_usage no longer hides active indexes behind a silent cap** ([#4131])
 - **pg_log_events reads a self-hosted target's csvlog file, closing a forged-line hole** ([#4124])
@@ -4544,10 +4555,13 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4127]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4127
 [#4131]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4131
 [#4133]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4133
+[#4135]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4135
 [#4136]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4136
 [#4137]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4137
 [#4141]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4141
 [#4157]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4157
+[#4158]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4158
+[#4159]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4159
 [#4186]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4186
 [#4198]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/4198
 [#4203]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/4203
@@ -5215,3 +5229,11 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
 [#5682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5682
 [#5820]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/5820
+[#5907]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5907
+[#5908]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5908
+[#5919]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5919
+[#5920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5920
+[#5921]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5921
+[#5914]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5922
+[#5912]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5925
+[#5913]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5926
