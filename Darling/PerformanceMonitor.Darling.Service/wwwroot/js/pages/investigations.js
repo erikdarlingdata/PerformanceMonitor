@@ -1,0 +1,244 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+/*
+ * The Investigations page (#5904): the agent investigation requests the service opened, newest first, with the state
+ * each one is in (open, claimed, reported, closed, expired). Two reads over /api/read, the answers of the MCP tools:
+ * list_investigation_requests for the list (filtered by state and family by the read itself), and
+ * get_investigation_reports for ONE request when a row is picked: its stored brief, its reports and its journal.
+ *
+ * Read only. Nothing here claims, releases, reports or decides anything about a request. The page draws exactly what
+ * the read answered: the operator sees the full report and brief, as in the desktop viewer (mcp.dataDetail masks
+ * agents over MCP only). A report is an agent's own claim, unreviewed and self-attributed, and the page says so.
+ *
+ * The list keeps the order the read gave (opened_at DESC, request_id) and the journal keeps its own (event_time
+ * DESC, journal_id DESC). The filters and the picked request live at MODULE scope, so the poll's rebuild of the page shows the
+ * same choices and the same open request.
+ *
+ * R4 (XSS): every value, the brief and the report text included, reaches the DOM as text through el()'s text path
+ * (a <pre> or a cell), never as HTML.
+ */
+
+import { VIZ } from "../panels.js";
+import { READ_FIELDS } from "../read-fields.js";
+import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
+
+/** The states the list read takes; an empty value is every state. */
+export const STATES = [
+  { value: "", label: "All states" },
+  { value: "open", label: "Open" },
+  { value: "claimed", label: "Claimed" },
+  { value: "reported", label: "Reported" },
+  { value: "closed", label: "Closed" },
+  { value: "expired", label: "Expired" },
+];
+
+/** The alert families the list read takes; an empty value is every family. */
+export const FAMILIES = [
+  { value: "", label: "All families" },
+  { value: "blocking", label: "Blocking" },
+  { value: "query_performance", label: "Query performance" },
+  { value: "resources", label: "Resources" },
+  { value: "availability", label: "Availability" },
+  { value: "jobs", label: "Jobs" },
+  { value: "self_monitor", label: "Self monitor" },
+  { value: "other", label: "Other" },
+];
+
+/** The most requests one list read returns (the read takes 1 to 100). */
+export const LIST_LIMIT = 100;
+
+/** The list's columns, from READ_FIELDS (once, for the page and for a notebook cell). claimed_by is the agent id; lease_until is when its live lease ends (the claim time itself is in the journal). */
+export const REQUEST_COLUMNS = READ_FIELDS.list_investigation_requests.table.columns;
+
+/** The journal's columns, in the order the read gave them (newest first): the read's own, then the detail the page draws as text. */
+export const JOURNAL_COLUMNS = [...READ_FIELDS.get_investigation_reports.table.columns, { key: "detail_text", label: "Detail", wrap: true }];
+
+/** The text of one value: a string as it is, nothing as "", anything else as indented JSON (a masked field is an object). */
+export function valueText(v) {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+/** When the request was claimed: the newest "claimed" event of its journal, or null when it was never claimed. */
+export function claimedAt(journal, requestId) {
+  let best = null;
+  for (const j of journal || []) {
+    if (!j || j.event !== "claimed") continue;
+    if (j.request_id != null && String(j.request_id) !== String(requestId)) continue;
+    if (best == null || String(j.event_time || "") > String(best)) best = j.event_time;
+  }
+  return best;
+}
+
+/** The journal rows of one request, each with its detail as text, in the order the read gave them. */
+export function journalRows(data, requestId) {
+  return rowsUnder(data, "journal")
+    .filter((j) => j && (j.request_id == null || String(j.request_id) === String(requestId)))
+    .map((j) => ({ ...j, detail_text: j.detail == null ? "" : valueText(j.detail) }));
+}
+
+/** The reports of one request, as the read gave them. */
+export function reportRows(data, requestId) {
+  return rowsUnder(data, "reports").filter((r) => r && String(r.request_id) === String(requestId));
+}
+
+/** The list read's parameters for the chosen filters. A blank choice is not sent. */
+export function listParams(choices) {
+  const p = { limit: LIST_LIMIT };
+  if (choices.state) p.state = choices.state;
+  if (choices.family) p.family = choices.family;
+  return p;
+}
+
+const choices = { state: "", family: "", requestId: null };
+let pageSeq = 0;
+let detailSeq = 0;
+let pageAbort = null;
+let detailAbort = null;
+
+function select(label, options, value, onPick) {
+  const sel = el("select", { "aria-label": label, class: "range-select-inline" }, options.map((o) => el("option", { value: String(o.value), text: o.label })));
+  sel.value = value;
+  sel.addEventListener("change", () => onPick(sel.value));
+  return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
+}
+
+function section(title, children) {
+  return el("div", { class: "inv-section" }, [el("strong", { text: title }), ...children]);
+}
+
+function reportBlock(rep) {
+  const found = rep.root_cause_found === true ? "Root cause found" : rep.root_cause_found === false ? "Root cause not found" : null;
+  const head = [rep.agent_id ? "Agent " + rep.agent_id : null, rep.submitted_at ? "reported " + localTime(rep.submitted_at) : null, found]
+    .filter(Boolean).join(" · ");
+  const parts = [el("div", { class: "muted", text: head })];
+  if (rep.verdict != null) parts.push(el("div", {}, [el("strong", { text: "Verdict: " }), el("span", { text: valueText(rep.verdict) })]));
+  if (rep.summary != null) parts.push(el("div", {}, [el("strong", { text: "Summary: " }), el("pre", { class: "jh-detail-message", text: valueText(rep.summary) })]));
+  if (rep.root_cause != null) parts.push(el("div", {}, [el("strong", { text: "Root cause: " }), el("pre", { class: "jh-detail-message", text: valueText(rep.root_cause) })]));
+  const evidence = Array.isArray(rep.evidence) ? rep.evidence : [];
+  if (evidence.length) {
+    parts.push(el("div", {}, [el("strong", { text: "Evidence (" + evidence.length + "): " }), ...evidence.map((e) => el("pre", { class: "jh-detail-message", text: valueText(e) }))]));
+  }
+  return el("div", { class: "inv-report" }, parts);
+}
+
+/* The pane under the list for one request, from its get_investigation_reports answer. */
+function detailPane(row, data) {
+  const reports = reportRows(data, row.request_id);
+  const journal = journalRows(data, row.request_id);
+  const claimed = claimedAt(journal, row.request_id);
+  const facts = [
+    "State " + row.state,
+    row.claimed_by ? "agent " + row.claimed_by : "no agent",
+    claimed ? "claimed " + localTime(claimed) : "never claimed",
+    row.reported_at ? "reported " + localTime(row.reported_at) : "not reported",
+  ].join(" · ");
+  const parts = [
+    el("div", { class: "jh-detail-head" }, [
+      el("strong", { text: "Request on " + (row.server_name || "?") + " (" + (row.family || "?") + ")" }),
+      el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; mount(slot, []); } }),
+    ]),
+    el("div", { class: "muted", text: facts }),
+  ];
+
+  if (reports.length) {
+    parts.push(noticeStrip("A report is an agent's own claim: unreviewed and self-attributed, not a finding."));
+    parts.push(section("Report" + (reports.length > 1 ? "s" : ""), reports.map(reportBlock)));
+  } else {
+    parts.push(section("Report", [emptyStrip("No agent has reported on this request.")]));
+  }
+
+  if (data && data.brief != null) {
+    const level = data.brief && data.brief.data_detail ? " (data detail: " + data.brief.data_detail + ")" : "";
+    parts.push(section("Stored brief" + level, [el("pre", { class: "jh-detail-message", text: valueText(data.brief) })]));
+  }
+
+  const jparts = [];
+  if (data && data.journal_truncated && journal.length) jparts.push(noticeStrip("Showing the newest " + journal.length + " journal rows; older ones are not listed."));
+  jparts.push(VIZ.table({ journal }, { id: "investigation-journal", rowsKey: "journal", columns: JOURNAL_COLUMNS, emptyText: "No journal rows for this request." }));
+  parts.push(section("Journal", jparts));
+  return parts;
+}
+
+let slot = null;
+
+async function loadDetail(row) {
+  const ticket = ++detailSeq;
+  if (detailAbort) detailAbort.abort();
+  const signal = (detailAbort = new AbortController()).signal;
+  mount(slot, [loadingStrip("Loading this request…")]);
+  const res = await readTool("get_investigation_reports", { request_id: row.request_id }, signal);
+  if (ticket !== detailSeq) return;
+  if (res.kind === "aborted" || res.kind === "auth") return;
+  if (res.kind === "error") return mount(slot, [readErrorStrip(res.message)]);
+  if (res.kind === "empty") return mount(slot, [emptyStrip(res.message || "This request has no stored report or journal.")]);
+  try {
+    mount(slot, detailPane(row, res.data || {}));
+  } catch (e) {
+    mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
+  }
+}
+
+export function renderInvestigations(main) {
+  if (pageAbort) pageAbort.abort();
+  const signal = (pageAbort = new AbortController()).signal;
+  ++pageSeq;
+  const body = el("div", {}, [loadingStrip("Loading investigation requests…")]);
+  slot = el("div", { class: "jh-detail" });
+
+  const reload = () => {
+    choices.requestId = null;
+    mount(slot, []);
+    load();
+  };
+  const state = select("State", STATES, choices.state, (v) => { choices.state = v; reload(); });
+  const family = select("Family", FAMILIES, choices.family, (v) => { choices.family = v; reload(); });
+  mount(main, [
+    el("div", { class: "page-head" }, [el("h2", { text: "Investigations" }), el("div", { class: "spacer" }), state, family]),
+    el("div", { class: "muted", text: "Requests the service opened for agents to look into, newest first. Read only." }),
+    body,
+    slot,
+  ]);
+
+  async function load() {
+    const mine = ++pageSeq;
+    mount(body, loadingStrip("Loading investigation requests…"));
+    const res = await readTool("list_investigation_requests", listParams(choices), signal);
+    if (mine !== pageSeq || res.kind === "aborted" || res.kind === "auth") return;
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, emptyStrip(res.message || "No investigation requests."));
+    const data = res.data || {};
+    const rows = rowsUnder(data, "requests");
+    if (!rows.length) return mount(body, emptyStrip("No investigation requests."));
+    const onRow = (r, tr) => {
+      if (!r) return;
+      tr.style.cursor = "pointer";
+      tr.setAttribute("title", "Show this request's report and journal");
+      makeActivatable(tr, () => {
+        choices.requestId = r.request_id;
+        loadDetail(r);
+      });
+    };
+    const parts = [];
+    if (data.truncated) parts.push(noticeStrip("Showing the newest " + rows.length + " requests; older ones are not listed. Narrow the state or family."));
+    parts.push(el("div", { class: "muted", text: rows.length + " requests shown" }));
+    parts.push(VIZ.table(data, { id: "investigations", rowsKey: "requests", columns: REQUEST_COLUMNS, onRow, emptyText: "No investigation requests." }));
+    mount(body, parts);
+    const keep = choices.requestId ? rows.find((r) => String(r.request_id) === String(choices.requestId)) : null;
+    if (keep) loadDetail(keep);
+    else choices.requestId = null;
+  }
+
+  load();
+}
