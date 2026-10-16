@@ -253,10 +253,22 @@ FROM config.investigation_reports
 WHERE request_id = ANY($1)
 ORDER BY submitted_at DESC";
 
+    /* #5914: a report's links are its request's link_recorded journal rows, read whole (at most MaxLinks per request), so
+       the journal page's limit never drops one. ReportsJournalSql excludes the event for the same reason: these rows are
+       served in full here, and leaving them in the capped newest-first page would spend it twice on one fact (a link sorts
+       above its own reported row, so 100 reported requests with two links each would fill a 200-row page with links alone). */
+    internal const string ReportLinksSql = @"
+SELECT request_id, detail::text
+FROM config.investigation_journal
+WHERE request_id = ANY($1)
+  AND event = 'link_recorded'
+ORDER BY journal_id";
+
     internal const string ReportsJournalSql = @"
 SELECT event_time, request_id, server_id, event, actor, reason, detail::text
 FROM config.investigation_journal
 WHERE request_id = ANY($1)
+  AND event <> 'link_recorded'
 ORDER BY event_time DESC, journal_id DESC
 LIMIT $2";
 
@@ -510,6 +522,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             return InvestigationSubmitOutcome.AgentIdInvalid;
         }
 
+        /* #5914: the tool layer's link rule again, before any write. */
+        InvestigationReportLinks.ThrowIfInvalid(report.Links, nameof(report));
         var now = Now();
         var actor = "agent:" + report.AgentId;
 
@@ -584,6 +598,15 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await ExecAsync(connection, transaction, ReportedSql, cancellationToken, P(report.RequestId), P(now));
         await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
+        /* #5914: each link is a link_recorded row under the agent's actor, once per request and URL (the once-key). A
+           report is stored once per request, so a request holds at most MaxLinks of them. */
+        foreach (var link in InvestigationReportLinks.Distinct(report.Links ?? []))
+        {
+            await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, InvestigationReportLinks.JournalEvent,
+                actor, link.Kind, InvestigationReportLinks.DetailJson(link), InvestigationReportLinks.OnceKey(report.RequestId, link.Url),
+                cancellationToken);
+        }
+
         await transaction.CommitAsync(cancellationToken);
         return InvestigationSubmitOutcome.Reported;
     }
@@ -746,6 +769,30 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reports.Add(new InvestigationReportRow(
                     reader.GetGuid(0), reader.GetInt16(1), reader.GetString(2), reader.GetFieldValue<DateTime>(3), reader.GetString(4),
                     reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
+            }
+        }
+
+        var links = new Dictionary<Guid, List<InvestigationReportLink>>();
+        await using (var command = Command(connection, null, ReportLinksSql, P(ids)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (InvestigationReportLinks.FromDetail(reader.IsDBNull(1) ? null : reader.GetString(1)) is not { } link)
+                    continue;
+                var id = reader.GetGuid(0);
+                if (!links.TryGetValue(id, out var list))
+                    links[id] = list = [];
+                list.Add(link);
+            }
+        }
+
+        if (links.Count > 0)
+        {
+            for (var i = 0; i < reports.Count; i++)
+            {
+                if (links.TryGetValue(reports[i].RequestId, out var list))
+                    reports[i] = reports[i] with { Links = list };
             }
         }
 

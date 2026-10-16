@@ -47,6 +47,9 @@ public sealed class InvestigationBriefComposer
     /// <summary>The tool an agent submits its report with.</summary>
     public const string ReportTool = "submit_investigation_report";
 
+    /// <summary>The most characters <c>prior_links</c> (#5914) may take, inside what the sections left.</summary>
+    public const int PriorLinksCap = 2_000;
+
     /// <summary>The sections in fill order, with each section's cap and the tool that fetches what a cut drops.</summary>
     public static readonly IReadOnlyList<(string Section, int Cap, string? FetchTool)> Sections = new (string, int, string?)[]
     {
@@ -153,6 +156,9 @@ public sealed class InvestigationBriefComposer
                 ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "root_cause_found", "evidence"),
             },
         };
+        /* #5914: the request's page on the web dashboard, for a ticket the agent files. Absent when there is none. */
+        if (!string.IsNullOrWhiteSpace(sources.RequestUrl))
+            root["request_url"] = sources.RequestUrl;
         foreach (var (section, _, _) in Sections)
             root[section] = new JsonArray();
 
@@ -188,6 +194,35 @@ public sealed class InvestigationBriefComposer
                     ["kept"] = kept,
                     ["dropped"] = list.Count - kept,
                     ["fetch"] = fetch,
+                });
+            }
+        }
+
+        /* #5914: links earlier reports on this server and family recorded, newest first, held to their own cap inside what
+           the sections left. Absent, never [], when there is none, so a brief without one is byte for byte as before. */
+        if (sources.PriorLinks is { Count: > 0 } priorLinks)
+        {
+            var list = priorLinks.Select(l => PriorLinkNode(l, masker, cut)).ToList();
+            var budget = Math.Max(0, Math.Min(PriorLinksCap, remaining));
+            var used = 0;
+            var kept = 0;
+            for (; kept < list.Count; kept++)
+            {
+                var length = list[kept].ToJsonString().Length + 1;
+                if (used + length > budget) break;
+                used += length;
+            }
+
+            root["prior_links"] = new JsonArray(list.Take(kept).Select(n => (JsonNode?)n).ToArray());
+            if (kept < list.Count)
+            {
+                droppedChars += list.Skip(kept).Sum(n => n.ToJsonString().Length + 1);
+                cuts.Add(new JsonObject
+                {
+                    ["section"] = "prior_links",
+                    ["kept"] = kept,
+                    ["dropped"] = list.Count - kept,
+                    ["fetch"] = "get_investigation_reports",
                 });
             }
         }
@@ -341,6 +376,22 @@ public sealed class InvestigationBriefComposer
         }, masker, cut, ("root_cause", report.RootCause), ("summary", report.Summary));
         node["labels"] = new JsonArray(InvestigationRules.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
         return node;
+    }
+
+    /// <summary>A prior link (#5914): the request it came from, when, its kind, and the URL and key as free text.</summary>
+    private static JsonObject PriorLinkNode(InvestigationPriorLink link, McpDataDetailMasker masker, CutCounter cut)
+    {
+        var node = new JsonObject
+        {
+            ["request_id"] = link.RequestId.ToString(),
+            ["recorded_at"] = Time(link.RecordedAtUtc),
+            ["kind"] = link.Kind,
+            ["url"] = null,
+        };
+        if (link.Key is null)
+            return Masked(node, masker, cut, ("url", link.Url));
+        node["key"] = null;
+        return Masked(node, masker, cut, ("url", link.Url), ("key", link.Key));
     }
 
     private static JsonObject ChangeNode(InvestigationRecentChange change, McpDataDetailMasker masker, CutCounter cut) =>

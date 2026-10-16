@@ -77,9 +77,15 @@ public sealed record InvestigationBriefNote(string Author, string? DecidedBy, Da
 /// <summary>The operator's environment profile text for the server (scope <c>server</c>, <c>tag</c> or <c>fleet</c>).</summary>
 public sealed record InvestigationProfileText(string Scope, string Text);
 
+/// <summary>A link an earlier report on the same server and family recorded (#5914): a <c>link_recorded</c> journal row.
+/// What an agent said, not checked by a person; the URL is free text.</summary>
+public sealed record InvestigationPriorLink(Guid RequestId, DateTime RecordedAtUtc, string Kind, string Url, string? Key);
+
 /// <summary>
 /// Everything the composer reads for one brief, already in priority order inside each list: the first alert then the
 /// newest, the request's own finding then the rest by the collapse order, everything else newest first.
+/// <see cref="PriorLinks"/> and <see cref="RequestUrl"/> (#5914) are Darling's: Lite's reader supplies neither, so a Lite
+/// brief carries neither key.
 /// </summary>
 public sealed record InvestigationBriefSources(
     InvestigationBriefRequest Request,
@@ -88,4 +94,6 @@ public sealed record InvestigationBriefSources(
     IReadOnlyList<InvestigationEarlierReport> EarlierReports,
     IReadOnlyList<InvestigationRecentChange> RecentChanges,
     IReadOnlyList<InvestigationBriefNote> Notes,
-    IReadOnlyList<InvestigationProfileText> Profiles);
+    IReadOnlyList<InvestigationProfileText> Profiles,
+    IReadOnlyList<InvestigationPriorLink>? PriorLinks = null,
+    string? RequestUrl = null);

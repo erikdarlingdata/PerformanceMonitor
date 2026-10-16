@@ -40,7 +40,7 @@ public sealed class PgInvestigationBriefSourceReader : IInvestigationBriefSource
 
     internal const string RequestSql = @"
 SELECT r.server_id, r.server_name, r.family, r.state, r.expires_at, r.lease_until, r.alert_count, r.first_metric,
-       r.story_path_hash, s.engine_kind
+       r.story_path_hash, s.engine_kind, r.first_alert_at, r.first_dedup_key
 FROM config.investigation_requests AS r
 LEFT JOIN collect.servers AS s ON s.server_id = r.server_id
 WHERE r.request_id = $1";
@@ -154,16 +154,41 @@ FROM (
 ORDER BY at DESC
 LIMIT $4";
 
+    /* #5914: the links earlier reports on the same server and family recorded in the last PriorLinkDays days, newest
+       first: link_recorded journal rows of other requests, whose detail holds {kind, url, key}. */
+    internal const string PriorLinksSql = @"
+SELECT j.request_id, j.event_time, j.detail::text
+FROM config.investigation_journal AS j
+JOIN config.investigation_requests AS rq ON rq.request_id = j.request_id
+WHERE j.event = 'link_recorded'
+  AND rq.server_id = $1
+  AND rq.family = $2
+  AND j.request_id <> $3
+  AND j.event_time >= $4
+ORDER BY j.event_time DESC, j.journal_id DESC
+LIMIT $5";
+
+    /// <summary>How far back <c>prior_links</c> reaches (#5914).</summary>
+    public const int PriorLinkDays = 30;
+
+    /// <summary>The most prior links a brief is offered (#5914); the composer's cap may keep fewer.</summary>
+    public const int MaxPriorLinks = 20;
+
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
     private readonly Func<DateTime> _utcNow;
+    private readonly string? _publicBaseUrl;
 
-    /// <summary>A reader over <paramref name="postgres"/>, a role that may read the investigation, alert and analysis tables.</summary>
-    public PgInvestigationBriefSourceReader(NpgsqlDataSource postgres, ILogger? logger = null, Func<DateTime>? utcNow = null)
+    /// <summary>A reader over <paramref name="postgres"/>, a role that may read the investigation, alert and analysis tables.
+    /// <paramref name="publicBaseUrl"/> (<c>web.publicBaseUrl</c> while the dashboard is on; null otherwise) builds the
+    /// brief's <c>request_url</c> (#5914): the triage page of the alert that opened the request.</summary>
+    public PgInvestigationBriefSourceReader(NpgsqlDataSource postgres, ILogger? logger = null, Func<DateTime>? utcNow = null,
+        string? publicBaseUrl = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _publicBaseUrl = publicBaseUrl;
     }
 
     /// <inheritdoc />
@@ -173,6 +198,7 @@ LIMIT $4";
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
 
         InvestigationBriefRequest? request = null;
+        string? requestUrl = null;
         await using (var command = Command(connection, RequestSql, requestId))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -190,6 +216,8 @@ LIMIT $4";
                     reader.GetInt32(6),
                     reader.GetString(7),
                     reader.IsDBNull(8) ? null : reader.GetString(8));
+                requestUrl = reader.IsDBNull(10) ? null : TriageLink.Build(_publicBaseUrl, request.ServerName, request.FirstMetric,
+                    DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(10), DateTimeKind.Utc), reader.IsDBNull(11) ? null : reader.GetString(11));
             }
         }
 
@@ -273,7 +301,23 @@ LIMIT $4";
             }
         }
 
-        return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles);
+        var priorLinks = new List<InvestigationPriorLink>();
+        await using (var command = Command(connection, PriorLinksSql, request.ServerId, request.Family, requestId,
+            now.AddDays(-PriorLinkDays), MaxPriorLinks))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (InvestigationReportLinks.FromDetail(reader.IsDBNull(2) ? null : reader.GetString(2)) is { } link)
+                {
+                    priorLinks.Add(new InvestigationPriorLink(reader.GetGuid(0),
+                        DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(1), DateTimeKind.Utc), link.Kind, link.Url, link.Key));
+                }
+            }
+        }
+
+        return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
+            priorLinks.Count > 0 ? priorLinks : null, requestUrl);
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each
