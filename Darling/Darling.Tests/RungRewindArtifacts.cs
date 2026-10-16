@@ -248,7 +248,7 @@ BEGIN
         ALTER TABLE config.investigation_requests ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level = 1);
     END IF;
 END $do$;"),
-        // /// V192 (#5977): the query-tag store, the probe's newest sentinel. Drops the tables, the trigger function and the cascade
+        // /// V192 (#5977): the query-tag store, the probe's newest sentinel until V193 (#5997) went on top of it. Drops the tables, the trigger function and the cascade
         // targets with them, so a re-run of V192 does everything again. Safe on a store that never had any of it.
         new(192, "hasQueryTagsStore",
             "DROP TABLE IF EXISTS config.query_tag_map, config.query_tag_state, config.query_tag_rules,"
