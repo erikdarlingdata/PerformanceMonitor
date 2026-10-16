@@ -166,16 +166,19 @@ WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
     /* #5822: the long-poll's catch-up read. Every request opened after $1 on the routes in $2 (all routes when NULL), oldest
        first, whatever its state now: it answers what opened, and the claim decides what is still claimable. */
     internal const string OpenedSinceSql = @"
-SELECT request_id, route_id, server_name, family, opened_at
-FROM config.investigation_requests
-WHERE opened_at > $1
-  AND ($2::integer[] IS NULL OR route_id = ANY ($2))
-ORDER BY opened_at, request_id
+SELECT r.request_id, r.route_id, r.server_name, r.family, r.opened_at,
+       COALESCE(sv.display_name, sv.server_name, r.server_name), sv.server_name
+FROM config.investigation_requests AS r
+LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
+WHERE r.opened_at > $1
+  AND ($2::integer[] IS NULL OR r.route_id = ANY ($2))
+ORDER BY r.opened_at, r.request_id
 LIMIT $3";
 
     internal const string ListSql = @"
 SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
-       effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at, practice_of
+       effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at, practice_of,
+       registry_display_name, registry_host_name
 FROM (
     SELECT r.*,
            CASE
@@ -184,8 +187,11 @@ FROM (
                WHEN r.state = 'open' AND r.claim_count >= 3 THEN 'expired'
                WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
                ELSE r.state
-           END AS effective_state
+           END AS effective_state,
+           COALESCE(sv.display_name, sv.server_name, r.server_name) AS registry_display_name,
+           sv.server_name AS registry_host_name
     FROM config.investigation_requests AS r
+    LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
     WHERE ($3::integer IS NULL OR r.server_id = $3)
       AND ($4::text IS NULL OR r.family = $4)
 ) AS s
@@ -263,8 +269,10 @@ SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_m
            WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
            ELSE r.state
        END AS effective_state,
-       r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief::text, r.practice_of
+       r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief::text, r.practice_of,
+       COALESCE(sv.display_name, sv.server_name, r.server_name), sv.server_name
 FROM config.investigation_requests AS r
+LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
 WHERE ($2::uuid IS NULL OR r.request_id = $2)
   AND ($3::integer IS NULL OR r.server_id = $3)
   AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
@@ -765,7 +773,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
         reader.GetInt32(14),
         reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15),
-        reader.IsDBNull(17) ? null : reader.GetGuid(17));
+        reader.IsDBNull(17) ? null : reader.GetGuid(17),
+        reader.GetString(18),
+        reader.IsDBNull(19) ? null : reader.GetString(19));
 
     /// <summary>
     /// Reads requests with their reports and journal (#5632 Phase A, <c>get_investigation_reports</c>): one request by id
@@ -922,7 +932,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTime>(13),
                 reader.GetInt32(14),
                 reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15),
-                reader.IsDBNull(16) ? null : reader.GetGuid(16)));
+                reader.IsDBNull(16) ? null : reader.GetGuid(16),
+                reader.GetString(17),
+                reader.IsDBNull(18) ? null : reader.GetString(18)));
         }
 
         return rows;
@@ -954,7 +966,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.GetInt32(1),
                 reader.GetString(2),
                 reader.GetString(3),
-                reader.GetFieldValue<DateTime>(4)));
+                reader.GetFieldValue<DateTime>(4),
+                reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
 
         return rows;

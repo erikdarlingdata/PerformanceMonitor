@@ -206,6 +206,23 @@ public sealed class DarlingMcpInvestigationTools
         }
     }
 
+    /// <summary>One request the wait answers. #5999: <c>display_name</c> and <c>host_name</c> are the registry's names, read when
+    /// served, and absent when the registry has none (the shape <c>list_investigation_requests</c> keeps).</summary>
+    private static Dictionary<string, object?> WaitRequest(InvestigationOpenedRow r)
+    {
+        var node = new Dictionary<string, object?>
+        {
+            ["request_id"] = r.RequestId,
+            ["route_id"] = r.RouteId,
+            ["server_name"] = r.ServerName,
+        };
+        if (r.DisplayName is not null) node["display_name"] = r.DisplayName;
+        if (r.HostName is not null) node["host_name"] = r.HostName;
+        node["family"] = r.Family;
+        node["opened_at"] = r.OpenedAtUtc;
+        return node;
+    }
+
     private static string WaitAnswer(IReadOnlyList<InvestigationOpenedRow> rows, WaitCursor cursor, int timeoutSeconds) =>
         JsonSerializer.Serialize(new
         {
@@ -214,14 +231,7 @@ public sealed class DarlingMcpInvestigationTools
                 ? $"No investigation request opened on these routes in {timeoutSeconds} seconds. Call again with this cursor."
                 : null,
             count = rows.Count,
-            requests = rows.Select(r => new
-            {
-                request_id = r.RequestId,
-                route_id = r.RouteId,
-                server_name = r.ServerName,
-                family = r.Family,
-                opened_at = r.OpenedAtUtc,
-            }),
+            requests = rows.Select(WaitRequest),
             cursor = cursor.Encode(),
         }, McpHelpers.JsonOptions);
 

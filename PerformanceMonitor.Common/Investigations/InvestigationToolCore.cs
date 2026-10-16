@@ -460,6 +460,11 @@ internal static class InvestigationToolCore
         /* #5918: a practice request names the case it replays; every other row keeps its shape (absent, not null). */
         if (r.PracticeOf is { } practiceOf)
             payload["practice_of"] = practiceOf.ToString();
+        /* #5999: the registry's names, read when served (a rename shows on the next read); absent where a store has no registry. */
+        if (r.DisplayName is { } displayName)
+            payload["display_name"] = displayName;
+        if (r.HostName is { } hostName)
+            payload["host_name"] = hostName;
         return payload;
     }
 

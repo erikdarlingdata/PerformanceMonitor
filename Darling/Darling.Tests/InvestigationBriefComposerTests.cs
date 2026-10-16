@@ -128,6 +128,21 @@ public sealed class InvestigationBriefComposerTests
         Assert.Contains(LiteralCanary, (string?)fields["Query"]);
     }
 
+    /// <summary>#5999: the brief's request carries the registry's display name and host name beside <c>server</c>, which keeps
+    /// the name the request was opened with; a store with no registry (Lite until #6011) leaves both keys out.</summary>
+    [Fact]
+    public void Brief_CarriesBothServerNames_BesideTheServerKey()
+    {
+        var named = Brief(Sources(request: Request() with { DisplayName = "Prod OLTP", HostName = "SQLPROD01\\INST1" }))["request"]!.AsObject();
+        Assert.Equal("SQLPROD01", (string?)named["server"]);
+        Assert.Equal("Prod OLTP", (string?)named["display_name"]);
+        Assert.Equal("SQLPROD01\\INST1", (string?)named["host_name"]);
+
+        var bare = Brief(Sources())["request"]!.AsObject();
+        Assert.False(bare.ContainsKey("display_name"));
+        Assert.False(bare.ContainsKey("host_name"));
+    }
+
     [Fact]
     public void Findings_RemediationIsVerdictAndBlockers_NeverAScript()
     {

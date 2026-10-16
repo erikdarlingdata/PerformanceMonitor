@@ -162,6 +162,11 @@ public sealed class InvestigationBriefComposer
                 ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "root_cause_found", "evidence"),
             },
         };
+        /* #5999: the registry's names for the server, read when the brief is composed. Absent where the store has no registry. */
+        if (request.DisplayName is { } displayName)
+            ((JsonObject)root["request"]!)["display_name"] = displayName;
+        if (request.HostName is { } hostName)
+            ((JsonObject)root["request"]!)["host_name"] = hostName;
         /* #5914: the request's page on the web dashboard, for a ticket the agent files. Absent when there is none. */
         if (!string.IsNullOrWhiteSpace(sources.RequestUrl))
             root["request_url"] = sources.RequestUrl;

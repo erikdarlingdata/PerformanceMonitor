@@ -159,6 +159,22 @@ public sealed class InvestigationLongPollTests
         Assert.Equal(0, rig.Signal.WaiterCount);
     }
 
+    /// <summary>#5999: a request the registry names answers its display name and host name beside <c>server_name</c> (the
+    /// name it was opened with); a request with no registry names keeps the shape above, with neither key.</summary>
+    [Fact]
+    public async Task AWait_AnswersBothServerNames_WhenTheStoreHasThem()
+    {
+        var rig = new Rig();
+        var cursor = await rig.CursorAsync();
+        rig.Store.Add(new InvestigationOpenedRow(
+            Guid.NewGuid(), BlockingRoute, "srv", "blocking", rig.Store.Clock.AddSeconds(5), "Prod OLTP", "SQLPROD01\\INST1"));
+
+        var row = Assert.Single(Requests(await rig.WaitAsync([BlockingRoute], cursor, 0, TestContext.Current.CancellationToken)))!.AsObject();
+        Assert.Equal("srv", (string)row["server_name"]!);
+        Assert.Equal("Prod OLTP", (string)row["display_name"]!);
+        Assert.Equal("SQLPROD01\\INST1", (string)row["host_name"]!);
+    }
+
     [Fact]
     public async Task AWait_DoesNotWake_ForAnotherRoute_NorForAJoin_AndTimesOutEmptyWithItsCursorUnchanged()
     {

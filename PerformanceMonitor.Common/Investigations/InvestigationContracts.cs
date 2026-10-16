@@ -192,10 +192,15 @@ public sealed record InvestigationReportsRead(
 /// One request as the long-poll's catch-up read returns it (#5822): the request id, its route, the server name, the family
 /// and when it opened (UTC), and nothing else.
 /// </summary>
-public sealed record InvestigationOpenedRow(Guid RequestId, int RouteId, string ServerName, string Family, DateTime OpenedAtUtc);
+public sealed record InvestigationOpenedRow(
+    Guid RequestId, int RouteId, string ServerName, string Family, DateTime OpenedAtUtc,
+    string? DisplayName = null, string? HostName = null);
 
 /// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.
-/// <see cref="PracticeOf"/> (#5918) is the request a practice request replays; null for every other request, and then absent from the answer.</summary>
+/// <see cref="PracticeOf"/> (#5918) is the request a practice request replays; null for every other request, and then absent from the answer.
+/// <see cref="DisplayName"/> and <see cref="HostName"/> (#5999) are the registry's names for the server, read when the row is served so a
+/// rename shows on the next read (<see cref="ServerName"/> stays the name the request was opened with); a store that has no registry
+/// leaves them null, and then they are absent from the answer.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,
     int RouteId,
@@ -213,7 +218,9 @@ public sealed record InvestigationRequestRow(
     DateTime? LeaseUntilUtc,
     int ClaimCount,
     DateTime? ReportedAtUtc,
-    Guid? PracticeOf = null);
+    Guid? PracticeOf = null,
+    string? DisplayName = null,
+    string? HostName = null);
 
 /// <summary>What one expiry sweep did.</summary>
 public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);
