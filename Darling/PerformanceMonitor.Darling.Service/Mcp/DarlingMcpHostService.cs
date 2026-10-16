@@ -827,7 +827,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
                 builder.Services, declaredPeers, _readLatency, _logger, _slowReads, writes,
-                new DarlingMcpAddServersPolicy(config.Mcp.AllowWindowsAuthOverUnverifiedTls), _readAdmission);
+                new DarlingMcpAddServersPolicy(config.Mcp.AllowWindowsAuthOverUnverifiedTls), _readAdmission,
+                /* #5914: a brief's request_url, the alert's triage page, only while the dashboard serves it (TriageBaseUrl's rule). */
+                config.Web.Enabled ? config.Web.PublicBaseUrl : null);
 
             _app = builder.Build();
 
@@ -1126,7 +1128,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null)
     {
         /* add_servers takes its caller policy as a service parameter, so the registration has to exist wherever the
            tools are registered: without it the SDK would serve the parameter as a client argument. Every setting
@@ -1163,7 +1165,7 @@ public sealed class DarlingMcpHostService : BackgroundService
            the composer masks at the host's mcp.dataDetail level (none registered: full, as the host filter passes
            through). Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
         services.AddSingleton<IInvestigationBriefSourceReader>(sp =>
-            new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger));
+            new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger, publicBaseUrl: publicBaseUrl));
         services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),

@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -190,6 +191,63 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
             Assert.Null(await reader.ReadAsync(Guid.NewGuid(), ct));
             Assert.NotNull(await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.MetadataOnly), DarlingInvestigationBriefTools.Tools, () => Now)
                 .ComposeAsync(requestId, ct));
+        });
+    }
+
+    /// <summary>
+    /// #5914: <c>prior_links</c> are the links of other requests on the same server and family recorded in the last 30
+    /// days, newest first; a link 31 days old, one on another family and one on another server are left out. The brief
+    /// carries them, and <c>request_url</c> (the opening alert's triage page) when a public base URL is set; with neither
+    /// set, neither key is in the brief.
+    /// </summary>
+    [Fact]
+    public async Task PriorLinks_AreTheSameServerAndFamilys_LastThirtyDays_AndTheBriefCarriesThemWithTheRequestUrl()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId + 1, ServerName + "B", ct);
+            async Task ReportedAsync(DateTime at, InvestigationAlert alert, string url)
+            {
+                var store = new InvestigationRequestStore(dataSource, 30, () => at);
+                var id = (await store.OpenOrJoinAsync(alert, ct)).RequestId!.Value;
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                    id, claim.ClaimId!.Value, "agent-a", 1, "real", "a chain", true, null, "[{\"tool\":\"get_blocking\"}]",
+                    Links: new[] { new InvestigationReportLink("jira", url, "OPS-1") }), ct));
+            }
+
+            await ReportedAsync(Now.AddDays(-31), Alert(Now.AddDays(-31)), "https://jira.example.invalid/browse/OLD");
+            await ReportedAsync(Now.AddDays(-3), Alert(Now.AddDays(-3)), "https://jira.example.invalid/browse/KEEP-3D");
+            await ReportedAsync(Now.AddHours(-2), Alert(Now.AddHours(-2)), "https://jira.example.invalid/browse/KEEP-2H");
+            await ReportedAsync(Now.AddHours(-1), new InvestigationAlert(1, ServerId, ServerName, "jobs", "Job failed", Now.AddHours(-1),
+                new[] { ServerId + ":Job" }, null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240), "https://jira.example.invalid/browse/FAMILY");
+            await ReportedAsync(Now.AddHours(-1), new InvestigationAlert(1, ServerId + 1, ServerName + "B", "blocking", "Blocking", Now.AddHours(-1),
+                new[] { (ServerId + 1) + ":Blocking" }, null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240), "https://jira.example.invalid/browse/SERVER");
+
+            var current = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-10));
+            var requestId = (await current.OpenOrJoinAsync(Alert(Now.AddMinutes(-10)), ct)).RequestId!.Value;
+
+            var sources = await new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now, publicBaseUrl: "https://monitor.example.invalid")
+                .ReadAsync(requestId, ct);
+            Assert.Equal(new[] { "https://jira.example.invalid/browse/KEEP-2H", "https://jira.example.invalid/browse/KEEP-3D" },
+                sources!.PriorLinks!.Select(l => l.Url));
+            Assert.StartsWith("https://monitor.example.invalid/#/triage", sources.RequestUrl, StringComparison.Ordinal);
+
+            var brief = JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now))!;
+            Assert.Equal(2, brief["prior_links"]!.AsArray().Count);
+            Assert.Equal("OPS-1", brief["prior_links"]![0]!["key"]!.GetValue<string>());
+            Assert.Equal(sources.RequestUrl, brief["request_url"]!.GetValue<string>());
+
+            /* No base URL and no prior link (another server's request): neither key. */
+            var lone = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-5));
+            var loneId = (await lone.OpenOrJoinAsync(new InvestigationAlert(1, ServerId + 1, ServerName + "B", "jobs", "Job failed", Now.AddMinutes(-5),
+                new[] { (ServerId + 1) + ":Job" }, null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240), ct)).RequestId!.Value;
+            var loneSources = await new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now).ReadAsync(loneId, ct);
+            Assert.Null(loneSources!.PriorLinks);
+            Assert.Null(loneSources.RequestUrl);
+            var loneBrief = InvestigationBriefComposer.Compose(loneSources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+            Assert.DoesNotContain("prior_links", loneBrief, StringComparison.Ordinal);
+            Assert.DoesNotContain("request_url", loneBrief, StringComparison.Ordinal);
         });
     }
 

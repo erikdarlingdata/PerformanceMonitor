@@ -724,8 +724,45 @@ const INVESTIGATION_COLUMNS = [
   { key: "alert_count", label: "Alerts" },
   { key: "verdict", label: "Verdict" },
   { key: "summary", label: "Summary" },
+  { key: "links", label: "Links", csv: false, render: (r) => reportLinksCell(r.links) },
   { key: "journal", label: "Journal", csv: false, render: (r) => journalCell(r) },
 ];
+
+/* #5914: why a report link's URL may not be rendered as a link, or null when it may. The rule of
+ * InvestigationReportLinks.UrlProblem, checked again here on render whatever the submit checked: an absolute https URL with
+ * a host, at most 1000 characters, no whitespace or control character, no backslash, no user info. A file or UNC link
+ * opened on Windows sends the user's credentials to its host. Pure, so the harness checks it. */
+export function reportLinkProblem(url) {
+  if (typeof url !== "string" || !url.trim()) return "missing.";
+  if (url.length > 1000) return `${url.length} characters, over 1000.`;
+  if (/[\s\u0000-\u001f\u007f-\u009f]/.test(url)) return "contains whitespace or a control character.";
+  if (url.startsWith("//") || url.includes("\\")) return "a UNC path is refused.";
+  const lower = url.toLowerCase();
+  if (lower.startsWith("file:")) return "a file URL is refused.";
+  if (lower.startsWith("http:")) return "http is refused; use https.";
+  if (!lower.startsWith("https://")) return "not an https URL.";
+  const rest = url.slice("https://".length);
+  const end = rest.search(/[/?#]/);
+  if ((end < 0 ? rest : rest.slice(0, end)).includes("@")) return "user info (a name or password before @) is refused.";
+  let parsed;
+  try { parsed = new URL(url); } catch { return "not an absolute https URL with a host."; }
+  if (parsed.protocol !== "https:" || !parsed.hostname) return "not an https URL.";
+  if (parsed.username || parsed.password) return "user info (a name or password before @) is refused.";
+  return null;
+}
+
+/* A report's links: each URL the rule passes is an <a> that opens in a new tab with no opener; a refused one is plain text
+ * that says why. No links: an empty cell. */
+export function reportLinksCell(links) {
+  if (!Array.isArray(links) || !links.length) return el("span", {});
+  return el("div", {}, links.filter((l) => l && typeof l === "object").map((l) => {
+    const label = [l.kind, l.key].filter((x) => x != null && x !== "").join(" ") || "link";
+    const problem = reportLinkProblem(l.url);
+    return problem
+      ? el("div", { text: `${label}: ${String(l.url ?? "")} (shown as text: ${problem})` })
+      : el("div", {}, [el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer", text: label })]);
+  }));
+}
 
 /* The rows of a reply under `key`, or the reply itself when it is an array; [] for anything else. */
 function rowsUnder(data, key) {
@@ -754,6 +791,7 @@ export function investigationRows(listData, reportsData) {
       alert_count: r.alert_count,
       verdict: rep ? rep.verdict : null,
       summary: rep ? (rep.summary || rep.root_cause || null) : null,
+      links: rep && Array.isArray(rep.links) ? rep.links : null,
     };
   });
 }

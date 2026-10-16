@@ -230,6 +230,14 @@ FROM investigation_reports
 WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
 ORDER BY submitted_at DESC";
 
+    /* #5914: Darling's ReportLinksSql. */
+    internal const string ReportLinksSql = @"
+SELECT request_id, detail
+FROM investigation_journal
+WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
+  AND event = 'link_recorded'
+ORDER BY journal_id";
+
     internal const string ReportsJournalSql = @"
 SELECT event_time, request_id, server_id, event, actor, reason, detail
 FROM investigation_journal
@@ -499,6 +507,8 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             throw new ArgumentException(string.Join(" ", caps.Select(c => c.Problem)), nameof(report));
         }
 
+        InvestigationReportLinks.ThrowIfInvalid(report.Links, nameof(report));
+
         var now = Now();
         var actor = "agent:" + report.AgentId;
 
@@ -571,6 +581,15 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         await ExecAsync(connection, ReportedSql, cancellationToken, report.RequestId, now);
         await JournalAsync(connection, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
+        /* #5914, Darling's rule in the shared contract: each link a link_recorded row, once per request and URL. Lite's
+           submit tool takes no links argument, so a Lite report carries none today. */
+        foreach (var link in InvestigationReportLinks.Distinct(report.Links ?? []))
+        {
+            await JournalAsync(connection, now, report.RequestId, null, serverId, InvestigationReportLinks.JournalEvent, actor,
+                link.Kind, InvestigationReportLinks.DetailJson(link), InvestigationReportLinks.OnceKey(report.RequestId, link.Url),
+                cancellationToken);
+        }
+
         transaction.Commit();
         return InvestigationSubmitOutcome.Reported;
     }
@@ -702,6 +721,27 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
                     reader.GetGuid(0), reader.GetInt16(1), reader.GetString(2), Utc(reader.GetDateTime(3)), reader.GetString(4),
                     reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
             }
+        }
+
+        var links = new Dictionary<Guid, List<InvestigationReportLink>>();
+        using (var command = Command(connection, ReportLinksSql, ids))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (InvestigationReportLinks.FromDetail(reader.IsDBNull(1) ? null : reader.GetString(1)) is not { } link)
+                    continue;
+                var id = reader.GetGuid(0);
+                if (!links.TryGetValue(id, out var list))
+                    links[id] = list = [];
+                list.Add(link);
+            }
+        }
+
+        for (var i = 0; i < reports.Count && links.Count > 0; i++)
+        {
+            if (links.TryGetValue(reports[i].RequestId, out var list))
+                reports[i] = reports[i] with { Links = list };
         }
 
         using (var command = Command(connection, ReportsJournalSql, ids, journalLimit + 1))

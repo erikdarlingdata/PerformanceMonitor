@@ -296,6 +296,9 @@ internal static class InvestigationToolCore
                 ["summary"] = null,
             }, masker, ("root_cause", r.RootCause), ("summary", r.Summary));
             node["evidence"] = evidence;
+            /* #5914: absent, never [], when the report carries no link. */
+            if (r.Links is { Count: > 0 } links && !node.ContainsKey("withheld"))
+                node["links"] = new JsonArray(links.Select(l => (JsonNode?)LinkNode(l, masker)).ToArray());
             node["labels"] = new JsonArray(InvestigationRules.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
             reports.Add(node);
         }
@@ -303,6 +306,8 @@ internal static class InvestigationToolCore
         var journal = new JsonArray();
         foreach (var j in read.Journal)
         {
+            /* #5914: a link_recorded row's detail holds an agent's URL and key: free text, masked as the report's link is. */
+            var link = j.Event == InvestigationReportLinks.JournalEvent ? InvestigationReportLinks.FromDetail(j.DetailJson) : null;
             var node = InvestigationFieldMasking.Mask(new JsonObject
             {
                 ["event_time"] = JsonSerializer.SerializeToNode(j.EventTimeUtc, McpHelpers.JsonOptions),
@@ -311,10 +316,12 @@ internal static class InvestigationToolCore
                 ["event"] = j.Event,
                 ["actor"] = null,
                 ["reason"] = null,
-                ["detail"] = j.DetailJson is null ? null : JsonNode.Parse(j.DetailJson),
+                ["detail"] = j.DetailJson is null || link is not null ? null : JsonNode.Parse(j.DetailJson),
             }, masker, ("reason", j.Reason));
             if (!node.ContainsKey("withheld"))
                 node["actor"] = InvestigationFieldMasking.Actor(j.Actor, masker);
+            if (link is not null && !node.ContainsKey("withheld"))
+                node["detail"] = LinkNode(link, masker);
             journal.Add(node);
         }
 
@@ -331,6 +338,21 @@ internal static class InvestigationToolCore
             ["brief"] = read.Brief is null ? null : InvestigationFieldMasking.StoredBrief(read.Brief, mode, masker),
         };
         return answer.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// A report link as an answer serves it (#5914): <c>kind</c> is Darling's own word and kept; the <c>url</c> and the
+    /// <c>key</c> an agent wrote are free text, masked through <see cref="McpDataDetailMasker.FreeText"/> as a report's
+    /// <c>root_cause</c> is (literals replaced under <c>maskLiterals</c>, withheld under <c>metadataOnly</c>). <c>key</c> is
+    /// absent when the link has none. Nothing here makes it safe to open: a renderer re-checks the URL.
+    /// </summary>
+    internal static JsonObject LinkNode(InvestigationReportLink link, McpDataDetailMasker masker)
+    {
+        var node = new JsonObject { ["kind"] = link.Kind, ["url"] = null };
+        if (link.Key is null)
+            return InvestigationFieldMasking.Mask(node, masker, ("url", link.Url));
+        node["key"] = null;
+        return InvestigationFieldMasking.Mask(node, masker, ("url", link.Url), ("key", link.Key));
     }
 
     internal static object RequestPayload(InvestigationRequestRow r) => new
