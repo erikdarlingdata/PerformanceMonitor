@@ -104,7 +104,7 @@ elseif ($EventName -eq 'pull_request') {
     # every class). A shard that cannot list the pull request's files skips nothing. Like the selection above it
     # happens AFTER the cut and the zero check, and an emptied shard ends here rather than reaching a runner with
     # no -class arguments.
-    $skip = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $EventName "--base-ref=$env:SLOW_BASE_REF" "--selection=$SelectionFile" | Where-Object { $_ })
+    $skip = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $EventName "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ })
     $kept = @($mine | Where-Object { $skip -notcontains (Get-ClassKey $_) })
     Write-Host "shard ${Shard}: $($mine.Count - $kept.Count) Cost=Slow classes left out on this pull request, $($kept.Count) to run"
     $mine = $kept

@@ -602,85 +602,6 @@ class SlowIndex:
         return out
 
 
-# ---------------------------------------------------------------------------------------------------------
-# The Darling slow-class gate (#5946): the test map decides what a pull request reaches, not a file-name stem.
-# ---------------------------------------------------------------------------------------------------------
-#
-# The stem rule above skips a Cost=Slow class when no changed file's name appears in its source. For a live store
-# class that is wrong in most merges: it runs code from files its source never names (a simulation over the
-# last 60 dev merges dropped a class that covers a changed file in 33 of them). The Darling shards therefore
-# skip a Cost=Slow class only when ALL of these hold:
-#   * the class carries Cost=Slow in the tree (the tag says it is slow and has been stable);
-#   * it has not failed in SLOW_FAILURE_DAYS days (.github/ci-history/failures.jsonl): the tag alone is not
-#     enough, a class that failed lately comes back at once;
-#   * the test map knows the class and says the change does not reach it: the pull request's files, with the
-#     files changed since the map's commit, are not its own file, not a file it ran code from, not read as text
-#     by it, and it shares no xunit collection with a changed class. These are map_select's reasons, because the
-#     gate IS map_select run with its age and drift limits off.
-# A class the map does not know stays (map_select selects every class it has not seen). When the map cannot speak
-# for the change at all (no map, wrong schema, drift unknown, a keep-full file, a file the map and the text
-# patterns do not know), map_select answers FULL and the gate skips nothing. The map-select step records the
-# answer in selection.json (`slow_unreached`), which is the only thing a shard reads: no selection, no skip.
-# Lite keeps the stem rule: this issue's Lite half was dropped (it buys no wall time).
-
-SLOW_FAILURE_DAYS = 35
-
-
-def slow_unreached(test_map: object, changed: list[str], drift: "list[str] | None", discovered: dict, *,
-                   event: str = "pull_request", base_ref: str = "", named: "dict[str, set[str]] | None" = None,
-                   **selection: object) -> dict[str, list[str]]:
-    """{suite: [Class, ...]}: the classes the map knows and says the change does not reach. {} whenever the map
-    cannot speak for the change (map_select answers FULL even with its age and drift limits off)."""
-    result = map_select(test_map, changed, drift, discovered, event=event, base_ref=base_ref, named=named,
-                        max_age_days=None, max_drift=10 ** 9, **selection)  # type: ignore[arg-type]
-    if result["full"] or not isinstance(test_map, dict):
-        return {}
-    out: dict[str, list[str]] = {}
-    for suite, entries in test_map["classes"].items():
-        kept = set(result["selected"].get(suite, ()))
-        out[suite] = sorted(c for c in entries if c not in kept)
-    return out
-
-
-def recent_failures(corpus: str = CORPUS, today: "datetime.date | None" = None,
-                    days: int = SLOW_FAILURE_DAYS) -> dict[str, set[str]]:
-    """{suite: {simple class names}} that failed a CI job in the last `days` days, from the failure corpus."""
-    since = ((today or datetime.date.today()) - datetime.timedelta(days=days)).isoformat()
-    out: dict[str, set[str]] = {suite: set() for suite in SUITE_DIRS}
-    try:
-        with open(corpus, encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                if str(row.get("date", "")) < since:
-                    continue
-                for cls in row.get("failed_classes", ()):
-                    prefix, simple = split_failed_class(cls)
-                    suite = SUITE_BY_PREFIX.get(prefix)
-                    if suite is not None:
-                        out[suite].add(simple)
-    except (OSError, ValueError):
-        # An unreadable corpus cannot vouch for any class: every Cost=Slow class counts as recently failed.
-        return {suite: {"*"} for suite in SUITE_DIRS}
-    return out
-
-
-def gate_skip(slow_classes: "list[str] | set[str]", selection: object, failed_recently: "set[str]",
-              suite: str = "darling") -> list[str]:
-    """The Cost=Slow classes of `suite` a shard leaves out: tagged, not failed lately, and in the selection's
-    `slow_unreached` list (the map says the change does not reach them). Nothing when the selection is missing,
-    unreadable or carries no list for the suite."""
-    if "*" in failed_recently or not isinstance(selection, dict):
-        return []
-    lists = selection.get("slow_unreached")
-    unreached = lists.get(suite) if isinstance(lists, dict) else None
-    if not isinstance(unreached, list) or not all(isinstance(n, str) for n in unreached):
-        return []
-    reached_not = set(unreached)
-    return sorted(c for c in slow_classes if c in reached_not and c not in failed_recently)
-
-
 def changed_files_of_pr(repo: str, pr: str) -> list[str]:
     """The pull request's changed files (both sides of a rename) through `gh api`; [] when the call fails."""
     import subprocess
@@ -1927,8 +1848,6 @@ def main(argv: list[str]) -> int:
     sk.add_argument("--repo", default="")
     sk.add_argument("--pr", default="")
     sk.add_argument("--list", action="store_true", help="print every Cost=Slow class of the suite instead")
-    sk.add_argument("--root", default=ROOT, help="the tree whose Cost=Slow classes are listed (default: this repository)")
-    sk.add_argument("--selection", default="", help="selection.json from map-select; the Darling suite skips only through it (#5946)")
     sk.add_argument("files", nargs="*", help="changed files; with --repo and --pr they come from the API instead")
 
     dc = sub.add_parser("decide", help="print every decision for a list of changed files")
@@ -2009,15 +1928,6 @@ def main(argv: list[str]) -> int:
         named = symbol_classes(args.root, args.base) if args.base else None
         result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
                             named=named, guard_stage_separate=args.guard_stage_separate, **selection_args(Rules()))
-        # #5946: a FULL answer also records what the map says the change does not reach, for the Cost=Slow gate.
-        # Only the Cost=Slow classes are recorded (the shards ask about no other), which keeps the file small.
-        slow_tagged = scan_slow(args.root)
-        result["slow_unreached"] = {
-            suite: [c for c in names if c in slow_tagged.get(suite, {})]
-            for suite, names in slow_unreached(test_map, files, drift, discovered, event=args.event,
-                                               base_ref=args.base_ref, named=named,
-                                               **selection_args(Rules())).items()
-        } if result["full"] else {}
         if result.get("docs_only"):
             print(f"::notice::test map: {result['reason']}")
         if result["full"]:
@@ -2109,20 +2019,9 @@ def main(argv: list[str]) -> int:
         print("filter=" + scope_filter(scope))
         return 0
     if args.cmd == "slow-skip":
-        index = SlowIndex(args.root)
+        index = SlowIndex()
         if args.list:
             print("\n".join(sorted(index.slow[args.suite])))
-            return 0
-        if args.suite == "darling":
-            # #5946: no file-name stem rule for the Darling suite; only what the test map says the change misses.
-            chosen = None
-            if args.selection and narrows(args.event, args.base_ref):
-                try:
-                    with open(args.selection, encoding="utf-8") as fh:
-                        chosen = json.load(fh)
-                except (OSError, ValueError):
-                    chosen = None
-            print("\n".join(gate_skip(index.slow["darling"], chosen, recent_failures(args.corpus).get("darling", set()))))
             return 0
         files = args.files
         if not files and args.repo and args.pr.isdigit() and args.event == "pull_request":
