@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// <see cref="QueryStoreIntervalWide.ResolveEdgeMarginAsync"/> shrinks it to the server's own longest interval. Pins that
 /// the narrower floor returns exactly the rows, in the order, the 26-hour floor returns on a server of 60-minute intervals
 /// and on a server of 2-hour intervals one of which straddles the window start; that the floor falls back to 26 hours
-/// whenever the server's interval length cannot be trusted; and that a floor that is too tight really would lose the
+/// whenever the server's interval length cannot be trusted, including a database with rows in range and no health row; and that a floor that is too tight really would lose the
 /// straddling plan (so the equality above is not vacuous).
 /// </summary>
 /* #1776 own-store: reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and then
@@ -37,8 +37,10 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
     private const int NoHealth = 3;
     private const int MixedHealth = 4;
     private const int YoungHealth = 5;
+    private const int UnreportedDatabase = 6;
     private const int Top = 20;
     private const long StraddlerPlan = 9999;
+    private const long UnreportedStraddlerPlan = 9998;
 
     private static readonly DateTime FirstHour = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime WindowStart = new(2026, 10, 14, 12, 0, 0, DateTimeKind.Unspecified);
@@ -67,7 +69,7 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
         var twoHourMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, TwoHour, WindowStart, WindowEnd, 60, ct);
         Assert.Equal(TimeSpan.FromHours(3), hourlyMargin);
         Assert.Equal(TimeSpan.FromHours(4), twoHourMargin);
-        foreach (var unknown in new[] { NoHealth, MixedHealth, YoungHealth })
+        foreach (var unknown in new[] { NoHealth, MixedHealth, YoungHealth, UnreportedDatabase })
         {
             Assert.Equal(
                 QueryStoreIntervalWide.PurgeEdgeMargin,
@@ -108,6 +110,20 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
         var tooTight = QueryStoreIntervalWide.WithEdgeMargin(wide, QueryStoreIntervalWide.EdgeMarginSqlFor(TimeSpan.FromHours(1)));
         var tightRows = await RunAsync(connection, tooTight, TwoHour, ct);
         Assert.DoesNotContain(tightRows, r => r.StartsWith($"a|{StraddlerPlan}|", StringComparison.Ordinal));
+
+        /* A database with wide rows in range and no health row: server 6 has a 60-minute database "a" with health rows and a
+           2-hour database "c" with none. Without the guard the longest reported length is 60 minutes, a 3-hour floor, which loses
+           c's straddling plan (first execution 08:30, collected 12:02); with it the floor is the full 26 hours and the read returns
+           the plan. */
+        var unreportedMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(connection, UnreportedDatabase, WindowStart, WindowEnd, 60, ct);
+        Assert.Equal(QueryStoreIntervalWide.PurgeEdgeMargin, unreportedMargin);
+        var unguardedMargin = QueryStoreIntervalWide.EdgeMarginFor(TimeSpan.FromMinutes(60));
+        Assert.Equal(TimeSpan.FromHours(3), unguardedMargin);
+        var unguardedRows = await RunAsync(connection, QueryStoreIntervalWide.WithEdgeMargin(wide, QueryStoreIntervalWide.EdgeMarginSqlFor(unguardedMargin)), UnreportedDatabase, ct);
+        Assert.DoesNotContain(unguardedRows, r => r.StartsWith($"c|{UnreportedStraddlerPlan}|", StringComparison.Ordinal));
+        var guardedRows = await RunAsync(connection, QueryStoreIntervalWide.WithEdgeMargin(wide, QueryStoreIntervalWide.EdgeMarginSqlFor(unreportedMargin)), UnreportedDatabase, ct);
+        Assert.StartsWith($"c|{UnreportedStraddlerPlan}|{UnreportedStraddlerPlan}|", guardedRows[0], StringComparison.Ordinal);
+        Assert.Equal(await RunAsync(connection, wide, UnreportedDatabase, ct), guardedRows);
 
         /* The daily arm's two edge reads take the same floor; with no built day it returns the wide read's answer. */
         var narrowDaily = QueryStoreIntervalWide.WithEdgeMargin(wideDaily, QueryStoreIntervalWide.EdgeMarginSqlFor(twoHourMargin));
@@ -170,14 +186,39 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
                     timestamp '{WindowStart:yyyy-MM-dd} 10:00')
             """, ct);
 
+        /* Server 6: hourly database "a" (health row, 60 minutes) and 2-hour database "c" (no health row at all), same shape as
+           servers 1 and 2. c's plan 9998 exists only in an interval collected at 12:02 whose first execution was 08:30. */
+        await ExecAsync(connection, $"""
+            INSERT INTO collect.query_store_interval_wide {columns}
+            SELECT t.h + interval '62 minutes', {UnreportedDatabase}, 'a', p.p, p.p, 'Regular', t.h + (p.p % 50) * interval '1 minute',
+                   t.h + interval '55 minutes', 'qh' || p.p, 'ph' || p.p, 10 + p.p % 7, 1000 * (p.p % 5) + 100, 100 * p.p, p.p, 0, 0, 1,
+                   CAST(extract(epoch FROM t.h) AS bigint) / 3600, t.h
+            FROM generate_series(timestamp '{FirstHour:yyyy-MM-dd HH:mm}', timestamp '{WindowEnd.AddHours(-1):yyyy-MM-dd HH:mm}', interval '1 hour') AS t(h)
+            CROSS JOIN generate_series(1, 30) AS p(p)
+            """, ct);
+        await ExecAsync(connection, $"""
+            INSERT INTO collect.query_store_interval_wide {columns}
+            SELECT t.h + interval '122 minutes', {UnreportedDatabase}, 'c', p.p, p.p, 'Regular', t.h + (p.p % 50) * interval '1 minute',
+                   t.h + interval '115 minutes', 'qh' || p.p, 'ph' || p.p, 10 + p.p % 7, 1000 * (p.p % 5) + 100, 100 * p.p, p.p, 0, 0, 1,
+                   CAST(extract(epoch FROM t.h) AS bigint) / 7200, t.h
+            FROM generate_series(timestamp '{FirstHour:yyyy-MM-dd HH:mm}', timestamp '{WindowEnd.AddHours(-2):yyyy-MM-dd HH:mm}', interval '2 hours') AS t(h)
+            CROSS JOIN generate_series(1, 30) AS p(p)
+            """, ct);
+        await ExecAsync(connection, $"""
+            INSERT INTO collect.query_store_interval_wide {columns}
+            VALUES (timestamp '{WindowStart:yyyy-MM-dd} 12:02', {UnreportedDatabase}, 'c', {UnreportedStraddlerPlan}, {UnreportedStraddlerPlan}, 'Regular',
+                    timestamp '{WindowStart:yyyy-MM-dd} 08:30', timestamp '{WindowStart:yyyy-MM-dd} 11:55', 'qhu', 'phu', 1000, 90000000, 1, 1, 0, 0, 1, 1,
+                    timestamp '{WindowStart:yyyy-MM-dd} 08:30')
+            """, ct);
+
         /* Health captures: one per database every six hours from two days before the first interval. Server 1: 60, server 2: 120,
-           server 4: 60 for a and 1440 for b, server 5: first capture at the window start, server 3: none. */
+           server 4: 60 for a and 1440 for b, server 5: first capture at the window start, server 3: none, server 6: 60 for a only. */
         await ExecAsync(connection, $"""
             INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
             SELECT row_number() OVER (), c.c, s.s, 'srv' || s.s, s.d_, s.len
             FROM generate_series(timestamp '{FirstHour.AddDays(-2):yyyy-MM-dd HH:mm}', timestamp '{WindowEnd:yyyy-MM-dd HH:mm}', interval '6 hours') AS c(c)
             CROSS JOIN (VALUES ({Hourly}, 60, 'a'), ({Hourly}, 60, 'b'), ({TwoHour}, 120, 'a'), ({TwoHour}, 120, 'b'),
-                               ({MixedHealth}, 60, 'a'), ({MixedHealth}, 1440, 'b')) AS s(s, len, d_)
+                               ({MixedHealth}, 60, 'a'), ({MixedHealth}, 1440, 'b'), ({UnreportedDatabase}, 60, 'a')) AS s(s, len, d_)
             """, ct);
         await ExecAsync(connection, $"""
             INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)

@@ -596,14 +596,41 @@ SELECT EXISTS
     /// The longest <c>interval_length_minutes</c> the server's databases have reported (<c>v_query_store_health</c>, one
     /// row per database per capture) over [readStart - 2 days, end + 1 day], and how many captures and NULL or
     /// non-positive lengths that range holds, and the oldest capture in it. The lookback is a day of interval plus a day of
-    /// capture cadence; the day past the end covers a change the last capture before the end did not see.
+    /// capture cadence; the day past the end covers a change the last capture before the end did not see. The fifth column is
+    /// true when a database with rows the read can return (the read's own <c>collection_time</c> and <c>first_execution_time</c>
+    /// range, so the <c>(server_id, first_execution_time)</c> index bounds it to the wide margin) has no capture in that range:
+    /// its interval length is unknown, so the longest of the others bounds nothing for it. A property, not a field: it reads
+    /// <see cref="FirstExecUpperSlackSql"/>, declared below it.
     /// </summary>
-    private const string LongestIntervalSpanSql = """
+    private static string LongestIntervalSpanSql => $"""
         SELECT
             MAX(interval_length_minutes),
             COUNT(*),
             COUNT(*) FILTER (WHERE interval_length_minutes IS NULL OR interval_length_minutes <= 0),
-            MIN(capture_time)
+            MIN(capture_time),
+            EXISTS
+            (
+                SELECT 1
+                FROM
+                (
+                    SELECT DISTINCT w.database_name
+                    FROM query_store_interval_wide AS w
+                    WHERE w.server_id = $1
+                    AND   w.collection_time >= $2
+                    AND   w.collection_time <= $3
+                    AND   w.first_execution_time >= $2 - {PurgeEdgeMarginSql}
+                    AND   w.first_execution_time <= $3 + {FirstExecUpperSlackSql}
+                ) AS d
+                WHERE NOT EXISTS
+                (
+                    SELECT 1
+                    FROM v_query_store_health AS h
+                    WHERE h.server_id = $1
+                    AND   h.database_name = d.database_name
+                    AND   h.capture_time >= $2 - interval '2 days'
+                    AND   h.capture_time <= $3 + interval '1 day'
+                )
+            )
         FROM v_query_store_health
         WHERE server_id = $1
         AND   capture_time >= $2 - interval '2 days'
@@ -613,7 +640,8 @@ SELECT EXISTS
     /// <summary>
     /// The edge margin (<see cref="EdgeMarginFor"/>) for a read of <paramref name="readStart"/> through
     /// <paramref name="end"/> on one server (#5882), or <see cref="PurgeEdgeMargin"/> whenever the server's longest interval
-    /// cannot be trusted: no capture in the range, a NULL or non-positive length, or no capture as old as a day before the
+    /// cannot be trusted: no capture in the range, a NULL or non-positive length, a database with rows in the read's range and no
+    /// capture in the health range (its length is unknown and may exceed the longest the others report), or no capture as old as a day before the
     /// read starts (an interval that began then, or one backfilled from before the monitor connected, may have run under a
     /// setting the captures never saw). Exact otherwise: every stored row has
     /// <c>first_execution_time &gt; collection_time - (span + MaxCatchup)</c> (<see cref="PurgeEdgeMarginSql"/>'s argument), and
@@ -632,7 +660,8 @@ SELECT EXISTS
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)
             || reader.IsDBNull(0) || reader.IsDBNull(3)
-            || reader.GetInt64(1) == 0 || reader.GetInt64(2) != 0)
+            || reader.GetInt64(1) == 0 || reader.GetInt64(2) != 0
+            || reader.GetBoolean(4))
         {
             return PurgeEdgeMargin;
         }
