@@ -12,9 +12,9 @@
  * list_investigation_requests for the list (filtered by state and family by the read itself), and
  * get_investigation_reports for ONE request when a row is picked: its stored brief, its reports and its journal.
  *
- * Read only. Nothing here claims, releases, reports or decides anything about a request. The brief and the reports
- * arrive already masked at the mcp.dataDetail level the service serves, and the page draws exactly what the read
- * answered. A report is an agent's own claim, unreviewed and self-attributed, and the page says so.
+ * Read only. Nothing here claims, releases, reports or decides anything about a request. The page draws exactly what
+ * the read answered: the operator sees the full report and brief, as in the desktop viewer (mcp.dataDetail masks
+ * agents over MCP only). A report is an agent's own claim, unreviewed and self-attributed, and the page says so.
  *
  * The list keeps the order the read gave (opened_at DESC, request_id) and the journal keeps its own (event_time
  * DESC, journal_id DESC). The filters and the picked request live at MODULE scope, so the poll's rebuild of the page shows the
