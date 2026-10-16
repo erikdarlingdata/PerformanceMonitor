@@ -65,8 +65,8 @@ public sealed record MutedAlertRow(DateTime AlertTimeUtc, int ServerId, string S
 
 /// <summary>What an undo did (#5917). <see cref="Undone"/> is true when the before image was restored and
 /// <c>action_undone</c> journaled; otherwise <see cref="Code"/> is the refusal: <c>changed_since</c>, <c>name_taken</c>, <c>not_found</c>,
-/// <c>already_undone</c>, <c>not_undoable</c> or <c>expired</c>, and <see cref="Message"/> says it in plain words.</summary>
-public sealed record AgentUndoResult(bool Undone, string? Code, string Message)
+/// <c>already_undone</c>, <c>not_undoable</c> or <c>expired</c>, and <see cref="Words"/> says it in plain words.</summary>
+public sealed record AgentUndoResult(bool Undone, string? Code, string Words)
 {
     internal static AgentUndoResult Ok(string kind) => new(true, null, "Undone: the " + kind + " is back to what it was before the agent's change.");
     internal static AgentUndoResult Refused(string code, string message) => new(false, code, message);

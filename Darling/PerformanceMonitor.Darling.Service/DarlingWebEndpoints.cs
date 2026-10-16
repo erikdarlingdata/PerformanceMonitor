@@ -1335,11 +1335,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var result = await changes.UndoAsync(id, login, context.RequestAborted);
                 if (result.Undone)
                 {
-                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["status"] = "undone", ["called_id"] = id, ["undone_by"] = AgentChangeUndo.PersonActor(login), ["message"] = result.Message },
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["status"] = "undone", ["called_id"] = id, ["undone_by"] = AgentChangeUndo.PersonActor(login), ["message"] = result.Words },
                         "/api/agent-changes/{id}/undo", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
                 }
 
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = result.Message, ["code"] = result.Code },
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = result.Words, ["code"] = result.Code },
                     "/api/agent-changes/{id}/undo", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted,
                     result.Code == "not_found" ? StatusCodes.Status404NotFound : StatusCodes.Status409Conflict);
             }

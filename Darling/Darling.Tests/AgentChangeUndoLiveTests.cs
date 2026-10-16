@@ -53,7 +53,7 @@ public sealed class AgentChangeUndoLiveTests
             var called = await JournalChangeAsync(connection, "mute", "m1", 7, Mute("old", false), Mute("agent says"), ct: ct);
 
             var result = await undo.UndoAsync(called, Login, ct);
-            Assert.True(result.Undone, result.Message);
+            Assert.True(result.Undone, result.Words);
             Assert.Equal("old|false", await ScalarAsync(connection, "SELECT reason || '|' || enabled FROM config.config_mute_rules WHERE id = 'm1'", ct));
             Assert.Equal("person:erik", await ScalarAsync(connection,
                 $"SELECT actor FROM config.investigation_journal WHERE event = 'action_undone' AND detail->>'called_id' = '{called}'", ct));

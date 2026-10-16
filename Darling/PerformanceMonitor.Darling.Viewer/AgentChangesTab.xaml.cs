@@ -93,7 +93,7 @@ public partial class AgentChangesTab : UserControl
         try
         {
             var result = await _dataService.UndoAgentChangeAsync(selected!.CalledId, _login);
-            Status?.Invoke(result.Message);
+            Status?.Invoke(result.Words);
             await LoadAsync();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
