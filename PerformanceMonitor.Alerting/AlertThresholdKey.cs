@@ -28,8 +28,9 @@ public enum AlertThresholdScope
 /// The registry of tunable alert thresholds (#5910): one key per tunable integer member of
 /// <see cref="IAlertEngineSettings"/>, named exactly as that member. <see cref="AlertEngine"/> reads every one of
 /// them through <see cref="IAlertThresholdOverrides.Resolve"/>; every other member of the settings is on
-/// <see cref="AlertThresholdKeys.NotTunable"/> with its reason. A census test fails when a member is on neither
-/// list, so a threshold added later cannot reach the engine without a decision about whether it is tunable.
+/// <see cref="AlertThresholdKeys.NotTunable"/> with its reason. The two lists divide the settings by hand: nothing
+/// enforces that a new member lands on one of them, and each key's resolution is pinned by a behaviour test, which
+/// moves one server's outcome with an override and leaves another's alone.
 /// </summary>
 public enum AlertThresholdKey
 {

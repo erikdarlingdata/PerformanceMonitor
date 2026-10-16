@@ -26,16 +26,16 @@ public sealed class AttentionAlertTests
     private static readonly DateTime T0 = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
     /// <summary>Successful runs one minute apart, newest first, the newest at <paramref name="newest"/>.</summary>
-    private static List<DateTime> Runs(DateTime newest, int count, int gapMinutes = 1) =>
+    internal static List<DateTime> Runs(DateTime newest, int count, int gapMinutes = 1) =>
         Enumerable.Range(0, count).Select(i => newest.AddMinutes(-i * gapMinutes)).ToList();
 
-    private static AttentionWindow Window(
+    internal static AttentionWindow Window(
         IEnumerable<DateTime> runs, IEnumerable<AttentionCountRow>? counts = null, IEnumerable<AttentionSampleGroup>? samples = null) =>
         new(runs.ToList(), (counts ?? Array.Empty<AttentionCountRow>()).ToList(), (samples ?? Array.Empty<AttentionSampleGroup>()).ToList(),
             Array.Empty<AttentionTopItem>(), Array.Empty<AttentionTopItem>(), Array.Empty<AttentionTopItem>());
 
     /// <summary>A count row stamped a couple of seconds after the run, like the runner stamps its rows.</summary>
-    private static AttentionCountRow Count(DateTime run, long count) => new(run.AddSeconds(2), count);
+    internal static AttentionCountRow Count(DateTime run, long count) => new(run.AddSeconds(2), count);
 
     private static AttentionSampleGroup Sample(DateTime run, string? db, string? app, long n) => new(run.AddSeconds(2), db, app, n);
 
@@ -330,7 +330,7 @@ public sealed class AttentionAlertTests
         return h;
     }
 
-    private static AttentionWindow StormWindow(DateTime now, long count)
+    internal static AttentionWindow StormWindow(DateTime now, long count)
     {
         var runs = Runs(now.AddSeconds(-5), 8);
         return Window(runs, new[] { Count(runs[0], count) });

@@ -3888,7 +3888,7 @@ public sealed class AlertEngineTests
 
     /* ---------------- database file growth (#2349; #3539 A8c: the rise is MB per HOUR) ---------------- */
 
-    private static DatabaseFileGrowthInfo GrowingFile(double growthMb, double windowMinutes) => new()
+    internal static DatabaseFileGrowthInfo GrowingFile(double growthMb, double windowMinutes) => new()
     {
         DatabaseName = "tempdb", FileName = "tempdev", PhysicalName = @"D:\data\tempdev.mdf", FileTypeDesc = "ROWS",
         TotalSizeMb = 90_000, GrowthMb = growthMb, GrowthWindowMinutes = windowMinutes,
@@ -3970,12 +3970,12 @@ public sealed class AlertEngineTests
     /// <summary>Two consecutive hourly collections of <c>database_size_stats</c>, so the pins below replay the
     /// shape the issue describes rather than an invented one: a rise observed at the top of the hour, twelve
     /// five-minute cooldowns of re-reads against the same two rows, the next collection an hour later.</summary>
-    private static readonly DateTime HourlyCollection0 = new(2026, 9, 18, 6, 0, 0, DateTimeKind.Utc);
-    private static readonly DateTime HourlyCollection1 = HourlyCollection0.AddHours(1);
+    internal static readonly DateTime HourlyCollection0 = new(2026, 9, 18, 6, 0, 0, DateTimeKind.Utc);
+    internal static readonly DateTime HourlyCollection1 = HourlyCollection0.AddHours(1);
 
     /// <summary>A rise-only file (2% of a 4 TB volume — the level gate cannot see it) stamped with the collection
     /// that produced it. 20 GB in the 60-minute window is twice the default 10,240 MB/hr bar.</summary>
-    private static DatabaseFileGrowthInfo RiseOnlyFile(DateTime? observedAt, double growthMb = 20_480, string fileName = "tempdev")
+    internal static DatabaseFileGrowthInfo RiseOnlyFile(DateTime? observedAt, double growthMb = 20_480, string fileName = "tempdev")
     {
         var f = GrowingFile(growthMb, windowMinutes: 60);
         f.FileName = fileName;
@@ -3985,7 +3985,7 @@ public sealed class AlertEngineTests
 
     /// <summary>A level-only file: 80% of a small volume and not growing at all. The standing-level shape that
     /// re-fires on the cooldown by design.</summary>
-    private static DatabaseFileGrowthInfo LevelOnlyFile(DateTime? observedAt) => new()
+    internal static DatabaseFileGrowthInfo LevelOnlyFile(DateTime? observedAt) => new()
     {
         DatabaseName = "Sales", FileName = "Sales_log", PhysicalName = @"L:\log\Sales_log.ldf", FileTypeDesc = "LOG",
         TotalSizeMb = 400_000, GrowthMb = 0, GrowthWindowMinutes = 60,

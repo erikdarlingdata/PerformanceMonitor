@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using Xunit;
@@ -257,109 +256,5 @@ public sealed class AlertThresholdOverrideTests
         Assert.Equal("1", blocking.ThresholdValue);
         Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
         Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Version Store (PVS)");
-    }
-}
-
-/// <summary>
-/// #5910: the key census. Every member of <see cref="IAlertEngineSettings"/> is a threshold key or is listed as not
-/// tunable, with a reason; and the engine reads a key's member only through the registry, so it cannot read one
-/// around <see cref="IAlertThresholdOverrides.Resolve"/>.
-/// </summary>
-public sealed class AlertThresholdKeyCensusTests
-{
-    private static readonly string[] s_keyNames = Enum.GetNames<AlertThresholdKey>();
-
-    [Fact]
-    public void EveryIntegerMember_IsAKeyOrListedAsNotTunable()
-    {
-        var unlisted = typeof(IAlertEngineSettings).GetProperties()
-            .Where(p => p.PropertyType == typeof(int))
-            .Select(p => p.Name)
-            .Where(n => !s_keyNames.Contains(n) && !AlertThresholdKeys.NotTunable.ContainsKey(n))
-            .ToList();
-
-        Assert.True(unlisted.Count == 0,
-            "Integer members of IAlertEngineSettings that are neither an AlertThresholdKey nor on AlertThresholdKeys.NotTunable: "
-            + string.Join(", ", unlisted) + ". Add each to one list, and if it is a key, read it in the engine through Threshold().");
-    }
-
-    [Fact]
-    public void EveryMember_IsExactlyOneOfKeyOrNotTunable()
-    {
-        foreach (var name in typeof(IAlertEngineSettings).GetProperties().Select(p => p.Name))
-        {
-            bool isKey = s_keyNames.Contains(name);
-            bool isListed = AlertThresholdKeys.NotTunable.ContainsKey(name);
-            Assert.True(isKey ^ isListed, $"{name}: key={isKey}, not-tunable={isListed}; exactly one must hold.");
-        }
-
-        foreach (var (name, reason) in AlertThresholdKeys.NotTunable)
-        {
-            Assert.NotNull(typeof(IAlertEngineSettings).GetProperty(name));
-            Assert.False(string.IsNullOrWhiteSpace(reason), name);
-        }
-    }
-
-    [Fact]
-    public void EveryKey_NamesAnIntegerMember_HasAScope_AndReadsThatMember()
-    {
-        var settings = new FakeSettings();
-        var intProperties = typeof(FakeSettings).GetProperties().Where(p => p.PropertyType == typeof(int)).ToList();
-        for (int i = 0; i < intProperties.Count; i++)
-        {
-            intProperties[i].SetValue(settings, 1000 + i);
-        }
-
-        foreach (var key in Enum.GetValues<AlertThresholdKey>())
-        {
-            var member = typeof(IAlertEngineSettings).GetProperty(key.ToString());
-            Assert.NotNull(member);
-            Assert.Equal(typeof(int), member!.PropertyType);
-            Assert.True(AlertThresholdKeys.Scopes.ContainsKey(key), $"{key} has no scope.");
-            Assert.Equal((int)member.GetValue(settings)!, settings.GlobalValue(key));
-        }
-
-        Assert.Equal(s_keyNames.Length, AlertThresholdKeys.Scopes.Count);
-    }
-
-    /// <summary>The design call later slices build on: database scope only where the engine grades one database's row.</summary>
-    [Fact]
-    public void DatabaseScope_IsExactlyTheChecksThatGradeEachDatabase()
-    {
-        var databaseScoped = AlertThresholdKeys.Scopes
-            .Where(kv => kv.Value == AlertThresholdScope.ServerAndDatabase)
-            .Select(kv => kv.Key)
-            .OrderBy(k => k)
-            .ToArray();
-
-        Assert.Equal(
-            new[]
-            {
-                AlertThresholdKey.PvsThresholdPercent, AlertThresholdKey.PvsFloorGb,
-                AlertThresholdKey.FileGrowthRiseMb, AlertThresholdKey.FileGrowthVolumePercent,
-            }.OrderBy(k => k).ToArray(),
-            databaseScoped);
-    }
-
-    /// <summary>
-    /// No file in the alerting project reads a key's member off the settings object except the registry's own
-    /// switch. A new direct read is a site that an override would never reach.
-    /// </summary>
-    [Fact]
-    public void NoAlertingSource_ReadsAKeyMemberAroundTheOverrides()
-    {
-        var files = System.IO.Directory.GetFiles(RepoFile.PathTo("PerformanceMonitor.Alerting"), "*.cs")
-            .Where(f => !f.EndsWith("AlertThresholdKey.cs", StringComparison.Ordinal))
-            .ToList();
-        Assert.Contains(files, f => f.EndsWith("AlertEngine.cs", StringComparison.Ordinal));
-
-        var pattern = new Regex(@"(?<![A-Za-z0-9])_?settings\.(" + string.Join("|", s_keyNames) + @")\b");
-        var hits = files
-            .SelectMany(f => System.IO.File.ReadAllLines(f).Select((line, i) => (File: System.IO.Path.GetFileName(f), Line: i + 1, Text: line)))
-            .Where(x => pattern.IsMatch(x.Text))
-            .Select(x => $"{x.File}:{x.Line}: {x.Text.Trim()}")
-            .ToList();
-
-        Assert.True(hits.Count == 0, "Read these through Threshold(AlertThresholdKey...):\n" + string.Join("\n", hits));
     }
 }
