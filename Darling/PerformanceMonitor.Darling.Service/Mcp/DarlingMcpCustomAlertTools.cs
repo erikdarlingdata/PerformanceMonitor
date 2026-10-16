@@ -432,6 +432,269 @@ public sealed class DarlingMcpCustomAlertTools
         }
     }
 
+    [McpServerTool(Name = "backtest_custom_alert_rule"), Description(
+        "Replays a SAVED rule (rule_id) OR a supplied definition over STORED history and reports per server the fire and clear " +
+        "points it WOULD have produced, with the same persistence rule the live engine applies. Writes and delivers nothing. " +
+        "Span: default 24 hours, over 168 is refused. At most 10 servers, 2,880 queries and 60 seconds per call: a cap that " +
+        "stops the replay answers status:partial with stopped_at. A server with no stored samples is unavailable, never 0 fires. " +
+        "<<GUIDE>> " +
+        "Backtest: replays the rule over history already in the store, without touching the live rule, its streak state or any " +
+        "channel. Pass EXACTLY ONE of rule_id or definition (definition is validated but not saved, same shape as " +
+        "validate_custom_alert_rule). servers is a comma-separated list of server names, each resolved through the registry " +
+        "(exact, then partial); omitted, the servers the rule is in scope for. hours is the span (default 24, at most 168); " +
+        "as_of is the end of the span (default now). " +
+        "STEP: the larger of the source's collection cadence on that server (the scheduler's own override, fleet, default " +
+        "resolution) and span / 288. At each step the rule's metric is read as of that step over the rule's own window (the " +
+        "same scalar seam test_custom_alert_rule and the sweep run), and the value goes through the persistence gate with the " +
+        "rule's breachSamples / clearSamples from a fresh streak: a no-data step freezes the streak and is never a breach or a " +
+        "clear, as on the live engine. So the fire and clear points are where the live engine would have fired and cleared on " +
+        "those samples. What a replay cannot reproduce: a sample the store no longer holds (retention), a streak already open " +
+        "before the span, and the channel side (mutes, throttles, failed sends). " +
+        "ANSWER: {status, rule_id, name, span_hours, start_utc, end_utc, queries_run, elapsed_ms, servers:[{server, status, " +
+        "step_seconds, steps, steps_run, samples_evaluated, no_data_steps, breaching_samples, fire_count, clear_count, fires:[{at_utc, " +
+        "value, severity}], clears:[{at_utc, value}], firing_at_end, covered_from_utc, covered_to_utc}]}. status is ok when every " +
+        "step of every server ran. partial when a cap stopped it: stopped_at {cap: servers|queries|time, at_utc, reason} names " +
+        "the cap and the first step not run (at_utc is null for the servers cap, which replays the first 10 servers by name and " +
+        "lists the rest in servers_not_covered), and each server's covered_from_utc / covered_to_utc say what it did cover. A " +
+        "server whose every step returned no value is status:unavailable with a reason and no counts: the source holds no " +
+        "samples for it in the span (or the metric no longer compiles), which is not the same as zero fires. Top-level " +
+        "status is unavailable when every server is; empty when no monitored server is in scope; invalid for a bad input or a " +
+        "span over 168 hours.")]
+    public static async Task<string> BacktestCustomAlertRule(
+        NpgsqlDataSource postgres,
+        [Description("The id of a SAVED rule to replay (from list_custom_alert_rules). Provide this OR definition, not both.")] long? rule_id = null,
+        [Description("A rule definition JSON to replay WITHOUT saving it (same shape as validate_custom_alert_rule). Provide this OR rule_id.")] string? definition = null,
+        [Description("Comma-separated server names (at most 10 are replayed). Omitted: the servers the rule is in scope for.")] string? servers = null,
+        [Description("The span to replay, in hours ending at as_of. Default 24; more than 168 (7 days) is refused.")] double? hours = null,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (rule_id.HasValue == (definition is not null))
+            {
+                return Outcome("invalid", "Provide exactly one of rule_id or definition.");
+            }
+
+            var span = hours is double h ? TimeSpan.FromHours(h) : CustomAlertBacktest.DefaultSpan;
+            if (hours is double requested && (double.IsNaN(requested) || requested <= 0))
+            {
+                return Outcome("invalid", "hours must be a positive number of hours (default 24, at most 168).");
+            }
+
+            if (span > CustomAlertBacktest.MaxSpan)
+            {
+                return Outcome("invalid",
+                    $"hours {span.TotalHours:0.##} is over the 168-hour (7-day) cap on one backtest; replay a shorter span, or several spans with as_of.");
+            }
+
+            var asOfError = McpHelpers.ResolveAsOf(as_of, out var endUtc);
+            if (asOfError is not null)
+            {
+                return asOfError;
+            }
+
+            long? resolvedId = null;
+            string? ruleName = null;
+            CustomAlertRuleDefinition def;
+            if (rule_id.HasValue)
+            {
+                var got = await new CustomAlertRuleStore(postgres).GetAsync(rule_id.Value, cancellationToken);
+                if (got is not CustomAlertRuleResult.Ok ok || ok.Rule is null)
+                {
+                    return Outcome("not_found", $"No custom alert rule with id {rule_id.Value}.");
+                }
+
+                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson);
+                if (parsedSaved is null || savedError is not null)
+                {
+                    return Outcome("invalid", $"The saved rule no longer validates: {savedError}");
+                }
+
+                def = parsedSaved;
+                resolvedId = ok.Rule.Id;
+                ruleName = ok.Rule.Name;
+            }
+            else
+            {
+                var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition!);
+                if (parsed is null || error is not null)
+                {
+                    return Outcome("invalid", error ?? "definition is invalid.");
+                }
+
+                def = parsed;
+            }
+
+            // The targets: the named servers through the registry, or the rule's in-scope servers by the sweep's own gate.
+            var registered = await DarlingServerResolver.LoadEnabledAsync(postgres, cancellationToken);
+            var targets = new List<CustomAlertBacktest.Target>();
+            if (!string.IsNullOrWhiteSpace(servers))
+            {
+                foreach (var name in servers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, cancellationToken);
+                    if (resolveError is not null)
+                    {
+                        return resolveError;
+                    }
+
+                    if (targets.All(t => t.ServerId != resolved.ServerId))
+                    {
+                        var row = registered.FirstOrDefault(r => r.ServerId == resolved.ServerId);
+                        targets.Add(new CustomAlertBacktest.Target(resolved.ServerId, resolved.ServerName, row?.DisplayName ?? resolved.ServerName));
+                    }
+                }
+            }
+            else
+            {
+                IReadOnlySet<int>? tagServerIds = null;
+                if (def.ScopeMode == CustomAlertScopeMode.Tag && def.ScopeTagId is int tagId)
+                {
+                    var members = await new CustomAlertRuleStore(postgres).ListTagMembersAsync(new[] { tagId }, cancellationToken);
+                    tagServerIds = members.TryGetValue(tagId, out var ids) ? ids : null;
+                }
+
+                targets.AddRange(registered
+                    .Where(s => CustomAlertEvaluator.RuleAppliesToServer(def, tagServerIds, s.ServerId, s.ServerName))
+                    .Select(s => new CustomAlertBacktest.Target(s.ServerId, s.ServerName, s.DisplayName ?? s.ServerName)));
+            }
+
+            if (targets.Count == 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "empty",
+                    rule_id = resolvedId,
+                    name = ruleName,
+                    message = "No monitored server is in scope for this rule, so there is nothing to replay.",
+                    servers = Array.Empty<object>(),
+                }, McpHelpers.JsonOptions);
+            }
+
+            // The servers cap: replay the first ten by name, report the rest as not covered.
+            var ordered = targets.OrderBy(t => t.Label, StringComparer.OrdinalIgnoreCase).ToList();
+            var covered = ordered.Take(CustomAlertBacktest.MaxServers).ToList();
+            var notCovered = ordered.Skip(CustomAlertBacktest.MaxServers).Select(t => t.Label).ToList();
+
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId: null, cancellationToken);
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+            var composedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
+
+            var replays = new List<CustomAlertBacktest.ServerReplay>(covered.Count);
+            var unregisteredByServer = new Dictionary<int, IReadOnlyList<string>>();
+            foreach (var target in covered)
+            {
+                var step = CustomAlertBacktest.StepFor(span, CustomAlertBacktest.CadenceFor(def.Plan.Measure.SourceTable, target.ServerId, overrides));
+                replays.Add(new CustomAlertBacktest.ServerReplay(def, target, step, CustomAlertBacktest.StepTimes(endUtc, span, step)));
+                unregisteredByServer[target.ServerId] =
+                    await ComposeServerScope.FindUnregisteredAsync(postgres, new[] { target.StorageName }, cancellationToken)
+                    ?? Array.Empty<string>();
+            }
+
+            // Every step is the evaluator's own scalar seam as of that step, on this least-privilege mcp pool, never the owner's.
+            var run = await CustomAlertBacktest.ReplayAsync(
+                replays,
+                (target, at, ct) => CustomAlertEvaluator.EvaluateScalarNowAsync(
+                    postgres, def, target.StorageName, at, rollups, coverage, composedSeconds, logger: null, ct, unregisteredByServer[target.ServerId]),
+                CustomAlertBacktest.MaxQueries,
+                CustomAlertBacktest.MaxElapsed,
+                cancellationToken);
+
+            return FormatBacktest(def, resolvedId, ruleName, span, endUtc, run, notCovered);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            return McpHelpers.FormatError("backtest_custom_alert_rule", ex);
+        }
+    }
+
+    /// <summary>The backtest's answer (#5911), split out so a test can hold its shape over a run it built itself.</summary>
+    internal static string FormatBacktest(
+        CustomAlertRuleDefinition def, long? ruleId, string? ruleName, TimeSpan span, DateTime endUtc,
+        CustomAlertBacktest.Run run, IReadOnlyList<string> serversNotCovered)
+    {
+        static string Utc(DateTime? value) => value is DateTime v
+            ? DateTime.SpecifyKind(v, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture)
+            : null!;
+
+        var stoppedBy = run.StoppedBy != CustomAlertBacktest.StopCap.None
+            ? run.StoppedBy
+            : serversNotCovered.Count > 0 ? CustomAlertBacktest.StopCap.Servers : CustomAlertBacktest.StopCap.None;
+
+        var servers = run.Servers.Select(s =>
+        {
+            var unavailable = s.StepsRun > 0 && s.SamplesEvaluated == 0;
+            return (object)new
+            {
+                server = s.Target.Label,
+                status = unavailable ? "unavailable" : s.StepsRun == s.Steps.Count ? "ok" : "partial",
+                reason = unavailable
+                    ? "Every step returned no value: the store holds no samples of this rule's source for this server in the span covered (or the metric no longer compiles). That is no answer, not zero fires."
+                    : null,
+                step_seconds = (long)s.Step.TotalSeconds,
+                steps = s.Steps.Count,
+                steps_run = s.StepsRun,
+                samples_evaluated = s.SamplesEvaluated,
+                no_data_steps = s.NoDataSteps,
+                breaching_samples = unavailable ? (int?)null : s.BreachingSamples,
+                fire_count = unavailable ? (int?)null : s.Fires.Count,
+                clear_count = unavailable ? (int?)null : s.Clears.Count,
+                fires = unavailable ? null : s.Fires.Select(f => new { at_utc = Utc(f.AtUtc), value = f.Value, severity = f.Severity }).ToList(),
+                clears = unavailable ? null : s.Clears.Select(c => new { at_utc = Utc(c.AtUtc), value = c.Value }).ToList(),
+                firing_at_end = unavailable ? (bool?)null : s.FiringAtEnd,
+                covered_from_utc = s.StepsRun > 0 ? Utc(s.Steps[0]) : null,
+                covered_to_utc = Utc(s.LastStepRun),
+            };
+        }).ToList();
+
+        var allUnavailable = run.Servers.Count > 0 && run.Servers.All(s => s.StepsRun > 0 && s.SamplesEvaluated == 0);
+        var status = stoppedBy != CustomAlertBacktest.StopCap.None ? "partial" : allUnavailable ? "unavailable" : "ok";
+
+        object? stoppedAt = stoppedBy switch
+        {
+            CustomAlertBacktest.StopCap.Servers => new
+            {
+                cap = "servers",
+                at_utc = (string?)null,
+                reason = $"{serversNotCovered.Count + run.Servers.Count} servers asked for; one backtest replays at most {CustomAlertBacktest.MaxServers}, so the first {CustomAlertBacktest.MaxServers} by name were replayed.",
+            },
+            CustomAlertBacktest.StopCap.Queries => new
+            {
+                cap = "queries",
+                at_utc = (string?)Utc(run.StoppedAtUtc),
+                reason = $"The replay reached the {CustomAlertBacktest.MaxQueries:N0}-query cap on one backtest.",
+            },
+            CustomAlertBacktest.StopCap.Time => new
+            {
+                cap = "time",
+                at_utc = (string?)Utc(run.StoppedAtUtc),
+                reason = $"The replay reached the {CustomAlertBacktest.MaxElapsed.TotalSeconds:0}-second cap on one backtest; replay a shorter span or fewer servers for the rest.",
+            },
+            _ => null,
+        };
+
+        return JsonSerializer.Serialize(new
+        {
+            status,
+            message = status == "unavailable"
+                ? "No server returned a value at any step: the store holds no samples of this rule's source for these servers in the span. That is no answer, not zero fires."
+                : null,
+            rule_id = ruleId,
+            name = ruleName,
+            span_hours = span.TotalHours,
+            start_utc = Utc(endUtc - span),
+            end_utc = Utc(endUtc),
+            breach_samples = def.BreachSamples,
+            clear_samples = def.ClearSamples,
+            queries_run = run.QueriesRun,
+            elapsed_ms = run.ElapsedMilliseconds,
+            stopped_at = stoppedAt,
+            servers_not_covered = serversNotCovered.Count > 0 ? serversNotCovered : null,
+            servers,
+        }, McpHelpers.JsonOptions);
+    }
+
     [McpServerTool(Name = "list_custom_alert_templates"), Description(
         "Lists the built-in STARTER custom-alert-rule templates: curated {key, name, description, definition} entries for " +
         "common PostgreSQL and SQL Server signals, where definition is a ready-to-use rule body. The starters are " +

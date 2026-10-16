@@ -37,4 +37,4 @@ All editions include real-time alerts (email + webhooks), charts and graphs, dar
 | Themes | Dark and light | Dark and light | Dark and light |
 | Web dashboard | Not available | Optional, off by default (port 5153) | Not available |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
-| MCP server (LLM integration) | Built-in (93 tools) | On request (186 tools) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (93 tools) | On request (188 tools) | Built into Dashboard (66 tools) |
