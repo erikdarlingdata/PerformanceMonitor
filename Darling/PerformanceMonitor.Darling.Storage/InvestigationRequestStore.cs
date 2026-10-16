@@ -42,7 +42,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>claims_exhausted</c>, once per request). A release keeps its claim counted. It never reopens a lease;
 /// the claim's own WHERE takes a lapsed lease over.</para>
 /// </summary>
-public sealed class InvestigationRequestStore : IInvestigationRequestStore
+public sealed class InvestigationRequestStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
     /// <summary>The first key of the route lock, <c>pg_advisory_xact_lock(5632, route_id)</c>.</summary>
     public const int RouteLockKey = 5632;
@@ -215,6 +215,26 @@ INSERT INTO config.investigation_notes (server_id, story_path_hash, dedup_key, m
 SELECT r.server_id, r.story_path_hash, r.first_dedup_key, r.first_metric, $2, $3, r.request_id
 FROM config.investigation_requests AS r
 WHERE r.request_id = $1";
+
+    /* #5903: the pending notes for the approve screen, with the request that proposed each (server name, family). A note past
+       its expires_at is not listed: the brief read drops it (state = 'approved' AND expires_at > now), so an approval of it
+       would do nothing. $1 the limit, $2 now. */
+    internal const string PendingNotesSql = @"
+SELECT n.note_id, n.server_id, r.server_name, n.metric_name, r.family, n.story_path_hash, n.note_text, n.author,
+       n.source_request_id, n.created_at, n.expires_at
+FROM config.investigation_notes AS n
+LEFT JOIN config.investigation_requests AS r ON r.request_id = n.source_request_id
+WHERE n.state = 'pending' AND n.expires_at > $2
+ORDER BY n.created_at, n.note_id
+LIMIT $1";
+
+    /* #5903: a decision lands only on a pending note, so a second click or a second viewer changes nothing. $1 note,
+       $2 the new state, $3 who, $4 when. */
+    internal const string DecideNoteSql = @"
+UPDATE config.investigation_notes
+SET state = $2, decided_by = $3, decided_at = $4
+WHERE note_id = $1 AND state = 'pending'
+RETURNING source_request_id, server_id";
 
     internal const string ReportsRequestsSql = @"
 SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.last_alert_at,
@@ -881,6 +901,80 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         await JournalAsync(connection, transaction, now, requestId, null, null, "journal_capped", actor, operation,
             null, "journal_capped:" + requestId.ToString(), cancellationToken);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, PendingNotesSql, P(Math.Clamp(limit, 1, 1000)), P(Now()));
+        var rows = new List<PendingInvestigationNote>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new PendingInvestigationNote(
+                reader.GetInt64(0),
+                reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetGuid(8),
+                DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
+        }
+
+        return rows;
+    }
+
+    /// <inheritdoc />
+    public Task<bool> ApproveNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, true, decidedBy, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> RejectNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, false, decidedBy, cancellationToken);
+
+    /* The one decide statement of Darling's note decisions (#5903): the desktop Viewer, the web routes and the tests all come
+       through here, so there is one statement, one clock and one decided_by rule. The update and its journal row share one
+       transaction: a decision is never stamped without its audit row. */
+    /// <summary>Approves (<paramref name="approve"/>) or rejects a pending note. False when the note is gone or already decided.
+    /// Throws <see cref="ArgumentException"/> when <paramref name="decidedBy"/> fails
+    /// <see cref="InvestigationNoteRules.ValidateDecidedBy"/>.</summary>
+    public async Task<bool> DecideNoteAsync(long noteId, bool approve, string decidedBy, CancellationToken cancellationToken = default)
+    {
+        var refusal = InvestigationNoteRules.ValidateDecidedBy(decidedBy);
+        if (refusal is not null)
+        {
+            throw new ArgumentException(refusal, nameof(decidedBy));
+        }
+
+        decidedBy = decidedBy.Trim();
+        var state = approve ? "approved" : "rejected";
+        var journalEvent = approve ? "note_approved" : "note_rejected";
+        var now = Now();
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        Guid? sourceRequest;
+        int? serverId;
+        await using (var command = Command(connection, transaction, DecideNoteSql, P(noteId), P(state), P(decidedBy), P(now)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            sourceRequest = reader.IsDBNull(0) ? null : reader.GetGuid(0);
+            serverId = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        }
+
+        await JournalAsync(connection, transaction, now, sourceRequest, null, serverId, journalEvent, decidedBy,
+            "note " + noteId.ToString(CultureInfo.InvariantCulture), null, null, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return true;
     }
 

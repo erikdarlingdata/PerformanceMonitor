@@ -37,6 +37,7 @@ public partial class SettingsWindow : Window
     private readonly MuteRuleService? _muteRuleService;
     private readonly DuckDbNotificationRouteStore? _routeStore;
     private readonly LocalDataService? _dataService;
+    private readonly PerformanceMonitor.Common.IInvestigationNoteStore? _noteStore;
 
     public SettingsWindow(
         ScheduleManager scheduleManager,
@@ -45,7 +46,8 @@ public partial class SettingsWindow : Window
         McpHostService? mcpService = null,
         MuteRuleService? muteRuleService = null,
         DuckDbNotificationRouteStore? routeStore = null,
-        LocalDataService? dataService = null)
+        LocalDataService? dataService = null,
+        PerformanceMonitor.Common.IInvestigationNoteStore? noteStore = null)
     {
         InitializeComponent();
         /* The window asks for 750 DIPs of height; on a work area shorter than that (a small laptop screen with the taskbar up)
@@ -60,6 +62,7 @@ public partial class SettingsWindow : Window
         _muteRuleService = muteRuleService;
         _routeStore = routeStore;
         _dataService = dataService;
+        _noteStore = noteStore;
 
         LoadServerScheduleSummary();
         UpdateCollectionStatus();
@@ -1211,6 +1214,13 @@ public partial class SettingsWindow : Window
     {
         if (_routeStore == null || _dataService == null) return;
         var window = new NotificationRoutesWindow(_routeStore, _dataService, _serverManager) { Owner = this };
+        window.ShowDialog();
+    }
+
+    private void ReviewAgentNotesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_noteStore == null) return;
+        var window = new InvestigationNotesWindow(_noteStore) { Owner = this };
         window.ShowDialog();
     }
 

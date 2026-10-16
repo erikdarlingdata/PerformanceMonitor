@@ -695,6 +695,15 @@
                                         Click="ManageNotificationRoutesButton_Click" HorizontalAlignment="Left"
                                         Padding="12,4" Margin="0,8,0,0"/>
 
+                                <!-- Agent notes (#5903): a note an agent proposes waits here for a person to approve or reject it -->
+                                <TextBlock Text="Agent Notes" FontSize="14" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>
+                                <TextBlock Text="An agent can propose a note with its investigation report. Approve a note for later briefs to carry it, or reject it to keep it out."
+                                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                <Button x:Name="ReviewAgentNotesButton" Content="Review Agent _Notes..."
+                                        Click="ReviewAgentNotesButton_Click" HorizontalAlignment="Left"
+                                        Padding="12,4" Margin="0,8,0,0"/>
+
                                 <!-- Severity Color Reference -->
                                 <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>
