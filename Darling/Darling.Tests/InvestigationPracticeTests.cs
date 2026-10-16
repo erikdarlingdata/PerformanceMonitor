@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -427,4 +428,125 @@ public sealed class InvestigationPracticeLiveTests
             Assert.Contains("ZEBRA-COMMENT", after.GetRawText(), StringComparison.Ordinal);
         });
     }
+}
+
+/// <summary>
+/// #5918 on the real grants: the Viewer connects as the <c>admin</c> role, so opening a practice request must work through
+/// the replayed INSERT grants (managed section 10e, provision-roles step 3j), as the real login each source made, and the
+/// <c>viewer</c> role must be refused with no row written. The fixed-name roles are cluster-wide, so the class is in the
+/// <c>pg-cluster-roles</c> collection.
+/// </summary>
+[Collection("pg-cluster-roles")]
+public sealed class InvestigationPracticeGrantLiveTests
+{
+    /* #1776 own-store: each test mints its own scratch database through ScratchPostgres; the fixed admin/viewer/mcp roles
+       are why the class sits in the pg-cluster-roles collection. */
+    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "mcp"];
+    private const int ServerId = 7_591_802;
+    private const string ServerName = "LcPracticeGrantSrv";
+
+    private static async Task<string> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!;
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>A reported, judged case written by the store owner, and the practice request opened as each login.</summary>
+    private static async Task RunAsync(Func<NpgsqlConnection, ScratchPostgres, CancellationToken, Task<(string Admin, string Viewer)>> provision)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the practice grant live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            await DarlingMcpTestData.RegisterServerAsync(owner, ServerId, ServerName, ct);
+            Assert.SkipWhen(
+                await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) == "True",
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the grants would adopt it.");
+            var (adminPassword, viewerPassword) = await provision(owner, scratch, ct);
+
+            await using var ownerSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var store = new InvestigationRequestStore(ownerSource, 30);
+            var at = DateTime.UtcNow.AddHours(-3);
+            var original = (await store.OpenOrJoinAsync(new InvestigationAlert(
+                1, ServerId, ServerName, "blocking", "Blocking", at, new[] { ServerId + ":blocking" }, null, 50, 200,
+                LeaseMinutes: 15, ExpiryMinutes: 240), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(original, "agent-orig", ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                original, claim.ClaimId!.Value, "agent-orig", 1, "real", "root", true, "summary", "[{\"tool\":\"get_blocking\"}]"), ct));
+            await new InvestigationFeedbackStore(ownerSource, 30).RecordAsync(
+                new InvestigationFeedbackSubmission(original, "right", null, null, null, "lee"), ct);
+            var alertRows = await ScalarAsync(owner, $"SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{original}'", ct);
+            Assert.NotEqual("0", alertRows);
+
+            /* The viewer role is refused, and nothing is written. */
+            await using (var viewerSource = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = "viewer", Password = viewerPassword }.ConnectionString))
+            {
+                var denied = await Assert.ThrowsAsync<PostgresException>(() => new InvestigationPracticeStore(viewerSource, 30).OpenAsync(original, "person:viewer", ct));
+                Assert.Equal("42501", denied.SqlState);
+            }
+
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_requests WHERE practice_of IS NOT NULL", ct));
+
+            /* The admin role opens it: the row names the case, and its alerts are the case's. */
+            await using (var adminSource = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = "admin", Password = adminPassword }.ConnectionString))
+            {
+                var opened = await new InvestigationPracticeStore(adminSource, 30).OpenAsync(original, "person:admin", ct);
+                Assert.Equal(InvestigationPracticeOutcome.Opened, opened.Outcome);
+                var practice = opened.RequestId!.Value;
+                Assert.Equal(original.ToString(), await ScalarAsync(owner,
+                    $"SELECT practice_of FROM config.investigation_requests WHERE request_id = '{practice}'", ct));
+                Assert.Equal(alertRows, await ScalarAsync(owner,
+                    $"SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{practice}'", ct));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(s_cleanupRoles, "pr5918none", cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task TheManagedBatch_LetsAdminOpenAPracticeRequest_AndRefusesViewer() =>
+        await RunAsync(async (owner, scratch, ct) =>
+        {
+            var ownerRole = new NpgsqlConnectionStringBuilder(owner.ConnectionString).Username ?? "darling";
+            await ExecAsync(owner,
+                DarlingManagedRoles.BuildProvisioningSql(
+                    ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+                    15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName)), ct);
+            return (ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword);
+        });
+
+    [Fact]
+    public async Task TheBringYourOwnScript_LetsAdminOpenAPracticeRequest_AndRefusesViewer() =>
+        await RunAsync(async (owner, scratch, ct) =>
+        {
+            Assert.SkipUnless(
+                await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct) == "True",
+                "The script names the store owner 'darling', and this rig has no such role.");
+            const string AdminPassword = "ScriptAdmin5918", ViewerPassword = "ScriptViewer5918", McpPassword = "ScriptMcp5918";
+            var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
+                .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", AdminPassword, StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", ViewerPassword, StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal);
+            await ExecAsync(owner, script, ct);
+            return (AdminPassword, ViewerPassword);
+        });
 }
