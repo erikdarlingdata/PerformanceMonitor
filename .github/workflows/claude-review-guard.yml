@@ -444,6 +444,7 @@ jobs:
           # already on the head listed `steps: []` for both its jobs, and so did a Build run of the
           # same minute). A job that ran always has steps, so an empty list under a review job that
           # did not skip means "not listed yet", not "the step was renamed".
+          # shellcheck disable=SC2016 # the single quotes hold a jq program: $j is a jq variable, not a shell one
           jobs_jq='([.jobs[] | select(.name == env.REVIEW_JOB)] | .[0]) as $j
             | "\($j.conclusion // "-") \(($j.steps // []) | length)"
               + " \(([.jobs[].steps[]? | select(.name == env.REVIEW_STEP)] | .[0].conclusion) // "-")"'

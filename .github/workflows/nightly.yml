@@ -69,7 +69,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # The 14:00 UTC cron builds the test map only (#5945); the 06:00 cron is the full nightly.
           MAP_ONLY: ${{ github.event.schedule == '0 14 * * *' }}
-        run: gh workflow run nightly.yml --repo ${{ github.repository }} --ref dev -f from_schedule=true -f map_only=${MAP_ONLY}
+        run: gh workflow run nightly.yml --repo "${GITHUB_REPOSITORY}" --ref dev -f from_schedule=true -f map_only="${MAP_ONLY}"
 
   # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
   # manual one — which executes from the dispatched ref (dev for the scheduled path).
@@ -138,10 +138,10 @@ jobs:
         run: |
           RECENT=$(git log --since="24 hours ago" --oneline | head -1)
           if [ -n "$RECENT" ]; then
-            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
             echo "New commits found — building nightly"
           else
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "No new commits — skipping nightly build"
           fi
 

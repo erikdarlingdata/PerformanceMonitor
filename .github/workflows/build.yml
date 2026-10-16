@@ -173,6 +173,7 @@ jobs:
             if [ "${attempt}" -gt 1 ]; then
               sleep 5
             fi
+            # shellcheck disable=SC2016 # the single quotes hold a jq program: $newest is a jq variable, not a shell one
             if page=$(gh api "repos/${GH_REPO}/actions/workflows/build.yml/runs?branch=dev&status=success&per_page=30" --jq '[.workflow_runs[] | select(.event == "push")] | (map(.updated_at) | max) as $newest | if $newest > env.FRESH_AFTER then .[].id else "stale \($newest // "none")" end'); then
               case "${page}" in
                 stale*)
@@ -596,7 +597,8 @@ jobs:
       # -shellcheck= and -pyflakes= are off on purpose. This job runs on Windows, and actionlint 1.7.12 hangs there
       # as soon as it pipes a `run:` script to shellcheck.exe (measured on claude-review-guard.yml with shellcheck
       # 0.10.0 and 0.11.0: no output and no exit). The bash-script checks need an ubuntu runner, where both tools
-      # are installed.
+      # are installed: the `workflow-lint` job below runs the same actionlint with shellcheck on (#5970). This step
+      # keeps the YAML, expression, `needs:` and action-input checks on the Windows job; that job adds the shell checks.
       - name: Detect changed workflow files
         id: workflow-filter
         if: needs.guard-build.outputs.run == 'true'
@@ -769,6 +771,48 @@ jobs:
           retention-days: 7
           overwrite: true
           if-no-files-found: ignore
+
+  # #5970: the shell half of the workflow lint. The Windows step in guard-tests runs actionlint with shellcheck and
+  # pyflakes off (it hangs on Windows when it pipes a `run:` script to shellcheck.exe), so nothing there reads the
+  # bash in a `run:` block. This job runs the rhysd/actionlint Docker image on ubuntu, where shellcheck is installed
+  # and on, over every file under .github/workflows/. The image is pinned by tag and by digest, so a moved tag cannot
+  # change what the guard checks. It runs on the same trigger as the Windows step: a pull request that changes a file
+  # under .github/workflows/, and every push to main or dev. On any other diff the job still runs and ends success
+  # with its lint step skipped, so the result jobs (darling-pg-result, lite-tests-result) read `success` and need no
+  # planned-skip arm for it. A finding fails the job and so both required result checks. It does not start
+  # guard-cancel: it costs a minute, and the shards' answer is not wasted by a lint finding.
+  workflow-lint:
+    name: Workflow lint (actionlint with shellcheck)
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect changed workflow files
+        id: workflow-filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Lint the workflow files with actionlint and shellcheck
+        if: github.event_name == 'push' || steps.workflow-filter.outputs.workflows == 'true'
+        shell: bash
+        env:
+          ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        run: |
+          set -uo pipefail
+          # No -ignore and no shellcheck-off flag: a finding is fixed in the workflow, not silenced here.
+          if ! docker run --rm -v "${GITHUB_WORKSPACE}:/repo" -w /repo "${ACTIONLINT_IMAGE}" -no-color; then
+            echo "::error title=actionlint found problems::Fix them in the workflow file. The findings, shellcheck's among them, are listed above."
+            exit 1
+          fi
 
   # #5949: when the Guard tests (or their build) fail on a pull request, cancel the rest of the run, so a bad
   # pull request costs the minutes the guard took and not the whole shard run it no longer waits for. A separate
@@ -2445,7 +2489,7 @@ jobs:
   # something other than success, and this fails loudly and says which.
   darling-pg-result:
     name: Darling PostgreSQL tests
-    needs: [gate, guard-build, guard-build-lite, guard-tests, darling-pg]
+    needs: [gate, guard-build, guard-build-lite, guard-tests, workflow-lint, darling-pg]
     if: ${{ !cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-build-lite.result == 'failure' || needs.guard-tests.result == 'failure')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -2456,6 +2500,7 @@ jobs:
         env:
           RESULT: ${{ needs.darling-pg.result }}
           GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-build-lite.result != 'success' && needs.guard-build-lite.result || needs.guard-tests.result }}
+          LINT_RESULT: ${{ needs.workflow-lint.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
           EVENT_NAME: ${{ github.event_name }}
@@ -2482,6 +2527,13 @@ jobs:
             else
               echo "::error title=Guard tests failed::guard result='${GUARD_RESULT}' - the Guard tests job (or its build) did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
             fi
+            exit 1
+          fi
+          # #5970: the workflow lint (actionlint with shellcheck, on ubuntu) runs on every event but a release. It ends
+          # `success` when no workflow file changed (its lint step is skipped, not the job), so anything else is a
+          # finding, a failed run or a cancel. `skipped` is fine on a release only: the job does not run there.
+          if [ "${LINT_RESULT}" != "success" ] && ! { [ "${EVENT_NAME}" = "release" ] && [ "${LINT_RESULT}" = "skipped" ]; }; then
+            echo "::error title=Workflow lint failed::workflow-lint result='${LINT_RESULT}' - actionlint (with shellcheck) reported a problem in a workflow file, or the job did not finish. Read the Workflow lint job's log."
             exit 1
           fi
           case "${RESULT}" in
@@ -3408,7 +3460,7 @@ jobs:
             full "no test map is pinned for this run"
           else
             ok=0
-            for attempt in 1 2 3; do
+            for _ in 1 2 3; do
               rm -rf shadow/map
               if gh run download "${MAP_RUN}" -n test-map -D shadow/map; then ok=1; break; fi
               sleep 5
@@ -3538,7 +3590,7 @@ jobs:
   # (result)" for the shards to gate merges — noted on #3887.)
   lite-tests-result:
     name: Lite tests (result)
-    needs: [gate, guard-build, guard-build-lite, guard-tests, lite-scope, lite-tests]
+    needs: [gate, guard-build, guard-build-lite, guard-tests, workflow-lint, lite-scope, lite-tests]
     if: ${{ (!cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-build-lite.result == 'failure' || needs.guard-tests.result == 'failure'))) && github.event_name != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -3549,6 +3601,7 @@ jobs:
         env:
           RESULT: ${{ needs.lite-tests.result }}
           GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-build-lite.result != 'success' && needs.guard-build-lite.result || needs.guard-tests.result }}
+          LINT_RESULT: ${{ needs.workflow-lint.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
           EVENT_NAME: ${{ github.event_name }}
@@ -3576,6 +3629,13 @@ jobs:
             else
               echo "::error title=Guard tests failed::guard result='${GUARD_RESULT}' - the Guard tests job (or its build) did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
             fi
+            exit 1
+          fi
+          # #5970: the workflow lint (actionlint with shellcheck, on ubuntu) runs on every event but a release. It ends
+          # `success` when no workflow file changed (its lint step is skipped, not the job), so anything else is a
+          # finding, a failed run or a cancel. `skipped` is fine on a release only: the job does not run there.
+          if [ "${LINT_RESULT}" != "success" ] && ! { [ "${EVENT_NAME}" = "release" ] && [ "${LINT_RESULT}" = "skipped" ]; }; then
+            echo "::error title=Workflow lint failed::workflow-lint result='${LINT_RESULT}' - actionlint (with shellcheck) reported a problem in a workflow file, or the job did not finish. Read the Workflow lint job's log."
             exit 1
           fi
           # #5669: the one planned skip of the whole matrix. The lite-scope job found nothing the Lite suite depends on in

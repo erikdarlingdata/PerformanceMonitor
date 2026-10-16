@@ -79,7 +79,7 @@ jobs:
         env:
           SA_PASSWORD: CI_Test#2026!
         run: |
-          for script in $(ls install/[0-9]*.sql | sort); do
+          for script in install/[0-9]*.sql; do
             filename=$(basename "$script")
 
             # Skip scripts that require SQL Agent or are test/troubleshooting

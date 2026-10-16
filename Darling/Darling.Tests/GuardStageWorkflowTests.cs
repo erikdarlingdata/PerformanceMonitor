@@ -283,8 +283,8 @@ public sealed class GuardStageWorkflowTests
         }
 
         /* The result jobs read both guard jobs, so a failed guard class run or a failed guard build reaches the required checks. */
-        Assert.Contains("\n    needs: [gate, guard-build, guard-build-lite, guard-tests, darling-pg]\n", JobBlock(yaml, "darling-pg-result"), StringComparison.Ordinal);
-        Assert.Contains("\n    needs: [gate, guard-build, guard-build-lite, guard-tests, lite-scope, lite-tests]\n", JobBlock(yaml, "lite-tests-result"), StringComparison.Ordinal);
+        Assert.Contains("\n    needs: [gate, guard-build, guard-build-lite, guard-tests, workflow-lint, darling-pg]\n", JobBlock(yaml, "darling-pg-result"), StringComparison.Ordinal);
+        Assert.Contains("\n    needs: [gate, guard-build, guard-build-lite, guard-tests, workflow-lint, lite-scope, lite-tests]\n", JobBlock(yaml, "lite-tests-result"), StringComparison.Ordinal);
     }
 
     /// <summary>
