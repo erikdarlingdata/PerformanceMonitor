@@ -115,6 +115,110 @@
                 </Grid>
             </TabItem>
 
+            <TabItem Header="Report _Feedback">
+                <!-- #5913: tell Darling whether a report was right. The false-positive counts per alert family use the
+                     settled verdict (a person's correction wins over the agent's). -->
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="3*"/>
+                        <ColumnDefinition Width="2*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,8">
+                        <TextBlock Text="Opened in the last:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="FeedbackWindowBox" Width="100" SelectedIndex="1"
+                                  AutomationProperties.Name="Feedback window"
+                                  SelectionChanged="FeedbackWindowBox_SelectionChanged">
+                            <ComboBoxItem Content="7 days" Tag="7"/>
+                            <ComboBoxItem Content="30 days" Tag="30"/>
+                            <ComboBoxItem Content="90 days" Tag="90"/>
+                        </ComboBox>
+                        <Button Content="Refresh" Width="80" Height="26" Margin="8,0,0,0" Click="Refresh_Click"/>
+                        <TextBlock x:Name="FeedbackTruncatedText" VerticalAlignment="Center" Margin="12,0,0,0"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    </StackPanel>
+
+                    <DataGrid Grid.Row="1" Grid.ColumnSpan="2" x:Name="FamilyCountsGrid" Style="{StaticResource DarkGrid}"
+                              Height="110" IsReadOnly="True" Margin="0,0,0,8">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Alert family" Binding="{Binding Family}" Width="*"/>
+                            <DataGridTextColumn Header="Reported" Binding="{Binding Reported}" Width="80"/>
+                            <DataGridTextColumn Header="With feedback" Binding="{Binding WithFeedback}" Width="100"/>
+                            <DataGridTextColumn Header="Marked wrong" Binding="{Binding MarkedWrong}" Width="100"/>
+                            <DataGridTextColumn Header="Agent said false positive" Binding="{Binding AgentFalsePositives}" Width="160"/>
+                            <DataGridTextColumn Header="False positives after feedback" Binding="{Binding FalsePositives}" Width="190"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <DataGrid Grid.Row="2" Grid.Column="0" x:Name="FeedbackReportsGrid" Style="{StaticResource DarkGrid}"
+                              IsReadOnly="True" SelectionMode="Single"
+                              SelectionChanged="FeedbackReportsGrid_SelectionChanged">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Reported" Binding="{Binding ReportedDisplay}" Width="120" SortMemberPath="Row.ReportedAtUtc"/>
+                            <DataGridTextColumn Header="Server" Binding="{Binding Row.ServerName}" Width="*"/>
+                            <DataGridTextColumn Header="Family" Binding="{Binding Row.Family}" Width="100"/>
+                            <DataGridTextColumn Header="Verdict" Binding="{Binding Row.ReportVerdict}" Width="90"/>
+                            <DataGridTextColumn Header="Feedback" Binding="{Binding FeedbackSummary}" Width="110"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <ScrollViewer Grid.Row="2" Grid.Column="1" Margin="8,0,0,0" VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <TextBlock x:Name="FeedbackReportHeader" Text="Select a report to see it and the feedback it has."
+                                       TextWrapping="Wrap" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                            <TextBox x:Name="FeedbackReportBox" IsReadOnly="True" TextWrapping="Wrap" Height="130"
+                                     VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Reported request"/>
+                            <TextBlock Text="Feedback so far" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
+                            <DataGrid x:Name="FeedbackGivenGrid" Style="{StaticResource DarkGrid}" Height="150" IsReadOnly="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="When" Binding="{Binding WhenDisplay}" Width="120" SortMemberPath="Row.CreatedAtUtc"/>
+                                    <DataGridTextColumn Header="By" Binding="{Binding Row.Author}" Width="100"/>
+                                    <DataGridTextColumn Header="Report was" Binding="{Binding Row.Verdict}" Width="70"/>
+                                    <DataGridTextColumn Header="Should be" Binding="{Binding CorrectedDisplay}" Width="95"/>
+                                    <DataGridTextColumn Header="Missed step" Binding="{Binding Row.MissedStep}" Width="150"/>
+                                    <DataGridTextColumn Header="Comment" Binding="{Binding Row.Comment}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <Grid x:Name="GiveFeedbackPanel" Grid.Row="3" Grid.ColumnSpan="2" Margin="0,8,0,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal">
+                            <TextBlock Text="The report was:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <ComboBox x:Name="FeedbackVerdictBox" Width="90" SelectedIndex="0" AutomationProperties.Name="Feedback verdict">
+                                <ComboBoxItem Content="right"/>
+                                <ComboBoxItem Content="partly"/>
+                                <ComboBoxItem Content="wrong"/>
+                            </ComboBox>
+                            <TextBlock Text="It should have said:" VerticalAlignment="Center" Margin="12,0,6,0"/>
+                            <ComboBox x:Name="FeedbackCorrectedBox" Width="150" SelectedIndex="0" AutomationProperties.Name="Corrected verdict">
+                                <ComboBoxItem Content="(keep the report's verdict)"/>
+                                <ComboBoxItem Content="real"/>
+                                <ComboBoxItem Content="false_positive"/>
+                                <ComboBoxItem Content="needs_person"/>
+                            </ComboBox>
+                            <TextBlock Text="Step the agent missed:" VerticalAlignment="Center" Margin="12,0,6,0"/>
+                            <TextBox x:Name="FeedbackMissedBox" Width="300" MaxLength="4000" AutomationProperties.Name="Missed step"/>
+                        </StackPanel>
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,6,0,0">
+                            <TextBox x:Name="FeedbackCommentBox" Width="760" Height="44" TextWrapping="Wrap" AcceptsReturn="True" MaxLength="4000"
+                                     AutomationProperties.Name="Feedback comment"/>
+                            <Button Content="Save Fee_dback" Width="110" Height="26" Margin="8,0,0,0" VerticalAlignment="Top" Click="SaveFeedback_Click"/>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="_Notes">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>

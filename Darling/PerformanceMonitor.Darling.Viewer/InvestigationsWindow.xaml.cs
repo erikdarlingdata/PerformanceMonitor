@@ -15,6 +15,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -32,11 +33,12 @@ public partial class InvestigationsWindow : Window
 {
     /// <summary>The status line a read-only seat shows in place of the write controls.</summary>
     internal const string ReadOnlyMessage =
-        "Read-only connection (postgres.connectAs = \"viewer\"): investigations can be viewed but not closed, and notes and profiles cannot be changed here. Set connectAs to \"admin\" and restart the viewer to change them.";
+        "Read-only connection (postgres.connectAs = \"viewer\"): investigations can be viewed but not closed, and notes, profiles and report feedback cannot be changed here. Set connectAs to \"admin\" and restart the viewer to change them.";
 
     private readonly ViewerDataService _dataService;
     private readonly ObservableCollection<InvestigationRequestViewRow> _requests = new();
     private readonly ObservableCollection<InvestigationNoteViewRow> _notes = new();
+    private readonly ObservableCollection<FeedbackReportItem> _feedbackReports = new();
     private IReadOnlyList<InvestigationProfileViewRow> _profiles = Array.Empty<InvestigationProfileViewRow>();
     private readonly string _login;
 
@@ -58,10 +60,12 @@ public partial class InvestigationsWindow : Window
         IsEditable = !readOnly;
         RequestsGrid.ItemsSource = _requests;
         NotesGrid.ItemsSource = _notes;
+        FeedbackReportsGrid.ItemsSource = _feedbackReports;
         SetScopes(null);
 
         if (readOnly)
         {
+            GiveFeedbackPanel.Visibility = Visibility.Collapsed;
             CloseRequestPanel.Visibility = Visibility.Collapsed;
             DecideNotePanel.Visibility = Visibility.Collapsed;
             WriteNotePanel.Visibility = Visibility.Collapsed;
@@ -113,6 +117,36 @@ public partial class InvestigationsWindow : Window
         return ViewerDataService.ValidateInvestigationNote(noteText, days);
     }
 
+    /// <summary>One reported request in the feedback tab's list.</summary>
+    internal sealed record FeedbackReportItem(InvestigationFeedbackListRow Row)
+    {
+        public string ReportedDisplay => Row.ReportedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+
+        public string FeedbackSummary => Row.Feedback.Count == 0 ? "none"
+            : string.Create(CultureInfo.InvariantCulture, $"{Row.Feedback.Count}, newest: {Row.Feedback[0].Verdict}");
+    }
+
+    /// <summary>One feedback record in the feedback tab's "so far" list.</summary>
+    internal sealed record FeedbackGivenItem(InvestigationFeedbackRow Row)
+    {
+        public string WhenDisplay => Row.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+
+        public string CorrectedDisplay => Row.CorrectedVerdict ?? "(report's)";
+    }
+
+    /// <summary>The corrected-verdict choice for the box's text: the first item means keep the report's verdict (null).</summary>
+    internal static string? CorrectedVerdictOf(string? choice) =>
+        choice is { } text && InvestigationFeedbackRules.CorrectedVerdicts.Contains(text, StringComparer.Ordinal) ? text : null;
+
+    /// <summary>Why Save Feedback cannot run, or null when it can; the rules' sentences come from the store's rule set.</summary>
+    internal static string? FeedbackError(FeedbackReportItem? selected, string? verdict, string? corrected, string? missedStep, string? comment) =>
+        selected is null ? "Select a report to give feedback on."
+        : InvestigationFeedbackRules.Validate(new InvestigationFeedbackSubmission(
+            selected.Row.RequestId, verdict ?? "", CorrectedVerdictOf(corrected),
+            string.IsNullOrWhiteSpace(missedStep) ? null : missedStep, string.IsNullOrWhiteSpace(comment) ? null : comment,
+            "viewer")) is { Count: > 0 } problems ? InvestigationFeedbackRules.RefusalMessage(problems)
+        : null;
+
     /// <summary>Why Save Profile cannot run, or null when it can.</summary>
     internal static string? SaveProfileError(ScopeChoice? scope, string? profileText) =>
         scope is null ? "Choose the fleet, a server or a tag."
@@ -130,8 +164,56 @@ public partial class InvestigationsWindow : Window
         }
 
         await LoadRequestsAsync();
+        await LoadFeedbackAsync();
         await LoadNotesAsync();
         await LoadProfilesAsync();
+    }
+
+    /// <summary>The window the feedback tab reads: the chosen number of days.</summary>
+    internal int FeedbackDays =>
+        FeedbackWindowBox.SelectedItem is ComboBoxItem { Tag: string tag } && int.TryParse(tag, NumberStyles.None, CultureInfo.InvariantCulture, out var days)
+            ? days : 30;
+
+    private async Task LoadFeedbackAsync()
+    {
+        try
+        {
+            var selected = (FeedbackReportsGrid.SelectedItem as FeedbackReportItem)?.Row.RequestId;
+            var (rows, truncated) = await _dataService.GetInvestigationFeedbackListAsync(FeedbackDays);
+            FamilyCountsGrid.ItemsSource = await _dataService.GetInvestigationFamilyCountsAsync(FeedbackDays);
+            _feedbackReports.Clear();
+            foreach (var row in rows)
+            {
+                _feedbackReports.Add(new FeedbackReportItem(row));
+            }
+
+            FeedbackTruncatedText.Text = truncated
+                ? string.Create(CultureInfo.InvariantCulture, $"Showing the newest {ViewerDataService.InvestigationFeedbackListLimit} reports; the counts above cover all of them.")
+                : "";
+            FeedbackReportsGrid.SelectedItem = _feedbackReports.FirstOrDefault(r => r.Row.RequestId == selected);
+            ShowFeedbackOf(FeedbackReportsGrid.SelectedItem as FeedbackReportItem);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not read the report feedback: " + ex.Message);
+        }
+    }
+
+    private void ShowFeedbackOf(FeedbackReportItem? item)
+    {
+        if (item is null)
+        {
+            FeedbackReportHeader.Text = "Select a report to see it and the feedback it has.";
+            FeedbackReportBox.Text = "";
+            FeedbackGivenGrid.ItemsSource = null;
+            return;
+        }
+
+        var row = item.Row;
+        FeedbackReportHeader.Text = row.ServerName + ", " + row.Family + " (" + row.FirstMetric + "): the agent said " + row.ReportVerdict;
+        FeedbackReportBox.Text = "By " + row.AgentId + ".\r\nRoot cause: " + row.RootCause
+            + (string.IsNullOrWhiteSpace(row.Summary) ? "" : "\r\nSummary: " + row.Summary);
+        FeedbackGivenGrid.ItemsSource = row.Feedback.Select(f => new FeedbackGivenItem(f)).ToList();
     }
 
     private void SetScopes(ViewerRouteScopeInputs? inputs)
@@ -277,6 +359,45 @@ public partial class InvestigationsWindow : Window
         }
     }
 
+    /// <summary>
+    /// Save Feedback (#5913): checks the selection and the values, then records the signed-in login's feedback on the report
+    /// and reloads. A second save by the same login replaces the first, which the status line says. A read-only seat's refusal
+    /// arrives as <see cref="ViewerReadOnlyException"/> and is shown in its own words.
+    /// </summary>
+    internal async Task SaveFeedbackCommandAsync()
+    {
+        var selected = FeedbackReportsGrid.SelectedItem as FeedbackReportItem;
+        var verdict = (FeedbackVerdictBox.SelectedItem as ComboBoxItem)?.Content as string;
+        var corrected = (FeedbackCorrectedBox.SelectedItem as ComboBoxItem)?.Content as string;
+        if (FeedbackError(selected, verdict, corrected, FeedbackMissedBox.Text, FeedbackCommentBox.Text) is { } error)
+        {
+            ShowStatus(error);
+            return;
+        }
+
+        try
+        {
+            var result = await _dataService.RecordInvestigationFeedbackAsync(
+                selected!.Row.RequestId, verdict!, CorrectedVerdictOf(corrected), FeedbackMissedBox.Text, FeedbackCommentBox.Text, _login);
+            ShowStatus(result.Outcome switch
+            {
+                InvestigationFeedbackOutcome.Recorded => "Feedback recorded.",
+                InvestigationFeedbackOutcome.Replaced => "Feedback recorded; it replaced your earlier feedback on this report.",
+                _ => result.Message ?? "The feedback was not recorded.",
+            });
+            if (result.Outcome is InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced)
+            {
+                FeedbackMissedBox.Text = "";
+                FeedbackCommentBox.Text = "";
+                await LoadFeedbackAsync();
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ShowStatus("Could not record the feedback: " + ex.Message);
+        }
+    }
+
     /// <summary>Approve or Reject: checks the selection, then decides the note and reloads.</summary>
     internal async Task DecideNoteCommandAsync(bool approve)
     {
@@ -358,6 +479,19 @@ public partial class InvestigationsWindow : Window
 
     private async void RequestsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         await ShowDetailAsync(RequestsGrid.SelectedItem as InvestigationRequestViewRow);
+
+    private void FeedbackReportsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+        ShowFeedbackOf(FeedbackReportsGrid.SelectedItem as FeedbackReportItem);
+
+    private async void FeedbackWindowBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (IsLoaded)
+        {
+            await LoadFeedbackAsync();
+        }
+    }
+
+    private async void SaveFeedback_Click(object sender, RoutedEventArgs e) => await SaveFeedbackCommandAsync();
 
     private void ProfileScopeBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => ShowProfileOfScope();
 

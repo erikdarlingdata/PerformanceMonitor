@@ -12,6 +12,8 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -468,6 +470,82 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         scopeServerId is { } server ? string.Create(CultureInfo.InvariantCulture, $"server {server} profile")
         : scopeTagId is { } tag ? string.Create(CultureInfo.InvariantCulture, $"tag {tag} profile")
         : "fleet profile";
+
+    /// <summary>How many requests the feedback list shows at most.</summary>
+    public const int InvestigationFeedbackListLimit = 200;
+
+    /// <summary>
+    /// The reported requests opened in the last <paramref name="daysBack"/> days, newest report first, each with the feedback
+    /// people gave it (#5913). Reads through <see cref="InvestigationFeedbackStore"/>; a store below V191 is a
+    /// <see cref="ViewerSchemaSkewException"/>. The second value says the window held more than the limit.
+    /// </summary>
+    public async Task<(IReadOnlyList<InvestigationFeedbackListRow> Rows, bool Truncated)> GetInvestigationFeedbackListAsync(
+        int daysBack, CancellationToken cancellationToken = default)
+    {
+        var store = FeedbackStore();
+        return await SkewAsync(() => store.ListReportedAsync(
+            DateTime.UtcNow.AddDays(-Math.Clamp(daysBack, 1, 365)), null, InvestigationFeedbackListLimit, cancellationToken));
+    }
+
+    /// <summary>The false-positive counts per alert family over the same window as the feedback list (#5913).</summary>
+    public async Task<IReadOnlyList<InvestigationFamilyCounts>> GetInvestigationFamilyCountsAsync(
+        int daysBack, CancellationToken cancellationToken = default)
+    {
+        var store = FeedbackStore();
+        return await SkewAsync(() => store.FamilyCountsAsync(
+            DateTime.UtcNow.AddDays(-Math.Clamp(daysBack, 1, 365)), null, cancellationToken));
+    }
+
+    /// <summary>
+    /// Records the signed-in person's feedback on a report (#5913): their verdict, the corrected verdict if they disagree, the
+    /// step the agent missed and a comment. The author is the login shaped by
+    /// <see cref="InvestigationFeedbackRules.AuthorFromIdentity"/>; a second record by the same login replaces the first. A
+    /// value the rules refuse is an <see cref="ArgumentException"/> carrying the rules' sentence, and nothing is written. An
+    /// unknown request or one with no report comes back as the result's outcome and message. A read-only seat's 42501 is
+    /// <see cref="ViewerReadOnlyException"/>. No journal row (the journal's event domain is not widened for feedback).
+    /// </summary>
+    public async Task<InvestigationFeedbackResult> RecordInvestigationFeedbackAsync(
+        Guid requestId, string verdict, string? correctedVerdict, string? missedStep, string? comment, string login,
+        CancellationToken cancellationToken = default)
+    {
+        var author = InvestigationFeedbackRules.AuthorFromIdentity(login);
+        if (author is null)
+        {
+            throw new ArgumentException(ValidateInvestigationLogin(login) ?? "The viewer could not tell who you are, so it cannot record the change.", nameof(login));
+        }
+
+        var store = FeedbackStore();
+        InvestigationFeedbackResult result;
+        try
+        {
+            result = await SkewAsync(() => store.RecordAsync(
+                new InvestigationFeedbackSubmission(requestId, verdict, correctedVerdict, missedStep, comment, author), cancellationToken));
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+
+        return result.Outcome == InvestigationFeedbackOutcome.Refused
+            ? throw new ArgumentException(result.Message, nameof(verdict))
+            : result;
+    }
+
+    private InvestigationFeedbackStore FeedbackStore() =>
+        new(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
+
+    /// <summary>Runs a feedback store call; a store without the V191 table or a column is the house schema-skew message.</summary>
+    private static async Task<T> SkewAsync<T>(Func<Task<T>> call)
+    {
+        try
+        {
+            return await call();
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+    }
 
     /// <summary>The login the actor names: not blank, at most 128 characters.</summary>
     public static string? ValidateInvestigationLogin(string? login) =>

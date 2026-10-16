@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace PerformanceMonitor.Common;
@@ -43,9 +44,11 @@ public static class InvestigationFeedbackRules
     public static bool IsValidAuthor(string? author) => InvestigationRules.IsValidAgentId(author);
 
     /// <summary>
-    /// The author a person's sign-in name is stored as: every character outside <c>[A-Za-z0-9._:-]</c> becomes an underscore
-    /// (so <c>DOMAIN\erik</c> is <c>DOMAIN_erik</c>, and an e-mail sign-in keeps its shape without the at sign), cut to
-    /// <see cref="MaxAuthorLength"/>. Null when nothing is left to name (a blank name).
+    /// The author a person's sign-in name is stored as. A name that already fits <c>[A-Za-z0-9._:-]{1,64}</c> is kept as it
+    /// is. Any other name has each outside character turned into an underscore (so <c>DOMAIN\erik</c> reads
+    /// <c>DOMAIN_erik</c>) and then gets a hyphen and 8 hex characters from a hash of the whole name (letter case ignored,
+    /// as V191's unique index ignores it), so two sign-ins that differ only in the characters V191 refuses, or only past
+    /// the 64th, stay two authors and never overwrite each other's feedback. Null when nothing is left to name (a blank name).
     /// </summary>
     public static string? AuthorFromIdentity(string? identity)
     {
@@ -55,18 +58,22 @@ public static class InvestigationFeedbackRules
             return null;
         }
 
-        var builder = new StringBuilder(Math.Min(trimmed.Length, MaxAuthorLength));
-        foreach (var c in trimmed)
+        if (IsValidAuthor(trimmed))
         {
-            if (builder.Length >= MaxAuthorLength)
-            {
-                break;
-            }
+            return trimmed;
+        }
 
+        // 64 = shaped part + '-' + 8 hex, so the distinguishing part is never the one cut.
+        var keep = Math.Min(trimmed.Length, MaxAuthorLength - 9);
+        var builder = new StringBuilder(MaxAuthorLength);
+        for (var i = 0; i < keep; i++)
+        {
+            var c = trimmed[i];
             builder.Append(c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '.' or '_' or ':' or '-' ? c : '_');
         }
 
-        return builder.ToString();
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(trimmed.ToLowerInvariant()));
+        return builder.Append('-').Append(Convert.ToHexString(hash, 0, 4).ToLowerInvariant()).ToString();
     }
 
     /// <summary>The problems with <paramref name="feedback"/>, in plain words; empty when the record is acceptable.</summary>
