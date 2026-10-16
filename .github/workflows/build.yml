@@ -268,6 +268,13 @@ jobs:
             echo "::notice title=Test map::No successful nightly has an unexpired test map built from an ancestor of this base (${seen} runs looked at), so the selection is FULL."
           fi
 
+  # #5949: the Guard stage is two jobs now, and neither is on the shards' critical path beyond the build.
+  # `guard-build` (below) builds and uploads both test projects; the shards, the whole-tree guards and the Linux
+  # image `need` it, and start the moment it ends. `guard-tests` fetches the same build and runs the Stage=Guard
+  # classes beside them. A red `guard-tests` (or a red `guard-build`) on a pull request starts `guard-cancel`,
+  # which cancels the run; the two aggregate result jobs run through that cancel and fail on the guard's result,
+  # so the required checks end failed. `build` no longer waits for either job.
+  #
   # #5459: the guard classes of BOTH test suites, first, so a source pin, a census or a hygiene scan that a
   # pull request breaks fails in about ten minutes with every shard skipped, instead of after the whole run.
   # Before this job, 6 PostgreSQL shards, 4 Lite shards, the build job's own suites and the Linux image all
@@ -305,8 +312,8 @@ jobs:
   # set is whatever carries the trait on THIS commit: no roster. An empty list is a hard error (a runner given
   # no class filter would run nothing or everything, and neither is a guard). Both suites run even when the
   # first fails, so one red run names everything that is broken.
-  guard-tests:
-    name: Guard tests
+  guard-build:
+    name: Guard tests build
     needs: gate
     if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}
     runs-on: windows-latest
@@ -320,6 +327,8 @@ jobs:
     # build, or a failed upload). The consumers download only when it is set; a job output is still published when
     # a later step of this job fails, which is the case that matters (the guards failed after the upload).
     outputs:
+      # Whether the guard classes run at all (false: every changed file is documentation).
+      run: ${{ steps.decide.outputs.run }}
       darling_build_artifact: ${{ steps.upload-darling-build.outcome == 'success' && 'guard-test-build-darling' || '' }}
       lite_build_artifact: ${{ steps.upload-lite-build.outcome == 'success' && 'guard-test-build-lite' || '' }}
 
@@ -448,8 +457,72 @@ jobs:
           overwrite: true
           if-no-files-found: error
 
+  # #5949: the guard CLASSES run here, in a job of their own that downloads guard-build's artifacts, so the
+  # shards, the Lite shards and `build` start as soon as the build is uploaded and no longer wait for the guard
+  # classes to finish (about three minutes of the old job). The job keeps its id and name, and every aggregate
+  # still reads its result. It checks out the same commit at the same workspace path and fetches both trees into
+  # their original relative paths, exactly as a shard does, because the guard classes find the repo root through
+  # [CallerFilePath] and a binary built at another path would read another tree.
+  guard-tests:
+    name: Guard tests
+    needs: [gate, guard-build]
+    if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup .NET 10.0
+        if: needs.guard-build.outputs.run == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Fetch the built Darling.Tests
+        if: needs.guard-build.outputs.run == 'true'
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-build.outputs.darling_build_artifact }}
+          path: .
+
+      - name: Fetch the built Lite.Tests
+        if: needs.guard-build.outputs.run == 'true'
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-build.outputs.lite_build_artifact }}
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error, as on the shards.
+      - name: Check the fetched build is for this workspace and commit
+        if: needs.guard-build.outputs.run == 'true'
+        shell: pwsh
+        env:
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Guard build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in @('Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll', 'Darling/Darling.Tests/obj/project.assets.json', 'Lite.Tests/obj/project.assets.json')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Guard build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+
       - name: Run the Stage=Guard classes of both suites
-        if: steps.decide.outputs.run == 'true'
+        if: needs.guard-build.outputs.run == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -490,7 +563,7 @@ jobs:
       # #5459: the Guard classes' xunit reports, whatever the step above did, for the shadow check (which lists the
       # failed classes of every report). Informational: a failed upload never turns the job red.
       - name: Upload the Guard darling report
-        if: steps.decide.outputs.run == 'true' && always()
+        if: needs.guard-build.outputs.run == 'true' && always()
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
@@ -501,7 +574,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload the Guard lite report
-        if: steps.decide.outputs.run == 'true' && always()
+        if: needs.guard-build.outputs.run == 'true' && always()
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
@@ -511,18 +584,42 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
+  # #5949: when the Guard tests (or their build) fail on a pull request, cancel the rest of the run, so a bad
+  # pull request costs the minutes the guard took and not the whole shard run it no longer waits for. A separate
+  # job, so the guard job keeps its own `failure` conclusion (a cancel called from inside a job turns that job
+  # cancelled). The aggregates below read `needs.guard-*.result` and run through this cancel (their `if:` is true
+  # when a guard job failed), so the required checks end failed, never skipped. A fork's token cannot cancel: the
+  # warning says so and the run is still red through the aggregates.
+  guard-cancel:
+    name: Cancel the run after a failed guard
+    needs: [guard-build, guard-tests]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-tests.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          echo "::error title=Guard tests failed::The Guard tests (or their build) failed, so this run is being cancelled. Read the Guard tests job's log for the failing class."
+          gh run cancel "${RUN_ID}" || echo "::warning title=Run not cancelled::gh run cancel failed (a fork's token cannot cancel). The run stays red through the aggregate checks."
+
   build:
     # test-map-select (#5459): the no-store Darling pass narrows to the map's selection on a pull request; the job still
     # runs, whatever that job did (`!cancelled()` below), and runs everything when there is no usable selection.
-    needs: [gate, guard-tests, test-map-select]
+    needs: [gate, test-map-select]
     # `build` is a required check, so it has to run to report anything but "skipped" (which counts as
     # passing). When the gate declines the run the job still starts, on a cheap Linux runner, and its
     # first step fails; no later step has an `always()`/`failure()` condition, so the rest are skipped.
     if: ${{ !cancelled() }}
-    # A pull request whose guard classes failed fails fast on the cheap Linux runner too (#5459): the step
-    # below reports it, and no Windows runner starts for a run that cannot pass. Push, merge_group and
-    # release keep the Windows runner whatever the guards said.
-    runs-on: ${{ needs.gate.outputs.run == 'true' && (github.event_name != 'pull_request' || needs.guard-tests.result == 'success') && 'windows-latest' || 'ubuntu-latest' }}
+    # #5949: `build` no longer waits for the Guard stage, so it cannot read the guard's result. A guard that fails on
+    # a pull request cancels the run (guard-cancel), and the two aggregate result jobs carry the guard's failure.
+    runs-on: ${{ needs.gate.outputs.run == 'true' && 'windows-latest' || 'ubuntu-latest' }}
 
     # Whether THIS job ran Darling.Tests, taken from the step's own outcome rather than restated as
     # a copy of the step's path gate. The darling-tree-guards job at the bottom of this file runs
@@ -550,19 +647,6 @@ jobs:
             exit 1
           fi
           echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it. (gate result: ${GATE_RESULT})"
-          exit 1
-
-      # #5459: the Guard tests job runs first on a pull request. When it did not succeed, this required check
-      # fails at once, before checkout, instead of building and running the suites for a run that is already
-      # lost; the shards were skipped for the same reason. Pull requests only: a push, a merge-queue run and a
-      # release carry on whatever the guards said (a release skips the guard job, so its result is `skipped`).
-      - name: Fail when the guard tests failed
-        if: ${{ github.event_name == 'pull_request' && needs.gate.outputs.run == 'true' && needs.guard-tests.result != 'success' }}
-        shell: bash
-        env:
-          GUARD_RESULT: ${{ needs.guard-tests.result }}
-        run: |
-          echo "::error title=Guard tests failed::The Guard tests job did not succeed (result: ${GUARD_RESULT}), so the rest of CI was skipped. Read that job's log for the failing class; it runs first and fails in about ten minutes."
           exit 1
 
       - uses: actions/checkout@v7
@@ -1540,8 +1624,8 @@ jobs:
     # a failed one decide for itself, and the result job below turns the skip into the failure it should be.
     # test-map-select (#5459) is a need so the selection exists before the shard starts; it never blocks the shard
     # (`!cancelled()`): a selection that did not arrive means the shard runs every class.
-    needs: [gate, guard-tests, test-map-select]
-    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
+    needs: [gate, guard-build, test-map-select]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-build.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: windows-latest
     # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
     # 30 minutes is 3x headroom over the cold path — past that, something is hung (pg_ctl -w
@@ -1670,11 +1754,11 @@ jobs:
       # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
       - name: Fetch the Guard job's build of the test project
         id: guard-build
-        if: steps.filter.outputs.darling == 'true' && needs.guard-tests.outputs.darling_build_artifact != ''
+        if: steps.filter.outputs.darling == 'true' && needs.guard-build.outputs.darling_build_artifact != ''
         continue-on-error: true
         uses: actions/download-artifact@v6
         with:
-          name: ${{ needs.guard-tests.outputs.darling_build_artifact }}
+          name: ${{ needs.guard-build.outputs.darling_build_artifact }}
           path: .
 
       # #5459 live selection: this run's test map selection, from the test-map-select job (pull requests only). Same
@@ -2151,8 +2235,8 @@ jobs:
   # something other than success, and this fails loudly and says which.
   darling-pg-result:
     name: Darling PostgreSQL tests
-    needs: [gate, guard-tests, darling-pg]
-    if: ${{ !cancelled() }}
+    needs: [gate, guard-build, guard-tests, darling-pg]
+    if: ${{ !cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-tests.result == 'failure')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -2161,7 +2245,7 @@ jobs:
         shell: bash
         env:
           RESULT: ${{ needs.darling-pg.result }}
-          GUARD_RESULT: ${{ needs.guard-tests.result }}
+          GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-tests.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
           EVENT_NAME: ${{ github.event_name }}
@@ -2177,15 +2261,16 @@ jobs:
             echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
             exit 1
           fi
-          # The Guard tests job runs first on a pull request (#5459). When it did not succeed the shards were
-          # skipped on purpose, and a skipped matrix reads as green, so this is where that becomes a failure. On
+          # The Guard tests run beside the shards on a pull request (#5949; first, before that). When they did not
+          # succeed the run was cancelled (guard-cancel) and a skipped or cancelled matrix must not read as green,
+          # so this is where that becomes a failure. On
           # a push, a merge-queue run or a release the shards ran whatever the guards said, but a guard that did
           # not pass is still a failure. `skipped` is fine on a release only: the guard job does not run there.
           if [ "${GUARD_RESULT}" != "success" ] && ! { [ "${EVENT_NAME}" = "release" ] && [ "${GUARD_RESULT}" = "skipped" ]; }; then
             if [ "${EVENT_NAME}" = "pull_request" ]; then
-              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed, so the shards did not run. Read that job's log for the failing class."
+              echo "::error title=Guard tests failed::guard result='${GUARD_RESULT}' - the Guard tests job (or its build) did not succeed, so the run was cancelled and the shards did not finish. Read that job's log for the failing class."
             else
-              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
+              echo "::error title=Guard tests failed::guard result='${GUARD_RESULT}' - the Guard tests job (or its build) did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
             fi
             exit 1
           fi
@@ -2224,8 +2309,8 @@ jobs:
   darling-linux:
     name: Darling Linux build
     # Fail fast on a pull request (#5459), exactly as the Darling PG shards: see the comment on that job.
-    needs: [gate, guard-tests]
-    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
+    needs: [gate, guard-build]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-build.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -2496,8 +2581,8 @@ jobs:
     name: Darling whole-tree guards
     # guard-tests too (#5459): when the Guard tests job failed on a pull request, `build` failed at once, and
     # a Windows runner started here would only report "not decided". It skips with the shards instead.
-    needs: [gate, build, guard-tests]
-    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
+    needs: [gate, build, guard-build]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-build.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: windows-latest
     # Measured on a warm NuGet cache: ~40s of .NET setup, ~10s restore, ~95s to build
     # Darling.Tests, ~35s for the suite. 20 minutes is ~6x that, past which something is hung and a
@@ -2599,11 +2684,11 @@ jobs:
       # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
       - name: Fetch the Guard job's build of the test project
         id: guard-build
-        if: steps.gate.outputs.run == 'true' && needs.guard-tests.outputs.darling_build_artifact != ''
+        if: steps.gate.outputs.run == 'true' && needs.guard-build.outputs.darling_build_artifact != ''
         continue-on-error: true
         uses: actions/download-artifact@v6
         with:
-          name: ${{ needs.guard-tests.outputs.darling_build_artifact }}
+          name: ${{ needs.guard-build.outputs.darling_build_artifact }}
           path: .
 
       # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
@@ -2814,8 +2899,8 @@ jobs:
     # goes for test-map-select: see there.
     # #5669: lite-scope is a need so its answer exists before the shards start; `mode == 'none'` skips all four legs
     # (nothing the Lite suite depends on changed), and an empty or unknown answer runs them as before.
-    needs: [gate, guard-tests, test-map-select, lite-scope]
-    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}
+    needs: [gate, guard-build, test-map-select, lite-scope]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-build.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -2897,11 +2982,11 @@ jobs:
       # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
       - name: Fetch the Guard job's build of the test project
         id: guard-build
-        if: steps.scope.outputs.run == 'true' && needs.guard-tests.outputs.lite_build_artifact != ''
+        if: steps.scope.outputs.run == 'true' && needs.guard-build.outputs.lite_build_artifact != ''
         continue-on-error: true
         uses: actions/download-artifact@v6
         with:
-          name: ${{ needs.guard-tests.outputs.lite_build_artifact }}
+          name: ${{ needs.guard-build.outputs.lite_build_artifact }}
           path: .
 
       # #5459 live selection: this run's test map selection, from the test-map-select job (pull requests only). Same
@@ -3202,8 +3287,8 @@ jobs:
   # (result)" for the shards to gate merges — noted on #3887.)
   lite-tests-result:
     name: Lite tests (result)
-    needs: [gate, guard-tests, lite-scope, lite-tests]
-    if: ${{ !cancelled() && github.event_name != 'release' }}
+    needs: [gate, guard-build, guard-tests, lite-scope, lite-tests]
+    if: ${{ (!cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-tests.result == 'failure'))) && github.event_name != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -3212,7 +3297,7 @@ jobs:
         shell: bash
         env:
           RESULT: ${{ needs.lite-tests.result }}
-          GUARD_RESULT: ${{ needs.guard-tests.result }}
+          GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-tests.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
           EVENT_NAME: ${{ github.event_name }}
@@ -3229,15 +3314,16 @@ jobs:
             echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
             exit 1
           fi
-          # The Guard tests job runs first on a pull request (#5459). When it did not succeed the shards were
-          # skipped on purpose, and a skipped matrix reads as green, so this is where that becomes a failure. On
+          # The Guard tests run beside the shards on a pull request (#5949; first, before that). When they did not
+          # succeed the run was cancelled (guard-cancel) and a skipped or cancelled matrix must not read as green,
+          # so this is where that becomes a failure. On
           # a push, a merge-queue run or a release the shards ran whatever the guards said, but a guard that did
           # not pass is still a failure. `skipped` is fine on a release only: the guard job does not run there.
           if [ "${GUARD_RESULT}" != "success" ] && ! { [ "${EVENT_NAME}" = "release" ] && [ "${GUARD_RESULT}" = "skipped" ]; }; then
             if [ "${EVENT_NAME}" = "pull_request" ]; then
-              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed, so the shards did not run. Read that job's log for the failing class."
+              echo "::error title=Guard tests failed::guard result='${GUARD_RESULT}' - the Guard tests job (or its build) did not succeed, so the run was cancelled and the shards did not finish. Read that job's log for the failing class."
             else
-              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
+              echo "::error title=Guard tests failed::guard result='${GUARD_RESULT}' - the Guard tests job (or its build) did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
             fi
             exit 1
           fi

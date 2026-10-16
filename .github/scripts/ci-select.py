@@ -178,7 +178,7 @@ class Rules:
         if not self.lite_shards:
             raise SystemExit(f"{lite_filter} holds no filters")
         self.tree = wf["darling-tree-guards"]
-        self.guard = wf["guard-tests"]
+        self.guard = wf["guard-build"]
         self.gate = load_file_filters(darling_filter)
 
     @staticmethod
