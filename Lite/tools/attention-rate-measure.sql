@@ -1,41 +1,55 @@
 -- attention-rate-measure.sql (#5736): the per-minute client attention rate, per server and for the fleet. The DuckDB twin of
--- Darling/tools/attention-rate-measure.sql: same buckets, same columns, same rule.
+-- Darling/tools/attention-rate-measure.sql: same buckets, same columns, same rule. The two are hand-written copies of one
+-- definition; change one and change the other in the same commit (nothing fails if only one moves, and the bars are set from both).
 --
 -- Why: the Client Timeouts alert (#5640) ships OFF with provisional bars of 10 (Warning) and 60 (Critical) attentions
 -- per minute, a guess. After a week of capture on a field store, run this to see the measured normal rate. The bar-setting
 -- rule is: take each server's p99.9 of the per-minute rate, then read the fleet spread of those p99.9 values (the fleet
 -- row: min, median, max) and set the defaults from that.
 --
--- How to run (the DuckDB CLI, on a COPY of the store or with Lite closed: DuckDB lets one process hold the file; copy
--- monitor.duckdb and monitor.duckdb.wal together to a scratch folder and open the copy read-only):
+-- How to run (the DuckDB CLI, on a read-only copy of the store, on the machine that ran Lite):
 --
---   duckdb -readonly <copy of monitor.duckdb> \
---          -c "SET VARIABLE range_from = '2026-10-13 00:00:00'; SET VARIABLE range_to = '2026-10-20 00:00:00';" \
---          -f attention-rate-measure.sql
+--   1. Close Lite first, so the store is checkpointed. A monitor.duckdb.wal file left beside the original means it is not: a
+--      copy of the .duckdb alone is missing what the .wal holds (the newest minutes). Start Lite and close it again until no
+--      .wal remains, then copy.
+--   2. Copy only the monitor.duckdb file to a scratch folder. Do not copy the .wal. Do not copy the archive folder.
+--   3. Run it on the same machine. The v_collection_log and v_attention_events views hold the ORIGINAL store's absolute archive
+--      path (a parquet glob baked in when the store was opened), so a copy still reads the archive from the original store's
+--      folder, wherever the copy sits; -readonly cannot repoint it. Moving the copy to another machine loses the archived weeks.
+--
+--   duckdb -readonly <copy of monitor.duckdb> -c "SET VARIABLE range_from = '2026-10-13 00:00:00'; SET VARIABLE range_to = '2026-10-20 00:00:00';" -f attention-rate-measure.sql
 --
 -- range_from and range_to are naive UTC timestamps (the clock of collection_time), range_from inclusive, range_to exclusive.
 -- Both are required. Add -csv for a file the next change can read. The query reads the v_collection_log and v_attention_events
--- archive views, the same relations the alert reads, so a week that straddles an archive-and-reset still reads in full (the views
--- need the store's archive folder in its usual place beside the copy; with no parquet files they are the plain tables).
+-- archive views, the same relations the alert reads, so a week that straddles an archive-and-reset still reads in full (with
+-- no parquet files the views are the plain tables).
 --
--- What one row means: per server, a bucket per calendar minute (date_trunc of collection_time) holding the sum of the
--- attention_events count rows (event_kind = 'count', the exact attentions since the prior run; the sample rows are detail and
--- never the total). The attention collector runs once a minute by default, so a minute holds one run. The server's observed
--- span is the first to the last minute that has a successful collector run in collection_log (collector_name = 'attention',
--- status = 'SUCCESS') or a count row. Every minute inside that span is a bucket, zero where nothing was counted: a p99.9 over
--- the non-empty minutes alone would overstate the rate, because quiet minutes write no row. Minutes outside the span are not
--- observed and are not counted. The first run after an app restart stages the counter and writes no count row, so that span
--- reads as quiet, the same known edge the alert has.
+-- What one row means: per server, a bucket per calendar minute that had a successful collector run (v_collection_log,
+-- collector_name = 'attention', status = 'SUCCESS'; the minute is date_trunc of collection_time). The bucket holds the sum of
+-- the attention_events count rows in that minute (event_kind = 'count', the exact attentions since the prior run; the sample
+-- rows are detail and never the total), and is zero when the run counted nothing. The attention collector runs once a minute
+-- by default, so a minute holds one run. A minute with NO successful run has no bucket: the collector did not look, so it is
+-- not a quiet minute, and inventing a zero for it would dilute the percentiles. A hole in collection therefore shows in the
+-- three coverage columns below, not as quiet minutes. A count row in a minute with no successful run is not read (the run that
+-- wrote it is not logged as a success, so the minute is not observed). The first run after a app restart stages the
+-- counter and writes no count row, so that minute reads as quiet, the same known edge the alert has.
 --
 -- Columns:
 --   scope                 server, or fleet for the last row
 --   server_id, server_name
---   minutes_observed      buckets in the span (zero-filled minutes included); on the fleet row the sum over servers
---   attentions            the sum of the count rows; on the fleet row the sum over servers
+--   minutes_in_span       minutes from the first to the last run, inclusive (the window the collector could have covered);
+--                         on the fleet row the sum over servers
+--   minutes_with_a_run    buckets: minutes that had a successful run; every percentile below is computed over these;
+--                         on the fleet row the sum over servers
+--   longest_gap_minutes   the longest stretch of consecutive minutes inside the span with no run (0 when there is none);
+--                         on the fleet row the largest over servers. Read it before trusting a p999: a long gap means the
+--                         rate was not measured for that long
+--   attentions            the sum of the count rows in the buckets; on the fleet row the sum over servers
 --   p50, p99, p999        percentiles (continuous) of attentions per minute over the buckets
 --   max_per_minute        the busiest minute
 --   p999_3min_avg         the p99.9 of the 3-minute rolling average of the per-minute rate, the quantity the alert compares to
---                         its bars (it averages over about three minutes); NULL when the span is under 3 minutes
+--                         its bars (it averages over about three minutes); only three consecutive run minutes make a window,
+--                         so a hole breaks it; NULL when no such window exists
 --   top_minutes           the three busiest minutes with a nonzero count, as "UTC minute=attentions; ..." (NULL when all are zero)
 --   fleet_p999_min, fleet_p999_median, fleet_p999_max
 --                         on the fleet row only: the spread of the per-server p999 across the servers above
@@ -74,43 +88,24 @@ counts AS (
     AND   e.collection_time < b.t_to
     GROUP BY e.server_id, date_trunc('minute', e.collection_time)
 ),
-seen AS (
-    SELECT server_id, server_name, minute FROM runs
-    UNION ALL
-    SELECT server_id, server_name, minute FROM counts
-),
-span AS (
-    SELECT
-        server_id,
-        max(server_name) AS server_name,
-        min(minute) AS first_minute,
-        max(minute) AS last_minute
-    FROM seen
-    GROUP BY server_id
-),
-spine AS (
-    SELECT
-        s.server_id,
-        s.server_name,
-        unnest(generate_series(s.first_minute, s.last_minute, INTERVAL 1 MINUTE)) AS minute
-    FROM span AS s
-),
 per_minute AS (
     SELECT
-        sp.server_id,
-        sp.server_name,
-        sp.minute,
-        coalesce(c.attentions, 0) AS attentions
-    FROM spine AS sp
+        r.server_id,
+        r.server_name,
+        r.minute,
+        coalesce(c.attentions, 0) AS attentions,
+        lag(r.minute) OVER (PARTITION BY r.server_id ORDER BY r.minute) AS prior_run_minute
+    FROM runs AS r
     LEFT JOIN counts AS c
-        ON  c.server_id = sp.server_id
-        AND c.minute = sp.minute
+        ON  c.server_id = r.server_id
+        AND c.minute = r.minute
 ),
 rolled AS (
     SELECT
         pm.*,
         CASE
             WHEN count(*) OVER w = 3
+            AND  date_diff('minute', min(pm.minute) OVER w, pm.minute) = 2
             THEN avg(CAST(pm.attentions AS DOUBLE)) OVER w
         END AS avg_3min,
         row_number() OVER (PARTITION BY pm.server_id ORDER BY pm.attentions DESC, pm.minute) AS busiest
@@ -121,7 +116,9 @@ per_server AS (
     SELECT
         r.server_id,
         max(r.server_name) AS server_name,
-        count(*) AS minutes_observed,
+        date_diff('minute', min(r.minute), max(r.minute)) + 1 AS minutes_in_span,
+        count(*) AS minutes_with_a_run,
+        coalesce(max(date_diff('minute', r.prior_run_minute, r.minute) - 1), 0) AS longest_gap_minutes,
         CAST(sum(r.attentions) AS BIGINT) AS attentions,
         quantile_cont(r.attentions, 0.5) AS p50,
         quantile_cont(r.attentions, 0.99) AS p99,
@@ -138,7 +135,9 @@ SELECT
     'server' AS scope,
     p.server_id,
     p.server_name,
-    p.minutes_observed,
+    p.minutes_in_span,
+    p.minutes_with_a_run,
+    p.longest_gap_minutes,
     p.attentions,
     round(CAST(p.p50 AS DECIMAL(18, 4)), 2) AS p50,
     round(CAST(p.p99 AS DECIMAL(18, 4)), 2) AS p99,
@@ -155,7 +154,9 @@ SELECT
     'fleet',
     NULL,
     '(' || CAST(count(*) AS VARCHAR) || ' servers)',
-    CAST(sum(p.minutes_observed) AS BIGINT),
+    CAST(sum(p.minutes_in_span) AS BIGINT),
+    CAST(sum(p.minutes_with_a_run) AS BIGINT),
+    max(p.longest_gap_minutes),
     CAST(sum(p.attentions) AS BIGINT),
     NULL,
     NULL,
@@ -168,4 +169,4 @@ SELECT
     round(CAST(max(p.p999) AS DECIMAL(18, 4)), 2)
 FROM per_server AS p
 HAVING count(*) > 0
-ORDER BY 1 DESC, 2;
+ORDER BY scope DESC, server_id;
