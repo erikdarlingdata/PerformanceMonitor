@@ -26,7 +26,6 @@ namespace Darling.Tests;
 /// Lite&lt;-&gt;Darling only. Lite.Tests carries the mirror-image pin for the Lite half.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class SharedBaselineModelPinTests
 {
     private const string SharedAssembly = "PerformanceMonitor.Analysis";

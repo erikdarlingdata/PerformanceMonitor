@@ -66,7 +66,6 @@ namespace Darling.Tests;
 /// could not report the whole repository as safe.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class EntraProviderPackageCensusTests
 {
     private const string CorePackage = "Microsoft.Data.SqlClient";

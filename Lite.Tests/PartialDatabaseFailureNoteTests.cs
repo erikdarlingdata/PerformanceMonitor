@@ -41,7 +41,6 @@ namespace PerformanceMonitorLite.Tests;
 /// schema versions of a plausible-looking empty table.
 /// </para>
 /// </summary>
-[Trait("Reads", "Darling")]
 public class PartialDatabaseFailureNoteTests
 {
     [Fact]

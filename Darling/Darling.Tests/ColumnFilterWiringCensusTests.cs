@@ -23,7 +23,6 @@ namespace Darling.Tests;
 /// with the same Name, would silently go unstored or overwrite each other, so this fails first.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class ColumnFilterWiringCensusTests
 {
     private static readonly Regex s_manager = new(@"new\s+DataGridFilterManager<[^>]+>\(\s*(?<grid>[^)\s]+)\s*\)", RegexOptions.Compiled);

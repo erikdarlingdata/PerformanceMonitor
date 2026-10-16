@@ -43,7 +43,6 @@ namespace Lite.Tests;
 /// the shared decision behaves correctly against Lite's real advertised schemas (the decision half), which
 /// is not implied by Darling's census: the schemas differ per SKU.</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
 public sealed class McpUnknownArgumentGuardTests
 {

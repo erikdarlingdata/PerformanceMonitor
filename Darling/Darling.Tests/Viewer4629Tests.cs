@@ -52,7 +52,6 @@ namespace Darling.Tests;
 /// assertion rather than left to that coincidence. No per-theme value changed for #4635: the existing
 /// #4629 hex already clears this background too.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 public class Viewer4629Tests
 {
     // The node card background (PlanViewerControl.Rendering.cs BuildNode: FindResource("BackgroundLightBrush")) —

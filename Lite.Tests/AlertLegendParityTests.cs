@@ -20,8 +20,6 @@ namespace Lite.Tests;
 /// be listed, and both SKUs must agree. #5640 adds Client Timeouts, which is graded the same way (orange at
 /// Warning, red at Critical) and sits on the same two legend lines.
 /// </summary>
-[Trait("Reads", "Darling")]
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class AlertLegendParityTests
 {

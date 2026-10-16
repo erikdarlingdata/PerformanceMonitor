@@ -36,7 +36,6 @@ namespace Lite.Tests;
 /// miss a tool that relied on framework-derived naming.
 /// </para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
 public sealed class CrossAppMcpToolInventoryPinTests
 {

@@ -41,7 +41,6 @@ namespace Darling.Tests;
 /// entire class green. <c>CollectorEngineCapabilityMovingGateTests</c> is the half that MOVES a gate and
 /// watches the answer move with it (#2518).</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class CollectorEngineCapabilityTests
 {
@@ -342,7 +341,6 @@ public sealed class CollectorEngineCapabilityTests
 /// behavioural sees that on the SKU that was not touched, which is exactly how the divergence
 /// <c>McpMissMessageParityPinTests</c> exists for got there.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class EngineCapabilityReadWiringTests
 {
@@ -664,7 +662,6 @@ public sealed class EngineCapabilityReadWiringTests
 /// into the true answer.</para>
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class EngineCapabilityMissLivePostgresTests
 {
     private const string AzureServerName = "darling-engine-cap-azure";

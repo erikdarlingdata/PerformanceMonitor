@@ -29,7 +29,6 @@ namespace Lite.Tests;
 /// map-select adds a class for the name reason.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Darling")]
 public sealed class CiSelectLocalClassesGuardTests : IDisposable
 {
     private readonly string _repo = Path.Combine(Path.GetTempPath(), "ci-local-classes-" + Guid.NewGuid().ToString("N"));

@@ -17,7 +17,6 @@ namespace Lite.Tests;
 /// that write the App alert statics.
 /// </summary>
 [Collection("app-alert-statics")]
-[Trait("Reads", "Darling")]
 public sealed class SmtpLoadedWarningTests
 {
     private static string? WithSettings(bool enabled, bool useSsl, string username, string? password, out bool passwordRead)

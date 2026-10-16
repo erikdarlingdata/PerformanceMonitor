@@ -33,7 +33,6 @@ namespace Lite.Tests;
 /// so a parser bug fails that self-test rather than silently passing the cross-app comparison.
 /// </para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
 public sealed class CrossAppPresetValuePinTests
 {

@@ -23,7 +23,6 @@ namespace Darling.Tests;
 /// notebook read it back as <c>external_source</c> (the key <c>get_alert_history</c> serves), and the alerts page shows it
 /// in a column that appears only while a fetched row has one. Every built-in alert reads null.
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class ExternalSourceSurfaceTests
 {
     private const string AlertsJsPath = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/alerts.js";

@@ -99,7 +99,6 @@ internal sealed class ScriptedMuteRuleStore : IMuteRuleStore
 /// never updates at all, so each one has an arm beside it proving a legitimately-empty read still empties
 /// the cache.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class MuteRuleReloadRetentionTests
 {
     private static MuteRule Rule(string id, string? metric = "High CPU") => new()

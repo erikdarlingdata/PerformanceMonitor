@@ -26,7 +26,6 @@ namespace PerformanceMonitorLite.Tests;
 /// #5558: the pure rule that names the databases this node holds only as a secondary copy. Every fail-open case
 /// is pinned: skipping a database wrongly hides a finding, so anything unknown skips nothing.
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class AgReplicaScopeTests
 {
     private static readonly DateTime End = new(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc);
@@ -136,7 +135,6 @@ public sealed class AgReplicaScopeTests
 }
 
 /// <summary>#5558: the table that classifies facts, and the census that keeps it complete.</summary>
-[Trait("Reads", "Darling")]
 public sealed class FactReplicaScopeCoverageTests
 {
     [Theory]
@@ -212,7 +210,6 @@ public sealed class FactReplicaScopeCoverageTests
 /// the node-local ones keep it. Three databases: <c>SecDb</c> (local secondary), <c>PrimDb</c> (local primary of a
 /// second group) and <c>StandDb</c> (not in a group).
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixture>
 {
     private const int ServerId = -558_001;

@@ -30,7 +30,6 @@ namespace Darling.Tests;
 /// <c>get_alert_history</c> reports the source an alert came from. Update's rule for the field is the tool's rule for
 /// every other optional dimension: a key left out leaves it, an explicit null clears it, a blank string is refused.
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class MuteRuleExternalSourceSurfaceTests
 {
     private static JsonNode Payload(string json) =>

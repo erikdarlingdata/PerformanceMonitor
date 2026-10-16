@@ -35,7 +35,6 @@ namespace Darling.Tests;
 ///
 /// <para>Every fact here was verified red-first by mutating the shipped behaviour it describes.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class OversizedPlanBacklogPins
 {

@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// NEXT rung's build goes red — the note V119's file left for this one.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class DeadlockRateBandRungTests
 {
     private const int RungVersion = 120;

@@ -34,7 +34,6 @@ namespace Darling.Tests;
 /// only property that matters: that a state somebody can fix is never reported as one they cannot, and the
 /// reverse.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class CollectorRuntimePreconditionTests
 {
     private const string Server = "precondition-probe";
@@ -915,7 +914,6 @@ public sealed class CollectorRuntimePreconditionTests
 /// on an engine that can never have the surface would re-introduce the defect #2511 closed, one layer down.
 /// Nothing in the type system enforces that, and a <c>??</c> chain is trivially reorderable.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class RuntimePreconditionReadWiringTests
 {
@@ -1202,7 +1200,6 @@ public sealed class RuntimePreconditionReadWiringTests
 /// everyone.</para>
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class RuntimePreconditionMissLivePostgresTests
 {
     private const string DeniedServerName = "darling-precondition-denied";

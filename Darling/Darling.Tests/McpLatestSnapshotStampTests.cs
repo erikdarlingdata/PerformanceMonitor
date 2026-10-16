@@ -49,7 +49,6 @@ namespace Darling.Tests;
 /// <c>Lite.Tests/McpLatestSnapshotStampTests</c> executes the Lite tools against a real DuckDB;
 /// <see cref="McpLatestSnapshotStampLivePostgresTests"/> executes the Darling ones against live Postgres.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class McpLatestSnapshotStampTests
 {
     /* ───────────────────────── the roster ───────────────────────── */
@@ -890,7 +889,6 @@ public sealed class McpLatestSnapshotStampTests
 /// assertions are equalities, and an anchor of "now" would make every age a race.
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class McpLatestSnapshotStampLivePostgresTests
 {
     private const string ServerName = "darling-mcp-latest-stamp-e2e";

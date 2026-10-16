@@ -23,7 +23,6 @@ namespace Darling.Tests;
 /// and every entry point that used to call the analyzer directly calls the pipeline instead.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class BenefitScorerWiringTests
 {
     /// <summary>

@@ -29,7 +29,6 @@ namespace Lite.Tests;
 /// selection reason cannot quietly turn the reach check off.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Darling")]
 public sealed class CiSelectQuarantineGuardTests : IDisposable
 {
     private const string Test = "Lite.Tests.OwnTests.Runs";

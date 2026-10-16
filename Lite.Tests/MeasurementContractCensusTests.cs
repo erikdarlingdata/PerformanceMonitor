@@ -160,7 +160,6 @@ namespace PerformanceMonitorLite.Tests;
 /// copies a reader field that a <c>Darling.Storage</c> alias populated, and only the twin can see both
 /// ends of that copy.</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
 public sealed class MeasurementContractCensusTests
 {

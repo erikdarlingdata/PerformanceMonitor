@@ -39,7 +39,6 @@ namespace Darling.Tests;
 /// Server hands an operator by default.</para>
 /// </summary>
 /* Reads Lite/README.md and a Lite csproj (#5651), so the Reads=Lite guard (#5459) wants the trait. */
-[Trait("Reads", "Lite")]
 public class DarlingRuntimePreflightTests
 {
     private static string InstallScript => ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));

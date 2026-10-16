@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// confirmed this fails against the pre-#3898-Phase-2 instructions (88,532 / 52,942 characters, and the old
 /// "### Diagnostic-analysis tools" family headers present).
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class DarlingMcpInstructionsBudgetTests
 {
     /* The rule for this ceiling (#5944). The instructions text is sent to every MCP client at the start of every session,

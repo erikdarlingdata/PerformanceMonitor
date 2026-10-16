@@ -30,7 +30,6 @@ namespace PerformanceMonitorLite.Tests;
 /// field names as Darling's twin and never a URL, key or host; the two writes are gated like the analysis mute and refuse
 /// while a saved-settings restore of the table is pending. Credential Manager is an in-memory pair here.
 /// </summary>
-[Trait("Reads", "Darling")]
 [Collection("app-alert-statics")]
 public sealed class NotificationRoutesMcpTests : IDisposable
 {

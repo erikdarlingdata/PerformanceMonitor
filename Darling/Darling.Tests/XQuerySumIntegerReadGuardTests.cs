@@ -33,7 +33,6 @@ namespace Darling.Tests;
 /// outside them is in <c>install/</c> and <c>deprecated/</c>, the retired SKUs.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class XQuerySumIntegerReadGuardTests
 {
     /// <summary>A value() whose XQuery is a sum or avg and whose SQL type is tinyint, smallint, int, integer or bigint. A single quote ends the query text, so the doubled quotes of a verbatim C# string do not hide it.</summary>

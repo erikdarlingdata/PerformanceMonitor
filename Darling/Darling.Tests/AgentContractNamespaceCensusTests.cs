@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// the same in a worktree under <c>.claude/worktrees</c>.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class AgentContractNamespaceCensusTests
 {
     private static readonly string[] Needles = { "AgentContract", "FakeInvestigationAgent" };

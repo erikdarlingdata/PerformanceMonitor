@@ -25,7 +25,6 @@ namespace PerformanceMonitorLite.Tests;
 /// What UI Automation reads for a grid ROW (it was the data item's type name, "...ViewerJobHistoryRow"), for a templated cell with
 /// nothing in it, and what the per-event handlers cost. The Viewer twin is in Darling.Tests (ViewerScreenReaderRowNamesTests).
 /// </summary>
-[Trait("Reads", "Darling")]
 public class ScreenReaderRowNamesTests
 {
     private static void Settle(Window window)

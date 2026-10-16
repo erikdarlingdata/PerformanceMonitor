@@ -43,7 +43,6 @@ namespace Lite.Tests;
 /// file arrive unexamined.
 /// </para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
 public class AuroraOnlySqlIsGatedTests
 {

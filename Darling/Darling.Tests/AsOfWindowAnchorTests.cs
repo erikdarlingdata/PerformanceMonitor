@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// which reads carry the parameter. The live half — seed a past window, read it anchored, read it
 /// unanchored, prove the two disagree — is <see cref="AsOfWindowAnchorLivePostgresTests"/>.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class AsOfWindowAnchorTests
 {
@@ -515,7 +514,6 @@ public sealed class AsOfWindowAnchorTests
 /// a demonstrably different answer, not the same one with more rows.
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class AsOfWindowAnchorLivePostgresTests
 {
     private const string ServerName = "darling-asof-anchor-e2e";

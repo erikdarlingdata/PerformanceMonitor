@@ -82,7 +82,6 @@ namespace Lite.Tests;
 /// EQUALITY against what the filter could not reach, and honoured only while
 /// <see cref="WholeTreeBackstopIsIntact"/> holds.</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class CrossAppGuardCiGateTests
 {
@@ -2879,7 +2878,8 @@ public class CrossAppGuardCiGateTests
         /* #5616: the cut itself is run-lite-shard.ps1, the one copy build.yml's legs and nightly.yml's legs both call. */
         var body = ReadLiteShardScript(RepoRoot());
         Assert.Contains("if ($ScopeMode -eq 'reads')", body, StringComparison.Ordinal);
-        Assert.Contains("Get-LiteClasses @('-trait', 'Reads=Darling')", body, StringComparison.Ordinal);
+        /* #5961: the Darling-reads classes come from ci-select.py's source scan, matched against the class listing. */
+        Assert.Contains("ci-select.py reads-classes --suite lite", body, StringComparison.Ordinal);
     }
 
     /// <summary>

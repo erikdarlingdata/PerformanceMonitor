@@ -37,7 +37,6 @@ namespace Darling.Tests;
 /// tier exists, and says the right thing there; both grids' row classes reach the shared decision and no
 /// grid still calls the by-name predicates directly.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class AlertHistoryRowSeverityTests
 {

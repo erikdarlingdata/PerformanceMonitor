@@ -13,7 +13,6 @@ namespace Darling.Tests;
 /// darling-linux-publish job needs both jobs and their success before it uploads, pushes, signs or attests.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class LinuxReleasePublishOrderTests
 {
     private static readonly string[] PublishSteps =

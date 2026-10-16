@@ -24,7 +24,6 @@ namespace Lite.Tests;
 /// Low-Impact preset's 5-minute cadence (M1), the top requests read by CPU ahead of its cap (L1), and the summary text
 /// the alert PR must not have changed (L3).
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class RunnableQueueRound1Tests : IClassFixture<SharedDuckDbFixture>
 {
     private const int ServerId = 5641_1;

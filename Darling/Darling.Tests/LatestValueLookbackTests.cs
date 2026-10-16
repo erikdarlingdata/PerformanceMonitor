@@ -44,7 +44,6 @@ namespace Darling.Tests;
 /// small enough for a test, and a ghost looks like data — so the shape is pinned on the text, the Lite twin is
 /// pinned to the same text, and the gated arm seeds ghosts and asks the planner.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class LatestValueLookbackSqlTests
 {
@@ -304,7 +303,6 @@ public sealed class LatestValueLookbackSqlTests
 /// included, because the ghost existed then.</para>
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class LatestValueLookbackLivePostgresTests
 {
     /// <summary>Sentinel ids — a real server_id is a storage-name hash, never these.</summary>

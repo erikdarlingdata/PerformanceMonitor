@@ -48,7 +48,6 @@ namespace Lite.Tests;
 /// artifact that stays green on the day a twentieth arrives.</para>
 /// </summary>
 [Collection("app-alert-statics")]
-[Trait("Reads", "Darling")]
 public sealed class McpAlertSettingsKeyTests
 {
     private static JsonElement Settings()

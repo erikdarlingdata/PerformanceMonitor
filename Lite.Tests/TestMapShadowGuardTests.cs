@@ -30,7 +30,6 @@ namespace Lite.Tests;
 /// file a test reads by name.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Darling")]
 public sealed class TestMapShadowGuardTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "testmap-shadow-" + Guid.NewGuid().ToString("N"));
@@ -633,7 +632,11 @@ public sealed class TestMapShadowGuardTests : IDisposable
 
         var scoped = RunShardScript("run-darling-pg-shard.ps1", "darling", all, selection, scopeFilter: "-trait Stage=Guard -trait Reads=Lite");
         Assert.True(scoped.ExitCode == 0, scoped.Output);
-        Assert.Equal("LIST [-list][classes/json][-trait][Stage=Guard][-trait][Reads=Lite]", ListingArguments(scoped.Output));
+        // #5961: the Lite-reads part of the scope is no runner filter any more (no assembly carries a Reads trait): the script
+        // lists once for the Guard stage and once unfiltered to match the source scan's names against.
+        Assert.Equal(
+            ["LIST [-list][classes/json]", "LIST [-list][classes/json][-trait][Stage=Guard]"],
+            ListingLines(scoped.Output));
         Assert.Equal("Darling.Tests.Class03Tests", Assert.Single(scoped.Ran));
 
         // No scope (every other caller): the listing is the bare `-list classes/json`, with no empty argument after it.
@@ -641,4 +644,37 @@ public sealed class TestMapShadowGuardTests : IDisposable
         Assert.True(whole.ExitCode == 0, whole.Output);
         Assert.Equal("LIST [-list][classes/json]", ListingArguments(whole.Output));
     }
+
+    [Fact]
+    public void TheDarlingShardScript_RunsExactlyTheClassesTheSourceScanSaysReadALitePath_ForTheLiteReadsScope()
+    {
+        // #5961: `-trait Reads=Lite` alone in the scope selects the classes ci-select.py's scan names, whatever the listing
+        // holds. Class03 reads a Lite path in the scratch tree; Class01 and Class02 do not.
+        string[] all = [.. Enumerable.Range(1, 3).Select(i => $"Darling.Tests.Class{i:00}Tests")];
+        var tests = Path.Combine(_dir, "shard-darling", "Darling", "Darling.Tests");
+        Directory.CreateDirectory(tests);
+        foreach (var i in new[] { 1, 2, 3 })
+        {
+            var path = i == 3 ? "\"Lite/Services/X.cs\"" : "\"Darling/Services/X.cs\"";
+            File.WriteAllText(
+                Path.Combine(tests, $"Class{i:00}Tests.cs"),
+                $"namespace Darling.Tests;\n\npublic sealed class Class{i:00}Tests\n{{\n    [Fact]\n    public void A() {{ var p = {path}; }}\n}}\n");
+        }
+
+        var run = RunShardScript("run-darling-pg-shard.ps1", "darling", all, null, eventName: "push", scopeFilter: "-trait Reads=Lite");
+        Assert.True(run.ExitCode == 0, run.Output);
+        Assert.Equal("Darling.Tests.Class03Tests", Assert.Single(run.Ran));
+        Assert.Equal(["LIST [-list][classes/json]"], ListingLines(run.Output));
+
+        // An empty scan adds no class: with the Guard stage in the scope the Guard listing still decides, and with
+        // nothing else in the scope the script stops at its zero check instead of running a runner with no -class argument.
+        File.Delete(Path.Combine(tests, "Class03Tests.cs"));
+        var empty = RunShardScript("run-darling-pg-shard.ps1", "darling", all, null, eventName: "push", scopeFilter: "-trait Reads=Lite");
+        Assert.NotEqual(0, empty.ExitCode);
+        Assert.Empty(empty.Ran);
+        Assert.Contains("returned no classes", empty.Output, StringComparison.Ordinal);
+    }
+
+    private static string[] ListingLines(string output) =>
+        [.. output.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.StartsWith("LIST ", StringComparison.Ordinal))];
 }

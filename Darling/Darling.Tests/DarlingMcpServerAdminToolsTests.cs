@@ -38,7 +38,6 @@ namespace Darling.Tests;
 /// bump round-trip (probe stubbed to success) is gated below.
 /// </summary>
 [Collection("darling-owned-secrets")]
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class DarlingMcpServerAdminToolsSurfaceTests
 {
@@ -1120,7 +1119,6 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 /// (remove sql2016, re-add via MCP).
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class DarlingMcpServerAdminToolsLivePostgresTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

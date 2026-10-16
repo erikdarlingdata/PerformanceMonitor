@@ -46,7 +46,6 @@ namespace Darling.Tests;
 /// only <c>config_version</c> mention under <c>Lite/</c> is a comment in <c>AppAlertEngineSettings</c>
 /// describing Darling's behaviour.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class ControlPlaneReloadDurabilityTests
 {

@@ -50,7 +50,6 @@ namespace PerformanceMonitorLite.Tests;
 /// exists for. Comments and string literals are stripped FIRST at every such site, because these
 /// files carry comments naming the very calls being searched for.</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public class EntraDeviceCodeTests
 {

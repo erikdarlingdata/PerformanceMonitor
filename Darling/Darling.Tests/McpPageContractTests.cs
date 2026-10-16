@@ -63,7 +63,6 @@ namespace Darling.Tests;
 /// arithmetic through each projection is <see cref="DarlingMcpPgPercentDenominatorTests"/>' subject; this
 /// file holds the census.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class McpPageContractTests
 {
     /* ───────────────────────── the census ───────────────────────── */
@@ -1315,7 +1314,6 @@ public sealed class McpPageContractTests
 /// because a window holding exactly <c>limit</c> rows is the case <c>count &gt;= limit</c> gets wrong.
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class McpPageContractLivePostgresTests
 {
     private const string ServerName = "darling-mcp-page-contract-e2e";
