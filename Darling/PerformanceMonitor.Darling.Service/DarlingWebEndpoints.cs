@@ -2133,13 +2133,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 var result = await store.RecordAsync(submission!, context.RequestAborted);
-                if (result.Outcome is not (InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced))
+                /* The store's own sentence for a refused, unknown or unreported request (never an exception's text). */
+                var (outcome, sentence) = result;
+                if (outcome is not (InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced))
                 {
-                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = result.Message! }, "/api/investigation-feedback/{requestId}",
-                        logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, FeedbackRefusalStatus(result.Outcome));
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = sentence! },"/api/investigation-feedback/{requestId}",
+                        logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, FeedbackRefusalStatus(outcome));
                 }
 
-                var receipt = FeedbackReceipt(result.Outcome, request, submission!.Author);
+                var receipt = FeedbackReceipt(outcome, request, submission!.Author);
                 return DarlingWebStatementSweep.JsonText(
                     receipt, "/api/investigation-feedback/{requestId}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
