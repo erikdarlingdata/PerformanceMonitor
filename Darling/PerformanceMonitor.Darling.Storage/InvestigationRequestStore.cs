@@ -216,13 +216,15 @@ SELECT r.server_id, r.story_path_hash, r.first_dedup_key, r.first_metric, $2, $3
 FROM config.investigation_requests AS r
 WHERE r.request_id = $1";
 
-    /* #5903: the pending notes for the approve screen, with the request that proposed each (server name, family). */
+    /* #5903: the pending notes for the approve screen, with the request that proposed each (server name, family). A note past
+       its expires_at is not listed: the brief read drops it (state = 'approved' AND expires_at > now), so an approval of it
+       would do nothing. $1 the limit, $2 now. */
     internal const string PendingNotesSql = @"
 SELECT n.note_id, n.server_id, r.server_name, n.metric_name, r.family, n.story_path_hash, n.note_text, n.author,
-       n.source_request_id, n.created_at
+       n.source_request_id, n.created_at, n.expires_at
 FROM config.investigation_notes AS n
 LEFT JOIN config.investigation_requests AS r ON r.request_id = n.source_request_id
-WHERE n.state = 'pending'
+WHERE n.state = 'pending' AND n.expires_at > $2
 ORDER BY n.created_at, n.note_id
 LIMIT $1";
 
@@ -906,7 +908,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     public async Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = Command(connection, null, PendingNotesSql, P(Math.Clamp(limit, 1, 1000)));
+        await using var command = Command(connection, null, PendingNotesSql, P(Math.Clamp(limit, 1, 1000)), P(Now()));
         var rows = new List<PendingInvestigationNote>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -921,7 +923,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.GetString(6),
                 reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetGuid(8),
-                DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc)));
+                DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
         }
 
         return rows;
@@ -929,16 +932,29 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     /// <inheritdoc />
     public Task<bool> ApproveNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
-        DecideNoteAsync(noteId, "approved", "note_approved", decidedBy, cancellationToken);
+        DecideNoteAsync(noteId, true, decidedBy, cancellationToken);
 
     /// <inheritdoc />
     public Task<bool> RejectNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
-        DecideNoteAsync(noteId, "rejected", "note_rejected", decidedBy, cancellationToken);
+        DecideNoteAsync(noteId, false, decidedBy, cancellationToken);
 
-    /* The update and its journal row share one transaction: a decision is never stamped without its audit row. */
-    private async Task<bool> DecideNoteAsync(long noteId, string state, string journalEvent, string decidedBy, CancellationToken cancellationToken)
+    /* The one decide statement of Darling's note decisions (#5903): the desktop Viewer, the web routes and the tests all come
+       through here, so there is one statement, one clock and one decided_by rule. The update and its journal row share one
+       transaction: a decision is never stamped without its audit row. */
+    /// <summary>Approves (<paramref name="approve"/>) or rejects a pending note. False when the note is gone or already decided.
+    /// Throws <see cref="ArgumentException"/> when <paramref name="decidedBy"/> fails
+    /// <see cref="InvestigationNoteRules.ValidateDecidedBy"/>.</summary>
+    public async Task<bool> DecideNoteAsync(long noteId, bool approve, string decidedBy, CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(decidedBy);
+        var refusal = InvestigationNoteRules.ValidateDecidedBy(decidedBy);
+        if (refusal is not null)
+        {
+            throw new ArgumentException(refusal, nameof(decidedBy));
+        }
+
+        decidedBy = decidedBy.Trim();
+        var state = approve ? "approved" : "rejected";
+        var journalEvent = approve ? "note_approved" : "note_rejected";
         var now = Now();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);

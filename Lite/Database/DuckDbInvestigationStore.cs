@@ -207,13 +207,14 @@ FROM investigation_requests AS r
 WHERE r.request_id = $1";
 
     /* #5903: the pending notes for the approve screen, oldest first, with the request that proposed each (server name,
-       family). Mirrors Darling's PendingNotesSql; created_at is naive UTC. */
+       family). Mirrors Darling's PendingNotesSql, expiry filter included: a note past its expires_at is not listed, because the
+       brief read drops it and an approval would do nothing. created_at and expires_at are naive UTC. $1 the limit, $2 now. */
     internal const string PendingNotesSql = @"
 SELECT n.note_id, n.server_id, r.server_name, n.metric_name, r.family, n.story_path_hash, n.note_text, n.author,
-       n.source_request_id, n.created_at
+       n.source_request_id, n.created_at, n.expires_at
 FROM investigation_notes AS n
 LEFT JOIN investigation_requests AS r ON r.request_id = n.source_request_id
-WHERE n.state = 'pending'
+WHERE n.state = 'pending' AND n.expires_at > $2
 ORDER BY n.created_at, n.note_id
 LIMIT $1";
 
@@ -820,7 +821,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     public async Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default)
     {
         using var connection = await OpenAsync(cancellationToken);
-        using var command = Command(connection, PendingNotesSql, Math.Clamp(limit, 1, 1000));
+        using var command = Command(connection, PendingNotesSql, Math.Clamp(limit, 1, 1000), Now());
         var rows = new List<PendingInvestigationNote>();
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -835,7 +836,8 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
                 reader.GetString(6),
                 reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetGuid(8),
-                Utc(reader.GetDateTime(9))));
+                Utc(reader.GetDateTime(9)),
+                Utc(reader.GetDateTime(10))));
         }
 
         return rows;
@@ -853,7 +855,13 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
        audit row. Only a person's action in the viewer reaches this; no MCP tool does. */
     private async Task<bool> DecideNoteAsync(long noteId, string state, string journalEvent, string decidedBy, CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(decidedBy);
+        var refusal = InvestigationNoteRules.ValidateDecidedBy(decidedBy);
+        if (refusal is not null)
+        {
+            throw new ArgumentException(refusal, nameof(decidedBy));
+        }
+
+        decidedBy = decidedBy.Trim();
         var now = Now();
         using var writeLock = _db.AcquireWriteLock(_lockBudget);
         using var connection = await OpenAsync(cancellationToken);

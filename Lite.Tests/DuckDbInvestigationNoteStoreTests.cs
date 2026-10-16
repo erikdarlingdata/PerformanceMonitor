@@ -12,7 +12,6 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.DependencyInjection;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Investigations;
@@ -153,14 +152,39 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         Assert.Equal(2, (await _store.ListPendingNotesAsync(10, Ct)).Count);
     }
 
+    /* #5903 round 1: a note is born with a 90-day expires_at and the brief read drops one past it, so approving an expired
+       pending note would do nothing. The list leaves it out and shows the expiry of the ones it does list. */
     [Fact]
-    public async Task TheRegistration_ResolvesTheNoteStore_OverTheSameDatabase()
+    public async Task AnExpiredPendingNote_IsNotListed_AndAListedNoteShowsItsExpiry()
     {
-        var services = new ServiceCollection();
-        LiteInvestigationServices.AddInvestigationBrief(services, _db);
-        using var provider = services.BuildServiceProvider();
-        var noteStore = provider.GetRequiredService<IInvestigationNoteStore>();
-        await ProposeAsync("blocking", "registered", T0.AddMinutes(-1));
-        Assert.Equal("registered", Assert.Single(await noteStore.ListPendingNotesAsync(10, Ct)).NoteText);
+        await ProposeAsync("blocking", "stale: proposed 100 days ago", T0.AddDays(-100));
+        await ProposeAsync("resources", "edge: expires a minute from now", T0.AddDays(-90).AddMinutes(1));
+        await ProposeAsync("jobs", "fresh", T0.AddMinutes(-5));
+        _now = T0;
+
+        var pending = await _store.ListPendingNotesAsync(200, Ct);
+        Assert.Equal(new[] { "edge: expires a minute from now", "fresh" }, pending.Select(n => n.NoteText).ToArray());
+        Assert.Equal(T0.AddMinutes(1), pending[0].ExpiresAtUtc);
+        Assert.Equal(DateTimeKind.Utc, pending[0].ExpiresAtUtc.Kind);
+        Assert.Equal(T0.AddMinutes(-5).AddDays(90), pending[1].ExpiresAtUtc);
+
+        /* The same clock decides the edge: a minute on, the edge note is expired and gone from the list. */
+        _now = T0.AddMinutes(1);
+        Assert.Equal("fresh", Assert.Single(await _store.ListPendingNotesAsync(200, Ct)).NoteText);
+    }
+
+    /* #5903 round 1: one decided_by rule (1 to 128 characters once trimmed) for every surface. */
+    [Fact]
+    public async Task ADecidedByOutsideOneTo128Characters_IsRefused_AndNothingChanges()
+    {
+        await ProposeAsync("blocking", "one", T0.AddMinutes(-10));
+        _now = T0;
+        var note = Assert.Single(await _store.ListPendingNotesAsync(10, Ct));
+        await Assert.ThrowsAsync<ArgumentException>(() => _store.ApproveNoteAsync(note.NoteId, new string('x', 129), Ct));
+        await Assert.ThrowsAsync<ArgumentException>(() => _store.RejectNoteAsync(note.NoteId, "", Ct));
+        Assert.Equal("0", Scalar("SELECT count(*) FROM investigation_journal WHERE event IN ('note_approved', 'note_rejected')"));
+
+        Assert.True(await _store.ApproveNoteAsync(note.NoteId, "  " + new string('x', 128) + "  ", Ct));
+        Assert.Equal(new string('x', 128), Scalar($"SELECT decided_by FROM investigation_notes WHERE note_id = {note.NoteId}"));
     }
 }

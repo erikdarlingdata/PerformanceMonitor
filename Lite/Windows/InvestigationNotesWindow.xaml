@@ -35,6 +35,8 @@
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Proposed" Binding="{Binding ProposedDisplay}" Width="130"
                                         ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="130"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerDisplay}" Width="130"
                                         ElementStyle="{StaticResource DataGridCellText}"/>
                     <DataGridTextColumn Header="Metric" Binding="{Binding MetricDisplay}" Width="110"

@@ -111,6 +111,7 @@ internal sealed class PendingNoteRow
         FamilyDisplay = note.Family ?? "";
         RequestDisplay = note.SourceRequestId?.ToString("D") ?? "";
         ProposedDisplay = note.ProposedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        ExpiresDisplay = note.ExpiresAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
     }
 
     public long NoteId { get; }
@@ -121,4 +122,7 @@ internal sealed class PendingNoteRow
     public string FamilyDisplay { get; }
     public string RequestDisplay { get; }
     public string ProposedDisplay { get; }
+
+    /// <summary>When the note stops reaching a brief: approving it counts only before then (an expired note is not listed).</summary>
+    public string ExpiresDisplay { get; }
 }

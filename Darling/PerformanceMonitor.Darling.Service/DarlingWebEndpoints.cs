@@ -1099,9 +1099,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// born gated by the host's write gate (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/> refuses every unsafe
     /// method to a read-only seat), 404 when the note is gone or already decided, 403 with <see cref="NoteDecisionRefusedMessage"/>
     /// when the store refuses the write for privilege (SQLSTATE 42501: deciding a note is an <c>admin</c> role write, and the web
-    /// host runs on whatever login it was given, the <c>viewer</c> role on a managed or compose store), a fixed-sentence 500 or 503
-    /// for any other store failure. The decision is stamped <c>person:</c> plus the seat's signed-in subject, else <c>person:viewer</c>. The
-    /// list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
+    /// host runs on whatever login it was given, the <c>viewer</c> role on a managed or compose store), 400 when the store's
+    /// <c>decided_by</c> rule refuses the seat's name (<see cref="InvestigationNoteRules.ValidateDecidedBy"/>), a fixed-sentence 500 or 503
+    /// for any other store failure. The decision is stamped as every web write is: the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>
+    /// (the signed-in subject, else <c>web</c>). The list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
     /// </summary>
     private static void MapInvestigationNotes(WebApplication app, InvestigationRequestStore notes, ILogger logger)
     {
@@ -1110,7 +1111,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                var pending = await notes.ListPendingNotesAsync(PendingNotesLimit, context.RequestAborted);
+                /* One row past the cap tells a full page from a cut one (#5903). */
+                var pending = await notes.ListPendingNotesAsync(PendingNotesLimit + 1, context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(
                     PendingNotesBody(pending), "/api/investigation-notes/pending", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
@@ -1130,6 +1132,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
+            if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
+            {
+                return NoteDeciderRefusedResult(refused);
+            }
+
             try
             {
                 if (!await notes.ApproveNoteAsync(id, decidedBy, context.RequestAborted))
@@ -1160,6 +1167,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
+            if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
+            {
+                return NoteDeciderRefusedResult(refused);
+            }
+
             try
             {
                 if (!await notes.RejectNoteAsync(id, decidedBy, context.RequestAborted))
@@ -1192,23 +1204,30 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static IResult NoteDecisionRefusedResult() =>
         ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
 
+    /// <summary>The 400 a decision answers when the store's <c>decided_by</c> rule refuses the seat's name: the rule's own plain
+    /// sentence (<see cref="InvestigationNoteRules.ValidateDecidedBy"/>), which never carries the name itself.</summary>
+    private static IResult NoteDeciderRefusedResult(string rulesSentence) =>
+        ErrorResult(rulesSentence, StatusCodes.Status400BadRequest);
+
     /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501).</summary>
     internal static bool IsInsufficientPrivilege(Exception ex) => ex is PostgresException { SqlState: "42501" };
 
     /// <summary>The most pending notes one list answers. A fleet that proposes more than this has a backlog the screen cannot
-    /// show whole; deciding the oldest shows the rest.</summary>
+    /// show whole; the list says so (<c>truncated</c>), and deciding the oldest shows the rest.</summary>
     internal const int PendingNotesLimit = 200;
 
-    /// <summary>Who a note decision is stamped as: <c>person:</c> plus the signed-in subject, or <c>person:viewer</c> for the
-    /// shared-token seat, the same <c>person:</c> prefix the desktop Viewer stamps.</summary>
-    internal static string NoteDecider(DarlingWebSeat seat) => "person:" + (string.IsNullOrWhiteSpace(seat.Subject) ? "viewer" : seat.Subject.Trim());
+    /// <summary>Who a note decision is stamped as: the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>, the convention every web
+    /// write path stamps its <c>updated_by</c> with (the signed-in subject, else <c>web</c> for the shared token).</summary>
+    internal static string NoteDecider(DarlingWebSeat seat) => seat.EditorPrincipal;
 
-    /// <summary>The list body: <c>{count, notes: [{note_id, server_id, server_name, metric_name, family, story_path_hash,
-    /// note_text, author, source_request_id, proposed_at_utc}]}</c>, oldest proposal first.</summary>
+    /// <summary>The list body: <c>{notes_returned, truncated, notes: [{note_id, server_id, server_name, metric_name, family,
+    /// story_path_hash, note_text, author, source_request_id, proposed_at_utc, expires_at_utc}]}</c>, oldest proposal first.
+    /// <paramref name="pending"/> is read with <see cref="PendingNotesLimit"/> + 1 rows: the first <see cref="PendingNotesLimit"/>
+    /// are returned and <c>truncated</c> is true when the extra row exists.</summary>
     internal static JsonObject PendingNotesBody(IReadOnlyList<PendingInvestigationNote> pending)
     {
         var array = new JsonArray();
-        foreach (var note in pending)
+        foreach (var note in pending.Take(PendingNotesLimit))
         {
             array.Add(new JsonObject
             {
@@ -1222,10 +1241,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["author"] = note.Author,
                 ["source_request_id"] = note.SourceRequestId?.ToString(),
                 ["proposed_at_utc"] = note.ProposedAtUtc.ToString("o", CultureInfo.InvariantCulture),
+                ["expires_at_utc"] = note.ExpiresAtUtc.ToString("o", CultureInfo.InvariantCulture),
             });
         }
 
-        return new JsonObject { ["count"] = pending.Count, ["notes"] = array };
+        return new JsonObject { ["notes_returned"] = array.Count, ["truncated"] = pending.Count > PendingNotesLimit, ["notes"] = array };
     }
 
     internal static JsonObject NoteDecisionBody(string status, long noteId, string decidedBy) =>

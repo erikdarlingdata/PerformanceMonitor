@@ -1226,12 +1226,15 @@ export const NOTE_COLUMNS = [
   { key: "author", label: "Proposed by" },
   { key: "request", label: "Request" },
   { key: "proposed_at_utc", label: "Proposed", format: "time" },
+  { key: "expires_at_utc", label: "Expires", format: "time" },
 ];
 
 const NOTES_NOTE_EDITING =
   "Notes an agent proposed that nobody has decided. An approved note goes into the briefs for its server; a rejected note " +
   "is kept, marked rejected, and never goes into a brief. The text cannot be edited here.";
 const NOTES_NOTE_READ_ONLY = "Notes an agent proposed that nobody has decided. This sign-in is read-only, so it cannot approve or reject them.";
+const NOTES_NOTE_EXPIRY =
+  " A note stops reaching briefs when it expires (the Expires column), and an expired note is not listed.";
 const NOTE_NOT_PENDING = "That note is not pending: it was already decided, or it is gone.";
 const NOTE_PAST = { approve: "approved", reject: "rejected" };
 
@@ -1250,7 +1253,16 @@ export function pendingNoteRows(data) {
     author: n.author,
     request: shortId(n.source_request_id),
     proposed_at_utc: n.proposed_at_utc,
+    expires_at_utc: n.expires_at_utc,
   }));
+}
+
+/** The sentence over a list the service cut at its cap, else null. The list says so itself (truncated), because the count it
+    carries is the page's (notes_returned), not the queue's: deciding the oldest notes shows the rest. */
+export function pendingNotesTruncatedNotice(data) {
+  if (!data || data.truncated !== true) return null;
+  const shown = Number.isInteger(data.notes_returned) ? data.notes_returned : Array.isArray(data.notes) ? data.notes.length : 0;
+  return "This list shows the oldest " + shown + " pending notes and more are waiting. Approve or reject some and the next ones appear.";
 }
 
 /** What a decision's answer says, in plain words: { message, isError, reread }. `verb` is "approve" or "reject". An expired
@@ -1351,7 +1363,9 @@ async function buildPending(body, generation) {
   if (bad) return mount(body, nodes.concat([bad]));
   const rows = pendingNoteRows(res.data);
   const canEdit = session.can_edit === true;
-  nodes.push(noticeStrip(canEdit ? NOTES_NOTE_EDITING : NOTES_NOTE_READ_ONLY));
+  nodes.push(noticeStrip((canEdit ? NOTES_NOTE_EDITING : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  const cut = pendingNotesTruncatedNotice(res.data);
+  if (cut) nodes.push(noticeStrip(cut));
   nodes.push(VIZ.table({ notes: rows }, {
     rowsKey: "notes",
     columns: noteColumns(canEdit),

@@ -83,6 +83,7 @@ public sealed class WebRouteStatementCensusTests
         (new Regex(@"^UnsupportedMediaTypeResult\s*\(\s*\)$", RegexOptions.Compiled), "a fixed 415 sentence"),
         (new Regex(@"^ErrorResult\s*\(", RegexOptions.Compiled), "the route's own request-validation message"),
         (new Regex(@"^NoteDecisionRefusedResult\s*\(\s*\)$", RegexOptions.Compiled), "#5903: a fixed 403 sentence (the store refused a note decision for privilege)"),
+        (new Regex(@"^NoteDeciderRefusedResult\s*\(\s*refused\s*\)$", RegexOptions.Compiled), "#5903: a fixed 400 sentence (InvestigationNoteRules.ValidateDecidedBy's own, which never carries the name)"),
         (new Regex(@"^(?:Alert)?NotFoundResult\s*\(\s*\)$", RegexOptions.Compiled), "a fixed 404 sentence"),
         (new Regex(@"^Results\s*\.\s*NoContent\s*\(\s*\)$", RegexOptions.Compiled), "no body"),
         (new Regex(@"^Results\s*\.\s*Json\s*\(\s*DarlingWebFailureLog\s*\.\s*Body\s*\(", RegexOptions.Compiled),

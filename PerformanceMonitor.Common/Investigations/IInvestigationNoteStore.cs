@@ -22,11 +22,14 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public interface IInvestigationNoteStore
 {
-    /// <summary>The pending notes, oldest proposal first, at most <paramref name="limit"/>.</summary>
+    /// <summary>The pending notes that have not expired, oldest proposal first, at most <paramref name="limit"/>. A note is born
+    /// with a 90-day <c>expires_at</c> and the brief composer drops one past it, so approving an expired note would do nothing:
+    /// an expired pending note is not listed (#5903).</summary>
     Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default);
 
     /// <summary>Approves a pending note and stamps <paramref name="decidedBy"/> and the time. False when the note is gone or
-    /// already decided, in which case nothing changes.</summary>
+    /// already decided, in which case nothing changes. Throws <see cref="ArgumentException"/> when <paramref name="decidedBy"/>
+    /// fails <see cref="InvestigationNoteRules.ValidateDecidedBy"/>.</summary>
     Task<bool> ApproveNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default);
 
     /// <summary>Rejects a pending note and stamps <paramref name="decidedBy"/> and the time. The note stays stored and never
@@ -34,8 +37,25 @@ public interface IInvestigationNoteStore
     Task<bool> RejectNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default);
 }
 
+/// <summary>The one rule on who a note decision names, shared by the Darling store (and so the desktop Viewer and the web
+/// routes) and Lite's store, so no surface can stamp a <c>decided_by</c> another refuses (#5903).</summary>
+public static class InvestigationNoteRules
+{
+    /// <summary>The longest <c>decided_by</c> a decision may carry.</summary>
+    public const int MaxDecidedByLength = 128;
+
+    /// <summary>Null when <paramref name="decidedBy"/> is 1 to <see cref="MaxDecidedByLength"/> characters once trimmed,
+    /// else a plain sentence that says why a decision naming it is refused.</summary>
+    public static string? ValidateDecidedBy(string? decidedBy) =>
+        string.IsNullOrWhiteSpace(decidedBy) ? "A note decision must say who made it."
+        : decidedBy.Trim().Length > MaxDecidedByLength
+            ? "The name on a note decision is longer than " + MaxDecidedByLength.ToString(System.Globalization.CultureInfo.InvariantCulture) + " characters."
+        : null;
+}
+
 /// <summary>One pending note for the approve screen. <see cref="ServerName"/>, <see cref="Family"/> and
-/// <see cref="SourceRequestId"/> are null for a note with no request behind it.</summary>
+/// <see cref="SourceRequestId"/> are null for a note with no request behind it. <see cref="ExpiresAtUtc"/> is when the note
+/// stops reaching a brief.</summary>
 public sealed record PendingInvestigationNote(
     long NoteId,
     int? ServerId,
@@ -46,4 +66,5 @@ public sealed record PendingInvestigationNote(
     string NoteText,
     string Author,
     Guid? SourceRequestId,
-    DateTime ProposedAtUtc);
+    DateTime ProposedAtUtc,
+    DateTime ExpiresAtUtc);

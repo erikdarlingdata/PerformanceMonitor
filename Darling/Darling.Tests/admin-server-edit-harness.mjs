@@ -1127,6 +1127,43 @@ try {
       const disabledCannotFocus = activeElement === null;
       return { afterFocus, keptWhenSiblingRepaints, lostWhenAncestorCleared, sameNodeBack, ancestorRecorded, lostOnTextReset, detachedCannotFocus, disabledCannotFocus };
     },
+    /* #5903: Approve on the Pending Notes tab. The page acts on the answer's reread flag: it reads the list again after an
+       approval or a 404 (the list is stale) and does NOT after a 403 refusal or a 500 (the list is right, the person is told why). */
+    decide: async (kind) => {
+      state.canEdit = true;
+      const note = (id) => ({
+        note_id: id, server_id: 1, server_name: "alpha", metric_name: "Blocking", family: "blocking", story_path_hash: "ABCDEF0123456789",
+        note_text: "note " + id, author: "agent:a", source_request_id: null, proposed_at_utc: "2026-10-01T00:00:00Z", expires_at_utc: "2026-12-30T00:00:00Z",
+      });
+      let pending = [note(7), note(8)];
+      const answers = {
+        approved: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 200, body: { status: "approved", note_id: 7 } }; },
+        gone: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 404, body: { error: "That note is not pending: it was already decided, or it is gone." } }; },
+        refused: () => ({ status: 403, body: { error: "Deciding a note needs a store login with the admin role." } }),
+        broken: () => ({ status: 500, body: { error: "The store did not answer." } }),
+      };
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/investigation-notes/pending") return { status: 200, body: { notes_returned: pending.length, truncated: false, notes: pending } };
+        if (method === "PUT" && url === "/api/investigation-notes/7/approve") return answers[kind]();
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("pending");
+      const listReads = () => requests.filter((r) => r.method === "GET" && r.url === "/api/investigation-notes/pending").length;
+      const approveIds = () => byAttr(main, "data-note-id").filter((b) => b.textContent === "Approve").map((b) => b.attrs["data-note-id"]);
+      const before = listReads();
+      const rowsBefore = approveIds();
+      const approve = byAttr(main, "data-note-id", "7").find((b) => b.textContent === "Approve");
+      await fire(approve, "click");
+      await settle(30);
+      return {
+        rowsBefore,
+        listReadsBefore: before,
+        listReadsAfter: listReads(),
+        writes: requests.filter((r) => r.method === "PUT").map((r) => r.url),
+        rowsAfter: approveIds(),
+        status: byAttr(main, "data-note-status").map((n) => n.textContent),
+      };
+    },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
        An export that is not a function (EDIT_FIELDS) is returned as it is. */

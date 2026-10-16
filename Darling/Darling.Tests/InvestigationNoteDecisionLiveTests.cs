@@ -238,7 +238,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         {
             var list = await Send("GET", "/api/investigation-notes/pending", null);
             Assert.Equal(200, list.Status);
-            Assert.Equal(2, (int)list.Body!["count"]!);
+            Assert.Equal(2, (int)list.Body!["notes_returned"]!);
             var first = list.Body["notes"]![0]!;
             Assert.Equal("first proposal", (string)first["note_text"]!);
             Assert.Equal(ServerName, (string)first["server_name"]!);
@@ -249,12 +249,12 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
 
             /* A write without the JSON content type is refused before the store is touched. */
             Assert.Equal(415, (await Send("PUT", $"/api/investigation-notes/{firstId}/approve", null)).Status);
-            Assert.Equal(2, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["count"]!);
+            Assert.Equal(2, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes_returned"]!);
 
             var approved = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
             Assert.Equal(200, approved.Status);
             Assert.Equal("approved", (string)approved.Body!["status"]!);
-            Assert.Equal("person:viewer", (string)approved.Body["decided_by"]!);
+            Assert.Equal("web", (string)approved.Body["decided_by"]!);
 
             var rejected = await Send("PUT", $"/api/investigation-notes/{secondId}/reject", "application/json");
             Assert.Equal(200, rejected.Status);
@@ -266,11 +266,11 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             Assert.Contains("not pending", (string)again.Body!["error"]!, StringComparison.Ordinal);
             Assert.Equal(404, (await Send("PUT", "/api/investigation-notes/999999999/approve", "application/json")).Status);
 
-            Assert.Equal(0, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["count"]!);
-            Assert.Equal("approved|person:viewer,rejected|person:viewer", await ScalarAsync(owner,
+            Assert.Equal(0, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes_returned"]!);
+            Assert.Equal("approved|web,rejected|web", await ScalarAsync(owner,
                 "SELECT string_agg(state || '|' || decided_by, ',' ORDER BY note_id) FROM config.investigation_notes", ct));
             Assert.Equal("2", await ScalarAsync(owner,
-                "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor = 'person:viewer'", ct));
+                "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor = 'web'", ct));
         });
     }
 
@@ -281,7 +281,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         {
             var list = await Send("GET", "/api/investigation-notes/pending", null);
             Assert.Equal(200, list.Status);
-            Assert.Equal(2, (int)list.Body!["count"]!);
+            Assert.Equal(2, (int)list.Body!["notes_returned"]!);
             var firstId = (long)list.Body["notes"]![0]!["note_id"]!;
             var secondId = (long)list.Body["notes"]![1]!["note_id"]!;
 
@@ -310,7 +310,73 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
                 "SELECT string_agg(state, '|' ORDER BY note_id) FROM config.investigation_notes", ct));
             Assert.Equal("0", await ScalarAsync(owner,
                 "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected')", ct));
-            Assert.Equal(2, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["count"]!);
+            Assert.Equal(2, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes_returned"]!);
+        });
+    }
+
+    /* #5903 round 1: a note is born with a 90-day expires_at and the brief read drops one past it, so approving an expired
+       pending note would do nothing. The list leaves it out and shows the expiry of the ones it lists; the one decide
+       statement refuses a decided_by outside 1 to 128 characters. */
+    [Fact]
+    public async Task AnExpiredPendingNote_IsNotListed_AListedOneShowsItsExpiry_AndADecidedByOver128IsRefused()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation note decision live tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = await MigratedAsync(scratch, ct);
+        var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
+        await ProposeAsync(store, DateTime.UtcNow.AddHours(-3), "stale: pending past its expiry", ct);
+        await ProposeAsync(store, DateTime.UtcNow.AddHours(-2), "fresh", ct);
+        await ExecAsync(owner, "UPDATE config.investigation_notes SET expires_at = now() - interval '1 day' WHERE note_text LIKE 'stale%'", ct);
+
+        var pending = Assert.Single(await store.ListPendingNotesAsync(200, ct));
+        Assert.Equal("fresh", pending.NoteText);
+        Assert.Equal(DateTimeKind.Utc, pending.ExpiresAtUtc.Kind);
+        Assert.InRange(pending.ExpiresAtUtc, DateTime.UtcNow.AddDays(90).AddMinutes(-5), DateTime.UtcNow.AddDays(90).AddMinutes(5));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ApproveNoteAsync(pending.NoteId, new string('x', 129), ct));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RejectNoteAsync(pending.NoteId, "  ", ct));
+        Assert.Equal("0", await ScalarAsync(owner,
+            "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected')", ct));
+        Assert.True(await store.ApproveNoteAsync(pending.NoteId, "  " + new string('x', 128) + "  ", ct));
+        Assert.Equal(new string('x', 128), await ScalarAsync(owner,
+            $"SELECT decided_by FROM config.investigation_notes WHERE note_id = {pending.NoteId}", ct));
+    }
+
+    /* #5903 round 1: the cap. 201 pending notes (199 planted older than the two the fixture proposes) answer 200, truncated,
+       oldest first; an expired one is not among them; deciding the oldest reveals the one that was cut. */
+    [Fact]
+    public async Task TheWebList_AtTheCap_ReturnsTheOldest200_SaysTruncated_AndDecidingTheOldestRevealsTheRest()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            await ExecAsync(owner, @"
+INSERT INTO config.investigation_notes (server_id, note_text, author, created_at)
+SELECT 7590301, 'planted ' || g, 'agent:planted', now() - interval '1 day' - make_interval(mins => 400 - g)
+FROM generate_series(1, 199) AS g;
+INSERT INTO config.investigation_notes (server_id, note_text, author, created_at, expires_at)
+VALUES (7590301, 'planted expired', 'agent:planted', now() - interval '2 days', now() - interval '1 day')", ct);
+
+            var list = await Send("GET", "/api/investigation-notes/pending", null);
+            Assert.Equal(200, list.Status);
+            Assert.Equal(200, (int)list.Body!["notes_returned"]!);
+            Assert.True((bool)list.Body["truncated"]!);
+            Assert.Null(list.Body["count"]);
+            var notes = list.Body["notes"]!.AsArray();
+            Assert.Equal(200, notes.Count);
+            Assert.Equal("planted 1", (string)notes[0]!["note_text"]!);
+            Assert.DoesNotContain(notes, n => (string)n!["note_text"]! == "planted expired");
+            Assert.DoesNotContain(notes, n => (string)n!["note_text"]! == "second proposal");
+            Assert.False(string.IsNullOrEmpty((string)notes[0]!["expires_at_utc"]!));
+
+            var approved = await Send("PUT", $"/api/investigation-notes/{(long)notes[0]!["note_id"]!}/approve", "application/json");
+            Assert.Equal(200, approved.Status);
+            var after = await Send("GET", "/api/investigation-notes/pending", null);
+            Assert.Equal(200, (int)after.Body!["notes_returned"]!);
+            Assert.False((bool)after.Body["truncated"]!);
+            Assert.Contains(after.Body["notes"]!.AsArray(), n => (string)n!["note_text"]! == "second proposal");
         });
     }
 }
