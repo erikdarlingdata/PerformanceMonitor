@@ -72,40 +72,6 @@ public sealed class InvestigationRungTests
         Assert.True(sql.LastIndexOf("REVOKE INSERT, UPDATE, DELETE", StringComparison.Ordinal) > sql.LastIndexOf("CREATE ", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void TheProbeCarriesTheSentinel_BelowV185s_AndAStoreStoppedHereMapsToThisRung()
-    {
-        Assert.Contains("to_regclass('config.investigation_requests') IS NOT NULL", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var parameters = method.GetParameters();
-        /* Found by name, not by distance from the top: every later rung's sentinel moved that distance (#5812, #5825). */
-        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasInvestigations");
-        Assert.True(ownOrdinal > 0, "MapProbedSchemaVersion takes this rung's sentinel");
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* A store stopped here: this rung's sentinel and every one below it, none above it. */
-        var atThisRung = (object[])all.Clone();
-        for (var i = ownOrdinal + 1; i < atThisRung.Length; i++)
-        {
-            atThisRung[i] = false;
-        }
-
-        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
-        var behind = (object[])atThisRung.Clone();
-        behind[ownOrdinal] = false;
-        Assert.Equal(183, (int)method.Invoke(null, behind)!);
-
-        var thisArm = viewer.IndexOf("if (hasInvestigations)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasReadCaller)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V184 arm sits above the V183 arm");
-    }
-
     /// <summary>A store at V183 that holds a route takes V184: the route keeps its effect (no agent level, the default
     /// limits), the agent CHECK refuses an hourly limit of 61, the journal refuses a second row with the same once key, and a
     /// second run of the rung changes nothing.</summary>
@@ -122,14 +88,7 @@ public sealed class InvestigationRungTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, RungVersion - 1, ct);
         await ExecAsync(connection, @"
 DELETE FROM darling_schema_version WHERE version >= 184;
 INSERT INTO config.config_notification_routes (metric_match, teams_url) VALUES ('Blocking', 'https://example.invalid/hook');", ct);

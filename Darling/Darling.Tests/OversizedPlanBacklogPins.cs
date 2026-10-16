@@ -1030,7 +1030,6 @@ public sealed class OversizedPlanBacklogPins
            rung still owns. */
         Assert.Contains("table_name = 'oversized_plan_backlog'", viewer, StringComparison.Ordinal);
         Assert.Contains("bool hasOversizedPlanBacklog = false", viewer, StringComparison.Ordinal);
-        Assert.Contains("reader.GetBoolean(96)", viewer, StringComparison.Ordinal);
 
         /* Above V120's arm. Newest-first is the whole contract of that method; "the TOP arm" was V122's
            claim to inherit, and PgAlertCountKnobRungTests holds it now. */

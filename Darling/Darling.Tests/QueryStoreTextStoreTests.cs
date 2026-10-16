@@ -99,30 +99,13 @@ public sealed class QueryStoreTextStoreTests
     }
 
     /// <summary>
-    /// The probe SQL must ASK for the table, and the three places that move in lockstep must agree: a probe
-    /// column, a reader argument, and a map parameter. A probe that cannot SEE the newest object maps every
-    /// fully-migrated store below the required version and the Viewer refuses to open.
-    ///
-    /// <para>Asserted on the reader's highest ordinal rather than by counting <c>EXISTS (</c>, because one
-    /// probe column is a COMPOUND <c>EXISTS(...) OR EXISTS(...)</c> — so the occurrence count is one higher
-    /// than the column count and a naive comparison fails for a reason that has nothing to do with this
-    /// rung.</para>
+    /// The probe SQL must ASK for the table: a probe that cannot SEE the newest object maps every fully-migrated store below the
+    /// required version and the Viewer refuses to open. The map itself is pinned by <c>MigrationProbeLadderTests</c>.
     /// </summary>
     [Fact]
-    public void TheProbeAsksForTheTable_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheTable()
     {
         Assert.Contains("table_name = 'query_store_text'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
-        var viewerSource = ReadViewerSource();
-
-        /* The reader must hand over exactly one argument per map parameter: ordinals are 0-based, so the
-           highest is Count - 1, and the next one up must NOT appear. */
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -113,11 +113,7 @@ public sealed class AlertResolutionSettingsRungTests
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct)); /* the ladder's top: V188 (#5821) and V189 (#5867) sit above this rung */
 
             /* A store one rung behind, holding a notification row, a route and an alert-history row from before the rung. */
-            await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, RungVersion - 1, ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 187", ct);
             await ExecAsync(connection, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
             await ExecAsync(connection, "INSERT INTO config.config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);

@@ -140,7 +140,6 @@ public sealed class PgAlertCountKnobRungTests
         Assert.Contains($"column_name = '{DeadlockColumn}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPgAlertCountKnobs", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);

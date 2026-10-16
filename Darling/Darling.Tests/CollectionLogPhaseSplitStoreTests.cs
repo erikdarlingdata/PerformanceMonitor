@@ -245,7 +245,6 @@ public class CollectionLogPhaseSplitStoreTests
             "table_name = 'collection_log' AND column_name = 'sql_drain_ms'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        Assert.Contains("reader.GetBoolean(83)", ReadViewerSource(), StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 

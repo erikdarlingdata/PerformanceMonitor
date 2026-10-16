@@ -92,21 +92,4 @@ public sealed class CollectionCaveatsRungTests
     }
 
     /* ---- the probe (top arm) -------------------------------------------------------------------------- */
-
-    /// <summary>
-    /// The viewer's schema map, given every sentinel up to this rung's ordinal, returns this rung's version, and with
-    /// this rung's sentinel clear, the previous rung's: a sentinel at the wrong ordinal maps a store one rung off.
-    /// </summary>
-    [Fact]
-    public void TheProbeMapsAStoreStoppedHereToThisRung()
-    {
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var arity = method.GetParameters().Length;
-        Assert.True(ProbeOrdinal < arity - 1);
-        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
-        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-        var behind = (object[])atThisRung.Clone();
-        behind[ProbeOrdinal] = false;
-        Assert.Equal(140, (int)method.Invoke(null, behind)!);
-    }
 }

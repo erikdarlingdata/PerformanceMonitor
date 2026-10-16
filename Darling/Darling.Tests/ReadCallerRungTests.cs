@@ -62,40 +62,6 @@ public sealed class ReadCallerRungTests
         }
     }
 
-    [Fact]
-    public void TheProbeCarriesTheSentinel_BelowV184s_AndAStoreStoppedHereMapsToThisRung()
-    {
-        Assert.Contains("to_regclass('collect.read_latency') AND attname = 'distinct_callers'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var parameters = method.GetParameters();
-        /* Found by name, not by distance from the top: every later rung's sentinel moved that distance (#5812, #5825). */
-        var ownOrdinal = Array.FindIndex(parameters, p => p.Name == "hasReadCaller");
-        Assert.True(ownOrdinal > 0, "MapProbedSchemaVersion takes this rung's sentinel");
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* A store stopped here: this rung's sentinel and every one below it, none above it. */
-        var atThisRung = (object[])all.Clone();
-        for (var i = ownOrdinal + 1; i < atThisRung.Length; i++)
-        {
-            atThisRung[i] = false;
-        }
-
-        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
-
-        var behind = (object[])atThisRung.Clone();
-        behind[ownOrdinal] = false;
-        Assert.Equal(182, (int)method.Invoke(null, behind)!);
-
-        var thisArm = viewer.IndexOf("if (hasReadCaller)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasReadLatencyCapacityFields)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V183 arm sits above the V182 arm");
-    }
-
     /// <summary>A store at V182 that already holds read-latency and slow-read rows takes V183: every row is kept with a NULL
     /// caller and a count of 0, the probe maps to 183, and a second run changes nothing.</summary>
     [Fact]
@@ -112,15 +78,7 @@ public sealed class ReadCallerRungTests
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* Put the two tables back to their V182 shape and the ladder back to 182. */
-        await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, RungVersion - 1, ct);
         await ExecAsync(connection, @"
 DELETE FROM darling_schema_version WHERE version >= 183;
 INSERT INTO collect.read_latency (metric_time, surface, route, outcome, window_band, run_count, total_ms, max_ms, bucket_counts)

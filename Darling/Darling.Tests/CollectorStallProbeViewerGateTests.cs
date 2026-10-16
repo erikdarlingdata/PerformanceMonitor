@@ -54,7 +54,6 @@ public class CollectorStallProbeViewerGateTests
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = ReadSource("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasCollectorStallProbes", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);

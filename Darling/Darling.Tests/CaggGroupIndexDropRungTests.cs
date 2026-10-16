@@ -66,7 +66,6 @@ public sealed class CaggGroupIndexDropRungTests
         Assert.Contains("collect.query_store_stats_hourly", probe, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;

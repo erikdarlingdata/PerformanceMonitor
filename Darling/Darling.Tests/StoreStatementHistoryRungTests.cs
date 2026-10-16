@@ -149,9 +149,7 @@ public sealed class StoreStatementHistoryRungTests
         Assert.Contains(arm, probe, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         /* No longer the probe's last arm: V164 (the hourly row-count ledger) landed above it. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();

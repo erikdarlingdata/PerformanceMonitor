@@ -42,7 +42,6 @@ public class StoreLogViewerGateTests
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = ReadSource("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasStoreLogSelfMonitoring", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);

@@ -315,98 +315,11 @@ public sealed class CaggGroupIndexDropLiveTests
     /// version-stamp rollback (<c>DELETE FROM darling_schema_version WHERE version >= N + 1</c>) actually
     /// simulates an older store for the schema PROBE too, not just the version row — a later rung's own
     /// sentinel object would otherwise still be on disk and make the probe map past the simulated version.
-    /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
+    /// A future rung that adds a new probe sentinel adds its removal to <see cref="RungRewindArtifacts.Ladder"/>.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
-        if (simulatedVersion < 191)
-        {
-            /* V191 (#5909) - the feedback table is the probe's newest sentinel. */
-            await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 190)
-        {
-            /* V190 (#5857) - the store metrics size-estimate marker is the probe's sentinel one below the newest. */
-            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 189)
-        {
-            /* V189 (#5867) - the compose builder's failure table is the probe's newest sentinel. */
-            await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 188)
-        {
-            /* V188 (#5821) - the investigation link rows' alert values. */
-            await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 187)
-        {
-            /* V187 (#5825) - the alert log's resolution columns. */
-            await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 186)
-        {
-            /* V186 (#5810) - the collection log's hourly rollup table. */
-            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 185)
-        {
-            /* V185 (#5812) - the plan regression partial-day watermark column. */
-            await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 184)
-        {
-            /* V184 (#5632) - the investigation request table. */
-            await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 183)
-        {
-            /* V183 (#5793) - the read-latency distinct caller column. */
-            await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 182)
-        {
-            /* V182 (#5506) - the read-latency window band column. */
-            await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 181)
-        {
-            /* V181 (#5750) - the route scope columns. */
-            await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < ExternalAlertTables.RungVersion)
-        {
-            /* V180 (#5654) - the registry of the services that raise alerts through the store is the probe's sentinel; its two dependants go with it. The shared helper owns the removal. */
-            await RungRewindArtifacts.DropV180SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 179)
-        {
-            /* V179 (#5640) - the Client Timeouts settings columns are the probe's newest sentinel. The shared helper owns the removal. */
-            await RungRewindArtifacts.DropV179SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < QueryStoreWatermarks.RungVersion)
-        {
-            /* V178 (#5684) - the per-batch Query Store watermark table is the probe's newest sentinel; the coverage table goes with it. The shared helper owns the removal. */
-            await RungRewindArtifacts.DropV178SentinelAsync(connection, ct);
-        }
-
-        if (simulatedVersion < 177)
-        {
-            /* V177 (#5641) - the Runnable Queue settings columns are the next sentinel down. The shared helper owns the removal. */
-            await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
-        }
+        /* The probe sentinels of the rungs above the simulated one (V177 and up) are the ladder's to remove (#5950). */
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, simulatedVersion, ct);
 
         if (simulatedVersion < ProcedureStatsTotals.RungVersion)
         {

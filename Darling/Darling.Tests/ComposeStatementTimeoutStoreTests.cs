@@ -66,24 +66,15 @@ public class ComposeStatementTimeoutStoreTests
     }
 
     /// <summary>
-    /// The probe, the reader ordinals and the map arity are three places that must agree; the reader hands over
-    /// exactly one argument per map parameter, so an added sentinel that forgot its ordinal fails here.
+    /// The probe SQL must ASK for the column: a probe that cannot SEE it maps every fully-migrated store below the required
+    /// version. The map itself is pinned by <c>MigrationProbeLadderTests</c>.
     /// </summary>
     [Fact]
-    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheColumn()
     {
         Assert.Contains(
             "table_name = 'config_service' AND column_name = 'compose_statement_timeout_seconds'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
-        var viewerSource = ReadViewerSource();
-
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
     }
 
     /// <summary>

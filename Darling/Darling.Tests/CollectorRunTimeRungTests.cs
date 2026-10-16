@@ -120,45 +120,6 @@ public sealed class CollectorRunTimeRungTests
         }
     }
 
-    [Fact]
-    public void TheProbeCarriesTheTableAsAnArm_AndMapsAStoreThroughTheRungToTheRung()
-    {
-        var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        var arm = $"to_regclass('config.{Table}') IS NOT NULL";
-        Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.IndexOf(arm, StringComparison.Ordinal) < probe.IndexOf("collect.query_store_top_daily", StringComparison.Ordinal),
-            "the newer rung's sentinel follows this one");
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var arity = method.GetParameters().Length;
-        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
-        Assert.Equal("hasCollectorRunAt", method.GetParameters()[ProbeOrdinal].Name);
-
-        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
-        Assert.Equal(160, (int)method.Invoke(null, all)!);
-
-        var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
-        Assert.Equal(159, (int)method.Invoke(null, behind)!);
-
-        var nextArm = viewer.IndexOf("if (hasQueryStoreTopDaily)", StringComparison.Ordinal);
-        var thisArm = viewer.IndexOf("if (hasCollectorRunAt)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasInstallIdTableOid)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "no sentinel arm: a store at this rung would map one rung short");
-        Assert.True(nextArm >= 0 && nextArm < thisArm, "the newer rung's arm sits above this one's");
-        Assert.True(thisArm < previousArm, "this arm sits below the newer rung's and above the previous one's");
-        Assert.Contains("return 160;", viewer[thisArm..previousArm], StringComparison.Ordinal);
-
-        /* The V71 finding: the table is named in the probe line and nowhere in the arm's prose. The comment block sits
-           ABOVE the `if`, and this probe line has no information_schema in it, so the prose must not repeat the name. */
-        var armProseStart = viewer.LastIndexOf("/* V160 (#4938)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the arm has no comment block saying why it exists");
-        Assert.DoesNotContain(Table, viewer[armProseStart..thisArm], StringComparison.Ordinal);
-    }
-
     /// <summary>The Collector Schedules window's Save is ONE call in ONE transaction (#4938): it never commits the run times as a
     /// transaction of their own ahead of the schedule rows, because a schedule write that then fails would leave the run time
     /// saved. The window calls the combined write once and none of the three single writes, and the combined write's scope writer

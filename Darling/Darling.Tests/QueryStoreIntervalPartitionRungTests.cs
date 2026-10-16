@@ -659,33 +659,15 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
             await RewindTableAsync(connection, table, ct);
         }
 
-        /* V185 (#5812), V184 (#5632), V183 (#5793), V182 (#5506) and V181 (#5750): the plan regression watermark column, the investigation tables, the read caller columns, the read latency capacity columns and the route scope columns are above V170 too (V185's is the probe's newest sentinel). */
-        await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
-        await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
-        /* V173 (#5582): the stamp-grain rollup and its triggers are above V170 too; RewindTableAsync dropped the triggers, the tables go here. */
-        /* V180 (#5654): the registry of the services that raise alerts is above V170 too (the probe's newest sentinel); its two dependants go with it. */
-        await RungRewindArtifacts.DropV180SentinelAsync(connection, ct);
-        /* V179 (#5640): the Client Timeouts settings columns are above V170 too. */
-        await RungRewindArtifacts.DropV179SentinelAsync(connection, ct);
-        /* V178 (#5684): the Query Store watermark side tables are above V170 too. */
-        await RungRewindArtifacts.DropV178SentinelAsync(connection, ct);
-        /* V177 (#5641): the Runnable Queue settings columns are above V170 too. */
-        await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
+        /* Every probe sentinel above V170 (V177 and up) goes; the ladder owns each removal (#5950). */
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 170, ct);
         /* V176 (#5638): the procedure totals table is above V170 too. */
         await ExecAsync(connection, "DROP TABLE IF EXISTS collect.procedure_stats_totals", ct);
         /* V175 (#5631): the daily plan regression rows-per-call column is above V170 too. */
         await ExecAsync(connection, "ALTER TABLE IF EXISTS collect.plan_regression_daily DROP COLUMN IF EXISTS rowcount_sum", ct);
         /* V174 (#5655): the service version table is above V170 too. */
         await ExecAsync(connection, "DROP TABLE IF EXISTS config.service_version", ct);
+        /* V173 (#5582): the stamp-grain rollup and its triggers are above V170 too; RewindTableAsync dropped the triggers, the tables go here. */
         await ExecAsync(connection, "DROP TABLE IF EXISTS collect.query_store_compose_stamp_hours, collect.query_store_compose_stamp_built, collect.query_store_compose_stamp; DROP FUNCTION IF EXISTS collect.query_store_compose_stamp_mark_late()", ct);
         await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + WideRungVersion.ToString(CultureInfo.InvariantCulture), ct);
     }

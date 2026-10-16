@@ -144,7 +144,6 @@ public class PgIndexBloatEstimateRungTests
 
         var viewer = ParitySourceLocal.ReadFile(
             "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPgIndexBloatEstimate", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
