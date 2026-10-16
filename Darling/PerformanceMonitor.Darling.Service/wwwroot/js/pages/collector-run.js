@@ -14,7 +14,7 @@
  */
 
 import { el, mount, apiGet, apiWrite, readTool } from "../util.js";
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
 
 const POLL_MS = 2000;
 const GIVE_UP_MS = 15 * 60 * 1000;
@@ -28,12 +28,6 @@ const bars = new Map();
 /* What the status line and the results table say for each server. Kept here, not in the elements, because the tab
    is rebuilt while a run goes (auto-refresh) and the run's last words must land on the page that is showing. */
 const shown = new Map();
-/* The session, once it has answered. app.js asks for it at start, long before anyone opens a server's tab. */
-let seat = null;
-getSession().then((session) => {
-  seat = session;
-});
-
 function notify(server) {
   const set = buttons.get(server);
   if (!set) return;
@@ -205,6 +199,8 @@ export function collectorRunBar(server) {
  * it is disabled) and does not also pick the row.
  */
 export function runNowColumns(server) {
+  /* The session app.js fetched at start, read without asking again: importing this module is not a data read. */
+  const seat = peekSession();
   if (!seat || !seat.can_edit) return [];
   return [
     {

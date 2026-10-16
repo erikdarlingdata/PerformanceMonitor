@@ -167,6 +167,35 @@ public sealed class RequestSnapshotNowRoleLiveTests
         });
     }
 
+    /// <summary>
+    /// A request that arrives while another request for the same server holds the per-server lock is refused with DL409 at
+    /// once, not queued behind it (provisioning never blocks: the function takes the lock with the try form).
+    /// </summary>
+    [Theory]
+    [InlineData("viewer")]
+    public async Task TheFunction_RefusesAtOnce_WhileAnotherRequestForTheSameServerHoldsTheLock(string managedRole)
+    {
+        await WithRoleAsync(managedRole, async (owner, asRole, ct) =>
+        {
+            await using var holder = await owner.OpenConnectionAsync(ct);
+            await using var transaction = await holder.BeginTransactionAsync(ct);
+            await using (var hold = new NpgsqlCommand($"SELECT pg_advisory_xact_lock(5941, {ServerId})", holder, transaction))
+            {
+                await hold.ExecuteScalarAsync(ct);
+            }
+
+            await using var call = asRole.CreateCommand("SELECT config.request_snapshot_now($1, NULL, 'web')");
+            call.Parameters.AddWithValue(ServerId);
+            call.CommandTimeout = 5; // a call that waited on the lock would time out here instead of refusing
+            var refused = await Assert.ThrowsAsync<PostgresException>(async () => await call.ExecuteScalarAsync(ct));
+            Assert.Equal("DL409", refused.SqlState);
+
+            await transaction.RollbackAsync(ct);
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
     private static async Task WithRoleAsync(
         string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, CancellationToken, Task> body)
     {

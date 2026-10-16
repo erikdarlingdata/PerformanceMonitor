@@ -22,6 +22,8 @@ import { apiGet, apiSend } from "./util.js";
 import { REFRESH_CHOICES } from "./refresh-policy.js";
 
 let _sessionPromise = null;
+/* The resolved session, for a synchronous reader that must not start the fetch itself (peekSession). */
+let _sessionValue = null;
 let _catalogPromise = null;
 
 /**
@@ -38,9 +40,21 @@ export function getSession() {
       r.kind === "data" && r.data && typeof r.data.can_edit === "boolean"
         ? r.data
         : { can_edit: false, probe_failed: true }
-    );
+    ).then((session) => {
+      _sessionValue = session;
+      return session;
+    });
   }
   return _sessionPromise;
+}
+
+/**
+ * The session if getSession() has already answered, else null. It never starts the request: a column list built
+ * synchronously (#5941's Run now column) reads the seat the shell fetched at start, and a page that never asked
+ * (a test harness that loads one module) does not gain a request it did not make.
+ */
+export function peekSession() {
+  return _sessionValue;
 }
 
 /** An empty compose sub-catalog — the shell a consumer reads array fields off when the fetch failed. */

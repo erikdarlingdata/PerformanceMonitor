@@ -2272,7 +2272,11 @@ BEGIN
    -- The same guard the service applies (#5941 review): one run at a time per server, and not within 60 seconds of the last
    -- request for it, so a holder of the viewer or mcp login cannot queue rows without limit. One lock per server makes the
    -- check and the insert one step.
-   PERFORM pg_advisory_xact_lock(5941, p_server_id);
+   -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the
+   -- same conflict as a pending row, so this refuses with the same DL409 instead of waiting.
+   IF NOT pg_try_advisory_xact_lock(5941, p_server_id) THEN
+      RAISE EXCEPTION 'A collector run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
    SELECT c.status, c.created_at INTO v_last_status, v_last_at
    FROM {config}.config_command AS c
    WHERE c.command_type = 'snapshot_now' AND c.target_server_id = p_server_id
