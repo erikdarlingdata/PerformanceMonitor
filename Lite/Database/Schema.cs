@@ -247,6 +247,111 @@ CREATE TABLE IF NOT EXISTS server_tag_map (
     public const string CreateServerTagMapIndex =
         "CREATE INDEX IF NOT EXISTS idx_server_tag_map_tag ON server_tag_map(tag_id)";
 
+    /* Query tags (#5989, schema v70): the Lite twin of Darling's config.query_tags / query_tag_assignments /
+       query_tag_rules / query_tag_map / query_tag_state and collect.query_tag_sightings (QueryTagSchema). Same
+       columns and the same CHECK rules; DuckDB has no IDENTITY, no self-FK cascade and no partial or expression
+       unique index, so ids are assigned in C# (max + 1 under the write lock), the subtree delete is walked by hand
+       and "unique name per parent" and "one assignment per key" are enforced by the store (LocalDataService.QueryTags).
+       The tags, assignments and rules are user choices and survive an archive reset; the sightings and the map are
+       derived and are rebuilt. */
+    public const string CreateQueryTagsTable = @"
+CREATE TABLE IF NOT EXISTS query_tags (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR NOT NULL,
+    parent_id INTEGER,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    colour VARCHAR,
+    created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    CHECK (trim(name) <> '')
+)";
+
+    public const string CreateQueryTagAssignmentsTable = @"
+CREATE TABLE IF NOT EXISTS query_tag_assignments (
+    id INTEGER PRIMARY KEY,
+    tag_id INTEGER NOT NULL,
+    kind VARCHAR NOT NULL,
+    server_id INTEGER,
+    query_hash VARCHAR,
+    database_name VARCHAR,
+    schema_name VARCHAR,
+    object_name VARCHAR,
+    query_id BIGINT,
+    created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    created_by VARCHAR NOT NULL,
+    CHECK (kind IN ('hash', 'object'))
+)";
+
+    public const string CreateQueryTagRulesTable = @"
+CREATE TABLE IF NOT EXISTS query_tag_rules (
+    id INTEGER PRIMARY KEY,
+    tag_id INTEGER,
+    priority INTEGER NOT NULL DEFAULT 100,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    server_id INTEGER,
+    match_field VARCHAR NOT NULL,
+    pattern VARCHAR NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    created_by VARCHAR NOT NULL,
+    CHECK (match_field IN ('application', 'login', 'host', 'database', 'object', 'text', 'text_tag')),
+    CHECK (match_field = 'text_tag' OR tag_id IS NOT NULL)
+)";
+
+    /* The text_sample cap is the shared constant, so the table and the collectors cannot disagree. */
+    public static readonly string CreateQueryTagSightingsTable = string.Create(System.Globalization.CultureInfo.InvariantCulture, $@"
+CREATE TABLE IF NOT EXISTS query_tag_sightings (
+    server_id INTEGER NOT NULL,
+    key_kind VARCHAR NOT NULL,
+    key VARCHAR NOT NULL,
+    database_name VARCHAR,
+    object_name VARCHAR,
+    application_name VARCHAR,
+    login_name VARCHAR,
+    host_name VARCHAR,
+    text_sample VARCHAR,
+    first_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    last_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    seen_count BIGINT NOT NULL DEFAULT 1,
+    CHECK (key_kind IN ('hash', 'object', 'caller')),
+    CHECK (text_sample IS NULL OR length(text_sample) <= {PerformanceMonitor.Common.QueryTags.QueryTagLimits.TextSampleCap}),
+    CHECK (seen_count >= 1)
+)");
+
+    public const string CreateQueryTagMapTable = @"
+CREATE TABLE IF NOT EXISTS query_tag_map (
+    server_id INTEGER NOT NULL,
+    key_kind VARCHAR NOT NULL,
+    key VARCHAR NOT NULL,
+    tag_id INTEGER NOT NULL,
+    source VARCHAR NOT NULL,
+    rule_id INTEGER,
+    matched_field VARCHAR,
+    matched_value VARCHAR,
+    built_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    PRIMARY KEY (server_id, key_kind, key),
+    CHECK (key_kind IN ('hash', 'object', 'caller')),
+    CHECK (source IN ('hand_hash', 'hand_object', 'rule'))
+)";
+
+    public const string CreateQueryTagStateTable = @"
+CREATE TABLE IF NOT EXISTS query_tag_state (
+    id INTEGER PRIMARY KEY,
+    rules_version BIGINT NOT NULL DEFAULT 1,
+    built_version BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    CHECK (id = 1)
+)";
+
+    /// <summary>The six query-tag tables, in the order the v70 step creates them (none depends on another).</summary>
+    public static IEnumerable<string> QueryTagTableStatements()
+    {
+        yield return CreateQueryTagsTable;
+        yield return CreateQueryTagAssignmentsTable;
+        yield return CreateQueryTagRulesTable;
+        yield return CreateQueryTagSightingsTable;
+        yield return CreateQueryTagMapTable;
+        yield return CreateQueryTagStateTable;
+    }
+
     /* #5750 (schema v69): the scoped notification routes, the Lite twin of Darling's
        config.config_notification_routes. A route says where an alert goes for a metric match, optionally limited to
        ONE server (scope_server_id: the hash id the alert path and server_tag_map use) or to a tag and its whole
@@ -476,6 +581,11 @@ CREATE TABLE IF NOT EXISTS agent_environment_profiles (
         yield return CreateServerTagsTable;
         yield return CreateServerTagMapTable;
         yield return CreateNotificationRoutesTable;
+
+        foreach (var statement in QueryTagTableStatements())
+        {
+            yield return statement;
+        }
 
         foreach (var statement in InvestigationTableStatements())
         {

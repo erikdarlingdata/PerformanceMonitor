@@ -213,6 +213,9 @@ public class ArchiveService
                                           max+1 in C#, safe because every row is restored.
          server_tags / server_tag_map   : user choice (#4887), PK id / (server_id, tag_id), one row per tag and
                                           per tagging; bounded by what the user created.
+         query_tags / query_tag_assignments / query_tag_rules : user choice (#5989), PK id each; ids are max + 1 in C#
+                                          and every row is restored. query_tag_sightings and query_tag_map are derived
+                                          and rebuilt, so they are not kept.
          notification_routes            : user choice (#5750), PK route_id; the destinations are in Credential Manager,
                                           keyed by route id, so restoring the rows verbatim keeps them wired.
          investigation_requests / _request_alerts / _reports / _journal / investigation_notes /
@@ -237,6 +240,9 @@ public class ArchiveService
         "server_tags",
         "server_tag_map",
         "notification_routes",
+        "query_tags",
+        "query_tag_assignments",
+        "query_tag_rules",
         "investigation_requests",
         "investigation_request_alerts",
         "investigation_reports",

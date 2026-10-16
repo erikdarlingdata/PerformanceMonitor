@@ -2161,6 +2161,7 @@ public partial class MainWindow : Window
                    refused: the second clear finds nothing to clear. */
                 StatusText.Text = StoreBusyReport.WaitingText($"removing '{server.DisplayName}'");
                 await Task.Run(() => _dataService.ClearServerTagsForServerAsync(removedServerId));
+                await Task.Run(() => _dataService.ClearQueryTagsForServerAsync(removedServerId));
                 StatusText.Text = string.Empty;
             }
             catch (StoreLockTimeoutException ex)

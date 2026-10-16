@@ -848,6 +848,8 @@ public class CollectionBackgroundService : BackgroundService
         try
         {
             await new LocalDataService(_duckDb).PurgeOldDismissedArchiveAlertsAsync();
+            /* #5989: the query-tag sightings age out on the same daily tick; only they are aged, the tags, assignments and rules are configuration. */
+            await new LocalDataService(_duckDb).PurgeOldQueryTagSightingsAsync();
             _lastDismissedAlertsCleanupTime = DateTime.UtcNow;
         }
         catch (Exception ex)
