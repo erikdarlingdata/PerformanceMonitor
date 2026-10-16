@@ -21,6 +21,7 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -549,4 +550,148 @@ public sealed class InvestigationPracticeGrantLiveTests
             await ExecAsync(owner, script, ct);
             return (AdminPassword, ViewerPassword);
         });
+}
+
+/// <summary>
+/// The Practice tab's panel on the shared STA thread (#5918), reached through the Investigations window that seats it: Start
+/// with nothing selected says so without reaching the store (it listens on nothing here), a read-only seat gets no Start
+/// control, and the score text reads in points or says nothing was scored.
+/// </summary>
+public sealed class InvestigationPracticePanelStaTests
+{
+    private const string UnreachableStore = "Host=127.0.0.1;Port=1;Username=nobody;Database=nothing;Timeout=3;Pooling=false";
+
+    private static void OnPanel(bool readOnly, Func<InvestigationPracticePanel, Task> body) =>
+        StaTestThread.Run(async () =>
+        {
+            await using var viewer = new ViewerDataService(UnreachableStore);
+            var window = new InvestigationsWindow(viewer, readOnly, "tester");
+            try
+            {
+                await body(window.PracticePanel);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+    [Fact]
+    public void Start_WithNoCaseSelected_SaysSo_BeforeAnyWrite() =>
+        OnPanel(false, async panel =>
+        {
+            await panel.StartCommandAsync();
+            Assert.Equal("Select a judged case to replay.", panel.PracticeStatusText.Text);
+        });
+
+    [Fact]
+    public void AReadOnlySeat_HasNoStartControl_AndAnAdminSeatHasOne()
+    {
+        OnPanel(true, panel =>
+        {
+            Assert.Equal(System.Windows.Visibility.Collapsed, panel.StartPracticePanel.Visibility);
+            return Task.CompletedTask;
+        });
+        OnPanel(false, panel =>
+        {
+            Assert.Equal(System.Windows.Visibility.Visible, panel.StartPracticePanel.Visibility);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public void AScoreRendersInPoints_AndAnUnscoredAgentSaysSo()
+    {
+        var scored = new InvestigationPracticeScore("agent-b", 3, 2, 1, 2, 2.0, 2.0, 1.0, 0);
+        var item = new InvestigationPracticePanel.PracticeScoreItem(scored);
+        Assert.Equal("agent-b", item.AgentId);
+        Assert.StartsWith("2 of 2 (", item.ScoreDisplay, StringComparison.Ordinal);
+        Assert.Equal("not scored yet", InvestigationPracticePanel.ScoreText(scored with { Percent = null }));
+    }
+}
+
+/* #1776 own-store: the fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT
+   [Collection("live-postgres")]. */
+
+/// <summary>
+/// The Practice tab's panel on a live store, on the shared STA thread (#5918): of two reported cases, only the one with
+/// feedback is listed; Start on it opens a practice request; once an agent's practice report lands the scores grid shows the
+/// agent with its points.
+/// </summary>
+public sealed class InvestigationPracticePanelLiveStaTests
+{
+    private const int ServerId = 7_591_803;
+    private const string ServerName = "LcPracticePanelSrv";
+
+    [Fact]
+    public async Task ThePanel_ListsOnlyTheJudgedCase_StartsItsPractice_AndShowsTheScore()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the practice panel live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var store = new InvestigationRequestStore(dataSource, 30);
+        async Task<Guid> ReportedAsync(DateTime at)
+        {
+            var id = (await store.OpenOrJoinAsync(new InvestigationAlert(
+                1, ServerId, ServerName, "blocking", "Blocking", at, new[] { ServerId + ":blocking" }, null, 50, 200,
+                LeaseMinutes: 15, ExpiryMinutes: 240), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(id, "agent-orig", ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                id, claim.ClaimId!.Value, "agent-orig", 1, "real", "root", true, "summary", "[{\"tool\":\"get_blocking\"}]"), ct));
+            return id;
+        }
+
+        var judged = await ReportedAsync(DateTime.UtcNow.AddHours(-9));
+        var unjudged = await ReportedAsync(DateTime.UtcNow.AddHours(-6));
+        await new InvestigationFeedbackStore(dataSource, 30).RecordAsync(
+            new InvestigationFeedbackSubmission(judged, "right", null, null, null, "lee"), ct);
+
+        var connectionString = scratch.ConnectionString;
+        var practice = Guid.Empty;
+        StaTestThread.Run(async () =>
+        {
+            await using var viewer = new ViewerDataService(connectionString);
+            var window = new InvestigationsWindow(viewer, false, "lee");
+            try
+            {
+                var panel = window.PracticePanel;
+                await panel.LoadAsync();
+                var items = panel.PracticeCasesGrid.Items.Cast<InvestigationPracticePanel.PracticeCaseItem>().ToList();
+                var listed = Assert.Single(items);
+                Assert.Equal(judged, listed.Row.RequestId);
+                Assert.DoesNotContain(items, i => i.Row.RequestId == unjudged);
+
+                panel.PracticeCasesGrid.SelectedItem = listed;
+                await panel.StartCommandAsync();
+                Assert.StartsWith("Practice request opened (", panel.PracticeStatusText.Text, StringComparison.Ordinal);
+                practice = Guid.Parse(panel.PracticeStatusText.Text.Split('(', ')')[1]);
+
+                var claim = await store.ClaimAsync(practice, "agent-b", ct);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                    practice, claim.ClaimId!.Value, "agent-b", 1, "real", "root", true, "same", "[{\"tool\":\"get_blocking\"}]"), ct));
+                await panel.LoadAsync();
+                var scores = ((IEnumerable<InvestigationPracticePanel.PracticeScoreItem>)panel.PracticeScoresGrid.ItemsSource).ToList();
+                var score = Assert.Single(scores);
+                Assert.Equal("agent-b", score.AgentId);
+                Assert.StartsWith("1 of 1 (", score.ScoreDisplay, StringComparison.Ordinal);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.NotEqual(Guid.Empty, practice);
+        await using var check = dataSource.CreateCommand($"SELECT practice_of::text FROM config.investigation_requests WHERE request_id = '{practice}'");
+        Assert.Equal(judged.ToString(), Convert.ToString(await check.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+    }
 }
