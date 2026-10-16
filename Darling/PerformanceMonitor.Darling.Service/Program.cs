@@ -528,72 +528,16 @@ if (OperatingSystem.IsWindows())
     }
 }
 
-/* #1560/#1562: the live MCP + web enable/port seams — the worker publishes the control-plane values on
-   every reload; each host's supervisor observes and starts/stops/rebinds without a service restart. */
-builder.Services.AddSingleton<McpRuntimeState>();
-builder.Services.AddSingleton<WebRuntimeState>();
-
-/* #3514: the host->worker seam carrying the served web-dashboard TLS certificate's expiry, so the worker's
-   alert sweep can raise a self-alert as it approaches (the web host loads the certificate once and only a
-   log line ever reported its expiry). */
-builder.Services.AddSingleton<WebTlsCertificateState>();
-
-/* #5288: the MCP listener's twin of the seam above, a SEPARATE singleton so each listener publishes and
-   clears only its own certificate: a web restart can never clear or resolve an MCP alert, and a certificate
-   both listeners serve is published to both and alerts (and resolves) twice, independently. */
-builder.Services.AddSingleton<McpTlsCertificateState>();
-
-/* #2298: the worker-published monitored-server registry the MCP host's plan-fetch resolver reads,
-   replacing its own mcp-role re-read of rows whose encrypted_password column that role is
-   deliberately denied. */
-builder.Services.AddSingleton<MonitoredServerRegistryState>();
-
-/* #2953: the collector's startup verdict — the worker publishes it, the web host's /api/ping reads it, and
-   neither touches the store to do so. A singleton for the same reason the three above are: the publisher and
-   the reader are separate hosted services in one process, and the answer has to survive being asked at any
-   moment rather than being computed on demand from something that might be down.
-
-   #4733: DARLING_STOPPED_MARKER, read once here, is the path of a file the state keeps present while collection
-   is stopped for good. Only the compose file sets it (its `darling` service's healthcheck tests for the file);
-   the Windows service and every other deployment leave it unset and nothing is written. */
 var stoppedMarkerPath = Environment.GetEnvironmentVariable("DARLING_STOPPED_MARKER");
-builder.Services.AddSingleton(services => new CollectorRuntimeState(
-    stoppedMarkerPath,
-    services.GetRequiredService<ILogger<CollectorRuntimeState>>()));
-
-/* #3941: the process's shared baseline tier. The worker's per-pass analysis services, the MCP host's and the web
-   host's each read the store as a different role (#3914), so they cannot share providers; they share the computed
-   30-day buckets instead, and a series is read from the store once per analysis hour between them. */
-builder.Services.AddSingleton<BaselineCache>();
-
-/* #4442 scope 2: the read-latency histogram accumulator, shared between the web host's /api/read/* dispatch
-   loop and RunComposedPanelAsync -- a singleton for the same reason CollectorCostAccumulator is: the worker's
-   flush and the web host's recording are separate hosted services in the one process. */
-builder.Services.AddSingleton<ReadLatencyAccumulator>();
-
-/* #5506 part 3: the read admission, one per process: the MCP and web hosts admit through the same slots, each host sets
-   the limit from reads.maxHeavyReads when it starts, and the worker builds its long-read table. */
-builder.Services.AddSingleton<ReadAdmission>();
-
-/* #5097: the slow-read record's queue. The three recorders offer to it; the worker runs its one writer once the store
-   is migrated. */
-builder.Services.AddSingleton<SlowReadLog>();
+/* The process-wide singletons and the three hosted services live in DarlingProcessServices.Add (#5950), so a test builds
+   the same container; their comments are there. */
+DarlingProcessServices.Add(builder.Services, stoppedMarkerPath);
 
 /* #5097: the per-statement timing listener for reads; samples only inside a ReadScope that asked for capture. */
 ReadStatementCapture.Register();
 
 /* #5506: the connection-wait listener for reads; records only inside a ReadScope. */
 ReadConnectionWait.Register();
-
-builder.Services.AddHostedService<DarlingWorker>();
-
-/* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on
-   darling.json's mcp.enabled (default OFF), so Program.cs stays config-free like the worker. */
-builder.Services.AddHostedService<DarlingMcpHostService>();
-
-/* #1562: the read-only web dashboard on its own port — registered always, self-gating on
-   darling.json's web.enabled (default OFF), same config-free posture as the worker and MCP host. */
-builder.Services.AddHostedService<DarlingWebHostService>();
 
 var host = builder.Build();
 

@@ -217,7 +217,10 @@ public sealed class CollectorStoppedMarkerTests : IDisposable
         var program = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/Program.cs");
 
         Assert.Single(Regex.Matches(program, Regex.Escape("GetEnvironmentVariable(\"DARLING_STOPPED_MARKER\")")));
-        Assert.Matches(@"new CollectorRuntimeState\(\s*stoppedMarkerPath\b", program);
-        Assert.DoesNotContain("AddSingleton<CollectorRuntimeState>()", program, StringComparison.Ordinal);
+        /* The registration moved out of the top-level statements into DarlingProcessServices (#5950). */
+        var registrations = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingProcessServices.cs");
+        Assert.Matches(@"new CollectorRuntimeState\(\s*stoppedMarkerPath\b", registrations);
+        Assert.DoesNotContain("AddSingleton<CollectorRuntimeState>()", registrations, StringComparison.Ordinal);
+        Assert.Matches(@"DarlingProcessServices\.Add\(builder\.Services,\s*stoppedMarkerPath\)", program);
     }
 }

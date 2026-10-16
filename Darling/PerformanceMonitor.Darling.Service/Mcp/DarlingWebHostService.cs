@@ -136,6 +136,9 @@ public sealed class DarlingWebHostService : BackgroundService
        Optional so a host built outside the service's DI (a test) keeps a private one. */
     private readonly BaselineCache _baselineCache;
 
+    /// <summary>The shared baseline cache this host holds (#5950): a test compares it with the container's one instance.</summary>
+    internal BaselineCache SharedBaselineCache => _baselineCache;
+
     /// <summary>#4442 scope 2: the process-wide read-latency histogram, passed through to <see
     /// cref="DarlingWebEndpoints.MapAll"/>. Optional so a host built outside the service's DI (a test) simply
     /// records nothing rather than needing its own instance.</summary>
