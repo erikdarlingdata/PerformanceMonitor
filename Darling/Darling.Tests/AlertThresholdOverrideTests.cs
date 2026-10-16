@@ -221,6 +221,31 @@ public sealed class AlertThresholdOverrideTests
         Assert.Contains(overrides.Calls, c => c.Key == AlertThresholdKey.PvsFloorGb && c.Database == "ledger");
     }
 
+    /// <summary>
+    /// An override of one bar of a Warning/Critical pair can cross the other. The evaluator's own clamp puts the
+    /// resolved pair back in order: a Warning of 30 over the global Critical of 16 lifts Critical to 30, so a reading
+    /// of 20 fires nothing on A, while B, on the global 8 / 16, pages for the same reading.
+    /// </summary>
+    [Fact]
+    public async Task APairedBarOverride_IsHeldInOrderByTheEvaluatorsClamp()
+    {
+        var overrides = new MapOverrides();
+        overrides.Values[(AlertThresholdKey.RunnableQueueWarningPerScheduler, ServerA, null)] = 30;
+        var h = new Harness { Overrides = overrides };
+        h.Settings.RunnableQueueEnabled = true;
+        var engine = h.Build();
+        h.Adapter.RunnableQueue = Enumerable.Range(0, 5)
+            .Select(i => new RunnableQueueSample(h.Now.AddSeconds(-10).AddMinutes(-i), 20, 80, 4))
+            .ToList();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* B holds the global pair (8 / 16): the same reading fires there. */
+        await engine.EvaluateServerAsync(SnapshotB());
+        Assert.Single(h.Deliverer.Outcomes, o => o.ServerKey == ServerB);
+    }
+
     [Fact]
     public async Task AThrowingOverride_FallsBackToTheGlobalValue()
     {

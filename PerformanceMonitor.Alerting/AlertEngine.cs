@@ -458,20 +458,6 @@ public sealed class AlertEngine
         }
     }
 
-    /// <summary>
-    /// #5910: a Warning/Critical pair. Each bar resolves on its own, so an override of one can cross the other; the
-    /// pair's own clamp (the one both stores apply on read) puts them back in order. With no overrides the pair is
-    /// the settings' pair, untouched, as before.
-    /// </summary>
-    private (int Warning, int Critical) ThresholdPair(
-        AlertThresholdKey warningKey, AlertThresholdKey criticalKey, string serverKey,
-        Func<int, int, (int Warning, int Critical)> clampBars)
-    {
-        int warning = Threshold(warningKey, serverKey);
-        int critical = Threshold(criticalKey, serverKey);
-        return _overrides is null ? (warning, critical) : clampBars(warning, critical);
-    }
-
     /// <summary>#5910: the file growth rise and level bars for one database on one server.</summary>
     private (int RiseMbPerHour, int VolumePercent) FileGrowthBars(string serverKey, string database) =>
         (Threshold(AlertThresholdKey.FileGrowthRiseMb, serverKey, database),
@@ -2254,11 +2240,8 @@ public sealed class AlertEngine
 
             _lastRunnableQueueEvaluation[key] = now;
 
-            var runnableBars = ThresholdPair(
-                AlertThresholdKey.RunnableQueueWarningPerScheduler, AlertThresholdKey.RunnableQueueCriticalPerScheduler, key,
-                RunnableQueueEvaluator.ClampBars);
             var finding = RunnableQueueEvaluator.Evaluate(
-                reading, runnableBars.Warning, runnableBars.Critical);
+                reading, Threshold(AlertThresholdKey.RunnableQueueWarningPerScheduler, key), Threshold(AlertThresholdKey.RunnableQueueCriticalPerScheduler, key));
 
             if (finding is not null)
             {
@@ -2438,11 +2421,8 @@ public sealed class AlertEngine
 
             _lastAttentionEvaluation[key] = now;
 
-            var attentionBars = ThresholdPair(
-                AlertThresholdKey.ClientTimeoutsWarningPerMinute, AlertThresholdKey.ClientTimeoutsCriticalPerMinute, key,
-                AttentionEvaluator.ClampBars);
             var finding = AttentionEvaluator.Evaluate(
-                reading, attentionBars.Warning, attentionBars.Critical,
+                reading, Threshold(AlertThresholdKey.ClientTimeoutsWarningPerMinute, key), Threshold(AlertThresholdKey.ClientTimeoutsCriticalPerMinute, key),
                 (database, app) => _isAlertMuted(new AlertMuteContext
                 {
                     ServerName = serverName,

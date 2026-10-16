@@ -19,8 +19,9 @@ namespace PerformanceMonitor.Alerting;
 ///
 /// <para><b>Contract.</b> Called on the sweep path, once per check per server and once per row for the
 /// database-scoped keys, so it must answer from memory: no I/O and no blocking. The engine uses the value it
-/// returns as-is (apart from re-ordering the two Warning/Critical pairs, which no single-key check can keep in
-/// order), so an implementation returns only values the global setting's own validation would accept. A throw is
+/// returns as-is, so an implementation returns only values the global setting's own validation would accept. The
+/// two Warning/Critical pairs (runnable queue, client timeouts) are the exception that needs no care here: each
+/// bar resolves on its own, and their evaluators clamp the pair back into order on every evaluation. A throw is
 /// logged and the engine falls back to the global value for that read rather than lose the whole check.</para>
 /// </summary>
 public interface IAlertThresholdOverrides
