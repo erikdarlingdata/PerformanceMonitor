@@ -327,17 +327,26 @@ DECLARE
     ring_buffer xml NOT NULL
 );
 
+{RingBufferXml.DeclareSql}
+
+SELECT /* PerformanceMonitorLite */
+    @ring_text = CONVERT(nvarchar(max), xet.target_data),
+    @ring_session = xes.name
+FROM {ringBufferSource}
+WHERE xes.name = N'{sessionName}'
+AND   xet.target_name = N'ring_buffer'
+OPTION(RECOMPILE);
+
+{RingBufferXml.ParseSql}
+
 INSERT
     @PerformanceMonitor_LongQueryCompletions
 (
     ring_buffer
 )
-SELECT /* PerformanceMonitorLite */
-    ring_xml = TRY_CAST(xet.target_data AS xml)
-FROM {ringBufferSource}
-WHERE xes.name = N'{sessionName}'
-AND   xet.target_name = N'ring_buffer'
-OPTION(RECOMPILE);
+SELECT
+    ring_xml = @ring_xml
+WHERE @ring_xml IS NOT NULL;
 {ShredSelect}";
 
         /* Use the most recent event_time from the host store as the cutoff, or fall back to
