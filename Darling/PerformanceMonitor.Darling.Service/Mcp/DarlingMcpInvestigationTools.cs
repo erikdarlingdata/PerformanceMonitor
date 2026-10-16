@@ -433,7 +433,11 @@ public sealed class DarlingMcpInvestigationTools
         "it (then lease_lost), even after the lease lapsed. report_format: 1. summary at most 4,000 characters, " +
         "proposed_note at most 2,000, root_cause at most 8,000; evidence at most 50 items, each string value at most 1,000 " +
         "characters, 32 KB in all (over a cap: status refused, naming the field and the cap). The note waits as pending until a person approves it, and only then reaches a later " +
-        "brief. Refusals are journaled once per request and reason.")]
+        "brief. Refusals are journaled once per request and reason. " +
+        "links (optional) is a JSON array of at most 10 {\"kind\":\"jira|pull_request|bug_report\",\"url\":\"https://...\",\"key\":\"OPS-123\"}: a ticket, " +
+        "pull request or bug report you opened or found. A url must be https with no user name or password; http, file and UNC " +
+        "(\\\\server\\share, //server/share) links are refused (invalid). Each URL is journaled once per request as link_recorded, and " +
+        "later briefs for the same server and family list it under prior_links. Darling stores the link and never calls Jira or git.")]
     public static Task<string> SubmitInvestigationReport(
         NpgsqlDataSource postgres,
         [Description("The request you claimed.")] string request_id,
@@ -445,17 +449,36 @@ public sealed class DarlingMcpInvestigationTools
         [Description("At most 4,000 characters.")] string summary,
         [Description("Optional note for a person to approve, at most 2,000 characters.")] string? proposed_note = null,
         [Description("Refused at Level 1. Omit.")] string? action_proposals = null,
+        [Description("Optional JSON array of at most 10 {kind, url, key}; https only. See the guide.")] string? links = null,
         CancellationToken cancellationToken = default) =>
         SubmitAsync(Store(postgres), request_id, claim_id, report_format, verdict, root_cause, evidence, summary,
-            proposed_note, action_proposals, cancellationToken);
+            proposed_note, action_proposals, cancellationToken, links);
+
+    /// <summary>The <c>reported</c> answer: <c>links_recorded</c> (the distinct URLs stored, #5914) only when the report
+    /// carried a link, so a report without one answers exactly as before.</summary>
+    private static string ReportedAnswer(Guid requestId, string? proposedNote, int linksRecorded)
+    {
+        var answer = new JsonObject
+        {
+            ["status"] = "reported",
+            ["request_id"] = requestId.ToString(),
+            ["proposed_note"] = string.IsNullOrWhiteSpace(proposedNote) ? null : "pending",
+        };
+        if (linksRecorded > 0)
+            answer["links_recorded"] = linksRecorded;
+        return answer.ToJsonString(McpHelpers.JsonOptions);
+    }
 
     /// <summary>The submit over a given store.</summary>
     internal static async Task<string> SubmitAsync(InvestigationRequestStore store, string request_id, string claim_id,
         int report_format, string verdict, string root_cause, string evidence, string summary, string? proposed_note,
-        string? action_proposals, CancellationToken cancellationToken)
+        string? action_proposals, CancellationToken cancellationToken, string? links = null)
     {
         var problems = InvestigationToolCore.ValidateReport(request_id, claim_id, verdict, root_cause, evidence, summary, proposed_note,
             action_proposals, out var requestId, out var claimId, out var evidenceJson);
+        /* #5914: links ride after the other fields, so a report's field order in invalid's message is unchanged. */
+        if (InvestigationReportLinks.Validate(links, out var reportLinks) is { } linkProblem)
+            problems.Add("links: " + linkProblem);
         try
         {
             var agent = requestId != Guid.Empty && claimId != Guid.Empty
@@ -503,16 +526,11 @@ public sealed class DarlingMcpInvestigationTools
             var outcome = await store.SubmitAsync(new InvestigationReportSubmission(
                 requestId, claimId, agent, (short)report_format, verdict, root_cause.Trim(),
                 RootCauseFound: verdict != "needs_person", summary.Trim(), evidenceJson!,
-                string.IsNullOrWhiteSpace(proposed_note) ? null : proposed_note.Trim()), cancellationToken);
+                string.IsNullOrWhiteSpace(proposed_note) ? null : proposed_note.Trim(), reportLinks.Count > 0 ? reportLinks : null), cancellationToken);
 
             return outcome switch
             {
-                InvestigationSubmitOutcome.Reported => JsonSerializer.Serialize(new
-                {
-                    status = "reported",
-                    request_id = requestId,
-                    proposed_note = string.IsNullOrWhiteSpace(proposed_note) ? null : "pending",
-                }, McpHelpers.JsonOptions),
+                InvestigationSubmitOutcome.Reported => ReportedAnswer(requestId, proposed_note, reportLinks.Count),
                 InvestigationSubmitOutcome.LeaseLost => InvestigationToolCore.Status("lease_lost",
                     "This claim_id no longer holds the request: a newer claim superseded it, or it never held one. The report was not stored."),
                 InvestigationSubmitOutcome.AlreadyReported => InvestigationToolCore.Status("already_reported", "The request already holds a report."),

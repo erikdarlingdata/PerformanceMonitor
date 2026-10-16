@@ -42,7 +42,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>claims_exhausted</c>, once per request). A release keeps its claim counted. It never reopens a lease;
 /// the claim's own WHERE takes a lapsed lease over.</para>
 /// </summary>
-public sealed class InvestigationRequestStore : IInvestigationRequestStore
+public sealed partial class InvestigationRequestStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
     /// <summary>The first key of the route lock, <c>pg_advisory_xact_lock(5632, route_id)</c>.</summary>
     public const int RouteLockKey = 5632;
@@ -65,10 +65,22 @@ WHERE r.server_id = $1
 ORDER BY r.opened_at DESC
 LIMIT 1";
 
-    internal const string JoinSql = @"
+    /// <summary>
+    /// The level an alert stamps (#5912): the route's level, except 1 for an alert of a custom rule an agent last wrote
+    /// (<c>updated_by</c> <c>agent:&lt;id&gt;</c>), so an agent cannot open its own Level 2 window. Custom rule alerts are named
+    /// <c>Custom:&lt;rule id&gt;</c>. <c>{metric}</c> and <c>{level}</c> are the statement's parameter numbers.
+    /// </summary>
+    internal static string StampLevelSql(int metric, int level) => $@"CASE WHEN EXISTS (
+        SELECT 1 FROM config.custom_alert_rules AS c
+        WHERE 'Custom:' || c.id::text = ${metric}
+          AND c.updated_by LIKE 'agent:%') THEN 1 ELSE ${level}::smallint END";
+
+    /// <summary>A join lowers the request to the joining alert's level (#5912): the lowest level among its routes wins.</summary>
+    internal static readonly string JoinSql = @"
 UPDATE config.investigation_requests
 SET alert_count = alert_count + 1,
-    last_alert_at = greatest(last_alert_at, $2)
+    last_alert_at = greatest(last_alert_at, $2),
+    autonomy_level = least(autonomy_level, " + StampLevelSql(3, 4) + @")
 WHERE request_id = $1";
 
     internal const string CountRouteSql = @"
@@ -78,11 +90,12 @@ FROM config.investigation_requests
 WHERE route_id = $1
   AND opened_at > $2 - interval '1 day'";
 
-    internal const string OpenSql = @"
+    internal static readonly string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
-     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + interval '30 minutes', $10, $10 + make_interval(mins => $11), $12)";
+     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + interval '30 minutes', $10, $10 + make_interval(mins => $11), $12,
+        " + StampLevelSql(6, 13) + ")";
 
     internal const string AlertRowsSql = @"
 INSERT INTO config.investigation_request_alerts
@@ -216,6 +229,26 @@ SELECT r.server_id, r.story_path_hash, r.first_dedup_key, r.first_metric, $2, $3
 FROM config.investigation_requests AS r
 WHERE r.request_id = $1";
 
+    /* #5903: the pending notes for the approve screen, with the request that proposed each (server name, family). A note past
+       its expires_at is not listed: the brief read drops it (state = 'approved' AND expires_at > now), so an approval of it
+       would do nothing. $1 the limit, $2 now. */
+    internal const string PendingNotesSql = @"
+SELECT n.note_id, n.server_id, r.server_name, n.metric_name, r.family, n.story_path_hash, n.note_text, n.author,
+       n.source_request_id, n.created_at, n.expires_at
+FROM config.investigation_notes AS n
+LEFT JOIN config.investigation_requests AS r ON r.request_id = n.source_request_id
+WHERE n.state = 'pending' AND n.expires_at > $2
+ORDER BY n.created_at, n.note_id
+LIMIT $1";
+
+    /* #5903: a decision lands only on a pending note, so a second click or a second viewer changes nothing. $1 note,
+       $2 the new state, $3 who, $4 when. */
+    internal const string DecideNoteSql = @"
+UPDATE config.investigation_notes
+SET state = $2, decided_by = $3, decided_at = $4
+WHERE note_id = $1 AND state = 'pending'
+RETURNING source_request_id, server_id";
+
     internal const string ReportsRequestsSql = @"
 SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.last_alert_at,
        r.alert_count,
@@ -240,10 +273,22 @@ FROM config.investigation_reports
 WHERE request_id = ANY($1)
 ORDER BY submitted_at DESC";
 
+    /* #5914: a report's links are its request's link_recorded journal rows, read whole (at most MaxLinks per request), so
+       the journal page's limit never drops one. ReportsJournalSql excludes the event for the same reason: these rows are
+       served in full here, and leaving them in the capped newest-first page would spend it twice on one fact (a link sorts
+       above its own reported row, so 100 reported requests with two links each would fill a 200-row page with links alone). */
+    internal const string ReportLinksSql = @"
+SELECT request_id, detail::text
+FROM config.investigation_journal
+WHERE request_id = ANY($1)
+  AND event = 'link_recorded'
+ORDER BY journal_id";
+
     internal const string ReportsJournalSql = @"
 SELECT event_time, request_id, server_id, event, actor, reason, detail::text
 FROM config.investigation_journal
 WHERE request_id = ANY($1)
+  AND event <> 'link_recorded'
 ORDER BY event_time DESC, journal_id DESC
 LIMIT $2";
 
@@ -326,7 +371,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         if (joinId is Guid join)
         {
-            await ExecAsync(connection, transaction, JoinSql, cancellationToken, P(join), P(alertTime));
+            await ExecAsync(connection, transaction, JoinSql, cancellationToken, P(join), P(alertTime), P(alert.MetricName),
+                P((short)alert.AutonomyLevel));
             await InsertAlertRowsAsync(connection, transaction, join, alert, alertTime, keys, cancellationToken);
             await JournalAsync(connection, transaction, now, join, alert.RouteId, alert.ServerId, "joined", "service",
                 alert.MetricName, null, null, cancellationToken);
@@ -361,7 +407,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await ExecAsync(connection, transaction, OpenSql, cancellationToken,
             P(requestId), P(alert.RouteId), P(alert.ServerId), P(alert.ServerName), P(alert.Family), P(alert.MetricName),
             PNullable(keys.FirstOrDefault()), PNullable(alert.StoryPathHash), P(alertTime), P(now), P(alert.ExpiryMinutes),
-            P(alert.LeaseMinutes));
+            P(alert.LeaseMinutes), P((short)alert.AutonomyLevel));
         await InsertAlertRowsAsync(connection, transaction, requestId, alert, alertTime, keys, cancellationToken);
         await JournalAsync(connection, transaction, now, requestId, alert.RouteId, alert.ServerId, "opened", "service",
             alert.MetricName, null, null, cancellationToken);
@@ -496,6 +542,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             return InvestigationSubmitOutcome.AgentIdInvalid;
         }
 
+        /* #5914: the tool layer's link rule again, before any write. */
+        InvestigationReportLinks.ThrowIfInvalid(report.Links, nameof(report));
         var now = Now();
         var actor = "agent:" + report.AgentId;
 
@@ -570,6 +618,15 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await ExecAsync(connection, transaction, ReportedSql, cancellationToken, P(report.RequestId), P(now));
         await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
+        /* #5914: each link is a link_recorded row under the agent's actor, once per request and URL (the once-key). A
+           report is stored once per request, so a request holds at most MaxLinks of them. */
+        foreach (var link in InvestigationReportLinks.Distinct(report.Links ?? []))
+        {
+            await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, InvestigationReportLinks.JournalEvent,
+                actor, link.Kind, InvestigationReportLinks.DetailJson(link), InvestigationReportLinks.OnceKey(report.RequestId, link.Url),
+                cancellationToken);
+        }
+
         await transaction.CommitAsync(cancellationToken);
         return InvestigationSubmitOutcome.Reported;
     }
@@ -736,6 +793,30 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
         }
 
+        var links = new Dictionary<Guid, List<InvestigationReportLink>>();
+        await using (var command = Command(connection, null, ReportLinksSql, P(ids)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (InvestigationReportLinks.FromDetail(reader.IsDBNull(1) ? null : reader.GetString(1)) is not { } link)
+                    continue;
+                var id = reader.GetGuid(0);
+                if (!links.TryGetValue(id, out var list))
+                    links[id] = list = [];
+                list.Add(link);
+            }
+        }
+
+        if (links.Count > 0)
+        {
+            for (var i = 0; i < reports.Count; i++)
+            {
+                if (links.TryGetValue(reports[i].RequestId, out var list))
+                    reports[i] = reports[i] with { Links = list };
+            }
+        }
+
         await using (var command = Command(connection, null, ReportsJournalSql, P(ids), P(journalLimit + 1)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -887,6 +968,80 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         await JournalAsync(connection, transaction, now, requestId, null, null, "journal_capped", actor, operation,
             null, "journal_capped:" + requestId.ToString(), cancellationToken);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, PendingNotesSql, P(Math.Clamp(limit, 1, 1000)), P(Now()));
+        var rows = new List<PendingInvestigationNote>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new PendingInvestigationNote(
+                reader.GetInt64(0),
+                reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetGuid(8),
+                DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
+        }
+
+        return rows;
+    }
+
+    /// <inheritdoc />
+    public Task<bool> ApproveNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, true, decidedBy, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> RejectNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, false, decidedBy, cancellationToken);
+
+    /* The one decide statement of Darling's note decisions (#5903): the desktop Viewer, the web routes and the tests all come
+       through here, so there is one statement, one clock and one decided_by rule. The update and its journal row share one
+       transaction: a decision is never stamped without its audit row. */
+    /// <summary>Approves (<paramref name="approve"/>) or rejects a pending note. False when the note is gone or already decided.
+    /// Throws <see cref="ArgumentException"/> when <paramref name="decidedBy"/> fails
+    /// <see cref="InvestigationNoteRules.ValidateDecidedBy"/>.</summary>
+    public async Task<bool> DecideNoteAsync(long noteId, bool approve, string decidedBy, CancellationToken cancellationToken = default)
+    {
+        var refusal = InvestigationNoteRules.ValidateDecidedBy(decidedBy);
+        if (refusal is not null)
+        {
+            throw new ArgumentException(refusal, nameof(decidedBy));
+        }
+
+        decidedBy = decidedBy.Trim();
+        var state = approve ? "approved" : "rejected";
+        var journalEvent = approve ? "note_approved" : "note_rejected";
+        var now = Now();
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        Guid? sourceRequest;
+        int? serverId;
+        await using (var command = Command(connection, transaction, DecideNoteSql, P(noteId), P(state), P(decidedBy), P(now)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            sourceRequest = reader.IsDBNull(0) ? null : reader.GetGuid(0);
+            serverId = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        }
+
+        await JournalAsync(connection, transaction, now, sourceRequest, null, serverId, journalEvent, decidedBy,
+            "note " + noteId.ToString(CultureInfo.InvariantCulture), null, null, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return true;
     }
 

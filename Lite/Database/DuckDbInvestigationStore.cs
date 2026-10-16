@@ -35,7 +35,7 @@ namespace PerformanceMonitorLite.Database;
 /// <para><b>Times.</b> Every time is bound from the injected clock, truncated to the microsecond DuckDB keeps, and read
 /// back with <see cref="DateTimeKind.Utc"/>. DuckDB's <c>current_timestamp</c> is never used: it is local-zone.</para>
 /// </summary>
-public sealed class DuckDbInvestigationStore : IInvestigationRequestStore
+public sealed class DuckDbInvestigationStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
     /* Darling's GroupLockSql and RouteLockSql (pg_advisory_xact_lock) have no twin: the write lock each write holds for its
        whole transaction covers them. SubmitLockSql keeps its name; its FOR UPDATE is the write lock. */
@@ -85,6 +85,17 @@ FROM (SELECT unnest($5::VARCHAR[]) AS key) AS k";
     internal const string JournalSql = @"
 INSERT INTO investigation_journal (journal_id, event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
 VALUES ((SELECT coalesce(max(journal_id), 0) + 1 FROM investigation_journal), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (once_key) DO NOTHING";
+
+    /* #5914: every link of one report in one statement. The ids continue from the table's max plus row_number(), the shape of
+       the sweep statements below: a max() subquery in a per-row VALUES would not see this statement's own rows. ord keeps the
+       order the agent gave the links in, and a repeated once_key writes nothing. */
+    internal const string ReportLinksInsertSql = @"
+INSERT INTO investigation_journal (journal_id, event_time, request_id, server_id, event, actor, reason, detail, once_key)
+SELECT (SELECT coalesce(max(journal_id), 0) FROM investigation_journal) + row_number() OVER (ORDER BY l.ord),
+       $1, $2, $3, 'link_recorded', $4, l.kind, l.detail, l.once_key
+FROM (SELECT unnest($5::VARCHAR[]) AS kind, unnest($6::VARCHAR[]) AS detail, unnest($7::VARCHAR[]) AS once_key,
+             unnest($8::INTEGER[]) AS ord) AS l
 ON CONFLICT (once_key) DO NOTHING";
 
     internal const string AgentJournalCountSql = @"
@@ -206,6 +217,26 @@ SELECT (SELECT coalesce(max(note_id), 0) FROM investigation_notes) + 1,
 FROM investigation_requests AS r
 WHERE r.request_id = $1";
 
+    /* #5903: the pending notes for the approve screen, oldest first, with the request that proposed each (server name,
+       family). Mirrors Darling's PendingNotesSql, expiry filter included: a note past its expires_at is not listed, because the
+       brief read drops it and an approval would do nothing. created_at and expires_at are naive UTC. $1 the limit, $2 now. */
+    internal const string PendingNotesSql = @"
+SELECT n.note_id, n.server_id, r.server_name, n.metric_name, r.family, n.story_path_hash, n.note_text, n.author,
+       n.source_request_id, n.created_at, n.expires_at
+FROM investigation_notes AS n
+LEFT JOIN investigation_requests AS r ON r.request_id = n.source_request_id
+WHERE n.state = 'pending' AND n.expires_at > $2
+ORDER BY n.created_at, n.note_id
+LIMIT $1";
+
+    /* #5903: a decision lands only on a pending note, so a second click changes nothing. $1 note, $2 the new state, $3 who,
+       $4 when (bound naive UTC, as the rest of the store binds it). */
+    internal const string DecideNoteSql = @"
+UPDATE investigation_notes
+SET state = $2, decided_by = $3, decided_at = $4
+WHERE note_id = $1 AND state = 'pending'
+RETURNING source_request_id, server_id";
+
     internal const string ReportsRequestsSql = @"
 SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.last_alert_at,
        r.alert_count,
@@ -230,10 +261,19 @@ FROM investigation_reports
 WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
 ORDER BY submitted_at DESC";
 
+    /* #5914: Darling's ReportLinksSql; ReportsJournalSql below excludes link_recorded as Darling's does. */
+    internal const string ReportLinksSql = @"
+SELECT request_id, detail
+FROM investigation_journal
+WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
+  AND event = 'link_recorded'
+ORDER BY journal_id";
+
     internal const string ReportsJournalSql = @"
 SELECT event_time, request_id, server_id, event, actor, reason, detail
 FROM investigation_journal
 WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
+  AND event <> 'link_recorded'
 ORDER BY event_time DESC, journal_id DESC
 LIMIT $2";
 
@@ -499,6 +539,8 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             throw new ArgumentException(string.Join(" ", caps.Select(c => c.Problem)), nameof(report));
         }
 
+        InvestigationReportLinks.ThrowIfInvalid(report.Links, nameof(report));
+
         var now = Now();
         var actor = "agent:" + report.AgentId;
 
@@ -571,6 +613,19 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         await ExecAsync(connection, ReportedSql, cancellationToken, report.RequestId, now);
         await JournalAsync(connection, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
+        /* #5914, Darling's rule in the shared contract: each link a link_recorded row, once per request and URL. Lite's
+           submit tool takes no links argument, so a Lite report carries none today. */
+        var links = InvestigationReportLinks.Distinct(report.Links ?? []);
+        if (links.Count > 0)
+        {
+            await ExecAsync(connection, ReportLinksInsertSql, cancellationToken,
+                now, report.RequestId, serverId, actor,
+                links.Select(l => (string?)l.Kind).ToList(),
+                links.Select(l => (string?)InvestigationReportLinks.DetailJson(l)).ToList(),
+                links.Select(l => (string?)InvestigationReportLinks.OnceKey(report.RequestId, l.Url)).ToList(),
+                Enumerable.Range(0, links.Count).ToList());
+        }
+
         transaction.Commit();
         return InvestigationSubmitOutcome.Reported;
     }
@@ -704,6 +759,27 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             }
         }
 
+        var links = new Dictionary<Guid, List<InvestigationReportLink>>();
+        using (var command = Command(connection, ReportLinksSql, ids))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (InvestigationReportLinks.FromDetail(reader.IsDBNull(1) ? null : reader.GetString(1)) is not { } link)
+                    continue;
+                var id = reader.GetGuid(0);
+                if (!links.TryGetValue(id, out var list))
+                    links[id] = list = [];
+                list.Add(link);
+            }
+        }
+
+        for (var i = 0; i < reports.Count && links.Count > 0; i++)
+        {
+            if (links.TryGetValue(reports[i].RequestId, out var list))
+                reports[i] = reports[i] with { Links = list };
+        }
+
         using (var command = Command(connection, ReportsJournalSql, ids, journalLimit + 1))
         using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -795,6 +871,75 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         await ExecAsync(connection, RetentionJournalSql, cancellationToken, cutoff);
         transaction.Commit();
         return requests;
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default)
+    {
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, PendingNotesSql, Math.Clamp(limit, 1, 1000), Now());
+        var rows = new List<PendingInvestigationNote>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new PendingInvestigationNote(
+                reader.GetInt64(0),
+                reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetGuid(8),
+                Utc(reader.GetDateTime(9)),
+                Utc(reader.GetDateTime(10))));
+        }
+
+        return rows;
+    }
+
+    /// <inheritdoc />
+    public Task<bool> ApproveNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, "approved", "note_approved", decidedBy, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> RejectNoteAsync(long noteId, string decidedBy, CancellationToken cancellationToken = default) =>
+        DecideNoteAsync(noteId, "rejected", "note_rejected", decidedBy, cancellationToken);
+
+    /* The update and its journal row share one transaction under the write lock: a decision is never stamped without its
+       audit row. Only a person's action in the viewer reaches this; no MCP tool does. */
+    private async Task<bool> DecideNoteAsync(long noteId, string state, string journalEvent, string decidedBy, CancellationToken cancellationToken)
+    {
+        var refusal = InvestigationNoteRules.ValidateDecidedBy(decidedBy);
+        if (refusal is not null)
+        {
+            throw new ArgumentException(refusal, nameof(decidedBy));
+        }
+
+        decidedBy = decidedBy.Trim();
+        var now = Now();
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+        Guid? sourceRequest;
+        int? serverId;
+        using (var command = Command(connection, DecideNoteSql, noteId, state, decidedBy, now))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            sourceRequest = reader.IsDBNull(0) ? null : reader.GetGuid(0);
+            serverId = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+        }
+
+        await JournalAsync(connection, now, sourceRequest, null, serverId, journalEvent, decidedBy,
+            "note " + noteId.ToString(CultureInfo.InvariantCulture), null, null, cancellationToken);
+        transaction.Commit();
+        return true;
     }
 
     private static InvestigationRequestRow RequestRow(System.Data.Common.DbDataReader reader) => new(

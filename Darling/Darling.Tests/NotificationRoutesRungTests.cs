@@ -300,7 +300,10 @@ public sealed class NotificationRoutesRungTests
            Investigate or Off (Off stops a broader agent route); the limits are the V184 CHECK's bounds. */
         Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1 }));
         Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Analysis: queries", AgentLevel = 0 }));
-        Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 2 }));
+        /* #5912: Level 2 is a stored, live level (V191), so a row an operator set to it must still save from the viewer with its level kept; the dialog
+           offers no way to PICK it (a disabled item), so accepting it here adds no write path. A level outside 0 to 2 is still refused. */
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 2 }));
+        Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 3 }));
         Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentMaxPerHour = 61 }));
         Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentMaxPerDay = 0 }));
         Assert.NotNull(ViewerDataService.ValidateNotificationRoute(new NotificationRouteRow { MetricMatch = "Blocking Detected", AgentLevel = 1, AgentLeaseMinutes = 4 }));

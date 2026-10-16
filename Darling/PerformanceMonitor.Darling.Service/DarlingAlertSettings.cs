@@ -533,7 +533,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// credential are the operator's own configuration and still get a link; the last of those gets a
     /// one-time startup warning instead (<c>PerformanceMonitor.Notifications.TriageLink.DescribeCredentialShapedBaseWarning</c>).</para>
     /// </summary>
-    public string TriageBaseUrl => _config.Web.Enabled ? (_config.Web.PublicBaseUrl ?? "") : "";
+    public string TriageBaseUrl => TriageBaseUrlOf(_config);
+
+    /// <summary>The one definition of <see cref="TriageBaseUrl"/>, for a seat that holds the config and not this object
+    /// (the MCP host's brief reader, #5914): <c>web.publicBaseUrl</c> while the dashboard serves, else empty.</summary>
+    internal static string TriageBaseUrlOf(DarlingConfig config) => config.Web.Enabled ? (config.Web.PublicBaseUrl ?? "") : "";
 }
 
 /// <summary>

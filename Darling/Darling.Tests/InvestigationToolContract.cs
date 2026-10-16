@@ -79,6 +79,19 @@ internal static class InvestigationToolContract
             }),
     };
 
+    /// <summary>
+    /// The parameters only Darling's tools take, after the shared ones (#5914): Darling's submit takes report <c>links</c>;
+    /// Lite's submit does not, so Lite's tool text stays as it was. Darling's test passes this table to
+    /// <see cref="Differences"/>; Lite's passes none.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, ToolParameter[]> DarlingOnlyParameters = new Dictionary<string, ToolParameter[]>(StringComparer.Ordinal)
+    {
+        ["submit_investigation_report"] = new[]
+        {
+            P("links", "string?", "null", "Optional JSON array of at most 10 {kind, url, key}; https only. See the guide."),
+        },
+    };
+
     /// <summary>Every <c>[McpServerTool]</c> method on <paramref name="toolClass"/>, by tool name.</summary>
     internal static IReadOnlyDictionary<string, MethodInfo> ToolMethods(Type toolClass) =>
         toolClass.GetMethods(BindingFlags.Public | BindingFlags.Static)
@@ -126,8 +139,9 @@ internal static class InvestigationToolContract
             .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
     }
 
-    /// <summary>Compares <paramref name="toolClass"/> with <see cref="Tools"/>; returns every difference, empty when equal.</summary>
-    internal static IReadOnlyList<string> Differences(Type toolClass)
+    /// <summary>Compares <paramref name="toolClass"/> with <see cref="Tools"/>, each tool's parameters followed by its
+    /// <paramref name="productParameters"/>; returns every difference, empty when equal.</summary>
+    internal static IReadOnlyList<string> Differences(Type toolClass, IReadOnlyDictionary<string, ToolParameter[]>? productParameters = null)
     {
         var differences = new List<string>();
         var methods = ToolMethods(toolClass);
@@ -140,9 +154,11 @@ internal static class InvestigationToolContract
             }
 
             var actual = Describe(method);
-            if (!actual.SequenceEqual(shape.Parameters))
+            var expected = productParameters is not null && productParameters.TryGetValue(name, out var extra)
+                ? shape.Parameters.Concat(extra).ToArray() : shape.Parameters;
+            if (!actual.SequenceEqual(expected))
             {
-                differences.Add($"{name}: parameters are [{string.Join("; ", actual)}], the contract is [{string.Join("; ", (IEnumerable<ToolParameter>)shape.Parameters)}]");
+                differences.Add($"{name}: parameters are [{string.Join("; ", actual)}], the contract is [{string.Join("; ", (IEnumerable<ToolParameter>)expected)}]");
             }
 
             var description = method.GetCustomAttribute<DescriptionAttribute>()?.Description ?? "";

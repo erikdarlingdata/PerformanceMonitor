@@ -611,6 +611,134 @@ GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {mcp};";
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>#5914: a report's links are link_recorded journal rows, one per request and URL: a URL given twice (as two
+    /// kinds) writes one row, the first kind kept; the read hands them back on the report, and a report without links reads
+    /// with none and answers with no links key.</summary>
+    [Fact]
+    public async Task AReportsLinks_AreJournaledOncePerUrl_AndReadBackOnTheReport()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(id, "agent-a", ct);
+            var links = new[]
+            {
+                new InvestigationReportLink("jira", "https://jira.example.invalid/browse/OPS-1", "OPS-1"),
+                new InvestigationReportLink("bug_report", "https://jira.example.invalid/browse/OPS-1", null),
+                new InvestigationReportLink("pull_request", "https://git.example.invalid/pm/pull/42", "#42"),
+            };
+            Assert.Equal(InvestigationSubmitOutcome.Reported,
+                await store.SubmitAsync(Report(id, claim.ClaimId!.Value) with { Links = links }, ct));
+
+            Assert.Equal("2|agent:agent-a", await ScalarAsync(connection, $@"
+SELECT count(*)::text || '|' || min(actor) FROM config.investigation_journal
+WHERE request_id = '{id}' AND event = 'link_recorded'", ct));
+
+            var read = await store.ReadReportsAsync(id, null, T0.AddDays(-1), 10, 200, ct);
+            var report = Assert.Single(read.Reports);
+            Assert.Equal(new[] { "jira OPS-1 https://jira.example.invalid/browse/OPS-1", "pull_request #42 https://git.example.invalid/pm/pull/42" },
+                report.Links!.Select(l => l.Kind + " " + l.Key + " " + l.Url));
+
+            /* A second request, reported with no links: no Links, and no links key anywhere in the answer. */
+            _now = T0.AddMinutes(1);
+            var other = (await store.OpenOrJoinAsync(Alert(T0.AddMinutes(1), family: "jobs"), ct)).RequestId!.Value;
+            var otherClaim = await store.ClaimAsync(other, "agent-b", ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(other, otherClaim.ClaimId!.Value), ct));
+            var bare = await store.ReadReportsAsync(other, null, T0.AddDays(-1), 10, 200, ct);
+            Assert.Null(Assert.Single(bare.Reports).Links);
+            Assert.DoesNotContain("\"links", InvestigationToolCore.ReportsAnswer(bare, null, McpDataDetail.Full), StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>#5914 review r1: link_recorded rows are served whole on each report, so the capped newest-first journal page
+    /// leaves them out. A link shares its report's event_time and sorts above it, so left in, 50 reported requests with two
+    /// links each (250 rows: opened, claimed, reported and two links apiece) would overflow the 200-row page and drop the
+    /// oldest requests' opened and claimed rows; now the 150 lifecycle rows fit, nothing is truncated, and every report still
+    /// carries both its links.</summary>
+    [Fact]
+    public async Task ReportLinks_DoNotCompeteForTheJournalPage_WithTheLifecycleRows()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            const int requests = 50;
+            var ids = new System.Collections.Generic.List<Guid>();
+            for (var i = 0; i < requests; i++)
+            {
+                _now = T0.AddSeconds(i * 10);
+                var id = (await store.OpenOrJoinAsync(Alert(_now, serverId: 100 + i, maxPerHour: 1000, maxPerDay: 1000), ct)).RequestId!.Value;
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                var links = new[]
+                {
+                    new InvestigationReportLink("jira", "https://jira.example.invalid/browse/OPS-" + i, "OPS-" + i),
+                    new InvestigationReportLink("pull_request", "https://git.example.invalid/pm/pull/" + i, "#" + i),
+                };
+                Assert.Equal(InvestigationSubmitOutcome.Reported,
+                    await store.SubmitAsync(Report(id, claim.ClaimId!.Value) with { Links = links }, ct));
+                ids.Add(id);
+            }
+
+            Assert.Equal(requests * 2, int.Parse((await ScalarAsync(connection,
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'link_recorded'", ct))!, CultureInfo.InvariantCulture));
+
+            var read = await store.ReadReportsAsync(null, null, T0.AddDays(-1), 100, 200, ct);
+            Assert.Equal(requests, read.Reports.Count);
+            Assert.All(read.Reports, r => Assert.Equal(2, r.Links!.Count));
+            Assert.DoesNotContain(read.Journal, j => j.Event == InvestigationReportLinks.JournalEvent);
+            Assert.False(read.JournalTruncated);
+            foreach (var evt in new[] { "opened", "claimed", "reported" })
+            {
+                Assert.Equal(requests, read.Journal.Count(j => j.Event == evt));
+            }
+        });
+    }
+
+    /// <summary>#5914: the store refuses a link the tool rule refuses (a caller that skipped the tool), before any write.</summary>
+    [Fact]
+    public async Task AnHttpLink_IsRefusedByTheStore_AndNothingIsWritten()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(id, "agent-a", ct);
+            await Assert.ThrowsAsync<ArgumentException>(async () => await store.SubmitAsync(Report(id, claim.ClaimId!.Value) with
+            {
+                Links = new[] { new InvestigationReportLink("jira", "http://jira.example.invalid/browse/OPS-1", null) },
+            }, ct));
+            Assert.Equal("claimed|0", await ScalarAsync(connection, $@"
+SELECT r.state || '|' || (SELECT count(*) FROM config.investigation_reports WHERE request_id = r.request_id)
+FROM config.investigation_requests AS r WHERE r.request_id = '{id}'", ct));
+        });
+    }
+
+    /// <summary>#5914: rendering re-checks the URL. A UNC and a file link planted straight into the journal (no submit
+    /// checked them) read back as stored, the viewer shows each as text with no target, and the answer still masks them as
+    /// free text.</summary>
+    [Fact]
+    public async Task AUncOrFileLinkPlantedInTheStore_ReadsBack_AndRendersAsText()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var claim = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(id, claim.ClaimId!.Value), ct));
+            await ExecAsync(connection, $@"
+INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, detail)
+VALUES (now(), '{id}', 7, 'link_recorded', 'agent:agent-a', 'jira', '{{""kind"":""jira"",""url"":""\\\\attacker.example.invalid\\share""}}'::jsonb),
+       (now(), '{id}', 7, 'link_recorded', 'agent:agent-a', 'bug_report', '{{""kind"":""bug_report"",""url"":""file://attacker.example.invalid/share/x""}}'::jsonb)", ct);
+
+            var report = Assert.Single((await store.ReadReportsAsync(id, null, T0.AddDays(-1), 10, 200, ct)).Reports);
+            Assert.Equal(new[] { "\\\\attacker.example.invalid\\share", "file://attacker.example.invalid/share/x" }, report.Links!.Select(l => l.Url));
+            foreach (var link in report.Links!)
+            {
+                Assert.False(InvestigationReportLinks.IsSafeUrl(link.Url));
+                var (label, target, refused) = PerformanceMonitor.Darling.Viewer.InvestigationsWindow.LinkItem(link);
+                Assert.Null(target);
+                Assert.NotNull(refused);
+                Assert.Contains(link.Url, label, StringComparison.Ordinal);
+            }
+        });
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

@@ -1,0 +1,24 @@
+{
+  "_comment": "#5914: the one list of report-link URLs pinned against BOTH implementations of the rule: InvestigationReportLinks.UrlProblem (C#, InvestigationReportLinksTests) and reportLinkProblem in wwwroot/js/pages/alerts.js (Node, report-links-harness.mjs via ReportLinksPageTests). reason is a substring the refusal must contain, or null when the URL must be accepted. padTo, when present, right-pads url with 'a' to that many characters (so the over-long cases stay readable).",
+  "vectors": [
+    { "name": "http", "url": "http://jira.example.invalid/browse/OPS-1", "reason": "http is refused" },
+    { "name": "file with host", "url": "file://server/share/x", "reason": "a file URL is refused" },
+    { "name": "file local", "url": "file:///C:/x", "reason": "a file URL is refused" },
+    { "name": "UNC backslashes", "url": "\\\\server\\share", "reason": "UNC" },
+    { "name": "UNC slashes", "url": "//server/share", "reason": "UNC" },
+    { "name": "https with backslashes", "url": "https:\\\\server\\share", "reason": "UNC" },
+    { "name": "user name", "url": "https://user@jira.example.invalid/x", "reason": "user info" },
+    { "name": "user name and password", "url": "https://user:secret@jira.example.invalid/x", "reason": "user info" },
+    { "name": "space", "url": "https://jira.example.invalid/a b", "reason": "whitespace" },
+    { "name": "control character", "url": "https://jira.example.invalid/a\u0001b", "reason": "whitespace or a control character" },
+    { "name": "ftp", "url": "ftp://jira.example.invalid/x", "reason": "not an https URL" },
+    { "name": "javascript", "url": "javascript:alert(1)", "reason": "not an https URL" },
+    { "name": "no host", "url": "https://", "reason": "with a host" },
+    { "name": "empty", "url": "", "reason": "missing" },
+    { "name": "one character over the limit", "url": "https://jira.example.invalid/", "padTo": 1001, "reason": "over 1000" },
+    { "name": "query and fragment", "url": "https://git.example.invalid/pm/pull/42?x=1#c", "reason": null },
+    { "name": "at sign in the path", "url": "https://jira.example.invalid/people/@bob", "reason": null },
+    { "name": "upper case scheme", "url": "HTTPS://Jira.Example.Invalid/browse/OPS-1", "reason": null },
+    { "name": "exactly the limit", "url": "https://jira.example.invalid/", "padTo": 1000, "reason": null }
+  ]
+}

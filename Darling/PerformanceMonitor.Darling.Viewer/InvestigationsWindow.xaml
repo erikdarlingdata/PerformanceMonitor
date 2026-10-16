@@ -95,6 +95,9 @@
                             <TextBox x:Name="ReportBox" IsReadOnly="True" TextWrapping="Wrap" Height="110"
                                      VerticalScrollBarVisibility="Auto"
                                      AutomationProperties.Name="Report"/>
+                            <TextBlock x:Name="ReportLinks" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       AutomationProperties.Name="Report links"/>
                             <TextBlock Text="Journal" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
                             <DataGrid x:Name="JournalGrid" Style="{StaticResource DarkGrid}" Height="120" IsReadOnly="True">
                                 <DataGrid.Columns>

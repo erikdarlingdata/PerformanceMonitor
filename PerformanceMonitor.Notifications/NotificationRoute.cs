@@ -108,6 +108,11 @@ public sealed record NotificationRoute(
     /// <summary>The agent level that opens Level 1 investigation requests (#5632). The only level Phase A stores.</summary>
     public const int AgentLevelInvestigate = 1;
 
+    /// <summary>The agent level that opens Level 2 requests (#5632 Phase B, #5912): an agent may also change alert settings
+    /// on the request's server, through the one gate, while its claim is live. A request opened by alerts from several routes
+    /// takes the lowest level among them.</summary>
+    public const int AgentLevelAct = 2;
+
     /// <summary>Default and bounds of <see cref="AgentMaxPerHour"/> (#5632, ruling R6). The store CHECK holds the same bounds.</summary>
     public const int DefaultAgentMaxPerHour = 20, MinAgentMaxPerHour = 1, MaxAgentMaxPerHour = 60;
 

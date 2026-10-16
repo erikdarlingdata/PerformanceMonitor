@@ -273,6 +273,42 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#5914: submit refuses a UNC link as invalid, naming links and the rule, and stores nothing; the same report
+    /// with https links is reported, the repeated URL counted once in links_recorded and journaled once; a report without
+    /// links answers with no links_recorded key.</summary>
+    [Fact]
+    public async Task Submit_Links_RefusesAUncUrl_AndRecordsEachUrlOnce()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var claimId = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct))
+                .GetProperty("claim_id").GetString()!;
+
+            var refused = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, "[{\"kind\":\"jira\",\"url\":\"\\\\\\\\attacker.example.invalid\\\\share\"}]"));
+            Assert.Equal("invalid", refused.GetProperty("status").GetString());
+            Assert.Contains("links: item 0 url: a UNC path", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*)::text FROM config.investigation_reports WHERE request_id = '{id}'", ct));
+
+            const string Links = "[{\"kind\":\"jira\",\"url\":\"https://jira.example.invalid/browse/OPS-7\",\"key\":\"OPS-7\"}," +
+                "{\"kind\":\"bug_report\",\"url\":\"https://jira.example.invalid/browse/OPS-7\"}," +
+                "{\"kind\":\"pull_request\",\"url\":\"https://git.example.invalid/pm/pull/9\",\"key\":\"#9\"}]";
+            var answer = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, Links));
+            Assert.Equal("reported", answer.GetProperty("status").GetString());
+            Assert.Equal(2, answer.GetProperty("links_recorded").GetInt32());
+            Assert.Equal("2", await ScalarAsync(connection,
+                $"SELECT count(*)::text FROM config.investigation_journal WHERE request_id = '{id}' AND event = 'link_recorded'", ct));
+
+            var read = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, id, 24, ct));
+            var links = read.GetProperty("reports")[0].GetProperty("links");
+            Assert.Equal(2, links.GetArrayLength());
+            Assert.Equal("https://jira.example.invalid/browse/OPS-7", links[0].GetProperty("url").GetString());
+        });
+    }
+
     /// <summary>#5822: the long poll's catch-up read answers the requests opened after a time, on the named routes, oldest
     /// first, and the wait tool answers a request opened after its cursor through it.</summary>
     [Fact]
