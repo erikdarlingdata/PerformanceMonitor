@@ -5,6 +5,8 @@ name: Darling UI smoke
 # the seed says must have data and does not. #5744 (phase 2): four pages are also compared with screenshot baselines
 # (tools/ui-smoke/baselines/*.png, in Playwright's own pinned Chromium). See tools/ui-smoke/ (run-ui-smoke.ps1 is
 # the entry, locally and here).
+# The screenshot compare is advisory (#5931): a page that differs from its baseline is reported in the job summary and
+# the darling-ui-smoke artifact and does not fail the job. Real breakage still does.
 #
 # Triggers: a pull request touching the web files, the harness or this workflow (a draft pull request is skipped
 # until it is marked ready), the nightly (workflow_call), and a manual dispatch. `pull_request`, never `pull_request_target`: the job runs the
@@ -132,6 +134,25 @@ jobs:
           if ($env:UPDATE_BASELINES -eq 'true') { $update.UpdateBaselines = $true }
           ./tools/ui-smoke/run-ui-smoke.ps1 -PgBin "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin" -PgPort 5541 -WorkDir "$env:RUNNER_TEMP\ui-smoke" -NoBuild -Channel chrome @update
 
+      # #5931: the per-page screenshot pixel counts, from the report.json that smoke.mjs writes (nothing is parsed from the log).
+      # Nothing to show for an update_baselines dispatch (nothing is compared) or when the run died before the shots.
+      - name: Screenshot compare summary
+        if: always()
+        shell: pwsh
+        run: |
+          $report = "$env:RUNNER_TEMP\ui-smoke\out\report.json"
+          if (-not (Test-Path $report)) { return }
+          $shots = @((Get-Content $report -Raw | ConvertFrom-Json).screenshots)
+          if ($shots.Count -eq 0) { return }
+          $lines = @('### Screenshot compare (advisory)', '', '| Page | Pixels that differ | Percent | Result |', '| --- | ---: | ---: | --- |')
+          foreach ($s in $shots) {
+            $result = if ($s.differing -gt 0) { 'differs' } else { 'matches' }
+            $lines += "| $($s.name) | $($s.differing) | $($s.pct) | $result |"
+          }
+          $lines += ''
+          $lines += 'A differing screenshot does not fail the job. The baseline, actual and diff images are in the `darling-ui-smoke` artifact, under `out/shot-failures`.'
+          $lines -join "`n" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
       - name: Logs tail
         if: always()
         shell: pwsh
@@ -142,7 +163,7 @@ jobs:
           }
           if (Test-Path "$env:RUNNER_TEMP\darling-pg.log") { "== PostgreSQL log (last 20 lines)"; Get-Content "$env:RUNNER_TEMP\darling-pg.log" -Tail 20 }
 
-      - name: Upload logs, failure screenshots and traces
+      - name: Upload logs, screenshot differences and traces
         if: always()
         uses: actions/upload-artifact@v6
         with:
