@@ -7,10 +7,11 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Three tabs, each one existing read:
+   Four tabs, three of them one existing read:
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
+     Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903)
    Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
@@ -656,6 +657,7 @@ const TABS = [
   { id: "servers", label: "Servers" },
   { id: "routes", label: "Notification Routes" },
   { id: "settings", label: "Alert Settings" },
+  { id: "pending", label: "Pending Notes" },
 ];
 
 /* The tab last shown, so a repaint with a bare #/admin returns to it. */
@@ -1210,7 +1212,153 @@ async function buildSettings(body, generation) {
   mount(body, nodes);
 }
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings };
+/* ─────────────────────────── pending agent notes (#5903) ─────────────────────────── */
+
+/* A Level 1 agent proposes a note with its report. It stays pending, out of every brief, until a person approves it here.
+   A rejected note is kept with who rejected it and when, and never reaches a brief. The text is shown as written: it is
+   not edited on this tab. */
+export const NOTE_COLUMNS = [
+  { key: "server_name", label: "Server" },
+  { key: "metric_name", label: "Metric" },
+  { key: "family", label: "Family" },
+  { key: "story", label: "Story" },
+  { key: "note_text", label: "Proposed note", wrap: true },
+  { key: "author", label: "Proposed by" },
+  { key: "request", label: "Request" },
+  { key: "proposed_at_utc", label: "Proposed", format: "time" },
+];
+
+const NOTES_NOTE_EDITING =
+  "Notes an agent proposed that nobody has decided. An approved note goes into the briefs for its server; a rejected note " +
+  "is kept, marked rejected, and never goes into a brief. The text cannot be edited here.";
+const NOTES_NOTE_READ_ONLY = "Notes an agent proposed that nobody has decided. This sign-in is read-only, so it cannot approve or reject them.";
+const NOTE_NOT_PENDING = "That note is not pending: it was already decided, or it is gone.";
+const NOTE_PAST = { approve: "approved", reject: "rejected" };
+
+const shortId = (v) => (typeof v === "string" && v.length > 8 ? v.slice(0, 8) : v || null);
+
+/** The rows of the pending-notes grid from the list read's body. A note with no server is a fleet note. */
+export function pendingNoteRows(data) {
+  const notes = data && Array.isArray(data.notes) ? data.notes : [];
+  return notes.map((n) => ({
+    note_id: n.note_id,
+    server_name: n.server_name || (Number.isInteger(n.server_id) ? "Server " + n.server_id : "Fleet"),
+    metric_name: n.metric_name || null,
+    family: n.family || null,
+    story: shortId(n.story_path_hash),
+    note_text: n.note_text,
+    author: n.author,
+    request: shortId(n.source_request_id),
+    proposed_at_utc: n.proposed_at_utc,
+  }));
+}
+
+/** What a decision's answer says, in plain words: { message, isError, reread }. `verb` is "approve" or "reject". An expired
+    session says nothing here (the shell has already told the person). A note that was already decided, or is gone, is a 404:
+    the list is stale, so it is read again. */
+export function noteDecisionOutcome(verb, noteId, res) {
+  const past = NOTE_PAST[verb] || verb;
+  if (!res || res.expired) return { message: null, isError: true, reread: false };
+  if (res.status === 0) return { message: res.message || "Network error.", isError: true, reread: false };
+  const body = res.body && typeof res.body === "object" ? res.body : null;
+  if (res.status === 200 && body && body.status === past) return { message: "Note " + noteId + " " + past + ".", isError: false, reread: true };
+  if (res.status === 404) return { message: "Note " + noteId + " was not changed. " + ((body && body.error) || NOTE_NOT_PENDING), isError: true, reread: true };
+  if (res.status === 403) return { message: "This sign-in is read-only, so it cannot " + verb + " notes.", isError: true, reread: false };
+  const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
+  return { message: "Note " + noteId + " was not " + past + ". The service answered " + res.status + "." + said, isError: true, reread: false };
+}
+
+/* The last decision's one-line answer, kept in module scope so the 60 s repaint and the re-read after a decision show it. */
+let notesStatus = null;
+let notesBusy = false;
+
+function noteButtons(row) {
+  if (!row || !Number.isInteger(row.note_id)) return null;
+  const make = (verb, label) => {
+    const button = el("button", {
+      class: "btn" + (verb === "approve" ? " primary" : ""),
+      type: "button",
+      text: label,
+      "aria-label": label + " note " + row.note_id + " for " + row.server_name,
+      "data-note-id": String(row.note_id),
+      onClick: () => decideNote(verb, row.note_id),
+    });
+    button.disabled = notesBusy;
+    return button;
+  };
+  return el("span", { class: "row-actions" }, [make("approve", "Approve"), make("reject", "Reject")]);
+}
+
+/** The pending-notes grid's columns: NOTE_COLUMNS, plus Approve and Reject for a seat whose session reports can_edit. */
+export function noteColumns(canEdit) {
+  return canEdit ? NOTE_COLUMNS.concat([{ key: "decide", label: "Decide", csv: false, copy: false, render: noteButtons }]) : NOTE_COLUMNS;
+}
+
+function setNoteButtons(disabled) {
+  if (!shownBody || !shownBody.querySelectorAll) return;
+  for (const b of shownBody.querySelectorAll("button[data-note-id]")) b.disabled = disabled;
+}
+
+async function decideNote(verb, noteId) {
+  if (notesBusy) return;
+  notesBusy = true;
+  setNoteButtons(true);
+  let out;
+  try {
+    const res = await apiWrite("PUT", "/api/investigation-notes/" + encodeURIComponent(noteId) + "/" + verb, {});
+    out = noteDecisionOutcome(verb, noteId, res);
+  } catch (e) {
+    out = { message: "Could not " + verb + " note " + noteId + ": " + (e && e.message ? e.message : String(e)), isError: true, reread: false };
+  }
+  notesBusy = false;
+  if (out.message) notesStatus = { message: out.message, isError: out.isError };
+  if (shownTab !== "pending" || !shownBody) return;
+  if (out.reread || !out.message) {
+    await startBuilder("pending", shownBody, ++renderGeneration);
+  } else {
+    setNoteButtons(false);
+    drawNoteStatus(shownBody);
+  }
+}
+
+function noteStatusNode() {
+  if (!notesStatus) return null;
+  return notesStatus.isError ? errorStrip(notesStatus.message) : noticeStrip(notesStatus.message);
+}
+
+/* A failed decision with no re-read replaces only the status line at the top of the body. */
+function drawNoteStatus(body) {
+  const old = body.querySelector && body.querySelector("[data-note-status]");
+  const node = noteStatusNode();
+  if (node) node.setAttribute("data-note-status", "1");
+  if (old && node) old.replaceWith(node);
+  else if (old) old.remove();
+  else if (node) body.insertBefore(node, body.firstChild);
+}
+
+async function buildPending(body, generation) {
+  const [session, res] = await Promise.all([getSession(), apiGet("/api/investigation-notes/pending")]);
+  if (generation !== renderGeneration) return;
+  const nodes = [];
+  const status = noteStatusNode();
+  if (status) {
+    status.setAttribute("data-note-status", "1");
+    nodes.push(status);
+  }
+  const bad = failure(res);
+  if (bad) return mount(body, nodes.concat([bad]));
+  const rows = pendingNoteRows(res.data);
+  const canEdit = session.can_edit === true;
+  nodes.push(noticeStrip(canEdit ? NOTES_NOTE_EDITING : NOTES_NOTE_READ_ONLY));
+  nodes.push(VIZ.table({ notes: rows }, {
+    rowsKey: "notes",
+    columns: noteColumns(canEdit),
+    emptyText: "No notes are waiting for a decision.",
+  }));
+  mount(body, nodes);
+}
+
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, pending: buildPending };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */
@@ -1254,6 +1402,7 @@ export function renderAdmin(main, tabId) {
     closeEdit();
     layout = null;
     summary = null;
+    notesStatus = null;
     notice = tab.id === "servers" ? held : null;
     if (tab.id === "servers") held = null;
   }

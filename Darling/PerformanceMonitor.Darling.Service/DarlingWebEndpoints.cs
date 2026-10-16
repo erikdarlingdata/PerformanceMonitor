@@ -1101,7 +1101,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// failure. The decision is stamped <c>person:</c> plus the seat's signed-in subject, else <c>person:viewer</c>. The
     /// list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
     /// </summary>
-    private static void MapInvestigationNotes(WebApplication app, IInvestigationNoteStore notes, ILogger logger)
+    private static void MapInvestigationNotes(WebApplication app, InvestigationRequestStore notes, ILogger logger)
     {
         app.MapGet("/api/investigation-notes/pending", async (HttpContext context) =>
         {
@@ -1130,10 +1130,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
             try
             {
-                return await notes.ApproveNoteAsync(id, decidedBy, context.RequestAborted)
-                    ? DarlingWebStatementSweep.JsonText(
-                        NoteDecisionBody("approved", id, decidedBy), "/api/investigation-notes/{id}/approve", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted)
-                    : ErrorResult(NoteNotPendingSentence, StatusCodes.Status404NotFound);
+                if (!await notes.ApproveNoteAsync(id, decidedBy, context.RequestAborted))
+                {
+                    return ErrorResult("That note is not pending: it was already decided, or it is gone.", StatusCodes.Status404NotFound);
+                }
+
+                return DarlingWebStatementSweep.JsonText(
+                    NoteDecisionBody("approved", id, decidedBy), "/api/investigation-notes/{id}/approve", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1153,10 +1156,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
             try
             {
-                return await notes.RejectNoteAsync(id, decidedBy, context.RequestAborted)
-                    ? DarlingWebStatementSweep.JsonText(
-                        NoteDecisionBody("rejected", id, decidedBy), "/api/investigation-notes/{id}/reject", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted)
-                    : ErrorResult(NoteNotPendingSentence, StatusCodes.Status404NotFound);
+                if (!await notes.RejectNoteAsync(id, decidedBy, context.RequestAborted))
+                {
+                    return ErrorResult("That note is not pending: it was already decided, or it is gone.", StatusCodes.Status404NotFound);
+                }
+
+                return DarlingWebStatementSweep.JsonText(
+                    NoteDecisionBody("rejected", id, decidedBy), "/api/investigation-notes/{id}/reject", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1169,8 +1175,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The most pending notes one list answers. A fleet that proposes more than this has a backlog the screen cannot
     /// show whole; deciding the oldest shows the rest.</summary>
     internal const int PendingNotesLimit = 200;
-
-    internal const string NoteNotPendingSentence = "That note is not pending: it was already decided, or it is gone.";
 
     /// <summary>Who a note decision is stamped as: <c>person:</c> plus the signed-in subject, or <c>person:viewer</c> for the
     /// shared-token seat, the same <c>person:</c> prefix the desktop Viewer stamps.</summary>

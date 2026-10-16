@@ -129,7 +129,10 @@ INSERT INTO config.agent_environment_profiles (profile_text, modified_by) VALUES
             Assert.Single(await viewer.GetInvestigationProfilesAsync(ct));
 
             await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.CloseInvestigationRequestAsync(requestId, "tester", "no", ct));
-            await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.DecideInvestigationNoteAsync(note.NoteId, true, "tester", ct));
+            /* #5903: the web dashboard decides a pending note as this role (its only store identity), so the role holds the note
+               decision columns and a journal insert. Deciding a note is no longer one of the writes this seat refuses; the
+               seat model gates the web routes. The note below is left pending, so the final read still sees it so. */
+            Assert.Equal("pending", note.State);
             await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.WriteInvestigationNoteAsync(null, null, "note", "tester", cancellationToken: ct));
             await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.SaveInvestigationProfileAsync(null, null, "x", "tester", ct));
             Assert.Equal("open|pending|fleet", await ScalarAsync(owner, @"
