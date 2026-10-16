@@ -37,18 +37,22 @@ namespace Darling.Tests;
 public sealed class GuardStageWorkflowTests
 {
     private const string ShardIf =
-        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}";
+        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-build.result == 'success' || github.event_name != 'pull_request') }}";
 
     private const string LiteShardIf =
-        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}";
+        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-build.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}";
 
     [Fact]
     public void TheGuardJob_IsNamedOnceNotRequiredByName_AndRunsBothSuitesByTrait()
     {
-        var job = JobBlock(Yaml(), "guard-tests");
+        var yaml = Yaml();
+        var producer = JobBlock(yaml, "guard-build");
+        var job = JobBlock(yaml, "guard-tests");
 
+        /* #5949: the build and its uploads are the producer job; the classes run in the guard-tests job beside the shards. */
+        Assert.Contains("\n    needs: gate\n", producer, StringComparison.Ordinal);
+        Assert.Contains("\n    needs: [gate, guard-build]\n", job, StringComparison.Ordinal);
         Assert.Contains("\n    name: Guard tests\n", job, StringComparison.Ordinal);
-        Assert.Contains("\n    needs: gate\n", job, StringComparison.Ordinal);
         Assert.Contains(
             "\n    if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}\n",
             job,
@@ -67,20 +71,24 @@ public sealed class GuardStageWorkflowTests
         Assert.Contains("if ($failed.Count -gt 0) { throw", job, StringComparison.Ordinal);
 
         /* Release builds of both projects, once, after a locked-mode restore of both, in bash with errexit. */
-        Assert.Single(Regex.Matches(job, @"dotnet build Darling/Darling\.Tests/Darling\.Tests\.csproj -c Release --no-restore"));
-        Assert.Single(Regex.Matches(job, @"dotnet build \S*Lite\.Tests\.csproj -c Release --no-restore"));
-        var restore = Step(job, "Restore both test projects");
+        Assert.Single(Regex.Matches(producer, @"dotnet build Darling/Darling\.Tests/Darling\.Tests\.csproj -c Release --no-restore"));
+        Assert.Single(Regex.Matches(producer, @"dotnet build \S*Lite\.Tests\.csproj -c Release --no-restore"));
+        var restore = Step(producer, "Restore both test projects");
         Assert.Contains("shell: bash", restore, StringComparison.Ordinal);
         Assert.Contains("set -euo pipefail", restore, StringComparison.Ordinal);
         Assert.Contains("dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode", restore, StringComparison.Ordinal);
         Assert.Matches(@"dotnet restore \S*Lite\.Tests\.csproj --locked-mode", restore);
 
         /* No store, and nothing the Lite timing packer could read as a timing source. */
-        Assert.DoesNotContain("DARLING_TEST_", job, StringComparison.Ordinal);
-        Assert.DoesNotContain("pg-runtime", job, StringComparison.Ordinal);
-        Assert.DoesNotContain("lite-tests-timing", job, StringComparison.Ordinal);
+        foreach (var block in new[] { producer, job })
+        {
+            Assert.DoesNotContain("DARLING_TEST_", block, StringComparison.Ordinal);
+            Assert.DoesNotContain("pg-runtime", block, StringComparison.Ordinal);
+            Assert.DoesNotContain("lite-tests-timing", block, StringComparison.Ordinal);
+        }
         /* The uploads are the two built test projects (#5459 change 2, pinned by TheGuardJobUploadsTheBuiltTestProjects_... below) and the two xunit reports the shadow check reads (#5459). */
-        Assert.Equal(4, Regex.Matches(job, "actions/upload-artifact@").Count);
+        Assert.Equal(2, Regex.Matches(producer, "actions/upload-artifact@").Count);
+        Assert.Equal(2, Regex.Matches(job, "actions/upload-artifact@").Count);
     }
 
     /// <summary>
@@ -131,7 +139,7 @@ public sealed class GuardStageWorkflowTests
     public void TheGuardJobsFilter_IsACopyOfTheBuildJobsDocsAndAllEntries()
     {
         var yaml = Yaml();
-        var guard = JobBlock(yaml, "guard-tests");
+        var guard = JobBlock(yaml, "guard-build");
         var build = JobBlock(yaml, "build");
 
         foreach (var name in new[] { "docs", "all" })
@@ -166,7 +174,7 @@ public sealed class GuardStageWorkflowTests
         var lists = new Dictionary<string, List<string>>
         {
             ["build job"] = FilterPatterns(JobBlock(yaml, "build"), "docs"),
-            ["guard-tests job"] = FilterPatterns(JobBlock(yaml, "guard-tests"), "docs"),
+            ["guard-build job"] = FilterPatterns(JobBlock(yaml, "guard-build"), "docs"),
         };
 
         /* ci-select.py's DOC_PATTERNS: the fallback when no live list is passed, which must not drift from build.yml. */
@@ -204,7 +212,7 @@ public sealed class GuardStageWorkflowTests
     [Fact]
     public void ADocsOnlyChange_LeavesTheGuardJobGreenHavingBuiltNothing()
     {
-        var job = JobBlock(Yaml(), "guard-tests");
+        var job = JobBlock(Yaml(), "guard-build");
         var steps = job[job.IndexOf("    steps:\n", StringComparison.Ordinal)..]
             .Split("\n      - ", StringSplitOptions.None)
             .Skip(1)
@@ -225,31 +233,41 @@ public sealed class GuardStageWorkflowTests
                 "A guard-job step after the decision does not wait for it, so a docs-only change would build and run "
               + "for nothing (or fail): " + step.Split('\n')[0]);
         }
+
+        /* The runner job reads that decision from the producer's output, and every step after its checkout waits for it. */
+        var runner = JobBlock(Yaml(), "guard-tests");
+        var runnerSteps = runner[runner.IndexOf("    steps:\n", StringComparison.Ordinal)..]
+            .Split("\n      - ", StringSplitOptions.None)
+            .Skip(2)
+            .ToList();
+        Assert.NotEmpty(runnerSteps);
+        foreach (var step in runnerSteps.Where(st => !st.StartsWith("name: Upload the Guard ", StringComparison.Ordinal)))
+        {
+            Assert.True(
+                step.Contains("if: needs.guard-build.outputs.run == 'true'", StringComparison.Ordinal),
+                "A guard-tests step after the checkout does not wait for the producer's decision: " + step.Split('\n')[0]);
+        }
     }
 
     [Fact]
-    public void EveryJobThatTheGuardJobGates_ListsItInNeeds()
+    public void EveryJobThatTheGuardStageGates_ListsItInNeeds()
     {
         var yaml = Yaml();
 
-        foreach (var key in new[]
-                 {
-                     "build", "darling-pg", "darling-linux", "lite-tests", "darling-pg-result", "lite-tests-result",
-                     "darling-tree-guards",
-                 })
+        /* The shards, the Linux image and the whole-tree guards wait for the BUILD only (#5949), never for the guard classes. */
+        foreach (var key in new[] { "darling-pg", "darling-linux", "lite-tests", "darling-tree-guards" })
         {
             var job = JobBlock(yaml, key);
             var needs = Regex.Match(job, @"\n    needs: \[(?<list>[^\]]*)\]\n");
             Assert.True(needs.Success, $"{key} has no `needs: [..]` list");
-            Assert.Contains(
-                "guard-tests",
-                needs.Groups["list"].Value.Split(',').Select(n => n.Trim()),
-                StringComparer.Ordinal);
+            var list = needs.Groups["list"].Value.Split(',').Select(n => n.Trim()).ToList();
+            Assert.Contains("guard-build", list, StringComparer.Ordinal);
+            Assert.DoesNotContain("guard-tests", list, StringComparer.Ordinal);
         }
 
-        /* The result jobs keep the pinned `needs: [gate, ` prefix and add the guard before the matrix. */
-        Assert.Contains("\n    needs: [gate, guard-tests, darling-pg]\n", JobBlock(yaml, "darling-pg-result"), StringComparison.Ordinal);
-        Assert.Contains("\n    needs: [gate, guard-tests, lite-scope, lite-tests]\n", JobBlock(yaml, "lite-tests-result"), StringComparison.Ordinal);
+        /* The result jobs read both guard jobs, so a failed guard class run or a failed guard build reaches the required checks. */
+        Assert.Contains("\n    needs: [gate, guard-build, guard-tests, darling-pg]\n", JobBlock(yaml, "darling-pg-result"), StringComparison.Ordinal);
+        Assert.Contains("\n    needs: [gate, guard-build, guard-tests, lite-scope, lite-tests]\n", JobBlock(yaml, "lite-tests-result"), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -404,7 +422,7 @@ public sealed class GuardStageWorkflowTests
         foreach (var key in new[] { "darling-pg-result", "lite-tests-result" })
         {
             var job = JobBlock(yaml, key);
-            Assert.Contains("GUARD_RESULT: ${{ needs.guard-tests.result }}", job, StringComparison.Ordinal);
+            Assert.Contains("GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-tests.result }}", job, StringComparison.Ordinal);
 
             var gateArm = job.IndexOf("if [ \"${GATE_RESULT}\" != \"success\" ]", StringComparison.Ordinal);
             var declinedArm = job.IndexOf("[ \"${GATE_RUN}\" != \"true\" ]", StringComparison.Ordinal);
@@ -430,32 +448,24 @@ public sealed class GuardStageWorkflowTests
     }
 
     [Fact]
-    public void TheBuildJob_FailsItsSecondStepWhenTheGuardsFailedOnAPullRequest()
+    public void TheBuildJob_DoesNotWaitForTheGuardStage()
     {
         var build = JobBlock(Yaml(), "build");
 
+        /* #5949: build starts beside the Guard stage; a failed guard cancels the run and the result jobs carry the failure. */
+        Assert.Contains("\n    needs: [gate, test-map-select]\n", build, StringComparison.Ordinal);
         Assert.Contains("\n    if: ${{ !cancelled() }}\n", build, StringComparison.Ordinal);
-        Assert.Contains(
-            "needs.gate.outputs.run == 'true' && (github.event_name != 'pull_request' || needs.guard-tests.result == 'success') && 'windows-latest' || 'ubuntu-latest'",
-            build,
-            StringComparison.Ordinal);
+        Assert.Contains("needs.gate.outputs.run == 'true' && 'windows-latest' || 'ubuntu-latest'", build, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs.guard-", build, StringComparison.Ordinal);
 
         var steps = build[build.IndexOf("    steps:\n", StringComparison.Ordinal)..]
             .Split("\n      - ", StringSplitOptions.None)
             .Skip(1)
-            .Take(3)
+            .Take(2)
             .ToList();
 
         Assert.StartsWith("name: Fail when CI did not run", steps[0], StringComparison.Ordinal);
-        Assert.StartsWith("name: Fail when the guard tests failed", steps[1], StringComparison.Ordinal);
-        Assert.StartsWith("uses: actions/checkout@v7", steps[2], StringComparison.Ordinal);
-
-        Assert.Contains(
-            "if: ${{ github.event_name == 'pull_request' && needs.gate.outputs.run == 'true' && needs.guard-tests.result != 'success' }}",
-            steps[1],
-            StringComparison.Ordinal);
-        Assert.Contains("::error title=Guard tests failed::The Guard tests job", steps[1], StringComparison.Ordinal);
-        Assert.Contains("exit 1", steps[1], StringComparison.Ordinal);
+        Assert.StartsWith("uses: actions/checkout@v7", steps[1], StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -467,15 +477,15 @@ public sealed class GuardStageWorkflowTests
     [Fact]
     public void TheGuardJobUploadsTheBuiltTestProjects_BeforeAnyTestRuns_WithTheWorkspaceAndShaBesideThem()
     {
-        var job = JobBlock(Yaml(), "guard-tests");
+        var job = JobBlock(Yaml(), "guard-build");
 
         var build = job.IndexOf("- name: Build both test projects\n", StringComparison.Ordinal);
         var origin = job.IndexOf("- name: Record where this build was made\n", StringComparison.Ordinal);
         var uploadDarling = job.IndexOf("- name: Upload the built Darling.Tests for the shards\n", StringComparison.Ordinal);
         var uploadLite = job.IndexOf("- name: Upload the built Lite.Tests for the shards\n", StringComparison.Ordinal);
-        var run = job.IndexOf("- name: Run the Stage=Guard classes of both suites\n", StringComparison.Ordinal);
-        Assert.True(build > 0 && build < origin && origin < uploadDarling && uploadDarling < uploadLite && uploadLite < run,
-            "the Guard job must build, record the origin, upload both test projects, and only then run the guard classes");
+        Assert.True(build > 0 && build < origin && origin < uploadDarling && uploadDarling < uploadLite,
+            "the Guard build job must build, record the origin and upload both test projects");
+        Assert.DoesNotContain("Run the Stage=Guard classes", job, StringComparison.Ordinal);
 
         var recorded = Step(job, "Record where this build was made");
         Assert.Contains("workspace=$env:PRODUCER_WORKSPACE", recorded, StringComparison.Ordinal);
@@ -527,15 +537,15 @@ public sealed class GuardStageWorkflowTests
     {
         var job = JobBlock(Yaml(), jobKey);
         Assert.Contains("needs: [gate, ", job.Split("\n    steps:\n")[0], StringComparison.Ordinal);
-        Assert.Contains("guard-tests", job.Split("\n    steps:\n")[0], StringComparison.Ordinal);
+        Assert.Contains("guard-build", job.Split("\n    steps:\n")[0], StringComparison.Ordinal);
 
         /* The fetch: this run's artifact, by the producer's output, nothing from another run; a miss is a notice. */
         var fetch = Step(job, "Fetch the Guard job's build of the test project");
         Assert.Contains("id: guard-build\n", fetch, StringComparison.Ordinal);
-        Assert.Contains($"if: {gate} && needs.guard-tests.outputs.{suite}_build_artifact != ''", fetch, StringComparison.Ordinal);
+        Assert.Contains($"if: {gate} && needs.guard-build.outputs.{suite}_build_artifact != ''", fetch, StringComparison.Ordinal);
         Assert.Contains("continue-on-error: true", fetch, StringComparison.Ordinal);
         Assert.Contains("uses: actions/download-artifact@v6", fetch, StringComparison.Ordinal);
-        Assert.Contains($"name: ${{{{ needs.guard-tests.outputs.{suite}_build_artifact }}}}", fetch, StringComparison.Ordinal);
+        Assert.Contains($"name: ${{{{ needs.guard-build.outputs.{suite}_build_artifact }}}}", fetch, StringComparison.Ordinal);
         Assert.DoesNotContain("run-id", fetch, StringComparison.Ordinal);
         Assert.DoesNotContain("github-token", fetch, StringComparison.Ordinal);
 
