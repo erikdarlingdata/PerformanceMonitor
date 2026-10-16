@@ -88,7 +88,6 @@ public class CollectionLogDrainForensicsStoreTests
         var viewer = ReadSource("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
 
         Assert.Contains("column_name = 'drain_last_read_ms'", viewer, StringComparison.Ordinal);
-        Assert.Contains("reader.GetBoolean(84)", viewer, StringComparison.Ordinal);
         Assert.Contains("hasCollectionLogDrainForensics", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);

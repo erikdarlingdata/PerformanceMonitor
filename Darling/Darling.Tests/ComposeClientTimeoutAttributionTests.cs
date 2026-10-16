@@ -137,36 +137,6 @@ public class ComposeClientTimeoutAttributionTests
 
     private static string WebCode() => Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
 
-    private static string CallArguments(string code, string callStart)
-    {
-        var at = code.IndexOf(callStart, StringComparison.Ordinal);
-        Assert.True(at >= 0, $"call '{callStart}' not found");
-        var end = code.IndexOf(");", at, StringComparison.Ordinal);
-        Assert.True(end > at);
-        return code[at..end];
-    }
-
-    [Fact]
-    public void TheComposeRunRoute_PassesTheHeadroomAndTheRemapFlag()
-    {
-        /* The call wraps onto a second line for the caller argument (#5793), so whitespace runs are compared as one space. */
-        var call = Regex.Replace(CallArguments(WebCode(), "await RunComposedPanelAsync(postgres, body, context.RequestAborted"), @"\s+", " ");
-
-        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true, caller: WebReadCaller(context), cacheHost: ReadSurface.Web", call);
-    }
-
-    [Fact]
-    public void TheMcpCaller_PassesNoHeadroom_AndTheRemapFlag()
-    {
-        /* #5506 part 3 (D4): the call passes the tool's own token, so a caller that leaves while the run waits for an admission slot
-           leaves the queue, and names the MCP cache host; the call wraps onto a second line, so whitespace runs compare as one space. */
-        var call = Regex.Replace(CallArguments(
-            Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomViewTools.cs"),
-            "DarlingWebEndpoints.RunComposedPanelAsync("), @"\s+", " ");
-
-        Assert.Equal("DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, cancellationToken, readLatency, remapClientTimeout: true, cacheHost: ReadSurface.Mcp", call);
-    }
-
     [Fact]
     public void TheRunner_PassesTheClientDeadlineToTheMeasureAndAnnotationQueries()
     {

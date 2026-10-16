@@ -13,11 +13,15 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -121,45 +125,29 @@ public sealed class SharedBaselineCacheTests
     }
 
     /// <summary>
-    /// The wiring: ONE instance per process, registered as a singleton and handed to every host's analysis service — the
-    /// worker's per-pass services, the MCP host's and the web host's. Any host constructing its service without it would
-    /// keep a private cache and quietly reopen the gap (a scheduled pass cannot warm an MCP call it does not share with).
-    /// Scanned as code, so the comments that explain the wiring are free to name it.
+    /// The wiring, resolved from the service's own container (#5950): ONE <see cref="BaselineCache"/> per process, and the
+    /// worker, the MCP host and the web host each hold THAT instance. A host that fell back to a private cache would quietly
+    /// reopen the gap (a scheduled pass cannot warm an MCP call it does not share with). The container is built by
+    /// <c>DarlingProcessServices.Add</c>, the registration Program.cs runs.
     /// </summary>
     [Fact]
-    public void TheService_HandsOneBaselineCacheToEveryHostsAnalysis()
+    public void TheContainer_HandsTheOneBaselineCacheToTheWorkerAndBothHosts()
     {
-        string Code(params string[] path) => CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(path));
+        var services = new ServiceCollection();
+        services.AddLogging();
+        DarlingProcessServices.Add(services, stoppedMarkerPath: null);
+        using var provider = services.BuildServiceProvider();
 
-        var program = Code("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
-        Assert.Contains("builder.Services.AddSingleton<BaselineCache>();", program, StringComparison.Ordinal);
+        var shared = provider.GetRequiredService<BaselineCache>();
+        var hosted = provider.GetServices<IHostedService>().ToList();
+        var worker = hosted.OfType<DarlingWorker>().Single();
+        var mcp = hosted.OfType<DarlingMcpHostService>().Single();
+        var web = hosted.OfType<DarlingWebHostService>().Single();
 
-        var worker = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        Assert.Matches(@"BaselineCache baselineCache\s*[,)]", worker);
-        Assert.Contains("new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig)", worker, StringComparison.Ordinal);
-
-        var mcp = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
-        /* #4726: the host's per-call registration is RegisterAnalysisService, which builds the service from the cache it is
-           handed; the host hands it its ONE _baselineCache. Both halves are pinned, so neither can drift alone. */
-        Assert.Contains("new DarlingAnalysisService(postgres, planFetcher, logger, baselineCache, analyzer ?? AnalyzerConfig.Default)", mcp, StringComparison.Ordinal);
-        Assert.Contains("RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer, _registryState)", mcp, StringComparison.Ordinal);
-
-        var web = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
-        Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission);", web, StringComparison.Ordinal);
-        var endpoints = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        Assert.Contains("new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache, analyzerConfig: analyzerConfig)", endpoints, StringComparison.Ordinal);
-
-        /* And no other production site builds an analysis service at all (a new one must be wired, or say why not). */
-        var sites = new[] { worker, mcp, endpoints }.Sum(code => CountOf(code, "new DarlingAnalysisService("));
-        Assert.Equal(3, sites);
-    }
-
-    private static int CountOf(string text, string needle)
-    {
-        var count = 0;
-        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + 1, StringComparison.Ordinal))
-            count++;
-        return count;
+        Assert.Same(shared, provider.GetRequiredService<BaselineCache>());
+        Assert.Same(shared, worker.SharedBaselineCache);
+        Assert.Same(shared, mcp.SharedBaselineCache);
+        Assert.Same(shared, web.SharedBaselineCache);
     }
 }
 

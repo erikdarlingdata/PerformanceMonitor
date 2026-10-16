@@ -275,17 +275,26 @@ SET @shred_needed =
 
 IF @shred_needed = 1
 BEGIN
+    {RingBufferXml.DeclareSql}
+
+    SELECT /* PerformanceMonitorLite */
+        @ring_text = CONVERT(nvarchar(max), xet.target_data),
+        @ring_session = xes.name
+    FROM {ringBufferSource}
+    WHERE xes.name = N'{XeSessionName}'
+    AND   xet.target_name = N'ring_buffer'
+    OPTION(RECOMPILE);
+
+    {RingBufferXml.ParseSql}
+
     INSERT
         @PerformanceMonitor_BlockedProcess
     (
         ring_buffer
     )
-    SELECT /* PerformanceMonitorLite */
-        ring_xml = TRY_CAST(xet.target_data AS xml)
-    FROM {ringBufferSource}
-    WHERE xes.name = N'{XeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
-    OPTION(RECOMPILE);
+    SELECT
+        ring_xml = @ring_xml
+    WHERE @ring_xml IS NOT NULL;
 END;
 
 SELECT

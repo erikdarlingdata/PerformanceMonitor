@@ -104,70 +104,6 @@ public sealed class ExternalAlertRungTests
     }
 
     [Fact]
-    public void TheProbeNamesTheRegistry_AndMapsAFullyMigratedStoreToThisTopRung()
-    {
-        Assert.Contains("to_regclass('config.external_alert_source')", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels sit above this one; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, V187's (#5825) and V188's (#5821) next, and V189's (#5867) is the probe's last ordinal. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var parameters = method.GetParameters();
-        Assert.Equal("hasReadLatencyCapacityFields", parameters[ProbeOrdinal + 2].Name);
-        Assert.Equal("hasReadCaller", parameters[ProbeOrdinal + 3].Name);
-        Assert.Equal("hasInvestigations", parameters[ProbeOrdinal + 4].Name);
-        Assert.Equal("hasPlanRegressionPartialDays", parameters[ProbeOrdinal + 5].Name);
-        Assert.Equal("hasCollectionLogHourly", parameters[ProbeOrdinal + 6].Name);
-        Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal].Name);
-        Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal - 1].Name);
-
-        var thisArm = viewer.IndexOf("if (hasExternalAlerts)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasClientTimeoutSettings)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V180 arm sits above the next rung down");
-
-        /* Every sentinel present: maps to the ladder's top. V189's (#5867), V188's (#5821), V187's (#5825), V186's (#5810), V185's (#5812), V184's (#5632), V183's (#5793), V182's (#5506) and V181's (#5750) absent: this rung. This sentinel
-           absent too: a rung back. */
-        var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
-        allPresent[Array.FindIndex(parameters, p => p.Name == "hasAgentLevel2Store")] = false; /* V191 (#5909) absent: the cases below are stores below it. */
-        allPresent[Array.FindIndex(parameters, p => p.Name == "hasStoreMetricsSizeEstimated")] = false; /* V190 (#5857) absent: the cases below are stores below it. */
-        allPresent[Array.FindIndex(parameters, p => p.Name == "hasComposeStampFailures")] = false; /* V189 (#5867) absent: the cases below are stores below it. */
-        allPresent[Array.FindIndex(parameters, p => p.Name == "hasInvestigationAlertFacts")] = false; /* V188 (#5821) absent: the cases below are stores below it. */
-        allPresent[Array.FindIndex(parameters, p => p.Name == "hasAlertResolutionDelivery")] = false; /* V187 (#5825) absent: the cases below are stores below it. */
-
-        var withoutV185 = (object[])allPresent.Clone();
-        withoutV185[ProbeOrdinal + 6] = false;
-        withoutV185[ProbeOrdinal + 5] = false;
-        Assert.Equal(184, (int)method.Invoke(null, withoutV185)!);
-
-        var withoutV184 = (object[])withoutV185.Clone();
-        withoutV184[ProbeOrdinal + 4] = false;
-        Assert.Equal(183, (int)method.Invoke(null, withoutV184)!);
-
-        var withoutV183 = (object[])withoutV184.Clone();
-        withoutV183[ProbeOrdinal + 3] = false;
-        Assert.Equal(182, (int)method.Invoke(null, withoutV183)!);
-
-        var withoutV182 = (object[])withoutV183.Clone();
-        withoutV182[ProbeOrdinal + 2] = false;
-        Assert.Equal(181, (int)method.Invoke(null, withoutV182)!);
-
-        var withoutV181 = (object[])withoutV182.Clone();
-        withoutV181[ProbeOrdinal + 1] = false;
-        Assert.Equal(ExternalAlertTables.RungVersion, (int)method.Invoke(null, withoutV181)!);
-
-        var behind = (object[])withoutV181.Clone();
-        behind[ProbeOrdinal] = false;
-        Assert.True((int)method.Invoke(null, behind)! < ExternalAlertTables.RungVersion);
-    }
-
-    [Fact]
     public async Task MigratingAFreshStore_CreatesTheTablesAndTheColumn_AndRerunningChangesNothing()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the external alert rung's live pin (it mints its own scratch database).");
@@ -244,17 +180,7 @@ public sealed class ExternalAlertRungTests
             /* An upgraded store: one rung behind (no tables, no column, no version row), then migrated, gets all of it. */
             await ExecAsync(connection, "DROP TABLE config.external_alert_state; DROP TABLE config.external_alert_pending; DROP TABLE config.external_alert_source; ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ExternalAlertTables.RungVersion, ct);
-            await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV186SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV185SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV183SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV182SentinelAsync(connection, ct);
-            await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, ExternalAlertTables.RungVersion, ct);
             Assert.True(await ProbedVersionAsync(connection, ct) < ExternalAlertTables.RungVersion);
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));

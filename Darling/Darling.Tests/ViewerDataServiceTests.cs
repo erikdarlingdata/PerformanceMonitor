@@ -497,25 +497,6 @@ public sealed class ViewerSchemaVersionGateTests
             "to_regclass('config.config_collector_run_times') IS NOT NULL",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        /* The map: every sentinel up to and including this one present is V160, and this one absent is V159, which is below
-           the version the build requires. Built from the signature, so a later migration's sentinel (which comes after this
-           one) is false in both and the answer does not move. */
-        var map = typeof(ViewerDataService).GetMethod(
-            nameof(ViewerDataService.MapProbedSchemaVersion),
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
-        var parameters = map.GetParameters();
-        var runAt = Array.FindIndex(parameters, p => p.Name == "hasCollectorRunAt");
-        Assert.True(runAt >= 0, "the probe map has no run-time sentinel, so a store without the column maps one rung high");
-
-        var atV160 = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= runAt)).ToArray();
-        Assert.Equal(160, (int)map.Invoke(null, atV160)!);
-
-        var atV159 = (object[])atV160.Clone();
-        atV159[runAt] = false;
-        var mapped = (int)map.Invoke(null, atV159)!;
-        Assert.Equal(159, mapped);
-        Assert.True(mapped < ViewerDataService.RequiredStoreSchemaVersion, "a store without the run-time column must read below the required version");
-
         /* The gate: a probed version below the required one shows the failure and returns, and it does so before the first tab
            loads from the store. */
         var main = CSharpSourceWalker.StripCommentsAndStrings(

@@ -2663,9 +2663,9 @@ public sealed class DarlingSelfAlertTests
     [Fact]
     public void McpTlsCert_IsRegisteredAsItsOwnSingleton_AndSweptOnTheWebCertificatesHourlyGate()
     {
-        var program = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
-        Assert.Contains("builder.Services.AddSingleton<WebTlsCertificateState>();", program, StringComparison.Ordinal);
-        Assert.Contains("builder.Services.AddSingleton<McpTlsCertificateState>();", program, StringComparison.Ordinal);
+        var program = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingProcessServices.cs");
+        Assert.Contains("services.AddSingleton<WebTlsCertificateState>();", program, StringComparison.Ordinal);
+        Assert.Contains("services.AddSingleton<McpTlsCertificateState>();", program, StringComparison.Ordinal);
         Assert.DoesNotContain("AddSingleton<ListenerTlsCertificateState>", program, StringComparison.Ordinal);
 
         var lines = RepoFile

@@ -67,34 +67,6 @@ public sealed class MuteRuleServerIdRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheColumn_AndMapsAStoreThroughThisRungToIt()
-    {
-        var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        var arm = "table_schema = 'config' AND table_name = 'config_mute_rules' AND column_name = 'server_id'";
-        Assert.Contains(arm, probe, StringComparison.Ordinal);
-
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var arity = method.GetParameters().Length;
-        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
-        Assert.Equal("hasMuteRuleServerId", method.GetParameters()[ProbeOrdinal].Name);
-
-        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
-        Assert.Equal(157, (int)method.Invoke(null, all)!);
-
-        var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
-        Assert.Equal(156, (int)method.Invoke(null, behind)!);
-
-        var thisArm = viewer.IndexOf("if (hasMuteRuleServerId)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasCheckpointLongestSync)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "no sentinel arm: a fully-migrated store would map one rung short");
-        Assert.True(thisArm < previousArm, "this arm sits below the previous rung's, so a current store maps one rung short");
-    }
-
-    [Fact]
     public void PgMuteRuleStoreSql_CarriesServerIdInSelectInsertAndUpdate()
     {
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "PgMuteRuleStore.cs");

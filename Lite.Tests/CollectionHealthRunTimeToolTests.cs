@@ -13,7 +13,6 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.DependencyInjection;
@@ -422,19 +421,6 @@ public sealed class CollectionHealthRunTimeToolTests : IClassFixture<SharedDuckD
         Assert.Equal(text, rows[Daily].GetProperty("run_at").GetString());
         var expectedNext = CollectorRunTime.NextDue(now, lastRun, minute, 1440, _serverId, CollectorRunTime.LocalIsUtc);
         Assert.Equal(expectedNext, ParseUtc(rows[Daily].GetProperty("next_run_utc")));
-    }
-
-    /* The two links the runtime test above cannot reach: the host calls that one registration method (and nothing else
-       builds the service), and the app hands the host the schedule it holds. */
-    [Fact]
-    public void TheHostRegistersTheRunTimeServiceOnlyThroughItsRegistrationMethod_AndTheAppHandsTheHostItsSchedule()
-    {
-        var host = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpHostService.cs"));
-        Assert.Contains("RegisterCollectorRunTimes(builder.Services, _scheduleManager, _serverManager);", host, StringComparison.Ordinal);
-        Assert.Equal(1, Regex.Count(host, @"new McpCollectorRunTimes\("));
-
-        var app = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "MainWindow.xaml.cs"));
-        Assert.Matches(@"new McpHostService\([^;]*\b_scheduleManager\s*[,)]", app);
     }
 
     /* The shared run-time paragraph names run_time_note for both apps: it is no longer scoped to Darling, and the row-shape

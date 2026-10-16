@@ -110,19 +110,28 @@ SET @shred_needed =
 
 IF @shred_needed = 1
 BEGIN
-    INSERT
-        @PerformanceMonitor_Deadlock
-    (
-        ring_buffer
-    )
+    {RingBufferXml.DeclareSql}
+
     SELECT /* PerformanceMonitorLite */
-        ring_xml = TRY_CAST(xet.target_data AS xml)
+        @ring_text = CONVERT(nvarchar(max), xet.target_data),
+        @ring_session = xes.name
     FROM sys.dm_xe_database_session_targets AS xet
     JOIN sys.dm_xe_database_sessions AS xes
       ON xes.address = xet.event_session_address
     WHERE xes.name = N'{XeSessionName}'
     AND   xet.target_name = N'ring_buffer'
     OPTION(RECOMPILE);
+
+    {RingBufferXml.ParseSql}
+
+    INSERT
+        @PerformanceMonitor_Deadlock
+    (
+        ring_buffer
+    )
+    SELECT
+        ring_xml = @ring_xml
+    WHERE @ring_xml IS NOT NULL;
 END;
 
 SELECT
@@ -213,19 +222,28 @@ SET @shred_needed =
 
 IF @shred_needed = 1
 BEGIN
-    INSERT
-        @PerformanceMonitor_Deadlock
-    (
-        ring_buffer
-    )
+    {RingBufferXml.DeclareSql}
+
     SELECT /* PerformanceMonitorLite */
-        ring_xml = TRY_CAST(xet.target_data AS xml)
+        @ring_text = CONVERT(nvarchar(max), xet.target_data),
+        @ring_session = xes.name
     FROM sys.dm_xe_session_targets AS xet
     JOIN sys.dm_xe_sessions AS xes
       ON xes.address = xet.event_session_address
     WHERE xes.name = N'{XeSessionName}'
     AND   xet.target_name = N'ring_buffer'
     OPTION(RECOMPILE);
+
+    {RingBufferXml.ParseSql}
+
+    INSERT
+        @PerformanceMonitor_Deadlock
+    (
+        ring_buffer
+    )
+    SELECT
+        ring_xml = @ring_xml
+    WHERE @ring_xml IS NOT NULL;
 END;
 
 SELECT

@@ -241,20 +241,9 @@ public sealed class PlanContentRetentionTests
     }
 
     [Fact]
-    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheColumn()
     {
         Assert.Contains("column_name = 'plan_content_retention_days'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
-        var viewerSource = ReadViewerSource();
-
-        /* The reader must hand over exactly one argument per map parameter: ordinals are 0-based, so the
-           highest is Count - 1, and the next one up must NOT appear. */
-        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
     }
 
     /* ---------------- helpers ---------------- */

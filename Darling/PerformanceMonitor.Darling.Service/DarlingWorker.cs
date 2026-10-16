@@ -1456,6 +1456,9 @@ LIMIT 1";
        the MCP and web hosts hand theirs. */
     private readonly BaselineCache _baselineCache;
 
+    /// <summary>The shared baseline cache this host holds (#5950): a test compares it with the container's one instance.</summary>
+    internal BaselineCache SharedBaselineCache => _baselineCache;
+
     /* #4442 scope 2: the same process-lifetime accumulator DarlingWebEndpoints.MapAll and RunComposedPanelAsync
        record into — the DI container hands this worker and the web host the SAME singleton instance, so a read
        recorded by either side is drained by this worker's hourly flush. */

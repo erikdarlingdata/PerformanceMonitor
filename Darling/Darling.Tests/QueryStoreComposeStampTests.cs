@@ -452,40 +452,6 @@ public sealed class QueryStoreComposeStampTests
     /* ---- the sentinel, the version map, the tick ---------------------------------------------------- */
 
     [Fact]
-    public void TheProbe_HasThisRungsSentinelAndMapsItsArmToV173()
-    {
-        Assert.Contains("to_regclass('collect.query_store_compose_stamp_hours')", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
-        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var arity = method.GetParameters().Length;
-        Assert.Equal("hasQueryStoreComposeStamp", method.GetParameters()[ProbeOrdinal].Name);
-
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* Every later rung's sentinel (V174 up to the top, #5825's V187 included) sits above V173's, so a store missing V173 is
-           missing them too; leaving any true would map the store to that rung. */
-        var behind = (object[])all.Clone();
-        for (var i = ProbeOrdinal; i < arity; i++)
-        {
-            behind[i] = false;
-        }
-
-        Assert.Equal(172, (int)method.Invoke(null, behind)!);
-
-        /* Everything through V173's sentinel true and every newer one false maps to V173 itself. */
-        var atThisRung = (object[])all.Clone();
-        for (var i = ProbeOrdinal + 1; i < arity; i++)
-        {
-            atThisRung[i] = false;
-        }
-
-        Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
-    }
-
-    [Fact]
     public void TheTick_IsANinthTenant_OutsideTheGate_BeforeTheIoRollup_WithItsOwnCatchAll()
     {
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");

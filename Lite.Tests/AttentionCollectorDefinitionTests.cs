@@ -101,7 +101,7 @@ public sealed class AttentionCollectorDefinitionTests
         var counter = text.IndexOf("target_name = N'event_counter'", StringComparison.Ordinal);
         var sum = text.IndexOf("sum(/CounterTarget/Packages/Package/Event[@name=\"attention\"]/@count)", StringComparison.Ordinal);
         var gate = text.IndexOf("SET @shred_needed", StringComparison.Ordinal);
-        var cast = text.IndexOf("TRY_CAST(xet.target_data AS xml)", gate, StringComparison.Ordinal);
+        var cast = text.IndexOf("@ring_text = CONVERT(nvarchar(max), xet.target_data)", gate, StringComparison.Ordinal);
         var shred = text.IndexOf("CROSS APPLY pma.ring_buffer.nodes", StringComparison.Ordinal);
         Assert.True(counter >= 0 && sum > counter && gate > sum && cast > gate && shred > cast, "counter, then gate, then cast, then shred");
 

@@ -181,7 +181,6 @@ public class RemediationCredentialRungTests
 
         var viewer = ParitySourceLocal.ReadFile(
             "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasRemediationCredentialAndActor", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);

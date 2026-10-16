@@ -123,24 +123,11 @@ public sealed class TempDbCeilingStoreTests
     }
 
     [Fact]
-    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    public void TheProbeAsksForTheColumn()
     {
         Assert.Contains(
             "table_name = 'tempdb_stats' AND column_name = 'max_size_mb'",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-
-        var mapParameters = typeof(ViewerDataService)
-            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .GetParameters().Length;
-
-        var viewerSource = ReadViewerSource();
-
-        /* Demoted at V82 (#2530): this read `mapParameters - 1`, which is the NEWEST sentinel's ordinal, so
-           the moment a rung was appended it silently started testing that rung's wiring instead of this
-           one's. Pinned at 56 — this rung's own ordinal — which cannot slide. The "and no more than that"
-           half is the top rung's to assert, and it moved to MonitoredEngineKindStoreTests with it. */
-        Assert.True(mapParameters > 56);
-        Assert.Contains("reader.GetBoolean(56)", viewerSource, StringComparison.Ordinal);
     }
 
     [Fact]

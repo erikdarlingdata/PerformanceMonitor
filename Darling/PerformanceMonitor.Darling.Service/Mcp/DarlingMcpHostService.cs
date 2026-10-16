@@ -121,6 +121,9 @@ public sealed class DarlingMcpHostService : BackgroundService
        outside the service's DI (a test) keeps a private one. */
     private readonly BaselineCache _baselineCache;
 
+    /// <summary>The shared baseline cache this host holds (#5950): a test compares it with the container's one instance.</summary>
+    internal BaselineCache SharedBaselineCache => _baselineCache;
+
     /* #4442 scope 2: the process-wide read-latency accumulator, the SAME singleton Program.cs hands the web
        host and the worker's flush (DI, one AddSingleton<ReadLatencyAccumulator> registration) -- optional so a
        test-constructed host (which passes none) keeps a private, throwaway accumulator rather than a
@@ -741,44 +744,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-            /* Register services that MCP tools need via dependency injection. */
-            builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
-            /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */
-            builder.Services.AddSingleton<MonitoredServerRegistryState>(_registryState);
-            /* #4214 part 2: get_store_host's config seat — the same config this host loaded to reach this
-               point, so it cannot disagree with what actually connected. Read-only: GatherAsync only ever
-               reads dataDirectory/Managed off it, never writes.
-               Trimmed copy, not config.Postgres itself (round-1 review, Low 3): the full PostgresConfig
-               also carries the owner connection string. Nothing serializes this DI registration today,
-               but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
-               takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
-            builder.Services.AddSingleton(new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory });
-            /* #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
-               section. Null (section omitted) is AnalyzerConfig.Default; DarlingMcpPlanTools takes this
-               as an [McpServerTool] method parameter the same way it takes NpgsqlDataSource above. */
-            builder.Services.AddSingleton<AnalyzerConfig>(config.Analyzer ?? AnalyzerConfig.Default);
-            /* #4214 round-1 review, Medium 2: get_store_host's 5-minute shared cache — the process-wide
-               Shared instance, not a fresh one per request, so every caller (MCP and the direct-call web
-               path below) actually shares the one cache window. Typed-generic AddSingleton<T>, not the
-               untyped AddSingleton(instance) overload: McpServiceParameterDiSeatCensusTests greps this
-               file's source text for AddSingleton<StoreHostProfileCache> specifically. */
-            builder.Services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
-            /* #4602: the same analyzer config just registered above, so MCP's plan advisories (get_analysis_facts,
-               analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
-               (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
-               MCP path silently fell back to AnalyzerConfig.Default. */
-            /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
-            RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer, _registryState);
-            /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
-               (the postgres pattern one line up — service-typed params are resolved per request and never
-               reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
-               clears its logging providers two blocks up, so anything resolved from the app's logging
-               would be a logger with nowhere to write — the host's is the one wired to the service's
-               real providers, the same instance DarlingAnalysisService already receives. Closes the
-               #3473 review's observation: get_sweep_reports' child reads throw on a store fault
-               (#4315) and the tool's own catch logs the exception once, where before this they
-               degraded with no log trace anywhere on the MCP path. */
-            builder.Services.AddSingleton<ILogger>(_logger);
+            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache);
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -1120,6 +1086,61 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /// <summary>
+    /// Registers the services the MCP tool methods take as parameters (#5950): the data source, the registry state, the
+    /// trimmed Postgres config, the analyzer config, the shared host-profile cache, the per-call analysis service and
+    /// the host's logger. Extracted from the start path so a test resolves every tool service parameter from the
+    /// SAME registration production uses, instead of searching this file's text for it.
+    /// </summary>
+    internal static void RegisterToolServices(
+        IServiceCollection services,
+        NpgsqlDataSource postgres,
+        MonitoredServerRegistryState registryState,
+        PostgresConfig configuredPostgres,
+        AnalyzerConfig? analyzer,
+        PerformanceMonitor.Analysis.IPlanFetcher? planFetcher,
+        ILogger logger,
+        BaselineCache baselineCache)
+    {
+        /* Register services that MCP tools need via dependency injection. */
+        services.AddSingleton<NpgsqlDataSource>(postgres);
+        /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */
+        services.AddSingleton<MonitoredServerRegistryState>(registryState);
+        /* #4214 part 2: get_store_host's config seat — the same config this host loaded to reach this
+           point, so it cannot disagree with what actually connected. Read-only: GatherAsync only ever
+           reads dataDirectory/Managed off it, never writes.
+           Trimmed copy, not config.Postgres itself (round-1 review, Low 3): the full PostgresConfig
+           also carries the owner connection string. Nothing serializes this DI registration today,
+           but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
+           takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
+        services.AddSingleton(new PostgresConfig { Managed = configuredPostgres.Managed, DataDirectory = configuredPostgres.DataDirectory });
+        /* #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
+           section. Null (section omitted) is AnalyzerConfig.Default; DarlingMcpPlanTools takes this
+           as an [McpServerTool] method parameter the same way it takes NpgsqlDataSource above. */
+        services.AddSingleton<AnalyzerConfig>(analyzer ?? AnalyzerConfig.Default);
+        /* #4214 round-1 review, Medium 2: get_store_host's 5-minute shared cache — the process-wide
+           Shared instance, not a fresh one per request, so every caller (MCP and the direct-call web
+           path below) actually shares the one cache window. Registered through
+           RegisterToolServices, which a test resolves every tool service parameter from (#5950). */
+        services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
+        /* #4602: the same analyzer config just registered above, so MCP's plan advisories (get_analysis_facts,
+           analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
+           (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
+           MCP path silently fell back to AnalyzerConfig.Default. */
+        /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
+        RegisterAnalysisService(services, postgres, planFetcher, logger, baselineCache, analyzer, registryState);
+        /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
+           (the postgres pattern one line up — service-typed params are resolved per request and never
+           reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
+           clears its logging providers two blocks up, so anything resolved from the app's logging
+           would be a logger with nowhere to write — the host's is the one wired to the service's
+           real providers, the same instance DarlingAnalysisService already receives. Closes the
+           #3473 review's observation: get_sweep_reports' child reads throw on a store fault
+           (#4315) and the tool's own catch logs the exception once, where before this they
+           degraded with no log trace anywhere on the MCP path. */
+        services.AddSingleton<ILogger>(logger);
+    }
+
+    /// <summary>
     /// Registers the MCP server, its stateless HTTP transport, every tool class, and the two call-tool
     /// filters — the same registration <c>TryStartServerAsync</c> used to build inline. Extracted (#4128)
     /// so a live-HTTP test builds the SAME server (including <c>/core</c>'s <c>ConfigureSessionOptions</c>
@@ -1138,7 +1159,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #5915: the Level 2 mute and custom-rule tools read the served policy through this seat, so under the investigations
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
-           client cannot supply it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+           client cannot supply it. */
         services.AddSingleton<DarlingAgentActionSeat>(new DarlingAgentActionSeat(writes));
 
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
@@ -1158,8 +1179,7 @@ public sealed class DarlingMcpHostService : BackgroundService
            find the accumulator in a process-wide static that only the web host set -- so the run was dropped
            whenever the web host was off, and was tied to whichever web server was mapped last when several
            were set up in one process. The tool now takes this seat as a DI service parameter, over the SAME
-           accumulator the filter above records into. Typed-generic AddSingleton<T>, as the seat census
-           (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
+           accumulator the filter above records into. */
         services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger, slowReads, readAdmission));
 
         /* #5506 part 3: get_read_latency reads the live admission counts as a DI service parameter. Registered always (a
@@ -1169,7 +1189,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         /* #5632 Phase A: claim_investigation_request composes the brief at claim time through this composer, a service
            parameter, so it must be registered wherever the tools are. The reader reads the store the host registered;
            the composer masks at the host's mcp.dataDetail level (none registered: full, as the host filter passes
-           through). Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+           through). */
         services.AddSingleton<IInvestigationBriefSourceReader>(sp =>
             new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger, publicBaseUrl: publicBaseUrl));
         services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
@@ -1178,17 +1198,16 @@ public sealed class DarlingMcpHostService : BackgroundService
             DarlingInvestigationBriefTools.Tools));
 
         /* #5918: get_investigation_reports hides the case a live practice request replays under the investigations arm. The arm is
-           the policy the host started with, so the tool takes it as a service parameter. Typed-generic AddSingleton<T>, for the
-           seat census (McpServiceParameterDiSeatCensusTests). */
+           the policy the host started with, so the tool takes it as a service parameter. */
         services.AddSingleton<InvestigationReadPolicy>(new InvestigationReadPolicy(writes.Investigations));
 
         /* #5822: wait_for_investigation_requests waits on the signal the worker's dispatcher fires when a request opens, a
            service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
-           host share it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+           host share it. */
         services.AddSingleton<InvestigationOpenSignal>(InvestigationOpenSignal.Shared);
 
         /* #5916: set_alert_threshold_override is a Level 2 action tool offered under both arms and takes the served policy as a
-           service parameter to tell them apart. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+           service parameter to tell them apart. */
         services.AddSingleton<DarlingMcpServedPolicy>(new DarlingMcpServedPolicy(writes));
 
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into

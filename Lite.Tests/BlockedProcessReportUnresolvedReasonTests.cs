@@ -139,7 +139,10 @@ public sealed class BlockedProcessReportUnresolvedReasonTests
            cross-database reference the login cannot bind, and (pre-2019) an Invalid-object-name on
            sys.dm_db_page_info. Verified live: 916 raised inside sp_executesql is caught out here with
            ERROR_NUMBER and ERROR_MESSAGE intact. */
-        var text = Sql();
+        /* The shared ring-buffer parse fragment (#5948) has its own TRY/CATCH, around a CONVERT and not around anything dynamic;
+           this test is about the handlers that wrap the dynamic execute.
+           Sql() normalises line endings to \n, so the fragment is normalised the same way or the Replace finds nothing. */
+        var text = Sql().Replace(RingBufferXml.ParseSql.ReplaceLineEndings("\n"), string.Empty, StringComparison.Ordinal);
 
         Assert.Equal(2, Regex.Matches(text, "BEGIN TRY").Count);
         Assert.Equal(2, Regex.Matches(text, @"BEGIN TRY\s+EXECUTE sys\.sp_executesql").Count);

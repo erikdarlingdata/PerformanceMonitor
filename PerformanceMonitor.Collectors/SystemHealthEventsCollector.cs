@@ -78,7 +78,7 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        behind. evt.query('.') stores each matching <event> node verbatim as text — no shredding here
        (Stage 2 owns that). Timestamp watermark (> @cutoff_time) stops the rolling ring buffer being
        re-collected. Azure SQL DB is gated out by AppliesTo, so only server-scoped reaches here. */
-    private const string QueryText = @"
+    private const string QueryText = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
@@ -87,19 +87,28 @@ DECLARE
     ring_buffer xml NOT NULL
 );
 
-INSERT
-    @system_health
-(
-    ring_buffer
-)
+{RingBufferXml.DeclareSql}
+
 SELECT /* PerformanceMonitorLite */
-    ring_xml = TRY_CAST(xet.target_data AS xml)
+    @ring_text = CONVERT(nvarchar(max), xet.target_data),
+    @ring_session = xes.name
 FROM sys.dm_xe_session_targets AS xet
 JOIN sys.dm_xe_sessions AS xes
   ON xes.address = xet.event_session_address
 WHERE xes.name = N'system_health'
 AND   xet.target_name = N'ring_buffer'
 OPTION(RECOMPILE);
+
+{RingBufferXml.ParseSql}
+
+INSERT
+    @system_health
+(
+    ring_buffer
+)
+SELECT
+    ring_xml = @ring_xml
+WHERE @ring_xml IS NOT NULL;
 
 SELECT
     event_time = evt.value('(@timestamp)[1]', 'datetime2'),

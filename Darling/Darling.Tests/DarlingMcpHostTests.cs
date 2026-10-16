@@ -514,16 +514,6 @@ public sealed class DarlingMcpHostTests
     /* ---- the constructor and the DI seam ---- */
 
     [Fact]
-    public void Constructor_McpTlsCertState_IsTheLastParameter_AndOptional()
-    {
-        var parameters = typeof(Host).GetConstructors().Single().GetParameters();
-
-        Assert.Equal("mcpTlsCertState", parameters[^1].Name);
-        Assert.Equal(typeof(McpTlsCertificateState), parameters[^1].ParameterType);
-        Assert.True(parameters[^1].IsOptional);
-    }
-
-    [Fact]
     public void Di_HandsTheHostTheRegisteredMcpTlsCertificateState_TheOneTheWorkerReads()
     {
         /* The self-alert worker takes the same registered McpTlsCertificateState singleton, so what the host publishes
@@ -531,21 +521,16 @@ public sealed class DarlingMcpHostTests
            nobody reads and the alert would never fire. */
         var services = new ServiceCollection();
         services.AddLogging();
-        services.AddSingleton<McpRuntimeState>();
-        services.AddSingleton<MonitoredServerRegistryState>();
-        var registered = new McpTlsCertificateState();
-        services.AddSingleton(registered);
-        services.AddHostedService<Host>();
+        /* The service's own registration (#5950), so the host is built from the container production builds. */
+        DarlingProcessServices.Add(services, stoppedMarkerPath: null);
 
         using var provider = services.BuildServiceProvider();
+        var registered = provider.GetRequiredService<McpTlsCertificateState>();
         var host = provider.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<Host>().Single();
 
         var field = typeof(Host).GetField("_mcpTlsCertState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(field);
         Assert.Same(registered, field!.GetValue(host));
-
-        var program = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
-        Assert.Contains("builder.Services.AddHostedService<DarlingMcpHostService>();", program, StringComparison.Ordinal);
     }
 
     /* ---- the start line (#5288 review F11) ---- */

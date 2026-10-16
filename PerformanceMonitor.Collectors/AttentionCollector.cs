@@ -216,19 +216,28 @@ SET @shred_needed =
 
 IF @shred_needed = 1
 BEGIN
-    INSERT
-        @PerformanceMonitor_Attention
-    (
-        ring_buffer
-    )
+    {4}
+
     SELECT /* PerformanceMonitorLite */
-        ring_xml = TRY_CAST(xet.target_data AS xml)
+        @ring_text = CONVERT(nvarchar(max), xet.target_data),
+        @ring_session = xes.name
     FROM {2} AS xet
     JOIN {1} AS xes
       ON xes.address = xet.event_session_address
     WHERE xes.name = N'{0}'
     AND   xet.target_name = N'ring_buffer'
     OPTION(RECOMPILE);
+
+    {5}
+
+    INSERT
+        @PerformanceMonitor_Attention
+    (
+        ring_buffer
+    )
+    SELECT
+        ring_xml = @ring_xml
+    WHERE @ring_xml IS NOT NULL;
 END;
 
 SELECT
@@ -276,7 +285,9 @@ SELECT
             .Replace("{0}", sessionName.Replace("'", "''", StringComparison.Ordinal), StringComparison.Ordinal)
             .Replace("{1}", isAzureSqlDb ? "sys.dm_xe_database_sessions" : "sys.dm_xe_sessions", StringComparison.Ordinal)
             .Replace("{2}", isAzureSqlDb ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets", StringComparison.Ordinal)
-            .Replace("{3}", EventCountExpression, StringComparison.Ordinal);
+            .Replace("{3}", EventCountExpression, StringComparison.Ordinal)
+            .Replace("{4}", RingBufferXml.DeclareSql, StringComparison.Ordinal)
+            .Replace("{5}", RingBufferXml.ParseSql, StringComparison.Ordinal);
 
     /// <summary>The stored prior event_counter count, or null on a first run, a restarted host or an unreadable value.</summary>
     public static long? ReadLastCount(IReadOnlyDictionary<string, string> state, string? databaseName) =>

@@ -486,7 +486,7 @@ public sealed class ServerPageTabsTests
         var js = ServerTabsJs;
 
         var stamped = McpLatestSnapshotStampTests.LatestTools
-            .Where(t => t.Shape is McpLatestSnapshotStampTests.Shape.Stamped or McpLatestSnapshotStampTests.Shape.SearchBound)
+            .Where(t => t.Shape is PerformanceMonitor.Common.LatestSnapshotShape.Stamped or PerformanceMonitor.Common.LatestSnapshotShape.SearchBound)
             .Select(t => t.ToolName)
             .ToHashSet(StringComparer.Ordinal);
         Assert.True(stamped.IsSupersetOf(["get_database_sizes", "get_running_jobs", "get_server_properties", "get_session_stats"]),

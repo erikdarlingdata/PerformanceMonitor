@@ -113,7 +113,7 @@ public sealed class XeShredGateTests
 
         var gateRead = plan.Text.IndexOf("@execution_count = xet.execution_count", StringComparison.Ordinal);
         var gateIf = plan.Text.IndexOf("IF @shred_needed = 1", StringComparison.Ordinal);
-        var cast = plan.Text.IndexOf("TRY_CAST(xet.target_data AS xml)", StringComparison.Ordinal);
+        var cast = plan.Text.IndexOf("@ring_text = CONVERT(nvarchar(max), xet.target_data)", StringComparison.Ordinal);
 
         Assert.True(gateRead >= 0, "no execution_count read");
         Assert.True(gateIf >= 0, "no shred_needed gate");
@@ -134,7 +134,7 @@ public sealed class XeShredGateTests
 
         var gateRead = plan.Text.IndexOf("@execution_count = xet.execution_count", StringComparison.Ordinal);
         var gateIf = plan.Text.IndexOf("IF @shred_needed = 1", StringComparison.Ordinal);
-        var cast = plan.Text.IndexOf("TRY_CAST(xet.target_data AS xml)", StringComparison.Ordinal);
+        var cast = plan.Text.IndexOf("@ring_text = CONVERT(nvarchar(max), xet.target_data)", StringComparison.Ordinal);
 
         Assert.True(gateRead >= 0, "no execution_count read");
         Assert.True(gateIf >= 0, "no shred_needed gate");

@@ -6,13 +6,12 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System;
-using System.IO;
-using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -56,22 +55,27 @@ public sealed class AnalyzeServerPerCallAnalysisServiceTests
     }
 
     /// <summary>
-    /// The source pin that keeps the runtime test honest: it exercises <c>RegisterAnalysisService</c>, so the host
-    /// must reach the analysis service ONLY through that method, and hand it the host's own shared cache.
+    /// The host's tool-service registration (<c>RegisterToolServices</c>, the method the start path calls), resolved twice: the
+    /// analysis service it registers is one per call, and every instance holds the host's ONE shared BaselineCache (#3941).
+    /// Replaces a pin on the host source's call text (#5950).
     /// </summary>
     [Fact]
-    public void TheMcpHostRegistersOneAnalysisServicePerCall_NotOneSharedInstance()
+    public void TheMcpHostsToolServices_ResolveOneAnalysisServicePerCall_OverTheHostsSharedBaselineCache()
     {
-        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs"));
+        using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=postgres;Username=darling");
+        var hostBaselines = new BaselineCache();
 
-        Assert.Contains("services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("AddSingleton(new DarlingAnalysisService", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("AddSingleton<DarlingAnalysisService>", source, StringComparison.Ordinal);
+        var services = new ServiceCollection();
+        DarlingMcpHostService.RegisterToolServices(
+            services, postgres, new MonitoredServerRegistryState(), new PostgresConfig(), analyzer: null,
+            planFetcher: null, NullLogger.Instance, hostBaselines);
 
-        /* The host calls the method the runtime test above calls, with its ONE BaselineCache (#3941), never a fresh one. */
-        Assert.Contains("RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer, _registryState)", source, StringComparison.Ordinal);
+        using var provider = services.BuildServiceProvider();
+        var first = provider.GetRequiredService<DarlingAnalysisService>();
+        var second = provider.GetRequiredService<DarlingAnalysisService>();
+
+        Assert.NotSame(first, second);
+        Assert.Same(hostBaselines, first.SharedBaselineCache);
+        Assert.Same(hostBaselines, second.SharedBaselineCache);
     }
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
 }

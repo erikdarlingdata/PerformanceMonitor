@@ -129,7 +129,6 @@ public sealed class MuteRuleReloadBeaconTests
         Assert.DoesNotContain("information_schema.triggers", probe, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasMuteRuleReloadBeacon", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService)

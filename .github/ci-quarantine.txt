@@ -1,0 +1,23 @@
+# The CI quarantine (#5942). A test that dev's own latest push broke is left out of an UNRELATED pull request while
+# its fix lands. It is not a place to park a flaky test. Our wrong test is a bug we introduced: it gets an issue and a
+# fix, and the entry names that issue (.github/REVIEW-TRAPS.md, "Workflows and CI").
+#
+# One test per line:
+#
+#   <Namespace.Class.Method> | <dev push run id> | <UTC time, ISO 8601> | #<issue>
+#
+# - The test is spelled as the runner prints it in a failed job's log (`Darling.Tests.SomeTests.TheMethod [FAIL]`); the
+#   arguments of a theory case are left off, and the entry leaves out every case of the method. It must start with
+#   Darling.Tests. or Lite.Tests.
+# - The run is the dev push run of build.yml that failed it. The time is when the line was added.
+# - The issue is the bug filed for the test and its fix.
+#
+# A pull request honors an entry only while ALL of these hold; otherwise the test runs as usual:
+# - the latest completed dev push run of build.yml failed this exact test (read through the Actions API);
+# - the entry is under 72 hours old, whatever else is true (it never renews: add a new line to extend it);
+# - the pull request's test map selection is usable and does not reach the test (it changes neither the test's own file
+#   nor a file the map says the test runs, reads or names).
+# Only pull requests honor it: a push to dev runs everything, which is how dev learns the test is fixed. The Guard job
+# and both shard runners read it. A line that is not in this format is ignored.
+#
+# Delete the line when the fix merges. This file ships empty.
