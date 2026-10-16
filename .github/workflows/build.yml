@@ -1249,7 +1249,7 @@ jobs:
           # not reach (ci-select.py slow_skip). The Guard-only pass has none of them (a Guard class is never Slow).
           $slowArgs = @()
           if ($env:SLOW_EVENT -eq 'pull_request' -and $scopeArgs.Count -eq 0) {
-              $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
+              $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT "--base-ref=$env:SLOW_BASE_REF" "--selection=$env:TEST_MAP_SELECTION" | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
           }
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @scopeArgs @slowArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
