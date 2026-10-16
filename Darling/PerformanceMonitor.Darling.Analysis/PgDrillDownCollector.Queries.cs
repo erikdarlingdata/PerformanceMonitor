@@ -1026,7 +1026,11 @@ LIMIT 5";
         /* $5/$6 (#3902): the fact's offenders, or NULL when it did not run, failed, or reported none — typed
            explicitly, because a NULL carries no array type for the server to infer. An empty list is read as
            unrestricted rather than as "nothing": a pass whose fact found no regression raises no
-           PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a fact. */
+           PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a fact.
+           #5957: on the table route these two arrays and the first_execution_time bound are what
+           QueryStoreBackgroundIndexes.LatestDatabaseQueryFirstExec seeks on, so the read takes the offenders' rows only
+           rather than every row the server has in the window. The command is not prepared, so each run gets a custom plan
+           with these values known and the "$5 IS NULL OR" arm folded away; a store without that index keeps its old plan. */
         var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
         cmd.Parameters.Add(new NpgsqlParameter
         {
