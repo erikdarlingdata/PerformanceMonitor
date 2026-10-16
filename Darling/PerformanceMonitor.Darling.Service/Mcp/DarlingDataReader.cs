@@ -3139,6 +3139,22 @@ internal static class DarlingDataReader
             }
 
             var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
+
+            /* #5882: the first_execution_time floor of both reads reaches PurgeEdgeMargin (26 hours) before the window,
+               because an interval may span a day. When the server's own intervals are shorter, the floor shrinks to what
+               they need (three hours at 60-minute intervals), so the day before the window is no longer read whole. The
+               planner then prefers a plain scan of first_execution_time_idx, which walks every server's rows in the
+               hours it covers, over the (server_id, first_execution_time) bitmap (measured: 320k buffer touches for a
+               read that the bitmap does in 5k), so index scans are off for this one statement; the bitmap scans stay. */
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, plan.ReadStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                topSql = QueryStoreIntervalWide.WithEdgeMargin(topSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+                await using var noIndexScan = new NpgsqlCommand(QueryStoreIntervalWide.SetLocalNoIndexScanSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+                await noIndexScan.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             /* #5313: the same candidate limit as the raw read, bound LAST ($8 on the interval table read, $10 on the
                daily read, after its two dates). #5815: one run at TopFill's final limit; each fill round used to
                re-read the server's whole window from the wide table. */

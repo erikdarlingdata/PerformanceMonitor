@@ -535,7 +535,20 @@ public sealed partial class ViewerDataService
             /* #5313: the same candidate limit as the raw read, on this transaction's snapshot ($6). #5815: one run at
                TopFill's final limit; each fill round used to re-read the server's window from the wide table. */
             List<ViewerQueryStoreRow> rows;
-            await using (var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+
+            /* #5882: the same shorter first_execution_time floor, and plain index scans off for this statement, as the MCP
+               read (DarlingDataReader.TryGetQueryStoreTopFromTableAsync explains both). An open end reads to now. */
+            var topSql = QueryStoreTopTableSql;
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, plan.ReadStart, literalEndUtc ?? DateTime.UtcNow, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                topSql = QueryStoreIntervalWide.WithEdgeMargin(topSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+                await using var noIndexScan = new Npgsql.NpgsqlCommand(QueryStoreIntervalWide.SetLocalNoIndexScanSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+                await noIndexScan.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
