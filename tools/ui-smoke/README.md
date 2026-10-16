@@ -105,7 +105,7 @@ To refresh the baselines (after a change to the page that you want to keep):
 4. Review GitHub's image diff of each PNG. Never commit a PNG that you rendered on your own machine. Fonts and the browser
    differ, so most pixels differ in CI.
 
-Every run, pass or fail, uploads the artifact `darling-ui-smoke`. For each page that differs, its `out/shot-failures` folder
+Every run, pass or fail, uploads the artifact `darling-ui-smoke`. For each page that differs, its `ui-smoke/out/shot-failures` folder
 holds `<page>.baseline.png`, `<page>.actual.png` and `<page>.diff.png` (the changed pixels). If the change is wanted, refresh
 the baselines as above. If a runner image update moved the pixels, refresh them the same way. A drift that nobody refreshes
 does not fail anything, so look at the NOTICE lines on a pull request that changes a page.

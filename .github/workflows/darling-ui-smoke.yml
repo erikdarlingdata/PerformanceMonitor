@@ -150,7 +150,7 @@ jobs:
             $lines += "| $($s.name) | $($s.differing) | $($s.pct) | $result |"
           }
           $lines += ''
-          $lines += 'A differing screenshot does not fail the job. The baseline, actual and diff images are in the `darling-ui-smoke` artifact, under `out/shot-failures`.'
+          $lines += 'A differing screenshot does not fail the job. The baseline, actual and diff images are in the `darling-ui-smoke` artifact, under `ui-smoke/out/shot-failures`.'
           $lines -join "`n" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       - name: Logs tail
