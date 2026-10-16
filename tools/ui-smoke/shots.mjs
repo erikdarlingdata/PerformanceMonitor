@@ -129,14 +129,16 @@ async function shoot(browser, spec, ctx) {
   }
 }
 
-/** Run the screenshot pages. Returns the problems (strings); writes PNGs and, on a mismatch, the baseline/actual/diff triple. */
+/** Run the screenshot pages. Returns { problems, shots }. `problems` (strings) fail the run: a page that would not shoot, no baseline, a
+ *  size change. `shots` is one { name, differing, pct } per compared page and is advisory (#5931): a page that differs from its baseline
+ *  prints a NOTICE and writes its baseline/actual/diff triple, but is not a problem. */
 export async function runShots({ config, baseUrl, outDir, only, settle }) {
   const mode = (process.env.UI_SMOKE_SHOTS || "compare").toLowerCase();
-  if (mode === "off") return [];
+  if (mode === "off") return { problems: [], shots: [] };
   const specs = config.pages.filter((p) => p.screenshot && (!only.length || only.includes(p.name)));
-  if (specs.length === 0) return [];
+  if (specs.length === 0) return { problems: [], shots: [] };
   const anchorMs = parseAnchor(process.env.UI_SMOKE_ANCHOR);
-  if (Number.isNaN(anchorMs)) return ["screenshots: UI_SMOKE_ANCHOR (the seed's anchor, UTC) is not set; run through run-ui-smoke.ps1"];
+  if (Number.isNaN(anchorMs)) return { problems: ["screenshots: UI_SMOKE_ANCHOR (the seed's anchor, UTC) is not set; run through run-ui-smoke.ps1"], shots: [] };
   const baselines = process.env.UI_SMOKE_BASELINES || join(dirname(fileURLToPath(import.meta.url)), "baselines");
   const newDir = join(outDir, "new-baselines");
   const failDir = join(outDir, "shot-failures");
@@ -170,13 +172,13 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
         break;
       }
       if (offline > 0) {
-        return [`screenshots: the fleet is already past collection stale (${seen}); the cards go Offline 30 minutes after the seed anchor, so the walk ran too long for the seed to stay stale. Shorten the walk or re-seed.`];
+        return { problems: [`screenshots: the fleet is already past collection stale (${seen}); the cards go Offline 30 minutes after the seed anchor, so the walk ran too long for the seed to stay stale. Shorten the walk or re-seed.`], shots: [] };
       }
     } catch {
       /* the service answers again on the next poll */
     }
     if (Date.now() > staleDeadline) {
-      return [`screenshots: the fleet never reached collection stale in ${STALE_WAIT_MS / 60000} minutes (${seen}); the band opens 2 minutes after the seed anchor, so the service clock or the seed anchor is wrong, or /api/fleet stopped answering`];
+      return { problems: [`screenshots: the fleet never reached collection stale in ${STALE_WAIT_MS / 60000} minutes (${seen}); the band opens 2 minutes after the seed anchor, so the service clock or the seed anchor is wrong, or /api/fleet stopped answering`], shots: [] };
     }
     await new Promise((r) => setTimeout(r, 5000));
   }
@@ -185,6 +187,7 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
      updates with the image and would move pixels. */
   const browser = await chromium.launch({ headless: true });
   const problems = [];
+  const shots = [];
   const ctx = { baseUrl, anchorMs, deltaMs: FIXED_ANCHOR_MS - anchorMs, settle, config };
   try {
     for (const spec of specs) {
@@ -220,10 +223,11 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
       const diff = new PNG({ width: base.width, height: base.height });
       const differing = pixelmatch(base.data, actual.data, diff.data, base.width, base.height, { threshold: PIXEL_THRESHOLD });
       const ratio = differing / (base.width * base.height);
+      shots.push({ name: spec.name, differing, pct: Number((ratio * 100).toFixed(3)) });
       if (differing > MAX_DIFF_PIXELS) {
+        /* Advisory (#5931): reported with its images, never a problem, so a layout change on a page does not fail the job. */
         writeFileSync(join(failDir, `${spec.name}.diff.png`), PNG.sync.write(diff));
-        problems.push(`screenshot ${spec.name}: ${differing} pixels differ (${(ratio * 100).toFixed(3)}%, none allowed); baseline, actual and diff are in shot-failures`);
-        console.log(`FAIL shot ${spec.name}: ${differing} pixels (${(ratio * 100).toFixed(3)}%) differ`);
+        console.log(`NOTICE screenshot ${spec.name}: ${differing} pixels differ (${(ratio * 100).toFixed(3)}%); baseline, actual and diff are in shot-failures`);
       } else {
         /* A pass keeps no triple: the failure folder holds only what failed. */
         for (const suffix of ["actual", "baseline"]) rmQuiet(join(failDir, `${spec.name}.${suffix}.png`));
@@ -233,7 +237,7 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
   } finally {
     await browser.close();
   }
-  return problems;
+  return { problems, shots };
 }
 
 function rmQuiet(p) {
