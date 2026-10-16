@@ -218,6 +218,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "POST \"/api/servers\""] = "admin write",
         [WebFile + "PATCH \"/api/servers/{id:int}\""] = "admin write",
         [WebFile + "POST \"/api/alert-history/dismiss\""] = "write",
+        [WebFile + "GET \"/api/investigation-feedback\""] = "definition read: reported requests with their feedback and the false-positive counts (two small config-table reads, capped at 100 requests; #5913)",
+        [WebFile + "PUT \"/api/investigation-feedback/{requestId}\""] = "write",
         [WebFile + "GET \"/api/investigation-notes/pending\""] = "definition read: the notes agents proposed that nobody has decided (one small config table, capped at 200 rows; #5903)",
         [WebFile + "GET \"/api/agent-changes\""] = "definition read: the journal's agent calls and refusals (one capped journal read plus the switch; #5917)",
         [WebFile + "GET \"/api/agent-changes/{id:long}/muted-alerts\""] = "definition read: the alerts muted since one agent mute (one capped alert-log read; #5917)",
