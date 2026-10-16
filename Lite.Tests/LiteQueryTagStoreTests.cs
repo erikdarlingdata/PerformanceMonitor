@@ -89,7 +89,7 @@ public sealed class LiteQueryTagStoreTests : IClassFixture<SharedDuckDbFixture>
     {
         var parent = (int?)null;
         var ids = new System.Collections.Generic.List<int>();
-        for (var i = 0; i < TagTreeRules.MaxDepth - 1; i++)
+        for (var i = 0; i < TagTreeRules.MaxDepth; i++)
         {
             parent = await _service.CreateQueryTagAsync("L" + i, parent);
             ids.Add(parent.Value);
@@ -141,7 +141,8 @@ public sealed class LiteQueryTagStoreTests : IClassFixture<SharedDuckDbFixture>
         /* The kept tag's rule and the text_tag rule (it names no tag) stay. */
         Assert.Equal(2, (await _service.GetQueryTagRulesAsync()).Count);
         Assert.Equal(1L, await CountAsync("SELECT COUNT(*) FROM query_tag_map"));
-        Assert.Equal(QueryTagStoreCodes.NotFound, await CodeOfAsync(() => _service.DeleteQueryTagAsync(root)));
+        var gone = await Assert.ThrowsAsync<QueryTagRefusedException>(() => _service.DeleteQueryTagAsync(root));
+        Assert.Equal(TagRefusalKind.NotFound, gone.Kind);
     }
 
     [Fact]
