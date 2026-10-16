@@ -44,7 +44,6 @@
                   SelectionMode="Single"
                   CanUserAddRows="False"
                   CanUserDeleteRows="False"
-                  CanUserSortColumns="False"
                   HeadersVisibility="Column"
                   GridLinesVisibility="Horizontal"
                   SelectionChanged="RequestsGrid_SelectionChanged">
@@ -53,10 +52,10 @@
                 <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
                 <DataGridTextColumn Header="Metric" Binding="{Binding FirstMetric}" Width="180"/>
                 <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="130"/>
-                <DataGridTextColumn Header="Opened" Binding="{Binding Opened}" Width="140"/>
+                <DataGridTextColumn Header="Opened" Binding="{Binding Opened}" SortMemberPath="OpenedAtUtc" Width="140"/>
                 <DataGridTextColumn Header="Agent" Binding="{Binding Agent}" Width="130"/>
-                <DataGridTextColumn Header="Lease until" Binding="{Binding LeaseUntil}" Width="140"/>
-                <DataGridTextColumn Header="Reported" Binding="{Binding Reported}" Width="140"/>
+                <DataGridTextColumn Header="Lease until" Binding="{Binding LeaseUntil}" SortMemberPath="LeaseUntilUtc" Width="140"/>
+                <DataGridTextColumn Header="Reported" Binding="{Binding Reported}" SortMemberPath="ReportedAtUtc" Width="140"/>
                 <DataGridTextColumn Header="Route" Binding="{Binding RouteId}" ElementStyle="{StaticResource NumericCell}" Width="60"/>
             </DataGrid.Columns>
         </DataGrid>
@@ -109,12 +108,11 @@
                           IsReadOnly="True"
                           CanUserAddRows="False"
                           CanUserDeleteRows="False"
-                          CanUserSortColumns="False"
-                          HeadersVisibility="Column"
+                                  HeadersVisibility="Column"
                           GridLinesVisibility="Horizontal"
                           MaxHeight="260">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="140"/>
+                        <DataGridTextColumn Header="Time" Binding="{Binding Time}" SortMemberPath="TimeUtc" Width="140"/>
                         <DataGridTextColumn Header="Event" Binding="{Binding Event}" Width="130"/>
                         <DataGridTextColumn Header="Actor" Binding="{Binding Actor}" Width="150"/>
                         <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="260"/>

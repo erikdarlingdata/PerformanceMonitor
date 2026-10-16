@@ -31,6 +31,10 @@ internal sealed record InvestigationPanelRequest(InvestigationRequestRow Row)
     public int RouteId => Row.RouteId;
     public string Agent => Row.ClaimedBy ?? "";
     public int ClaimCount => Row.ClaimCount;
+    /* The UTC times are what the grid's time columns sort by (SortMemberPath), never their local text. */
+    public DateTime OpenedAtUtc => Row.OpenedAtUtc;
+    public DateTime? LeaseUntilUtc => Row.LeaseUntilUtc;
+    public DateTime? ReportedAtUtc => Row.ReportedAtUtc;
     public string Opened => InvestigationPanelReader.LocalText(Row.OpenedAtUtc);
     public string LeaseUntil => InvestigationPanelReader.LocalText(Row.LeaseUntilUtc);
     public string Reported => InvestigationPanelReader.LocalText(Row.ReportedAtUtc);
@@ -42,7 +46,7 @@ internal sealed record InvestigationPanelReport(
     string AgentId, string Submitted, string Verdict, bool RootCauseFound, string Summary, string RootCause, string Evidence);
 
 /// <summary>One journal row under a request (claims, releases, lapses, limits, refusals), newest first.</summary>
-internal sealed record InvestigationPanelJournalRow(string Time, string Event, string Actor, string Reason, string Detail);
+internal sealed record InvestigationPanelJournalRow(string Time, string Event, string Actor, string Reason, string Detail, DateTime TimeUtc);
 
 /// <summary>The detail pane of one request: its reports, journal and stored brief, all masked at the level the MCP
 /// investigation tools serve. <see cref="Claimed"/> is the newest <c>claimed</c> journal time, or empty when never claimed.</summary>
@@ -122,7 +126,7 @@ internal sealed class InvestigationPanelReader
             var j = read.Journal[i];
             var node = journalNodes[i]!.AsObject();
             journal.Add(new InvestigationPanelJournalRow(
-                LocalText(j.EventTimeUtc), j.Event, Text(node["actor"]), Withheld(node, Text(node["reason"])), Text(node["detail"])));
+                LocalText(j.EventTimeUtc), j.Event, Text(node["actor"]), Withheld(node, Text(node["reason"])), Text(node["detail"]), j.EventTimeUtc));
         }
 
         var claimed = read.Journal.Where(j => j.Event == "claimed").Select(j => (DateTime?)j.EventTimeUtc).Max();
