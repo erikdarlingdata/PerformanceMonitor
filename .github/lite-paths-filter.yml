@@ -54,7 +54,7 @@ lite_shard:
   - '.github/lite-paths-filter.yml'
 # The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.
 # A diff that reaches ONLY these (no lite_shard, core_shard or root_shard entry) runs just the
-# Lite.Tests classes tagged [Trait("Reads", "Darling")], in one shard; see the scope step below.
+# Lite.Tests classes the ci-select.py reads-classes scan finds reading a Darling path (#5961), in one shard; see the scope step below.
 # lite_shard followed by darling_reads_shard is the build job's `lite` set, entry for entry.
 darling_reads_shard:
   - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
