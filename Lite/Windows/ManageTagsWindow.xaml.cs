@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -32,6 +33,10 @@ public sealed class TagNode
     public ServerTag Tag { get; }
 
     public int Depth { get; }
+
+    /// <summary>Whether a child tag may be added under this node: the nesting limit is the shared
+    /// <see cref="TagTreeRules"/> one (#5978), the same as Darling's server tags.</summary>
+    public bool CanAddChild => TagTreeRules.CanHaveChildren(Depth);
 
     public string Name => Tag.Name;
 
@@ -84,9 +89,6 @@ public sealed class ServerCheckItem : INotifyPropertyChanged
 /// </summary>
 public partial class ManageTagsWindow : Window
 {
-    /// <summary>Four levels of nesting: a node at depth 0..2 may have children; depth 3 (the 4th) may not.</summary>
-    private const int MaxDepth = 4;
-
     private readonly LocalDataService _dataService;
     private readonly IReadOnlyList<ServerConnection> _servers;
 
@@ -234,7 +236,7 @@ public partial class ManageTagsWindow : Window
     private void UpdateButtons()
     {
         var hasSelection = _selectedNode is not null;
-        NewChildButton.IsEnabled = hasSelection && _selectedNode!.Depth < MaxDepth - 1;
+        NewChildButton.IsEnabled = hasSelection && _selectedNode!.CanAddChild;
         RenameButton.IsEnabled = hasSelection;
         ColourButton.IsEnabled = hasSelection;
         DeleteButton.IsEnabled = hasSelection;
@@ -453,7 +455,7 @@ public partial class ManageTagsWindow : Window
             return;
         }
 
-        if (_selectedNode.Depth >= MaxDepth - 1)
+        if (!_selectedNode.CanAddChild)
         {
             MessageBox.Show(this, "Tags can nest at most four levels deep.", "Manage Tags",
                 MessageBoxButton.OK, MessageBoxImage.Information);
