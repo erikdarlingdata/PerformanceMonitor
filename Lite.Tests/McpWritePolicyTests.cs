@@ -410,7 +410,7 @@ public sealed class McpWritePolicyTests
         Assert.Contains("bool allowWrites = false", host, StringComparison.Ordinal);
 
         var main = ParitySource.ReadFile("Lite/MainWindow.xaml.cs");
-        Assert.Contains("mcpSettings.Port, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, InvestigationStore)", main, StringComparison.Ordinal);
+        Assert.Contains("mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail)", main, StringComparison.Ordinal);
     }
 
     [Fact]

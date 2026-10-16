@@ -101,8 +101,6 @@ public sealed class StoreSqlClockDisciplineTests
     /// and the analysis reads that window on it hit both.</item>
     /// </list>
     ///
-    /// <para>The investigation tables (#5820) add three more names that split by STORE, not by table: Lite's DuckDB declares <c>expires_at</c>, <c>lease_until</c> and <c>submitted_at</c> as naive <c>TIMESTAMP</c> (Lite binds every bound in UTC), while Darling's PostgreSQL <c>InvestigationTables</c> and <c>ExternalAlertTables</c> declare the same names <c>timestamptz</c>, where <c>now()</c> and <c>clock_timestamp()</c> are the correct comparison. The vocabulary is scraped from both stores' DDL, so without these entries the scan reads the Lite declaration and flags Darling's timestamptz comparisons with a naive-UTC fix that would be wrong there.</para>
-    ///
     /// <para>Adding a name here REMOVES it from the discriminator, which is a real cost: a future bare clock
     /// compared against <c>query_store_stats.last_execution_time</c> would go unflagged, and there the naive-UTC
     /// bind this scan recommends would have been the right fix. That trade is taken deliberately, because the
@@ -118,7 +116,20 @@ public sealed class StoreSqlClockDisciplineTests
     /// with a different fix (de-skew by the server's offset, not bind naive UTC), so it belongs to that pin.
     /// Add a name here only with the same kind of evidence: a documented split, per table.</para>
     /// </summary>
-    private static readonly string[] AmbiguousFrameColumns = ["sample_time", "event_time", "last_execution_time", "expires_at", "lease_until", "submitted_at"];
+    private static readonly string[] AmbiguousFrameColumns = ["sample_time", "event_time", "last_execution_time"];
+
+    /// <summary>
+    /// Column names that split by STORE rather than by table (#5820): Lite's DuckDB investigation tables declare
+    /// <c>expires_at</c>, <c>lease_until</c> and <c>submitted_at</c> as naive <c>TIMESTAMP</c> (Lite binds every bound in
+    /// UTC), while Darling's PostgreSQL <c>InvestigationTables</c> and <c>ExternalAlertTables</c> declare the same names
+    /// <c>timestamptz</c>, where <c>now()</c> and <c>clock_timestamp()</c> are the correct comparison. The vocabulary is
+    /// scraped from both stores' DDL, so without this list the scan reads Lite's declaration and flags Darling's
+    /// timestamptz comparisons with a naive-UTC fix that would be wrong there. They are not in
+    /// <see cref="AmbiguousFrameColumns"/> because that register is pinned against the collector catalog's per-table
+    /// frames (<c>ConsumedTimestampFrameDisciplineTests</c>), and these columns are in no collector's payload.
+    /// Same cost as above: a bare clock compared with a Lite-side <c>expires_at</c> goes unflagged.
+    /// </summary>
+    private static readonly string[] StoreSplitTypeColumns = ["expires_at", "lease_until", "submitted_at"];
 
     /// <summary>
     /// The one bare <c>now()</c> left in the store's SQL, and it is waived on ARITHMETIC, not on being
@@ -939,7 +950,7 @@ public sealed class StoreSqlClockDisciplineTests
            break inside a DDL literal. Left in, it would match every SQL literal that casts anything. */
         names.Remove("timestamp");
 
-        foreach (var ambiguous in AmbiguousFrameColumns)
+        foreach (var ambiguous in AmbiguousFrameColumns.Concat(StoreSplitTypeColumns))
         {
             names.Remove(ambiguous);
         }
