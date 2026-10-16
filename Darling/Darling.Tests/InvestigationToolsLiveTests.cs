@@ -194,6 +194,61 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#5904: the two reads the Investigations page makes carry the fields it draws, in the MCP order (requests
+    /// <c>opened_at DESC</c>, journal <c>event_time DESC</c>), and the report read the web serves is the full report and
+    /// brief an operator sees (the same answer the tool gives at the full level).</summary>
+    [Fact]
+    public async Task TheWebReads_CarryTheFieldsThePageDraws_InTheMcpOrder_AndTheReportIsServedInFull()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var older = (await store.OpenOrJoinAsync(Alert("resources"), ct)).RequestId!.Value;
+            _now = _now.AddSeconds(2);
+            var newer = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var id = newer.ToString();
+            var claim = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct));
+            await DarlingMcpInvestigationTools.SubmitAsync(store, id, claim.GetProperty("claim_id").GetString()!, 1,
+                "needs_person", "could not tell", Evidence, "see the table SecretOrders for the cause", null, null, ct);
+
+            async Task<JsonElement> WebRead(string tool, string query)
+            {
+                var context = new DefaultHttpContext();
+                context.Request.QueryString = new QueryString(query);
+                return Root(await DarlingWebEndpoints.BuildReadDispatch()[tool](context, dataSource, null!));
+            }
+
+            var list = await WebRead("list_investigation_requests", "?limit=100");
+            var requests = list.GetProperty("requests").EnumerateArray().ToArray();
+            Assert.Equal(new[] { newer, older }, requests.Select(r => r.GetProperty("request_id").GetGuid()));
+            foreach (var key in new[] { "request_id", "opened_at", "state", "server_name", "first_metric", "family", "alert_count",
+                         "claimed_by", "lease_until", "reported_at", "route_id" })
+                Assert.True(requests[0].TryGetProperty(key, out _), "the list row carries " + key);
+            Assert.Equal("reported", requests[0].GetProperty("state").GetString());
+            Assert.Equal("agent-a", requests[0].GetProperty("claimed_by").GetString());
+            Assert.Equal("open", requests[1].GetProperty("state").GetString());
+
+            var full = await WebRead("get_investigation_reports", "?request_id=" + id);
+            var report = Assert.Single(full.GetProperty("reports").EnumerateArray().ToArray());
+            foreach (var key in new[] { "agent_id", "submitted_at", "verdict", "root_cause_found", "root_cause", "summary", "evidence" })
+                Assert.True(report.TryGetProperty(key, out _), "the report carries " + key);
+            Assert.Equal("see the table SecretOrders for the cause", report.GetProperty("summary").GetString());
+            Assert.True(full.GetProperty("brief").ValueKind == JsonValueKind.Object);
+            var journal = full.GetProperty("journal").EnumerateArray().ToArray();
+            Assert.Contains(journal, j => j.GetProperty("event").GetString() == "claimed");
+            Assert.Contains(journal, j => j.GetProperty("event").GetString() == "reported");
+            var times = journal.Select(j => j.GetProperty("event_time").GetDateTime()).ToArray();
+            Assert.Equal(times.OrderByDescending(t => t), times);
+            foreach (var key in new[] { "event_time", "event", "actor", "reason", "request_id" })
+                Assert.True(journal[0].TryGetProperty(key, out _), "the journal row carries " + key);
+
+            /* The web read is the tool's full-level answer: an operator sees the whole report and brief. */
+            var tool = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, id, 24, ct));
+            Assert.Equal(tool.GetProperty("reports").GetRawText(), full.GetProperty("reports").GetRawText());
+            Assert.Equal(tool.GetProperty("brief").GetRawText(), full.GetProperty("brief").GetRawText());
+        });
+    }
+
     [Fact]
     public async Task Submit_AProposedNote_LandsPending_AndTheReportIsStored()
     {

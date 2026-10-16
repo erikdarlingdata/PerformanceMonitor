@@ -498,6 +498,13 @@ export function parseUtc(s) {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/** The rows of a read's reply under `key`, or the reply itself when it is an array; [] for anything else. One definition for the pages that unwrap a tool's reply (alerts, investigations). */
+export function rowsUnder(data, key) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data[key])) return data[key];
+  return [];
+}
+
 /** Full localized date-time, or an em dash for null/unparseable. */
 export function localTime(s) {
   const d = parseUtc(s);

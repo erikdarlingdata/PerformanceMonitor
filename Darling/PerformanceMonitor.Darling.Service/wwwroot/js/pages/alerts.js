@@ -24,7 +24,7 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail } from "../util.js";
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -727,12 +727,6 @@ const INVESTIGATION_COLUMNS = [
   { key: "journal", label: "Journal", csv: false, render: (r) => journalCell(r) },
 ];
 
-/* The rows of a reply under `key`, or the reply itself when it is an array; [] for anything else. */
-function rowsUnder(data, key) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data[key])) return data[key];
-  return [];
-}
 
 /* The requests of list_investigation_requests, each with the verdict and summary of its newest report from
  * get_investigation_reports (by submitted_at; a request with no report shows none). Pure, so the harness checks it. */

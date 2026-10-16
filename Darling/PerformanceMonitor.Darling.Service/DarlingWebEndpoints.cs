@@ -118,7 +118,8 @@ public static class DarlingWebEndpoints
     /// the registration-time catalog only the MCP host builds, so a web read of it has nothing to mirror.
     /// <c>wait_for_investigation_requests</c> (#5822) is an agent's long poll: it holds the call up to 25 seconds waiting
     /// for a request to open, which is no page read, and the web page reads the requests through
-    /// <c>list_investigation_requests</c>.</summary>
+    /// <c>list_investigation_requests</c>. <c>backtest_custom_alert_rule</c> (#5911) replays a rule over up to 7 days of
+    /// history in up to 2,880 queries and 60 seconds, which is no page read: it is served over MCP only.</summary>
     public static readonly IReadOnlySet<string> ExcludedToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_server",
@@ -156,6 +157,7 @@ public static class DarlingWebEndpoints
         "delete_custom_alert_rule",
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
+        "backtest_custom_alert_rule",
         "list_custom_alert_templates",
         "create_server_tag",
         "update_server_tag",

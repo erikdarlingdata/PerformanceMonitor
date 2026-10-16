@@ -22,8 +22,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Ungated (no-live-store) contract for the #3285 custom-alert-rule MCP tools: the tool surface is EXACTLY the
-/// eight management tools (the six CRUD/validate tools, #3299's test_custom_alert_rule evaluate-now, and #3285
-/// Component 7's list_custom_alert_templates; all static, on a [McpServerToolType] class, returning
+/// nine management tools (the six CRUD/validate tools, #3299's test_custom_alert_rule evaluate-now, #5911's
+/// backtest_custom_alert_rule replay, and #3285 Component 7's list_custom_alert_templates; all static, on a [McpServerToolType] class, returning
 /// Task&lt;string&gt;), the advertised tools/list schema is
 /// Gemini-clean (#1074) with the expected required-param set, and validate / create / update run the SAME
 /// CustomAlertRuleDefinition.TryParse authority (the one the evaluator uses) BEFORE any persistence - an invalid
@@ -50,6 +50,7 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
 
     private static readonly string[] ExpectedToolSurface =
     {
+        "backtest_custom_alert_rule",
         "create_custom_alert_rule",
         "delete_custom_alert_rule",
         "get_custom_alert_rule",
@@ -80,7 +81,7 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
     }
 
     [Fact]
-    public void ToolSurface_IsExactlyTheEightCustomAlertTools()
+    public void ToolSurface_IsExactlyTheNineCustomAlertTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -104,10 +105,10 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllEightTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllNineTools()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(8, tools.Count);
+        Assert.Equal(9, tools.Count);
         var violations = tools.Values.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
     }
@@ -121,6 +122,8 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
     [InlineData("delete_custom_alert_rule", "rule_id")]
     /* #3299: both inputs are optional (the tool enforces "exactly one" at runtime, not via required-schema). */
     [InlineData("test_custom_alert_rule", "")]
+    /* #5911: the same exactly-one-of rule input, plus the optional servers, hours and as_of. */
+    [InlineData("backtest_custom_alert_rule", "")]
     /* #3285 Component 7: the template list takes no parameters. */
     [InlineData("list_custom_alert_templates", "")]
     public void AdvertisedSchema_RequiredParams_MatchTheContract(string toolName, string expectedCsv)
