@@ -1044,6 +1044,7 @@ public sealed class McpPayloadContractCensusTests
     [
         ("DarlingMcpFinOpsInventoryTools.cs", "get_finops_inventory"),
         ("DarlingMcpInvestigationTools.cs", "list_investigation_requests"),
+        ("McpInvestigationTools.cs", "list_investigation_requests"),
     ];
 
     private static readonly Regex InlineLimitRefusal = new(
