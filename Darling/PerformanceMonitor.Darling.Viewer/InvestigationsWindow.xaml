@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitor.Darling.Viewer.InvestigationsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
         Title="Investigations"
         Height="680" Width="1180"
         WindowStartupLocation="CenterOwner"
@@ -73,6 +74,7 @@
                             <DataGridTextColumn Header="Claims" Binding="{Binding ClaimsDisplay}" Width="55"/>
                             <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="120" SortMemberPath="ExpiresAtUtc"/>
                             <DataGridTextColumn Header="Verdict" Binding="{Binding Verdict}" Width="90"/>
+                            <DataGridTextColumn Header="Practice" Binding="{Binding PracticeDisplay}" Width="60"/>
                         </DataGrid.Columns>
                     </DataGrid>
 
@@ -230,6 +232,11 @@
                         </Grid>
                     </Grid>
                 </Grid>
+            </TabItem>
+
+            <TabItem Header="_Practice">
+                <!-- #5918: replay a judged case for an agent and score its report against the feedback. -->
+                <local:InvestigationPracticePanel x:Name="PracticePanel"/>
             </TabItem>
 
             <TabItem Header="_Notes">

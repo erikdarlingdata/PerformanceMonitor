@@ -96,11 +96,11 @@ public sealed class McpServiceParameterDiSeatCensusTests
            AddSingleton<InvestigationBriefComposer> overload (its reader behind it, AddSingleton<IInvestigationBriefSourceReader>).
            ReadAdmission added by #5506 part 3: get_read_latency's live admission counts, registered via the
            typed-generic AddSingleton<ReadAdmission> overload. InvestigationOpenSignal added by #5822: the long poll waits on
-           the process's one open signal, registered via the typed-generic AddSingleton<InvestigationOpenSignal> overload.
+           the process's one open signal, registered via the typed-generic AddSingleton<InvestigationOpenSignal> overload. InvestigationReadPolicy added by #5918: get_investigation_reports hides the case a live practice request replays under the investigations arm, so the tool takes the arm as a service parameter, registered via the typed-generic AddSingleton<InvestigationReadPolicy> overload.
            DarlingAgentActionSeat added by #5915: the Level 2 mute and custom-rule tools read the served policy through it, registered
            via the typed-generic AddSingleton<DarlingAgentActionSeat> overload. */
         Assert.Equal(
-            new List<string> { "AnalyzerConfig", "DarlingAgentActionSeat", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "InvestigationBriefComposer", "InvestigationOpenSignal", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadAdmission", "ReadLatencyRecorder", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAgentActionSeat", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "InvestigationBriefComposer", "InvestigationOpenSignal", "InvestigationReadPolicy", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadAdmission", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

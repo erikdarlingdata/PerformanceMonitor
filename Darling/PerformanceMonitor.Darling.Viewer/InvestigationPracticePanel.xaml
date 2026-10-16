@@ -1,0 +1,72 @@
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.InvestigationPracticePanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- #5918: practice requests. Pick a case somebody already gave feedback on and start a practice request: it replays the
+         case for an agent without showing the answers, and the agent's report is scored against the feedback. Scores are
+         advisory and turn nothing on or off. -->
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,6"
+                   Text="A practice request replays a case somebody gave feedback on. The agent sees the case without its answers, cannot change anything, and its report is scored against the feedback. Scores are advisory and turn no route on or off."/>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <ComboBox x:Name="PracticeWindowBox" Width="100" SelectedIndex="1" AutomationProperties.Name="Practice window"
+                      SelectionChanged="PracticeWindowBox_SelectionChanged">
+                <ComboBoxItem Content="30 days" Tag="30"/>
+                <ComboBoxItem Content="90 days" Tag="90"/>
+                <ComboBoxItem Content="365 days" Tag="365"/>
+            </ComboBox>
+            <Button Content="Refresh" Width="80" Height="26" Margin="8,0,0,0" Click="PracticeRefresh_Click"/>
+            <TextBlock x:Name="PracticeStatusText" VerticalAlignment="Center" Margin="12,0,0,0" TextWrapping="Wrap"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        </StackPanel>
+
+        <DataGrid Grid.Row="2" x:Name="PracticeCasesGrid" Style="{StaticResource DarkGrid}" IsReadOnly="True" SelectionMode="Single"
+                  AutomationProperties.Name="Judged cases">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Reported" Binding="{Binding ReportedDisplay}" Width="120" SortMemberPath="ReportedAtUtc"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding Row.ServerName}" Width="*"/>
+                <DataGridTextColumn Header="Family" Binding="{Binding Row.Family}" Width="100"/>
+                <DataGridTextColumn Header="Report said" Binding="{Binding Row.ReportVerdict}" Width="100"/>
+                <DataGridTextColumn Header="Feedback" Binding="{Binding FeedbackSummary}" Width="120"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <StackPanel Grid.Row="3" x:Name="StartPracticePanel" Orientation="Horizontal" Margin="0,6,0,6">
+            <Button Content="Start Practice Request" Width="170" Height="26" Click="StartPractice_Click"/>
+            <TextBlock VerticalAlignment="Center" Margin="12,0,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       Text="Opens a practice request for the selected case; an agent on the same route can claim it."/>
+        </StackPanel>
+
+        <TextBlock Grid.Row="4" Text="Practice scores per agent" Margin="0,4,0,4" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+        <DataGrid Grid.Row="5" x:Name="PracticeScoresGrid" Style="{StaticResource DarkGrid}" IsReadOnly="True"
+                  AutomationProperties.Name="Practice scores">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Agent" Binding="{Binding AgentId}" Width="*"/>
+                <DataGridTextColumn Header="Cases" Binding="{Binding Cases}" Width="60"/>
+                <DataGridTextColumn Header="Scored" Binding="{Binding Scored}" Width="60"/>
+                <DataGridTextColumn Header="Matched" Binding="{Binding Matched}" Width="70"/>
+                <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="130"/>
+                <DataGridTextColumn Header="No answer" Binding="{Binding Unscored}" Width="80"/>
+                <DataGridTextColumn Header="Missed step noted" Binding="{Binding MissedStepCases}" Width="120"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>

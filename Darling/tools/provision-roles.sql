@@ -1727,6 +1727,10 @@ BEGIN
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.investigation_feedback TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO mcp;
+   -- #5918 (V191's practice_of column, so here and not in 3i): the Viewer opens a practice request (a replay of a judged case) and copies the case's alert rows.
+   GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+      window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO admin;
+   GRANT INSERT ON config.investigation_request_alerts TO admin;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the

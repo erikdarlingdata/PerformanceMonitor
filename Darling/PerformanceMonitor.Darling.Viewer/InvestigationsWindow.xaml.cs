@@ -61,6 +61,7 @@ public partial class InvestigationsWindow : Window
         RequestsGrid.ItemsSource = _requests;
         NotesGrid.ItemsSource = _notes;
         FeedbackReportsGrid.ItemsSource = _feedbackReports;
+        PracticePanel.Initialize(_dataService, login, readOnly);
         SetScopes(null);
 
         if (readOnly)
@@ -171,6 +172,7 @@ public partial class InvestigationsWindow : Window
 
         await LoadRequestsAsync();
         await LoadFeedbackAsync();
+        await PracticePanel.LoadAsync();
         await LoadNotesAsync();
         await LoadProfilesAsync();
     }
