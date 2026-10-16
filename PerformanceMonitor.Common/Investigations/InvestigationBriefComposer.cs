@@ -50,6 +50,9 @@ public sealed class InvestigationBriefComposer
     /// <summary>The most characters <c>prior_links</c> (#5914) may take, inside what the sections left.</summary>
     public const int PriorLinksCap = 2_000;
 
+    /// <summary>The most characters <c>recurrence</c> (#6000) may take, inside what the sections left.</summary>
+    public const int RecurrenceCap = 2_000;
+
     /// <summary>The sections in fill order, with each section's cap and the tool that fetches what a cut drops.</summary>
     public static readonly IReadOnlyList<(string Section, int Cap, string? FetchTool)> Sections = new (string, int, string?)[]
     {
@@ -210,6 +213,37 @@ public sealed class InvestigationBriefComposer
                     ["kept"] = kept,
                     ["dropped"] = list.Count - kept,
                     ["fetch"] = fetch,
+                });
+            }
+        }
+
+        /* #6000: how often each linked metric fired at the first alert's time of day, held to its own cap inside what the
+           sections left. Placed before prior_links: it is a count the agent cannot get in one call elsewhere. Absent, never
+           [], when the source supplied none (Lite's, until #6011), so such a brief is byte for byte as before. */
+        if (sources.Recurrence is { Count: > 0 } recurrence)
+        {
+            var list = recurrence.Select(RecurrenceNode).ToList();
+            var budget = Math.Max(0, Math.Min(RecurrenceCap, remaining));
+            var used = 0;
+            var kept = 0;
+            for (; kept < list.Count; kept++)
+            {
+                var length = list[kept].ToJsonString().Length + 1;
+                if (used + length > budget) break;
+                used += length;
+            }
+
+            root["recurrence"] = new JsonArray(list.Take(kept).Select(n => (JsonNode?)n).ToArray());
+            remaining -= used;
+            if (kept < list.Count)
+            {
+                droppedChars += list.Skip(kept).Sum(n => n.ToJsonString().Length + 1);
+                cuts.Add(new JsonObject
+                {
+                    ["section"] = "recurrence",
+                    ["kept"] = kept,
+                    ["dropped"] = list.Count - kept,
+                    ["fetch"] = "get_alert_history",
                 });
             }
         }
@@ -393,6 +427,18 @@ public sealed class InvestigationBriefComposer
         node["labels"] = new JsonArray(InvestigationRules.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
         return node;
     }
+
+    /// <summary>A metric's recurrence (#6000). Structured fields only (a metric name, counts, dates): nothing to mask.</summary>
+    private static JsonObject RecurrenceNode(InvestigationAlertRecurrence r) => new()
+    {
+        ["metric"] = r.MetricName,
+        ["around_utc"] = r.AroundUtc.ToString("HH:mm", CultureInfo.InvariantCulture),
+        ["window_minutes"] = InvestigationAlertRecurrence.WindowMinutes,
+        ["days"] = InvestigationAlertRecurrence.Days,
+        ["fired"] = r.Fired,
+        ["muted"] = r.Muted,
+        ["dates"] = new JsonArray(r.Dates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
+    };
 
     /// <summary>A prior link (#5914): the request it came from, when, its kind, and the URL and key as free text.</summary>
     private static JsonObject PriorLinkNode(InvestigationPriorLink link, McpDataDetailMasker masker, CutCounter cut)

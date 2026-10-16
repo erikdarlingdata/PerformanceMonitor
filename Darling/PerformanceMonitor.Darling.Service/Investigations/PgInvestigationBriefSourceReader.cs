@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Service.Investigations;
 /// Reads a brief's sources from the monitoring store (#5632 Phase A): the request, the first and the latest three of its
 /// alerts with their stored text and context, the latest findings for the server (24 hours, collapsed, the request's own
 /// story first), earlier reports for the same server and family, approved unexpired notes, the environment profile, and
-/// the monitoring-side changes of the last seven days. Every command carries <see cref="CommandTimeoutSeconds"/>.
+/// the monitoring-side changes of the last seven days, and how often each linked metric fired at the first alert's time of day (#6000). Every command carries <see cref="CommandTimeoutSeconds"/>.
 /// </summary>
 public sealed class PgInvestigationBriefSourceReader : IInvestigationBriefSourceReader
 {
@@ -177,6 +177,34 @@ WHERE j.event = 'link_recorded'
 ORDER BY j.event_time DESC, j.journal_id DESC
 LIMIT $5";
 
+    /* #6000: how often each of the request's linked metrics fired at the first alert's time of day: the metric's history rows
+       in the seven days before the first alert, within thirty minutes either side of its clock time (circular, so a 23:50 alert
+       counts a 00:10 fire, the next date's), muted apart from unmuted. The first alert's own row and anything at or after it are
+       out: they are this incident, not its history. One index seek per metric (idx_config_alert_log_time on server_id,
+       metric_name, alert_time); the clock test filters inside the seven days. A metric with no rows still comes back (day NULL),
+       so the brief says zero. alert_time is naive UTC. Past rows do not change, so this is read at compose time. $1 request, $2 server. */
+    internal const string RecurrenceSql = @"
+WITH anchor AS (
+    SELECT min(alert_time) AS t FROM config.investigation_request_alerts WHERE request_id = $1
+), m AS (
+    SELECT DISTINCT metric_name FROM config.investigation_request_alerts WHERE request_id = $1
+)
+SELECT m.metric_name, a.t, f.day, f.muted, f.n
+FROM m
+CROSS JOIN anchor AS a
+LEFT JOIN LATERAL (
+    SELECT cal.alert_time::date AS day, cal.muted, count(*) AS n
+    FROM config_alert_log AS cal
+    CROSS JOIN LATERAL (SELECT mod(mod(extract(epoch FROM cal.alert_time - a.t)::numeric, 86400) + 86400, 86400) AS d) AS o
+    WHERE cal.server_id = $2
+      AND cal.metric_name = m.metric_name
+      AND cal.alert_time >= a.t - interval '7 days'
+      AND cal.alert_time < a.t
+      AND least(o.d, 86400 - o.d) <= 1800
+    GROUP BY cal.alert_time::date, cal.muted
+) AS f ON true
+ORDER BY m.metric_name, f.day DESC";
+
     /// <summary>How far back <c>prior_links</c> reaches (#5914).</summary>
     public const int PriorLinkDays = 30;
 
@@ -331,8 +359,46 @@ LIMIT $5";
             }
         }
 
+        var recurrence = new List<InvestigationAlertRecurrence>();
+        await using (var command = Command(connection, RecurrenceSql, requestId, request.ServerId))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            string? metric = null;
+            DateTime around = default;
+            int fired = 0, muted = 0;
+            var dates = new List<DateOnly>();
+            void Flush()
+            {
+                if (metric is not null)
+                    recurrence.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, dates));
+                dates = new List<DateOnly>();
+                fired = 0;
+                muted = 0;
+            }
+
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var name = reader.GetString(0);
+                if (!string.Equals(name, metric, StringComparison.Ordinal))
+                {
+                    Flush();
+                    metric = name;
+                    around = DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(1), DateTimeKind.Utc);
+                }
+
+                if (reader.IsDBNull(2)) continue;
+                var count = (int)reader.GetInt64(4);
+                if (reader.GetBoolean(3)) muted += count; else fired += count;
+                var date = DateOnly.FromDateTime(reader.GetFieldValue<DateTime>(2));
+                if (!dates.Contains(date)) dates.Add(date);
+            }
+
+            Flush();
+        }
+
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
-            priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null);
+            priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null,
+            recurrence.Count > 0 ? recurrence : null);
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each
