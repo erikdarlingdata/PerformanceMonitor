@@ -828,8 +828,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             ConfigureMcpServices(
                 builder.Services, declaredPeers, _readLatency, _logger, _slowReads, writes,
                 new DarlingMcpAddServersPolicy(config.Mcp.AllowWindowsAuthOverUnverifiedTls), _readAdmission,
-                /* #5914: a brief's request_url, the alert's triage page, only while the dashboard serves it (TriageBaseUrl's rule). */
-                config.Web.Enabled ? config.Web.PublicBaseUrl : null);
+                /* #5914: a brief's request_url, the alert's triage page, only while the dashboard serves it: the one definition
+                   of TriageBaseUrl, not a copy of it. */
+                DarlingAlertSettings.TriageBaseUrlOf(config));
 
             _app = builder.Build();
 

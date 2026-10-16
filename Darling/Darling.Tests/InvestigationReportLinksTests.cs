@@ -7,10 +7,14 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using PerformanceMonitor.Common;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -20,21 +24,32 @@ public sealed class InvestigationReportLinksTests
     private static string One(string url, string kind = "jira") =>
         new JsonArray(new JsonObject { ["kind"] = kind, ["url"] = url, ["key"] = "OPS-1" }).ToJsonString();
 
-    [Theory]
-    [InlineData("http://jira.example.invalid/browse/OPS-1", "http is refused")]
-    [InlineData("file://server/share/x", "a file URL is refused")]
-    [InlineData("file:///C:/x", "a file URL is refused")]
-    [InlineData("\\\\server\\share", "UNC")]
-    [InlineData("//server/share", "UNC")]
-    [InlineData("https:\\\\server\\share", "UNC")]
-    [InlineData("https://user@jira.example.invalid/x", "user info")]
-    [InlineData("https://user:secret@jira.example.invalid/x", "user info")]
-    [InlineData("https://jira.example.invalid/a b", "whitespace")]
-    [InlineData("ftp://jira.example.invalid/x", "not an https URL")]
-    [InlineData("javascript:alert(1)", "not an https URL")]
-    public void ACredentialLeakingOrNonHttpsUrl_IsRefused_NamingTheRule(string url, string reason)
+    /// <summary>The rows of report-link-vectors.json, the one list shared with the Node harness (ReportLinksPageTests).</summary>
+    private static IEnumerable<object[]> Vectors(bool refused)
     {
-        Assert.Contains(reason, InvestigationReportLinks.UrlProblem(url), StringComparison.Ordinal);
+        var file = PathTo("Darling", "Darling.Tests", "report-link-vectors.json");
+        using var doc = JsonDocument.Parse(File.ReadAllText(file));
+        foreach (var v in doc.RootElement.GetProperty("vectors").EnumerateArray())
+        {
+            var url = v.GetProperty("url").GetString()!;
+            if (v.TryGetProperty("padTo", out var pad))
+                url = url.PadRight(pad.GetInt32(), 'a');
+            var reason = v.GetProperty("reason").GetString();
+            if ((reason is not null) == refused)
+                yield return new object[] { v.GetProperty("name").GetString()!, url, reason ?? "" };
+        }
+    }
+
+    public static IEnumerable<object[]> RefusedVectors() => Vectors(refused: true);
+
+    public static IEnumerable<object[]> AcceptedVectors() => Vectors(refused: false);
+
+    [Theory]
+    [MemberData(nameof(RefusedVectors))]
+    public void ACredentialLeakingOrNonHttpsUrl_IsRefused_NamingTheRule(string name, string url, string reason)
+    {
+        var why = InvestigationReportLinks.UrlProblem(url);
+        Assert.True(why?.Contains(reason, StringComparison.Ordinal) == true, name + ": expected a refusal naming '" + reason + "', got '" + why + "'.");
         var problem = InvestigationReportLinks.Validate(One(url), out var links);
         Assert.NotNull(problem);
         Assert.Contains("https", problem, StringComparison.Ordinal);
@@ -42,11 +57,12 @@ public sealed class InvestigationReportLinksTests
         Assert.Throws<ArgumentException>(() => InvestigationReportLinks.ThrowIfInvalid(new[] { new InvestigationReportLink("jira", url, null) }, "report"));
     }
 
-    [Fact]
-    public void AnHttpsUrl_Passes_WithAQueryAndAnAtInThePath()
+    [Theory]
+    [MemberData(nameof(AcceptedVectors))]
+    public void AnHttpsUrl_Passes_WithAQueryAnAtInThePathAndTheLimitExactly(string name, string url, string reason)
     {
-        Assert.Null(InvestigationReportLinks.UrlProblem("https://git.example.invalid/pm/pull/42?x=1#c"));
-        Assert.Null(InvestigationReportLinks.UrlProblem("https://jira.example.invalid/people/@bob"));
+        Assert.True(reason.Length == 0, name);
+        Assert.Null(InvestigationReportLinks.UrlProblem(url));
     }
 
     [Fact]

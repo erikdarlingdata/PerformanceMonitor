@@ -241,7 +241,9 @@ WHERE request_id = ANY($1)
 ORDER BY submitted_at DESC";
 
     /* #5914: a report's links are its request's link_recorded journal rows, read whole (at most MaxLinks per request), so
-       the journal page's limit never drops one. */
+       the journal page's limit never drops one. ReportsJournalSql excludes the event for the same reason: these rows are
+       served in full here, and leaving them in the capped newest-first page would spend it twice on one fact (a link sorts
+       above its own reported row, so 100 reported requests with two links each would fill a 200-row page with links alone). */
     internal const string ReportLinksSql = @"
 SELECT request_id, detail::text
 FROM config.investigation_journal
@@ -253,6 +255,7 @@ ORDER BY journal_id";
 SELECT event_time, request_id, server_id, event, actor, reason, detail::text
 FROM config.investigation_journal
 WHERE request_id = ANY($1)
+  AND event <> 'link_recorded'
 ORDER BY event_time DESC, journal_id DESC
 LIMIT $2";
 

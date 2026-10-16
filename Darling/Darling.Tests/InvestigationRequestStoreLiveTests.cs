@@ -647,6 +647,48 @@ WHERE request_id = '{id}' AND event = 'link_recorded'", ct));
         });
     }
 
+    /// <summary>#5914 review r1: link_recorded rows are served whole on each report, so the capped newest-first journal page
+    /// leaves them out. A link shares its report's event_time and sorts above it, so left in, 50 reported requests with two
+    /// links each (250 rows: opened, claimed, reported and two links apiece) would overflow the 200-row page and drop the
+    /// oldest requests' opened and claimed rows; now the 150 lifecycle rows fit, nothing is truncated, and every report still
+    /// carries both its links.</summary>
+    [Fact]
+    public async Task ReportLinks_DoNotCompeteForTheJournalPage_WithTheLifecycleRows()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            const int requests = 50;
+            var ids = new System.Collections.Generic.List<Guid>();
+            for (var i = 0; i < requests; i++)
+            {
+                _now = T0.AddSeconds(i * 10);
+                var id = (await store.OpenOrJoinAsync(Alert(_now, serverId: 100 + i, maxPerHour: 1000, maxPerDay: 1000), ct)).RequestId!.Value;
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                var links = new[]
+                {
+                    new InvestigationReportLink("jira", "https://jira.example.invalid/browse/OPS-" + i, "OPS-" + i),
+                    new InvestigationReportLink("pull_request", "https://git.example.invalid/pm/pull/" + i, "#" + i),
+                };
+                Assert.Equal(InvestigationSubmitOutcome.Reported,
+                    await store.SubmitAsync(Report(id, claim.ClaimId!.Value) with { Links = links }, ct));
+                ids.Add(id);
+            }
+
+            Assert.Equal(requests * 2, int.Parse((await ScalarAsync(connection,
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'link_recorded'", ct))!, CultureInfo.InvariantCulture));
+
+            var read = await store.ReadReportsAsync(null, null, T0.AddDays(-1), 100, 200, ct);
+            Assert.Equal(requests, read.Reports.Count);
+            Assert.All(read.Reports, r => Assert.Equal(2, r.Links!.Count));
+            Assert.DoesNotContain(read.Journal, j => j.Event == InvestigationReportLinks.JournalEvent);
+            Assert.False(read.JournalTruncated);
+            foreach (var evt in new[] { "opened", "claimed", "reported" })
+            {
+                Assert.Equal(requests, read.Journal.Count(j => j.Event == evt));
+            }
+        });
+    }
+
     /// <summary>#5914: the store refuses a link the tool rule refuses (a caller that skipped the tool), before any write.</summary>
     [Fact]
     public async Task AnHttpLink_IsRefusedByTheStore_AndNothingIsWritten()

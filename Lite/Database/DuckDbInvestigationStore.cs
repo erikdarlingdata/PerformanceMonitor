@@ -87,6 +87,17 @@ INSERT INTO investigation_journal (journal_id, event_time, request_id, route_id,
 VALUES ((SELECT coalesce(max(journal_id), 0) + 1 FROM investigation_journal), $1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (once_key) DO NOTHING";
 
+    /* #5914: every link of one report in one statement. The ids continue from the table's max plus row_number(), the shape of
+       the sweep statements below: a max() subquery in a per-row VALUES would not see this statement's own rows. ord keeps the
+       order the agent gave the links in, and a repeated once_key writes nothing. */
+    internal const string ReportLinksInsertSql = @"
+INSERT INTO investigation_journal (journal_id, event_time, request_id, server_id, event, actor, reason, detail, once_key)
+SELECT (SELECT coalesce(max(journal_id), 0) FROM investigation_journal) + row_number() OVER (ORDER BY l.ord),
+       $1, $2, $3, 'link_recorded', $4, l.kind, l.detail, l.once_key
+FROM (SELECT unnest($5::VARCHAR[]) AS kind, unnest($6::VARCHAR[]) AS detail, unnest($7::VARCHAR[]) AS once_key,
+             unnest($8::INTEGER[]) AS ord) AS l
+ON CONFLICT (once_key) DO NOTHING";
+
     internal const string AgentJournalCountSql = @"
 SELECT count(*)
 FROM investigation_journal
@@ -230,7 +241,7 @@ FROM investigation_reports
 WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
 ORDER BY submitted_at DESC";
 
-    /* #5914: Darling's ReportLinksSql. */
+    /* #5914: Darling's ReportLinksSql; ReportsJournalSql below excludes link_recorded as Darling's does. */
     internal const string ReportLinksSql = @"
 SELECT request_id, detail
 FROM investigation_journal
@@ -242,6 +253,7 @@ ORDER BY journal_id";
 SELECT event_time, request_id, server_id, event, actor, reason, detail
 FROM investigation_journal
 WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
+  AND event <> 'link_recorded'
 ORDER BY event_time DESC, journal_id DESC
 LIMIT $2";
 
@@ -583,11 +595,15 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             report.Verdict, null, null, cancellationToken);
         /* #5914, Darling's rule in the shared contract: each link a link_recorded row, once per request and URL. Lite's
            submit tool takes no links argument, so a Lite report carries none today. */
-        foreach (var link in InvestigationReportLinks.Distinct(report.Links ?? []))
+        var links = InvestigationReportLinks.Distinct(report.Links ?? []);
+        if (links.Count > 0)
         {
-            await JournalAsync(connection, now, report.RequestId, null, serverId, InvestigationReportLinks.JournalEvent, actor,
-                link.Kind, InvestigationReportLinks.DetailJson(link), InvestigationReportLinks.OnceKey(report.RequestId, link.Url),
-                cancellationToken);
+            await ExecAsync(connection, ReportLinksInsertSql, cancellationToken,
+                now, report.RequestId, serverId, actor,
+                links.Select(l => (string?)l.Kind).ToList(),
+                links.Select(l => (string?)InvestigationReportLinks.DetailJson(l)).ToList(),
+                links.Select(l => (string?)InvestigationReportLinks.OnceKey(report.RequestId, l.Url)).ToList(),
+                Enumerable.Range(0, links.Count).ToList());
         }
 
         transaction.Commit();
