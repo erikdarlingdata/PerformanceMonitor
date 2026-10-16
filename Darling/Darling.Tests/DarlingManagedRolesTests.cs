@@ -565,19 +565,15 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT ON config.investigation_journal TO mcp;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id) ON config.investigation_notes TO mcp;", flat, StringComparison.Ordinal);
 
-        /* admin (the WPF viewer): close a request, write the profiles, write and decide notes, journal it. viewer (the web host) also decides notes and journals it (#5903, below). */
+        /* admin (the WPF viewer): close a request, write the profiles, write and decide notes, journal it. */
         Assert.Contains("GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON config.investigation_requests TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, DELETE ON config.investigation_notes TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;", flat, StringComparison.Ordinal);
 
-        /* #5903: viewer (the web dashboard's only store identity) decides a note and journals it, and writes nothing else here. */
-        Assert.Contains("GRANT UPDATE (state, decided_at, decided_by) ON config.investigation_notes TO viewer;", flat, StringComparison.Ordinal);
-        Assert.Contains("GRANT INSERT ON config.investigation_journal TO viewer;", flat, StringComparison.Ordinal);
-
-        /* Nobody but the owner links alerts, and viewer writes nothing else here. */
+        /* Nobody but the owner links alerts, and viewer writes nothing here. */
         Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO", flat);
-        Assert.DoesNotMatch(@"GRANT (INSERT|UPDATE|DELETE)[^;]* ON config\.(investigation_requests|investigation_reports|agent_environment)[a-z_]* TO [a-z_, ]*viewer", flat);
+        Assert.DoesNotMatch(@"GRANT (INSERT|UPDATE|DELETE)[^;]* ON config\.(investigation|agent_environment)[a-z_]* TO [a-z_, ]*viewer", flat);
     }
 
     [Fact]

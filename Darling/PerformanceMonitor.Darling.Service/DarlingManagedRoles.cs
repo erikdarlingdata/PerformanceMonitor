@@ -1714,12 +1714,6 @@ GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON {config}.investigat
 GRANT INSERT ON {config}.investigation_journal TO {admin};
 GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
 GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
--- #5903: the web dashboard's pending-notes screen (GET/PUT under /api/investigation-notes) runs as viewer, the web host's
---    only store identity, so viewer gets the two writes a decision makes and no more: the decision columns of a note
---    (never its text, author or scope, and no INSERT or DELETE) and a journal row. The seat model decides who may call the
---    routes (a read-only seat is refused every unsafe method); these two grants are only the floor beneath that gate.
-GRANT UPDATE (state, decided_at, decided_by) ON {config}.investigation_notes TO {viewer};
-GRANT INSERT ON {config}.investigation_journal TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
 
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
