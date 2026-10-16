@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -49,7 +50,7 @@ public sealed class DarlingMcpThresholdOverrideTools
     private static readonly Regex SetByShape = new("^[A-Za-z0-9._:-]{1,64}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>The table, schema-qualified; the mcp role holds SELECT, INSERT, UPDATE and DELETE on it (#5920).</summary>
-    internal const string Table = "config.config_threshold_overrides";
+    internal const string Table = ThresholdOverrideStore.Table;
 
     internal const string PreconditionMessage =
         "The service's mcp store role has no grant on config.config_threshold_overrides. A bring-your-own store needs " +
@@ -130,7 +131,7 @@ public sealed class DarlingMcpThresholdOverrideTools
 
             async Task<string?> ReadBefore(NpgsqlConnection c, NpgsqlTransaction t, CancellationToken ct)
             {
-                applied.Previous = await ReadValueAsync(c, t, resolved.ServerId, database, wire, ct);
+                applied.Previous = await ThresholdOverrideStore.ReadValueAsync(c, t, resolved.ServerId, database, wire, ct);
                 return applied.Previous is null ? null : JsonSerializer.Serialize(new { value = applied.Previous });
             }
 
@@ -139,11 +140,11 @@ public sealed class DarlingMcpThresholdOverrideTools
                 /* Attribution: the writes arm names the person; an agent change names the agent and the request. */
                 var by = person ?? "agent:" + action?.AgentId;
                 Guid? requestId = person is null ? action?.RequestId : null;
-                applied.Previous = await ReadValueAsync(c, t, resolved.ServerId, database, wire, ct);
+                applied.Previous = await ThresholdOverrideStore.ReadValueAsync(c, t, resolved.ServerId, database, wire, ct);
                 if (clear)
-                    await DeleteAsync(c, t, resolved.ServerId, database, wire, ct);
+                    await ThresholdOverrideStore.DeleteAsync(c, t, resolved.ServerId, database, wire, ct);
                 else
-                    await UpsertAsync(c, t, resolved.ServerId, database, wire, value!.Value, by, requestId, ct);
+                    await ThresholdOverrideStore.UpsertAsync(c, t, resolved.ServerId, database, wire, value!.Value, by, requestId, ct);
                 applied.SetBy = by;
                 applied.RequestId = requestId;
                 return clear ? null : JsonSerializer.Serialize(new { value });
@@ -331,45 +332,4 @@ public sealed class DarlingMcpThresholdOverrideTools
         DarlingThresholdKeys.PgDeadlockCount => s.PgDeadlockCountThreshold,
         _ => throw new ArgumentOutOfRangeException(nameof(wire), wire, "Not a tunable threshold."),
     };
-
-    private static NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, int serverId, string? database, string wire)
-    {
-        var command = new NpgsqlCommand(sql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)database ?? DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = wire });
-        return command;
-    }
-
-    internal static async Task<double?> ReadValueAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string? database, string wire,
-        CancellationToken ct)
-    {
-        await using var command = Command(connection, transaction,
-            "SELECT value FROM " + Table + " WHERE server_id = $1 AND coalesce(database_name, '') = coalesce($2::text, '') AND threshold_key = $3",
-            serverId, database, wire);
-        return await command.ExecuteScalarAsync(ct) is double d ? d : null;
-    }
-
-    private static async Task DeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string? database, string wire, CancellationToken ct)
-    {
-        await using var command = Command(connection, transaction,
-            "DELETE FROM " + Table + " WHERE server_id = $1 AND coalesce(database_name, '') = coalesce($2::text, '') AND threshold_key = $3",
-            serverId, database, wire);
-        await command.ExecuteNonQueryAsync(ct);
-    }
-
-    internal static async Task UpsertAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string? database, string wire, int value,
-        string setBy, Guid? requestId, CancellationToken ct)
-    {
-        await using var command = Command(connection, transaction,
-            "INSERT INTO " + Table + " (server_id, database_name, threshold_key, value, set_by, request_id) " +
-            "VALUES ($1, $2, $3, $4, $5, $6) " +
-            "ON CONFLICT (server_id, (coalesce(database_name, '')), threshold_key) DO UPDATE " +
-            "SET value = EXCLUDED.value, set_by = EXCLUDED.set_by, request_id = EXCLUDED.request_id, updated_at = now()",
-            serverId, database, wire);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = (double)value });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = setBy });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Uuid, Value = (object?)requestId ?? DBNull.Value });
-        await command.ExecuteNonQueryAsync(ct);
-    }
 }

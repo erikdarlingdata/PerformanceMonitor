@@ -221,6 +221,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/investigation-notes/pending\""] = "definition read: the notes agents proposed that nobody has decided (one small config table, capped at 200 rows; #5903)",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/approve\""] = "write",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/reject\""] = "write",
+        [WebFile + "GET \"/api/threshold-overrides\""] = "definition read: the threshold overrides, one small config table, plus the registry's names (#5916)",
+        [WebFile + "PUT \"/api/threshold-overrides\""] = "write",
         [WebFile + "POST \"/api/server-tags\""] = "write",
         [WebFile + "PATCH \"/api/server-tags/{id:int}\""] = "write",
         [WebFile + "DELETE \"/api/server-tags/{id:int}\""] = "write",
