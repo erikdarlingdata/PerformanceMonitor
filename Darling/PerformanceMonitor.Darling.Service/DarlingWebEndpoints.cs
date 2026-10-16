@@ -6720,9 +6720,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// which lets a tool auto-select a sole configured server exactly as the MCP surface does.</summary>
     /// <summary>#5904: the <c>mcp.dataDetail</c> level the investigation report read is masked at, from the setting the web host
     /// registers once per start (the same value the MCP host serves). A host with none registered (a test host that maps the
-    /// routes directly) serves <see cref="McpDataDetail.Full"/>.</summary>
+    /// routes directly, whose request carries no service provider) serves <see cref="McpDataDetail.Full"/>.</summary>
     private static McpDataDetail WebDataDetail(HttpContext context) =>
-        (context.RequestServices.GetService(typeof(McpDataDetailSetting)) as McpDataDetailSetting)?.Mode ?? McpDataDetail.Full;
+        (context.RequestServices?.GetService(typeof(McpDataDetailSetting)) as McpDataDetailSetting)?.Mode ?? McpDataDetail.Full;
 
     private static string? Server(HttpContext context) => First(context, "server") ?? First(context, "server_name");
 
