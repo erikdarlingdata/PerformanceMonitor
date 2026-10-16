@@ -471,29 +471,43 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         : scopeTagId is { } tag ? string.Create(CultureInfo.InvariantCulture, $"tag {tag} profile")
         : "fleet profile";
 
-    /// <summary>How many requests the feedback list shows at most.</summary>
+    /// <summary>How many requests the feedback list shows at most (the web page's list holds the same number).</summary>
     public const int InvestigationFeedbackListLimit = 200;
+
+    /// <summary>The longest feedback window, in days; a longer one is refused, not shortened.</summary>
+    public const int InvestigationFeedbackMaxDays = 365;
 
     /// <summary>
     /// The reported requests opened in the last <paramref name="daysBack"/> days, newest report first, each with the feedback
-    /// people gave it (#5913). Reads through <see cref="InvestigationFeedbackStore"/>; a store below V191 is a
-    /// <see cref="ViewerSchemaSkewException"/>. The second value says the window held more than the limit.
+    /// people gave it (#5913). <paramref name="daysBack"/> is 1 to <see cref="InvestigationFeedbackMaxDays"/>; a value outside
+    /// that is an <see cref="ArgumentOutOfRangeException"/>, never a shorter or longer window than the one asked for. Reads
+    /// through <see cref="InvestigationFeedbackStore"/>; a store below V191 is a <see cref="ViewerSchemaSkewException"/>. The
+    /// second value says the window held more than the limit.
     /// </summary>
     public async Task<(IReadOnlyList<InvestigationFeedbackListRow> Rows, bool Truncated)> GetInvestigationFeedbackListAsync(
         int daysBack, CancellationToken cancellationToken = default)
     {
+        ValidateFeedbackDays(daysBack);
         var store = FeedbackStore();
         return await SkewAsync(() => store.ListReportedAsync(
-            DateTime.UtcNow.AddDays(-Math.Clamp(daysBack, 1, 365)), null, InvestigationFeedbackListLimit, cancellationToken));
+            DateTime.UtcNow.AddDays(-daysBack), null, InvestigationFeedbackListLimit, cancellationToken));
     }
 
-    /// <summary>The false-positive counts per alert family over the same window as the feedback list (#5913).</summary>
+    /// <summary>The false-positive counts per alert family over the same window as the feedback list (#5913); the window is
+    /// validated as <see cref="GetInvestigationFeedbackListAsync"/> does.</summary>
     public async Task<IReadOnlyList<InvestigationFamilyCounts>> GetInvestigationFamilyCountsAsync(
         int daysBack, CancellationToken cancellationToken = default)
     {
+        ValidateFeedbackDays(daysBack);
         var store = FeedbackStore();
         return await SkewAsync(() => store.FamilyCountsAsync(
-            DateTime.UtcNow.AddDays(-Math.Clamp(daysBack, 1, 365)), null, cancellationToken));
+            DateTime.UtcNow.AddDays(-daysBack), null, cancellationToken));
+    }
+
+    private static void ValidateFeedbackDays(int daysBack)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(daysBack, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(daysBack, InvestigationFeedbackMaxDays);
     }
 
     /// <summary>

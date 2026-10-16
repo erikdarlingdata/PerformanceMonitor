@@ -156,6 +156,16 @@ SELECT (SELECT state FROM config.investigation_requests) || '|' || (SELECT state
             Assert.Equal(InvestigationFeedbackOutcome.NoReport, noReport.Outcome);
             Assert.Empty((await viewer.GetInvestigationFeedbackListAsync(30, ct)).Rows);
 
+            /* A window outside 1 to 365 days is refused, never shortened or lengthened (#5913, REVIEW-TRAPS: refuse, don't clamp). */
+            foreach (var days in new[] { -1, 0, 366, 4000 })
+            {
+                await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => viewer.GetInvestigationFeedbackListAsync(days, ct));
+                await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => viewer.GetInvestigationFamilyCountsAsync(days, ct));
+            }
+
+            Assert.Empty((await viewer.GetInvestigationFeedbackListAsync(365, ct)).Rows);
+            Assert.Empty((await viewer.GetInvestigationFeedbackListAsync(1, ct)).Rows);
+
             await ReportAsync(owner, requestId, "real", ct);
             var first = await viewer.RecordInvestigationFeedbackAsync(
                 requestId, "wrong", "false_positive", "look at the job history", "it is the nightly job", "DOMAIN\\Tester", ct);

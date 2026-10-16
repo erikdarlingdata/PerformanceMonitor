@@ -2051,8 +2051,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The longest feedback request body the route reads (two 4000-character fields plus the rest, with room for escapes).</summary>
     internal const int MaxFeedbackBodyBytes = 64 * 1024;
 
-    /// <summary>The most reported requests one feedback list answers.</summary>
-    internal const int FeedbackListLimit = 100;
+    /// <summary>The most reported requests one feedback list answers (the Viewer's list holds the same number).</summary>
+    internal const int FeedbackListLimit = 200;
 
     /// <summary>The 403 sentence a feedback record answers when the store refuses the write (SQLSTATE 42501): the web host runs on
     /// whatever login <c>postgres.webConnectionString</c> names, and recording feedback is an <c>admin</c> role write (#5913).</summary>
@@ -2089,10 +2089,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 var since = DateTime.UtcNow.AddHours(-hours);
-                var (rows, truncated) = await store.ListReportedAsync(since, null, FeedbackListLimit, context.RequestAborted);
-                var counts = await store.FamilyCountsAsync(since, null, context.RequestAborted);
+                /* One connection for the list, the counts and the capability probe (#5913). */
+                await using var connection = await postgres.OpenConnectionAsync(context.RequestAborted);
+                var (rows, truncated) = await store.ListReportedAsync(connection, since, null, FeedbackListLimit, context.RequestAborted);
+                var counts = await store.FamilyCountsAsync(connection, since, null, context.RequestAborted);
+                var canRecord = await store.CanRecordAsync(connection, context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(
-                    FeedbackListBody(rows, truncated, counts, hours), "/api/investigation-feedback", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                    FeedbackListBody(rows, truncated, counts, hours, canRecord), "/api/investigation-feedback", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2246,12 +2249,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return true;
     }
 
-    /// <summary>The list body: <c>{hours_back, requests_returned, truncated, families: [{family, reported, with_feedback, marked_wrong,
+    /// <summary>The list body: <c>{hours_back, can_record, requests_returned, truncated, families: [{family, reported, with_feedback, marked_wrong,
     /// agent_false_positives, false_positives}], requests: [{request_id, server_name, family, first_metric, opened_at_utc, reported_at_utc,
     /// agent_id, report_verdict, root_cause, summary, feedback: [{verdict, corrected_verdict, missed_step, comment, author, recorded_at_utc}]}]}</c>,
-    /// newest report first.</summary>
+    /// newest report first. <c>can_record</c> is whether the web dashboard's own store login may write feedback (false on managed and
+    /// compose stores, where it connects as the viewer role): the page shows its form only when it is true (#5913).</summary>
     internal static JsonObject FeedbackListBody(
-        IReadOnlyList<InvestigationFeedbackListRow> rows, bool truncated, IReadOnlyList<InvestigationFamilyCounts> counts, int hoursBack)
+        IReadOnlyList<InvestigationFeedbackListRow> rows, bool truncated, IReadOnlyList<InvestigationFamilyCounts> counts, int hoursBack,
+        bool canRecord)
     {
         static string Iso(DateTime t) => DateTime.SpecifyKind(t, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
         var requests = new JsonArray();
@@ -2290,6 +2295,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return new JsonObject
         {
             ["hours_back"] = hoursBack,
+            ["can_record"] = canRecord,
             ["requests_returned"] = requests.Count,
             ["truncated"] = truncated,
             ["families"] = InvestigationToolCore.FamilyCountsPayload(counts),

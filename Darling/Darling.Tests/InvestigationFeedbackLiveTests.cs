@@ -218,6 +218,13 @@ public sealed class InvestigationFeedbackLiveTests
         await feedback.RecordAsync(Feedback(kept, "wrong", "erik", corrected: "false_positive", missed: "look at the head blocker", comment: "never real"), ct);
         await feedback.RecordAsync(Feedback(doomed, "right", "erik"), ct);
 
+        /* A window with no requests still answers as a store that keeps feedback: empty lists, never null (a null reads as a store that keeps none). */
+        var none = await store.ReadReportsAsync(null, null, DateTime.UtcNow.AddMinutes(1), 100, 200, ct);
+        Assert.Empty(none.Requests);
+        Assert.Empty(none.Feedback!);
+        Assert.Empty(none.FamilyCounts!);
+        Assert.Null((await store.ReadReportsAsync(kept, null, DateTime.UtcNow.AddMinutes(1), 100, 200, ct)).FamilyCounts);
+
         /* The reports list: each report carries its feedback, and the window read carries the counts. */
         var read = await store.ReadReportsAsync(null, null, DateTime.UtcNow.AddDays(-1), 100, 200, ct);
         Assert.Equal(2, read.Feedback!.Count);
@@ -359,6 +366,7 @@ public sealed class InvestigationFeedbackLiveTests
             var list = await Send("GET", "/api/investigation-feedback", null, null);
             Assert.Equal(200, list.Status);
             var listed = Assert.Single(list.Body!["requests"]!.AsArray())!;
+            Assert.True((bool)list.Body["can_record"]!, "the admin login holds INSERT and UPDATE, so the page may show its form");
             Assert.Equal(request.ToString(), (string)listed["request_id"]!);
             Assert.Equal("real", (string)listed["report_verdict"]!);
             var shown = Assert.Single(listed["feedback"]!.AsArray())!;
@@ -388,6 +396,8 @@ public sealed class InvestigationFeedbackLiveTests
             var list = await Send("GET", "/api/investigation-feedback", null, null);
             Assert.Equal(200, list.Status);
             Assert.Equal("right", (string)Assert.Single(Assert.Single(list.Body!["requests"]!.AsArray())!["feedback"]!.AsArray())!["verdict"]!);
+            /* The list says the viewer login cannot record, so the page shows no form (the promise made before the click). */
+            Assert.False((bool)list.Body["can_record"]!);
         });
     }
 }

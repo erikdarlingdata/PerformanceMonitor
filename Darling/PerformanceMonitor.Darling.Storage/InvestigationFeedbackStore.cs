@@ -162,13 +162,27 @@ ORDER BY rep.family";
         IReadOnlyCollection<Guid> requestIds, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(requestIds);
+        if (requestIds.Count == 0)
+        {
+            return new List<InvestigationFeedbackRow>();
+        }
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await ReadAsync(connection, requestIds, cancellationToken);
+    }
+
+    /// <summary>The same read on the caller's open connection, so a method that holds one does not open a second (#5913).</summary>
+    public async Task<IReadOnlyList<InvestigationFeedbackRow>> ReadAsync(
+        NpgsqlConnection connection, IReadOnlyCollection<Guid> requestIds, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(requestIds);
         var rows = new List<InvestigationFeedbackRow>();
         if (requestIds.Count == 0)
         {
             return rows;
         }
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, FeedbackSql,
             new NpgsqlParameter<Guid[]> { TypedValue = requestIds.ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -192,8 +206,17 @@ ORDER BY rep.family";
         DateTime sinceUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await ListReportedAsync(connection, sinceUtc, serverId, limit, cancellationToken);
+    }
+
+    /// <summary>The same read on the caller's open connection (#5913): the list and its feedback share it.</summary>
+    public async Task<(IReadOnlyList<InvestigationFeedbackListRow> Rows, bool Truncated)> ListReportedAsync(
+        NpgsqlConnection connection, DateTime sinceUtc, int? serverId, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         var heads = new List<(Guid Id, string Server, string Family, string Metric, DateTime Opened, DateTime Reported, string Agent, string Verdict, string Root, string? Summary)>();
-        await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
         await using (var command = Command(connection, ReportedSql, Utc(sinceUtc),
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
             new NpgsqlParameter<int> { TypedValue = limit + 1 }))
@@ -213,7 +236,7 @@ ORDER BY rep.family";
             heads.RemoveRange(limit, heads.Count - limit);
         }
 
-        var feedback = (await ReadAsync(heads.Select(h => h.Id).ToArray(), cancellationToken))
+        var feedback = (await ReadAsync(connection, heads.Select(h => h.Id).ToArray(), cancellationToken))
             .ToLookup(f => f.RequestId);
         var rows = heads.Select(h => new InvestigationFeedbackListRow(
             h.Id, h.Server, h.Family, h.Metric, h.Opened, h.Reported, h.Agent, h.Verdict, h.Root, h.Summary,
@@ -228,8 +251,16 @@ ORDER BY rep.family";
     public async Task<IReadOnlyList<InvestigationFamilyCounts>> FamilyCountsAsync(
         DateTime sinceUtc, int? serverId, CancellationToken cancellationToken = default)
     {
-        var rows = new List<InvestigationFamilyCounts>();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken);
+    }
+
+    /// <summary>The same read on the caller's open connection (#5913).</summary>
+    public async Task<IReadOnlyList<InvestigationFamilyCounts>> FamilyCountsAsync(
+        NpgsqlConnection connection, DateTime sinceUtc, int? serverId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        var rows = new List<InvestigationFamilyCounts>();
         await using var command = Command(connection, FamilyCountsSql, Utc(sinceUtc),
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -240,6 +271,19 @@ ORDER BY rep.family";
         }
 
         return rows;
+    }
+
+    /// <summary>Whether the connection's login may record feedback: INSERT and UPDATE on the table (the record is an upsert).
+    /// The admin role holds both; viewer and mcp hold SELECT only, so a record there is refused with 42501 (#5913).</summary>
+    public const string CanRecordSql =
+        "SELECT has_table_privilege('config.investigation_feedback', 'INSERT') AND has_table_privilege('config.investigation_feedback', 'UPDATE')";
+
+    /// <summary>Whether the connection's login may record feedback, asked of the store itself rather than inferred from a seat (#5913).</summary>
+    public async Task<bool> CanRecordAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        await using var command = Command(connection, CanRecordSql);
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
     private NpgsqlCommand Command(NpgsqlConnection connection, string sql, params NpgsqlParameter[] parameters)

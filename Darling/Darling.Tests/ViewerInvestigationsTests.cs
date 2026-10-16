@@ -194,6 +194,13 @@ public sealed class InvestigationsWindowStaTests
             Assert.StartsWith("The feedback was not recorded. verdict:", InvestigationsWindow.FeedbackError(item, "", null, null, null), StringComparison.Ordinal);
             Assert.Contains("comment: 4001 characters", InvestigationsWindow.FeedbackError(item, "wrong", null, null, new string('c', 4001)), StringComparison.Ordinal);
             Assert.Equal("none", item.FeedbackSummary);
+
+            /* The tab says what its counts are taken over, and the rule that settles a request's verdict (#5913). */
+            Assert.Equal(30, window.FeedbackDays);
+            var label = InvestigationsWindow.FeedbackWindowLabel(window.FeedbackDays);
+            Assert.Contains("last 30 days", label, StringComparison.Ordinal);
+            Assert.Contains("a later one that gives none does not displace it", label, StringComparison.Ordinal);
+            Assert.Equal(item.Row.ReportedAtUtc, item.ReportedAtUtc);
         });
     }
 

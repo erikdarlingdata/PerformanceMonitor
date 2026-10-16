@@ -1128,7 +1128,9 @@ try {
       return { afterFocus, keptWhenSiblingRepaints, lostWhenAncestorCleared, sameNodeBack, ancestorRecorded, lostOnTextReset, detachedCannotFocus, disabledCannotFocus };
     },
     /* #5913: the Report Feedback tab. `kind` is what the service answers a record with: recorded, refused (403, the store login is
-       not an admin one), invalid (400) or gone (404); "listonly" is a seat that cannot make changes (no form at all). The page
+       not an admin one), invalid (400) or gone (404); "listonly" is a seat that cannot make changes (no form at all); "nostore" is a
+       seat that can make changes on a store whose login may not record (the list answers can_record false: no form, and the
+       page says why). The page
        reads the list again after a record or a 404 (the list is stale) and does NOT after a 403 or a 400 (the list is right and
        the person is told why). */
     feedback: async (kind) => {
@@ -1148,7 +1150,7 @@ try {
       };
       state.responder = (method, url, sent) => {
         if (method === "GET" && url === "/api/investigation-feedback") {
-          return { status: 200, body: { hours_back: 168, requests_returned: 1, truncated: false,
+          return { status: 200, body: { hours_back: 168, can_record: kind !== "nostore", requests_returned: 1, truncated: false,
             families: [{ family: "blocking", reported: 1, with_feedback: held.length, marked_wrong: 0, agent_false_positives: 0, false_positives: 0 }], requests: [report()] } };
         }
         if (method === "PUT" && url === "/api/investigation-feedback/" + id) return (answers[kind] || answers.recorded)(sent);
@@ -1159,7 +1161,12 @@ try {
       const reads = () => requests.filter((r) => r.method === "GET" && r.url === "/api/investigation-feedback").length;
       const formsBefore = byAttr(main, "data-fb-form").length;
       const readsBefore = reads();
-      const result = { formsBefore, readsBefore, tabs: all(main, (n) => n.tag === "a").map((n) => n.textContent) };
+      const result = {
+        formsBefore, readsBefore, tabs: all(main, (n) => n.tag === "a").map((n) => n.textContent),
+        strips: all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent),
+        reported: all(main, (n) => n.tag === "p" && n.textContent.startsWith("Reported ")).map((n) => n.textContent),
+        window: byAttr(main, "data-fb-window", "1").map((n) => n.textContent),
+      };
       if (formsBefore === 0) return result;
       field("verdict").value = "wrong";
       await fire(field("verdict"), "change");

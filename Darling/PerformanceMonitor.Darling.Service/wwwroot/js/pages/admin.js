@@ -21,7 +21,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
 import { getSession } from "../views-api.js";
 
 export const SERVER_COLUMNS = [
@@ -1214,11 +1214,12 @@ async function buildSettings(body, generation) {
 }
 
 /* Report Feedback (#5913): what people say about the investigation reports agents write. GET /api/investigation-feedback lists the
-   reported requests of the last week with the feedback each one holds and the false-positive counts per alert family; a sign-in
-   that can make changes also gets a form on each report (PUT /api/investigation-feedback/{id}). The page lists for everyone. The
-   service records only when the web dashboard's store login has the admin role: managed and compose stores connect it as the
-   viewer role, where a record answers 403 and the notice says to use the desktop Viewer. A second record by the same author
-   replaces the first. */
+   reported requests of the last week (the newest 200 are listed; the counts cover every one) with the feedback each one holds and
+   the false-positive counts per alert family. The page lists for everyone. The form (PUT /api/investigation-feedback/{id}) shows
+   only for a sign-in that can make changes AND when the list's own answer says `can_record`: the service asks the store whether
+   the web dashboard's login may write the table. Managed and compose stores connect the web as the viewer role, where it may not,
+   so the page is list-only there (FEEDBACK_LIST_ONLY says so and names the Viewer); a record that is refused anyway still answers
+   403. A second record by the same author replaces the first. */
 export const FEEDBACK_VERDICTS = [
   { value: "right", label: "Right" },
   { value: "partly", label: "Partly right" },
@@ -1233,9 +1234,21 @@ export const FEEDBACK_CORRECTIONS = [
 
 export const FEEDBACK_NOTE =
   "Say whether each report was right, partly right or wrong, and what the agent missed. The counts show how often each alert " +
-  "family's investigations end as a false positive once your corrections are applied. Recording needs a store login with the admin " +
-  "role; on managed and compose stores the web dashboard connects as the viewer role, so this page is list-only there and " +
-  "feedback is given in the desktop Viewer.";
+  "family's investigations end as a false positive once your corrections are applied. A request's settled verdict is the corrected " +
+  "verdict of the newest feedback that gave one, so a later feedback that gives no corrected verdict does not displace an earlier " +
+  "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
+
+/* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
+export const FEEDBACK_LIST_ONLY =
+  "Recording needs a store login with the admin role. On managed and compose stores the web dashboard connects as the viewer role, " +
+  "so this page is list-only there and feedback is given in the desktop Viewer.";
+
+/* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
+export function feedbackWindowLabel(hours) {
+  const h = Number.isInteger(hours) && hours > 0 ? hours : 168;
+  const span = h % 24 === 0 ? (h / 24) + (h === 24 ? " day" : " days") : h + " hours";
+  return "Counts and reports cover the requests opened in the last " + span + " that have a report.";
+}
 
 export const FEEDBACK_FAMILY_COLUMNS = [
   { key: "family", label: "Alert family" },
@@ -1282,6 +1295,7 @@ function feedbackLine(f) {
   if (f.corrected_verdict) parts.push("corrected to " + f.corrected_verdict);
   if (f.missed_step) parts.push("missed: " + f.missed_step);
   if (f.comment) parts.push(f.comment);
+  if (f.recorded_at_utc) parts.push("given " + localizeIsoText(f.recorded_at_utc));
   return parts.join(" - ");
 }
 
@@ -1331,7 +1345,7 @@ function feedbackCard(r, canEdit, rerender) {
   const lines = (r.feedback || []).map((f) => el("li", { "data-fb-line": r.request_id, text: feedbackLine(f) }));
   return el("section", { class: "feedback-card", "data-request-id": r.request_id }, [
     el("h4", { text: r.server_name + " - " + r.family + " - " + r.first_metric }),
-    el("p", { class: "mute-label", text: "Reported " + r.reported_at_utc + " by " + r.agent_id + ": " + r.report_verdict }),
+    el("p", { class: "mute-label", text: localizeIsoText("Reported " + r.reported_at_utc + " by " + r.agent_id + ": " + r.report_verdict) }),
     el("p", { text: r.root_cause }),
     lines.length ? el("ul", {}, lines) : el("p", { class: "mute-label", text: "No feedback yet." }),
     canEdit ? feedbackForm(r, rerender) : null,
@@ -1347,17 +1361,20 @@ async function buildFeedback(body, generation) {
   const requests = Array.isArray(data.requests) ? data.requests : [];
   const families = Array.isArray(data.families) ? data.families : [];
   const rerender = () => buildFeedback(body, generation);
+  const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [noticeStrip(FEEDBACK_NOTE)];
+  if (data.can_record !== true) nodes.push(noticeStrip(FEEDBACK_LIST_ONLY));
   nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
+  nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
   nodes.push(VIZ.table({ families }, {
     rowsKey: "families",
     columns: FEEDBACK_FAMILY_COLUMNS,
     emptyText: "No investigation reports in the last " + (data.hours_back || 168) + " hours.",
   }));
   nodes.push(el("h3", { class: "section-title", text: "Reports" }));
-  if (data.truncated === true) nodes.push(noticeStrip("Showing the newest " + requests.length + " reports; older ones in the window are not listed."));
+  if (data.truncated === true) nodes.push(noticeStrip("Showing the newest " + requests.length + " reports; older ones in the window are not listed, and the counts above still cover them."));
   if (!requests.length) nodes.push(emptyStrip("No investigation has reported in this window."));
-  for (const r of requests) nodes.push(feedbackCard(r, session.can_edit === true, rerender));
+  for (const r of requests) nodes.push(feedbackCard(r, canRecord, rerender));
   mount(body, nodes);
 }
 

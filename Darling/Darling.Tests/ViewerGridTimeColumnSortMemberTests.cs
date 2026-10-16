@@ -195,6 +195,10 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "InvestigationsWindow.xaml", "JournalGrid", "TimeDisplay", Name(typeof(InvestigationJournalViewRow)), "EventTimeUtc" },
         { "InvestigationsWindow.xaml", "NotesGrid", "CreatedDisplay", Name(typeof(InvestigationNoteViewRow)), "CreatedAtUtc" },
         { "InvestigationsWindow.xaml", "NotesGrid", "ExpiresDisplay", Name(typeof(InvestigationNoteViewRow)), "ExpiresAtUtc" },
+
+        /* #5913: the report feedback tab's two time columns sort by the row wrapper's UTC DateTime. */
+        { "InvestigationsWindow.xaml", "FeedbackReportsGrid", "ReportedDisplay", Name(typeof(InvestigationsWindow.FeedbackReportItem)), "ReportedAtUtc" },
+        { "InvestigationsWindow.xaml", "FeedbackGivenGrid", "WhenDisplay", Name(typeof(InvestigationsWindow.FeedbackGivenItem)), "CreatedAtUtc" },
     };
 
     /// <summary>

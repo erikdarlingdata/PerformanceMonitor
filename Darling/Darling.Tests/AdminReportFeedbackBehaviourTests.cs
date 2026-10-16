@@ -66,6 +66,41 @@ public sealed class AdminReportFeedbackBehaviourTests
     }
 
     [Fact]
+    public void AStoreLoginThatCannotRecord_ShowsNoForm_AndSaysTheViewerIsWhereFeedbackIsGiven()
+    {
+        // The seat can make changes, but the list's own answer says the dashboard's store login may not write (a managed store).
+        var page = AdminServerEditBehaviourTests.Run("feedback:nostore");
+
+        Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
+        Assert.Contains(Strings(page.GetProperty("strips")),
+            t => t.Contains("list-only there", System.StringComparison.Ordinal) && t.Contains("desktop Viewer", System.StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AStoreLoginThatCanRecord_ShowsTheForm_AndNotTheListOnlySentence()
+    {
+        var page = AdminServerEditBehaviourTests.Run("feedback:recorded");
+
+        Assert.Equal(1, page.GetProperty("formsBefore").GetInt32());
+        Assert.DoesNotContain(Strings(page.GetProperty("strips")), t => t.Contains("list-only", System.StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheReportedLine_ShowsTheInstantInTheReadersClock_AndTheWindowOfTheCountsIsStated()
+    {
+        // The harness runs in UTC; the stamp is localized (toLocaleString), never the route's ISO text.
+        var page = AdminServerEditBehaviourTests.Run("feedback:recorded");
+
+        var reported = Assert.Single(Strings(page.GetProperty("reported")));
+        Assert.StartsWith("Reported ", reported, System.StringComparison.Ordinal);
+        Assert.EndsWith(" by agent-a: real", reported, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("2026-10-01T", reported, System.StringComparison.Ordinal);
+        Assert.DoesNotContain(".0000000Z", reported, System.StringComparison.Ordinal);
+        Assert.Contains("2026", reported, System.StringComparison.Ordinal);
+        Assert.Equal("Counts and reports cover the requests opened in the last 7 days that have a report.", Assert.Single(Strings(page.GetProperty("window"))));
+    }
+
+    [Fact]
     public void ASeatThatCannotMakeChanges_SeesTheList_AndNoForm()
     {
         var page = AdminServerEditBehaviourTests.Run("feedback:listonly");

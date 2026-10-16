@@ -120,6 +120,9 @@ public partial class InvestigationsWindow : Window
     /// <summary>One reported request in the feedback tab's list.</summary>
     internal sealed record FeedbackReportItem(InvestigationFeedbackListRow Row)
     {
+        /// <summary>The instant the Reported column is formatted from, and sorts by (not its text).</summary>
+        public DateTime ReportedAtUtc => Row.ReportedAtUtc;
+
         public string ReportedDisplay => Row.ReportedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
 
         public string FeedbackSummary => Row.Feedback.Count == 0 ? "none"
@@ -129,6 +132,9 @@ public partial class InvestigationsWindow : Window
     /// <summary>One feedback record in the feedback tab's "so far" list.</summary>
     internal sealed record FeedbackGivenItem(InvestigationFeedbackRow Row)
     {
+        /// <summary>The instant the When column is formatted from, and sorts by (not its text).</summary>
+        public DateTime CreatedAtUtc => Row.CreatedAtUtc;
+
         public string WhenDisplay => Row.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
 
         public string CorrectedDisplay => Row.CorrectedVerdict ?? "(report's)";
@@ -169,6 +175,11 @@ public partial class InvestigationsWindow : Window
         await LoadProfilesAsync();
     }
 
+    /// <summary>What the counts and the list are taken over, in words, and the settled-verdict rule the counts use (#5913).</summary>
+    internal static string FeedbackWindowLabel(int days) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"Counts and list: reported requests opened in the last {days} days. The newest feedback that gives a corrected verdict settles a request; a later one that gives none does not displace it.");
+
     /// <summary>The window the feedback tab reads: the chosen number of days.</summary>
     internal int FeedbackDays =>
         FeedbackWindowBox.SelectedItem is ComboBoxItem { Tag: string tag } && int.TryParse(tag, NumberStyles.None, CultureInfo.InvariantCulture, out var days)
@@ -187,6 +198,7 @@ public partial class InvestigationsWindow : Window
                 _feedbackReports.Add(new FeedbackReportItem(row));
             }
 
+            FeedbackWindowText.Text = FeedbackWindowLabel(FeedbackDays);
             FeedbackTruncatedText.Text = truncated
                 ? string.Create(CultureInfo.InvariantCulture, $"Showing the newest {ViewerDataService.InvestigationFeedbackListLimit} reports; the counts above cover all of them.")
                 : "";
