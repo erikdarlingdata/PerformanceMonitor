@@ -107,7 +107,43 @@ internal static class DarlingMcpWritePolicy
         "submit_investigation_report",
     };
 
+    /// <summary>
+    /// The Level 2 action tools (#5632 Phase B, #5912): write tools an agent may also call under the investigations arm
+    /// (writes off, investigations on, token set), each through the one gate (<see cref="DarlingAgentActionGate"/>) with an
+    /// <c>agent_action</c>. Under the writes arm they are ordinary write tools and the gate is not asked. Empty until the
+    /// mute, custom-rule and threshold override tools add to it (#5915, #5916). A name in <see cref="NeverAgentTools"/> is
+    /// never offered under the investigations arm, even if listed here.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> AgentActionTools = new HashSet<string>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The write tools never offered to agents (#5912): the one global alert settings row, the analysis finding mute,
+    /// routes, Custom Views, server tags and the server admin tools.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> NeverAgentTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "update_alert_settings",
+        "mute_analysis_finding",
+        "delete_notification_route",
+        "set_notification_route_enabled",
+        "create_custom_view",
+        "update_custom_view",
+        "delete_custom_view",
+        "create_server_tag",
+        "update_server_tag",
+        "delete_server_tag",
+        "assign_server_tag",
+        "unassign_server_tag",
+        "add_servers",
+        "remove_server",
+        "edit_server",
+    };
+
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
+
+    /// <summary>True for a Level 2 action tool (#5912) an agent may call under the investigations arm.</summary>
+    internal static bool IsAgentAction(string toolName, IReadOnlySet<string> agentActionTools) =>
+        agentActionTools.Contains(toolName) && !NeverAgentTools.Contains(toolName);
 
     internal static bool IsInvestigation(string toolName) => InvestigationTools.Contains(toolName);
 
@@ -119,10 +155,18 @@ internal static class DarlingMcpWritePolicy
         internal static readonly Effective Off = new(false, false);
 
         /// <summary>True when a tool named <paramref name="toolName"/> is offered under this policy.</summary>
-        internal bool Offers(string toolName)
+        internal bool Offers(string toolName) => Offers(toolName, AgentActionTools);
+
+        /// <summary>
+        /// <see cref="Offers(string)"/> over a given action tool set: the one rule both arms read (#5912). A Level 2 action
+        /// tool is offered under the investigations arm, and under the writes arm as the write it is.
+        /// </summary>
+        internal bool Offers(string toolName, IReadOnlySet<string> agentActionTools)
         {
             if (IsInvestigation(toolName))
                 return Investigations;
+            if (Investigations && IsAgentAction(toolName, agentActionTools))
+                return true;
             if (IsServerAdmin(toolName))
                 return ServerAdmin;
             if (IsWrite(toolName))

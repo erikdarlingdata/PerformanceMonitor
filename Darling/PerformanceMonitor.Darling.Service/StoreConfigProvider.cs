@@ -2166,7 +2166,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     public static IReadOnlyList<NotificationRoute> ExpandRoutes(IReadOnlyList<NotificationRoute> routes, RouteScopeInputs inputs) =>
         NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags, inputs.TagsReadable);
 
-    private static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    internal static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
     {
         var routes = new List<NotificationRoute>();
         using (var command = new NpgsqlCommand(NotificationRoutesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })

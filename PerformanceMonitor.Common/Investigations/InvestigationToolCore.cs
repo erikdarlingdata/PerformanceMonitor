@@ -62,6 +62,72 @@ internal static class InvestigationToolCore
     /// <summary>The agent a submit refusal is journaled under when its claim_id resolves to no claim holder.</summary>
     internal const string UnclaimedAgent = "unclaimed";
 
+    /// <summary>The longest <c>agent_action.reason</c> (#5912), as a note.</summary>
+    internal const int MaxActionReasonChars = 2000;
+
+    /// <summary>
+    /// Validates a Level 2 tool's <c>agent_action</c> (#5912): <c>{request_id, claim_id, agent_id, reason, evidence}</c>. The
+    /// reason is 1 to <see cref="MaxActionReasonChars"/> characters; the evidence is a report's evidence, by
+    /// <see cref="ValidateEvidence"/> and <see cref="CapProblems"/>; the agent id is <see cref="InvestigationRules.IsValidAgentId"/>'s.
+    /// Null or blank answers <see cref="AgentActionCodes.Required"/>; anything else wrong answers
+    /// <see cref="AgentActionCodes.Invalid"/> with a message that names the field. <paramref name="agentAction"/> is the
+    /// argument's JSON text; <c>evidence</c> is a JSON array, or a string holding one (as the report takes it).
+    /// </summary>
+    internal static AgentActionRefusal? ParseAgentAction(string? agentAction, out AgentAction? action)
+    {
+        action = null;
+        if (string.IsNullOrWhiteSpace(agentAction) || agentAction.Trim() == "null")
+            return new AgentActionRefusal(AgentActionCodes.Required,
+                "agent_action is required: {request_id, claim_id, agent_id, reason, evidence}, under the claim you hold.");
+
+        JsonObject? root;
+        try
+        {
+            root = JsonNode.Parse(agentAction) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            root = null;
+        }
+
+        if (root is null)
+            return Invalid("agent_action", "must be a JSON object {request_id, claim_id, agent_id, reason, evidence}.");
+
+        if (!Guid.TryParse(Text(root, "request_id"), out var requestId))
+            return Invalid("request_id", "missing or not a request id.");
+        if (!Guid.TryParse(Text(root, "claim_id"), out var claimId))
+            return Invalid("claim_id", "missing or not a claim id.");
+        var agentId = Text(root, "agent_id");
+        if (!InvestigationRules.IsValidAgentId(agentId))
+            return Invalid("agent_id", InvestigationRules.AgentIdRule);
+        var reason = Text(root, "reason");
+        if (string.IsNullOrWhiteSpace(reason) || reason.Length > MaxActionReasonChars)
+            return Invalid("reason", $"give 1 to {MaxActionReasonChars} characters saying why.");
+
+        var evidenceText = root["evidence"] switch
+        {
+            JsonValue v when v.TryGetValue(out string? s) => s,
+            JsonNode node => node.ToJsonString(),
+            null => null,
+        };
+        var evidenceProblem = ValidateEvidence(evidenceText, out var evidenceJson);
+        if (evidenceProblem is not null)
+            return Invalid("evidence", evidenceProblem);
+        var caps = CapProblems(null, evidenceJson);
+        if (caps.Count > 0)
+            return Invalid("evidence", caps[0].Problem["evidence: ".Length..]); /* the cap text carries its own "evidence: " lead, as a report lists it */
+
+        action = new AgentAction(requestId, claimId, agentId!, reason, evidenceJson!);
+        return null;
+
+        static string? Text(JsonObject o, string key) =>
+            o[key] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
+
+        /* The argument itself is "agent_action:"; a field in it is "agent_action.<field>:" (never "agent_action.agent_action"). */
+        static AgentActionRefusal Invalid(string field, string problem) =>
+            new(AgentActionCodes.Invalid, field == "agent_action" ? $"agent_action: {problem}" : $"agent_action.{field}: {problem}");
+    }
+
     /// <summary>The <c>invalid</c> answer's message: every problem at once, each as <c>field: sentence</c>, so an agent
     /// fixes the report in one round; the refusal's <c>hints.parameter</c> names the first field.</summary>
     internal static string InvalidReportMessage(IReadOnlyList<string> problems) =>
@@ -265,24 +331,7 @@ internal static class InvestigationToolCore
         var reports = new JsonArray();
         foreach (var r in read.Reports)
         {
-            var evidence = new JsonArray();
-            if (JsonNode.Parse(r.EvidenceJson) is JsonArray items)
-            {
-                foreach (var item in items)
-                {
-                    if (item is not JsonObject entry)
-                    {
-                        evidence.Add(InvestigationFieldMasking.Mask(new JsonObject { ["item"] = item?.DeepClone() }, masker));
-                        continue;
-                    }
-
-                    var keyNumbers = entry["key_numbers"] is JsonValue v && v.TryGetValue(out string? text)
-                        ? text : entry["key_numbers"]?.ToJsonString();
-                    var copy = (JsonObject)entry.DeepClone();
-                    copy["key_numbers"] = null;
-                    evidence.Add(InvestigationFieldMasking.Mask(copy, masker, ("key_numbers", keyNumbers)));
-                }
-            }
+            var evidence = InvestigationFieldMasking.Evidence(JsonNode.Parse(r.EvidenceJson), masker);
 
             var node = InvestigationFieldMasking.Mask(new JsonObject
             {
@@ -316,8 +365,12 @@ internal static class InvestigationToolCore
                 ["event"] = j.Event,
                 ["actor"] = null,
                 ["reason"] = null,
-                ["detail"] = j.DetailJson is null || link is not null ? null : JsonNode.Parse(j.DetailJson),
+                ["detail"] = null,
             }, masker, ("reason", j.Reason));
+            /* #5912: the detail through the one journal helper the web endpoint shares (its evidence as a report's, the
+               free text of a Level 2 change's before and after images through FreeText). */
+            if (!node.ContainsKey("withheld"))
+                node["detail"] = InvestigationFieldMasking.JournalDetail(j.DetailJson, masker);
             if (!node.ContainsKey("withheld"))
                 node["actor"] = InvestigationFieldMasking.Actor(j.Actor, masker);
             if (link is not null && !node.ContainsKey("withheld"))

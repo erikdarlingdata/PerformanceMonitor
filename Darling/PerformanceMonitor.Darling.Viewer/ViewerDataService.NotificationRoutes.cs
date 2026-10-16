@@ -267,9 +267,9 @@ WHERE route_id = $1";
             return "Set at least one destination or the agent channel — a route with every channel empty inherits everything and routes nothing.";
         }
 
-        if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate))
+        if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct))
         {
-            return "The agent channel is Inherit, Off or Investigate.";
+            return "The agent channel is Inherit, Off, Investigate or Act.";
         }
 
         return ValidateAgentLimit("Requests per hour", row.AgentMaxPerHour, NotificationRoute.MinAgentMaxPerHour, NotificationRoute.MaxAgentMaxPerHour)
@@ -439,18 +439,19 @@ public sealed class NotificationRouteRow
             var channels = new List<string>(ConfiguredChannels);
             if (AgentLevel is { } level)
             {
-                channels.Add(level == NotificationRoute.AgentLevelInvestigate ? "agent" : "agent off");
+                channels.Add(level is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct ? "agent" : "agent off");
             }
 
             return channels.Count == 0 ? "—" : string.Join(", ", channels);
         }
     }
 
-    /// <summary>The Agent column (#5632): Inherit, Off, or Investigate with its hourly and daily limits.</summary>
+    /// <summary>The Agent column (#5632): Inherit, Off, Investigate, or Act (#5912, Level 2) with its hourly and daily limits.</summary>
     public string AgentDisplay => AgentLevel switch
     {
         null => "Inherit",
         NotificationRoute.AgentLevelInvestigate => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Investigate ({AgentMaxPerHour}/h, {AgentMaxPerDay}/day)"),
+        NotificationRoute.AgentLevelAct => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Act ({AgentMaxPerHour}/h, {AgentMaxPerDay}/day)"),
         _ => "Off",
     };
 

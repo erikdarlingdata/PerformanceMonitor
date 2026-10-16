@@ -113,4 +113,96 @@ internal static class InvestigationFieldMasking
         briefObject["data_detail"] = McpDataDetailModes.Word(mode);
         return briefObject;
     }
+
+    /// <summary>
+    /// Evidence items masked as a report's are (#5632 review round 2, M1): each item's <c>key_numbers</c> as free text, the
+    /// rest by key. Shared by the report read and the journal (#5912), so a Level 2 change's evidence is masked exactly as
+    /// the report's is.
+    /// </summary>
+    internal static JsonArray Evidence(JsonNode? evidence, McpDataDetailMasker masker)
+    {
+        var masked = new JsonArray();
+        if (evidence is not JsonArray items)
+            return masked;
+        foreach (var item in items)
+        {
+            if (item is not JsonObject entry)
+            {
+                masked.Add(Mask(new JsonObject { ["item"] = item?.DeepClone() }, masker));
+                continue;
+            }
+
+            var keyNumbers = entry["key_numbers"] is JsonValue v && v.TryGetValue(out string? text)
+                ? text : entry["key_numbers"]?.ToJsonString();
+            var copy = (JsonObject)entry.DeepClone();
+            copy["key_numbers"] = null;
+            masked.Add(Mask(copy, masker, ("key_numbers", keyNumbers)));
+        }
+
+        return masked;
+    }
+
+    /// <summary>The image keys that are free text (#5912): a mute's reason, a rule's name, description and definition, and
+    /// an action_failed row's error. Every key that ends in <c>_pattern</c> is free text too.</summary>
+    internal static readonly IReadOnlySet<string> ImageFreeTextKeys =
+        new HashSet<string>(StringComparer.Ordinal) { "reason", "name", "description", "definition", "error" };
+
+    /// <summary>
+    /// A journal row's <c>detail</c> at <paramref name="masker"/>'s level: the one helper the MCP read and the web journal
+    /// endpoint share (#5912). <c>evidence</c> goes through <see cref="Evidence"/>; the <c>before</c> and <c>after</c> images
+    /// and an <c>error</c> have their free text (<see cref="ImageFreeTextKeys"/> and every <c>*_pattern</c>) through
+    /// <see cref="McpDataDetailMasker.FreeText"/>, so it is masked under <c>maskLiterals</c> and withheld under
+    /// <c>metadataOnly</c>, and the rest by key. Under <c>full</c> (the Viewer's and the web's level) it comes back as stored.
+    /// </summary>
+    internal static JsonNode? JournalDetail(string? detailJson, McpDataDetailMasker masker)
+    {
+        ArgumentNullException.ThrowIfNull(masker);
+        if (detailJson is null)
+            return null;
+        var root = JsonNode.Parse(detailJson);
+        if (root is not JsonObject detail)
+            return root is null ? null : Mask(new JsonObject { ["detail"] = root.DeepClone() }, masker)["detail"]?.DeepClone();
+
+        var evidence = detail["evidence"];
+        var images = new List<(string Key, JsonNode? Node)>();
+        foreach (var key in new[] { "before", "after" })
+        {
+            if (detail.ContainsKey(key))
+                images.Add((key, detail[key]?.DeepClone()));
+        }
+
+        var error = detail["error"] is JsonValue ev && ev.TryGetValue(out string? errorText) ? errorText : detail["error"]?.ToJsonString();
+        var copy = (JsonObject)detail.DeepClone();
+        copy.Remove("evidence");
+        foreach (var (key, _) in images)
+            copy.Remove(key);
+        var hasError = copy.Remove("error");
+        if (hasError)
+            copy["error"] = null;
+
+        var result = hasError ? Mask(copy, masker, ("error", error)) : Mask(copy, masker);
+        if (result.ContainsKey("withheld"))
+            return result;
+        if (evidence is not null)
+            result["evidence"] = Evidence(evidence, masker);
+        foreach (var (key, node) in images)
+            result[key] = Image(node, masker);
+        return result;
+    }
+
+    /// <summary>A before or after image: its free-text keys through <see cref="McpDataDetailMasker.FreeText"/> (an object's
+    /// text as its JSON), the rest by key. A non-object image is masked whole as free text.</summary>
+    private static JsonNode? Image(JsonNode? image, McpDataDetailMasker masker)
+    {
+        if (image is not JsonObject obj)
+            return image is null ? null : JsonValue.Create(masker.FreeText(image.ToJsonString()));
+
+        var freeText = obj.Where(p => ImageFreeTextKeys.Contains(p.Key) || p.Key.EndsWith("_pattern", StringComparison.Ordinal))
+            .Select(p => (Key: p.Key, Text: p.Value is JsonValue v && v.TryGetValue(out string? s) ? s : p.Value?.ToJsonString()))
+            .ToArray();
+        var copy = (JsonObject)obj.DeepClone();
+        foreach (var (key, _) in freeText)
+            copy[key] = null;
+        return Mask(copy, masker, freeText);
+    }
 }

@@ -14,9 +14,11 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -222,6 +224,12 @@ public sealed class AgentLevel2StoreRungTests
             await PgMigrations.MigrateAsync(store, ct);
             await ExecAsync(store, Rung.Sql, ct);
             Assert.Equal(before, await ScalarAsync(store, Identity, ct));
+
+            /* V191's guard reads pg_get_constraintdef text (!~ 'ARRAY\[0, 1, 2\]' and 'ARRAY\[1, 2\]'). The columns are smallint, and
+               this is the rendering they produce: no explicit casts inside the array, so the guard recognises its own
+               constraint (the identity check above is the same fact, from the other side). */
+            Assert.Matches(@"ARRAY\[0, 1, 2\]", await ScalarAsync(store, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_config_notification_routes_agent'", ct));
+            Assert.Matches(@"ARRAY\[1, 2\]", await ScalarAsync(store, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_investigation_requests_autonomy'", ct));
             Assert.Equal("1", await ScalarAsync(store, "SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_bump_threshold_overrides' AND NOT tgisinternal", ct));
         });
     }
@@ -407,6 +415,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
                     15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName)), ct);
             await AssertMatrixAsync(owner, ct);
             await ExerciseLoginsAsync(owner, scratch, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword, ct);
+            await RunTheGateAsMcpAsync(owner, scratch, ProvisioningTestSecrets.McpPassword, ct);
             bodySucceeded = true;
         }
         finally
@@ -457,12 +466,54 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await ExecAsync(owner, script, ct);
             await AssertMatrixAsync(owner, ct);
             await ExerciseLoginsAsync(owner, scratch, AdminPassword, ViewerPassword, McpPassword, ct);
+            await RunTheGateAsMcpAsync(owner, scratch, McpPassword, ct);
             bodySucceeded = true;
         }
         finally
         {
             await CleanUpAsync(scratch, bodySucceeded);
         }
+    }
+
+    /// <summary>
+    /// #5912 review round 1: the gate's own statements as the real <c>mcp</c> login, whichever grant source made it. The store runs
+    /// <c>RunAgentActionAsync</c> as <c>mcp</c> (the role the MCP host connects as): the request read <c>FOR SHARE</c> takes its row
+    /// lock through <c>mcp</c>'s column-level UPDATE grant on <c>investigation_requests</c>, and <c>action_called</c> /
+    /// <c>action_done</c> are <c>INSERT ... RETURNING journal_id</c> through its journal grants. A pass journals both and a refusal
+    /// (the live route sends the metric at Level 1) journals one refused row.
+    /// </summary>
+    private static async Task RunTheGateAsMcpAsync(NpgsqlConnection owner, ScratchPostgres scratch, string mcpPassword, CancellationToken ct)
+    {
+        var t0 = DateTime.UtcNow;
+        var ownerStore = new InvestigationRequestStore(NpgsqlDataSource.Create(scratch.ConnectionString), 30);
+        var opened = await ownerStore.OpenOrJoinAsync(
+            new InvestigationAlert(1, 7, "srv-7", "blocking", "Blocking", t0, Array.Empty<string>(), null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240) { AutonomyLevel = 2 }, ct);
+        var request = opened.RequestId!.Value;
+
+        var mcpString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = "mcp", Password = mcpPassword }.ConnectionString;
+        await using var mcpSource = NpgsqlDataSource.Create(mcpString);
+        var mcpStore = new InvestigationRequestStore(mcpSource, 30);
+        var claim = (await mcpStore.ClaimAsync(request, "agent-a", ct)).ClaimId!.Value;
+        var writes = 0;
+        AgentActionCall Call() => new("create_mute_rule", "mute", new AgentAction(request, claim, "agent-a", "known batch",
+            "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"12\"}]"), new AgentActionTarget(7, "srv-7", null, null));
+        AgentActionHooks Hooks(int level) => new()
+        {
+            LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => level),
+            ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
+            Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
+        };
+
+        var done = await mcpStore.RunAgentActionAsync(Call(), Hooks(2), ct);
+        Assert.True(done.Done, done.Refusal?.Message);
+        Assert.Equal(1, writes);
+        Assert.Equal("action_called|action_done", await ScalarAsync(owner,
+            $"SELECT string_agg(event, '|' ORDER BY journal_id) FROM config.investigation_journal WHERE request_id = '{request}' AND event LIKE 'action_%'", ct));
+
+        var refused = await mcpStore.RunAgentActionAsync(Call(), Hooks(1), ct);
+        Assert.Equal(AgentActionCodes.NotLevel2, refused.Refusal?.Reason);
+        Assert.Equal(1, writes);
+        Assert.Equal("1", await ScalarAsync(owner, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'refused'", ct));
     }
 
     /// <summary>As the real logins, for each role and each new table: mcp inserts, updates and deletes overrides (the beacon trigger runs
