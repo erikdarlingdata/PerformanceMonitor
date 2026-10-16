@@ -27,12 +27,28 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public sealed class PgMuteRuleStore : IMuteRuleStore
 {
-    private readonly NpgsqlDataSource _postgres;
+    private readonly NpgsqlDataSource? _postgres;
+    private readonly NpgsqlConnection? _connection;
+    private readonly NpgsqlTransaction? _transaction;
 
     public PgMuteRuleStore(NpgsqlDataSource postgres)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
     }
+
+    /// <summary>
+    /// A store that runs every statement on the given connection and transaction and commits nothing (#5915): a Level 2
+    /// agent change writes inside the gate's transaction, so the re-check, the change and the <c>action_done</c> journal
+    /// row are one commit.
+    /// </summary>
+    internal PgMuteRuleStore(NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+        _transaction = transaction ?? throw new ArgumentNullException(nameof(transaction));
+    }
+
+    private Task<PgStoreScope> OpenAsync(CancellationToken cancellationToken = default) =>
+        PgStoreScope.OpenAsync(_postgres, _connection, _transaction, transactional: false, cancellationToken);
 
     /// <summary>
     /// Every persisted rule, newest first. A store fault propagates: the one caller that caches these rows
@@ -44,13 +60,13 @@ public sealed class PgMuteRuleStore : IMuteRuleStore
     {
         var rules = new List<MuteRule>();
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var scope = await OpenAsync(cancellationToken);
         using var command = new NpgsqlCommand(@"
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
        query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source
 FROM config_mute_rules
-ORDER BY created_at_utc DESC", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -84,13 +100,13 @@ ORDER BY created_at_utc DESC", connection) { CommandTimeout = DarlingAlertReadAd
             throw new ArgumentNullException(nameof(rule));
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var scope = await OpenAsync();
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
      query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
         command.Parameters.AddWithValue(Naive(rule.CreatedAtUtc));
@@ -115,14 +131,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connectio
             throw new ArgumentNullException(nameof(rule));
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var scope = await OpenAsync();
         using var command = new NpgsqlCommand(@"
 UPDATE config_mute_rules SET
     enabled = $2, expires_at_utc = $3, reason = $4,
     server_name = $5, metric_name = $6, database_pattern = $7,
     query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11, client_app_pattern = $12,
     external_source = $13
-WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
         AddNullable(command, rule.ExpiresAtUtc);
@@ -139,10 +155,26 @@ WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPass
         await command.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// The Level 2 recheck (#5915): locks the stored rule <c>FOR UPDATE</c> on this store's transaction and returns the server
+    /// and metric it is scoped to now, or <c>null</c> when the id is gone. Only the gate-bound store (connection and
+    /// transaction given) holds the lock to the write; on a pooled store it would release at once.
+    /// </summary>
+    internal async Task<(int? ServerId, string? MetricName)?> LockServerAndMetricAsync(string ruleId, CancellationToken cancellationToken = default)
+    {
+        await using var scope = await OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand("SELECT server_id, metric_name FROM config_mute_rules WHERE id = $1 FOR UPDATE", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = ruleId });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+        return (reader.IsDBNull(0) ? null : reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
     public async Task SetEnabledAsync(string ruleId, bool enabled)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
-        using var command = new NpgsqlCommand("UPDATE config_mute_rules SET enabled = $2 WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        await using var scope = await OpenAsync();
+        using var command = new NpgsqlCommand("UPDATE config_mute_rules SET enabled = $2 WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(ruleId);
         command.Parameters.AddWithValue(enabled);
         await command.ExecuteNonQueryAsync();
@@ -150,8 +182,8 @@ WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPass
 
     public async Task DeleteAsync(string ruleId)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
-        using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        await using var scope = await OpenAsync();
+        using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(ruleId);
         await command.ExecuteNonQueryAsync();
     }
@@ -163,10 +195,10 @@ WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPass
             return;
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var scope = await OpenAsync();
         foreach (var id in expiredIds)
         {
-            using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(id);
             await command.ExecuteNonQueryAsync();
         }

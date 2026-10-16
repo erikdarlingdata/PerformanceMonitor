@@ -189,9 +189,10 @@ public sealed class MuteRuleClientAppTests
     public void TheMcpToolsNameTheClientAppParameter_InCreateAndTheUpdateFieldList()
     {
         var mcp = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
-        /* The create tool's parameter list ends with client_app_pattern and then external_source (V180, #5654). */
+        /* The create tool's parameter list runs client_app_pattern, then external_source (V180, #5654), then the Level 2
+           agent_action (#5915). */
         Assert.Contains("string? client_app_pattern = null,\n", mcp, StringComparison.Ordinal);
-        Assert.Contains("string? external_source = null) =>", mcp, StringComparison.Ordinal);
+        Assert.Contains("string? external_source = null,\n", mcp, StringComparison.Ordinal);
         Assert.Contains("client_app_pattern = r.ClientAppPattern,", mcp, StringComparison.Ordinal);
         Assert.Contains("metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, \" +", mcp, StringComparison.Ordinal);
     }

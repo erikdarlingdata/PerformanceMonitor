@@ -1136,6 +1136,11 @@ public sealed class DarlingMcpHostService : BackgroundService
            off unless the host passes the one built from darling.json. */
         services.AddSingleton<DarlingMcpAddServersPolicy>(addServers ?? DarlingMcpAddServersPolicy.Default);
 
+        /* #5915: the Level 2 mute and custom-rule tools read the served policy through this seat, so under the investigations
+           arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
+           client cannot supply it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<DarlingAgentActionSeat>(new DarlingAgentActionSeat(writes));
+
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
            optional parameter, defaulted to a private instance, so every existing test-constructed call site

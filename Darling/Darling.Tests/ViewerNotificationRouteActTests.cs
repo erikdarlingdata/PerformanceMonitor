@@ -63,8 +63,8 @@ public sealed class ViewerNotificationRouteActTests
 
             var combo = (ComboBox)dialog.FindName("AgentLevelCombo");
             var shown = Assert.IsType<ComboBoxItem>(combo.SelectedItem);
-            Assert.Equal("Act (set in SQL)", shown.Content);
-            Assert.False(shown.IsEnabled, "Act cannot be picked from here (the write path is a later slice), only kept");
+            Assert.Equal("Act (Level 2: investigate and change alert settings)", shown.Content);
+            Assert.True(shown.IsEnabled, "Level 2 is offered since #5915: Act can be picked from the dialog");
 
             /* Untouched, the dialog reads the level back as 2: it does not save a Level 2 row as Inherit, Off or Investigate. */
             var error = (string?)typeof(NotificationRouteEditDialog)

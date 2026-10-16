@@ -15,7 +15,8 @@ public sealed record InvestigationBriefRequest(
     DateTime? LeaseUntilUtc,
     int AlertCount,
     string FirstMetric,
-    string? StoryPathHash);
+    string? StoryPathHash,
+    int AutonomyLevel = 1);
 
 /// <summary>One alert linked to the request, with its stored text and context (<c>config_alert_log</c>).</summary>
 public sealed record InvestigationBriefAlert(

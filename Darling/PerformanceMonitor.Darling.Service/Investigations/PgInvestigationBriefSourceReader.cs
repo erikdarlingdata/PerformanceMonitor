@@ -41,7 +41,7 @@ public sealed class PgInvestigationBriefSourceReader : IInvestigationBriefSource
 
     internal const string RequestSql = @"
 SELECT r.server_id, r.server_name, r.family, r.state, r.expires_at, r.lease_until, r.alert_count, r.first_metric,
-       r.story_path_hash, s.engine_kind, r.first_alert_at, r.first_dedup_key, r.practice_of
+       r.story_path_hash, s.engine_kind, r.first_alert_at, r.first_dedup_key, r.autonomy_level, r.practice_of
 FROM config.investigation_requests AS r
 LEFT JOIN collect.servers AS s ON s.server_id = r.server_id
 WHERE r.request_id = $1";
@@ -225,10 +225,11 @@ LIMIT $5";
                     reader.IsDBNull(5) ? null : reader.GetFieldValue<DateTime>(5),
                     reader.GetInt32(6),
                     reader.GetString(7),
-                    reader.IsDBNull(8) ? null : reader.GetString(8));
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(12) ? 1 : reader.GetInt16(12));
                 requestUrl = reader.IsDBNull(10) ? null : TriageLink.Build(_publicBaseUrl, request.ServerName, request.FirstMetric,
                     DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(10), DateTimeKind.Utc), reader.IsDBNull(11) ? null : reader.GetString(11));
-                practiceOf = reader.IsDBNull(12) ? null : reader.GetGuid(12);
+                practiceOf = reader.IsDBNull(13) ? null : reader.GetGuid(13);
             }
         }
 
