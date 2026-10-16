@@ -217,9 +217,13 @@ jobs:
 
       # #5459 change 4: the ONE test map this run's selection job reads, picked here once for the
       # same reason as the Lite timing source above (two readers must not see two maps). It is the newest
-      # successful nightly run whose `test-map` artifact has not expired (two days of margin) and whose
-      # commit is an ancestor of the pull request's base, so a map built from code the base does not contain
-      # is never used. Pull requests only; a push, a merge group and a release never read a map. Every failure
+      # nightly run on dev, WHATEVER its conclusion, whose `test-map` artifact has not expired (two days of
+      # margin) and whose commit is an ancestor of the pull request's base, so a map built from code the base
+      # does not contain is never used. The conclusion is not asked (#5945): the nightlies of 2026-10-15 and
+      # 10-16 failed on an unrelated job (a UI smoke, a test shard) yet built a complete map, and every pull
+      # request that day ran FULL while a map 106 files behind sat unused. The artifact IS the completeness
+      # check: the join step runs with `--expect darling=6 --expect lite=4` and uploads nothing when a shard
+      # is missing, so an unexpired `test-map` is always a whole one. Pull requests only; a push, a merge group and a release never read a map. Every failure
       # here means "no map", which the selection job reads as FULL, and a FULL selection narrows nothing: every
       # shard runs every class. The step cannot fail the gate.
       - name: Pin the test map
@@ -242,11 +246,11 @@ jobs:
           map_run=""
           map_sha=""
           seen=0
-          if runs=$(gh api "repos/${GH_REPO}/actions/workflows/nightly.yml/runs?status=success&per_page=20" --jq '.workflow_runs[] | select(.event == "schedule" or .event == "workflow_dispatch") | "\(.id) \(.head_sha)"'); then
+          if runs=$(gh api "repos/${GH_REPO}/actions/workflows/nightly.yml/runs?branch=dev&per_page=40" --jq '.workflow_runs[] | select((.event == "schedule" or .event == "workflow_dispatch") and .head_branch == "dev") | "\(.id) \(.head_sha)"'); then
             while read -r id sha; do
               [ -n "${id}" ] || continue
               seen=$((seen + 1))
-              [ "${seen}" -le 10 ] || break
+              [ "${seen}" -le 16 ] || break
               has=$(gh api "repos/${GH_REPO}/actions/runs/${id}/artifacts?per_page=100" --jq '[.artifacts[] | select(.name == "test-map" and (.expired | not) and .expires_at > env.KEEP_UNTIL)] | length') || has=0
               [ "${has}" = "1" ] || continue
               rel=$(gh api "repos/${GH_REPO}/compare/${sha}...${BASE_SHA}" --jq '.status') || rel=""
@@ -263,9 +267,9 @@ jobs:
           echo "run_id=${map_run}" >> "$GITHUB_OUTPUT"
           echo "sha=${map_sha}" >> "$GITHUB_OUTPUT"
           if [ -n "${map_run}" ]; then
-            echo "::notice title=Test map::The test map selection reads the map of nightly run ${map_run} (commit ${map_sha:0:10}), the newest one built from an ancestor of this base."
+            echo "::notice title=Test map::The test map selection reads the map of nightly run ${map_run} (commit ${map_sha:0:10}), the newest one built from an ancestor of this base (its conclusion is not asked: the map is only uploaded whole)."
           else
-            echo "::notice title=Test map::No successful nightly has an unexpired test map built from an ancestor of this base (${seen} runs looked at), so the selection is FULL."
+            echo "::notice title=Test map::No nightly run on dev has an unexpired test map built from an ancestor of this base (${seen} runs looked at), so the selection is FULL."
           fi
 
   # #5459: the guard classes of BOTH test suites, first, so a source pin, a census or a hygiene scan that a

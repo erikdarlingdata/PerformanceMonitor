@@ -4,6 +4,9 @@ on:
   schedule:
     # 6:00 AM UTC (1:00 AM EST / 2:00 AM EDT)
     - cron: '0 6 * * *'
+    # 2:00 PM UTC (9:00 AM EST / 10:00 AM EDT): the map-only build (#5945). It re-dispatches with map_only=true, which
+    # skips every job but the test map, so pull requests read a map at most about 12 hours old.
+    - cron: '0 14 * * *'
   workflow_dispatch: # manual trigger — and the vehicle the scheduled re-dispatch below rides
     inputs:
       from_schedule:
@@ -21,6 +24,11 @@ on:
         type: boolean
         required: false
         default: true
+      map_only:
+        description: 'Build only the class-to-file test map (#5945): skip build, the Darling PostgreSQL tests, the Lite tests, the smokes, the upgrade shapes, linux and publish. Set by the 14:00 UTC scheduled re-dispatch. Leave false for a full nightly.'
+        type: boolean
+        required: false
+        default: false
       altcover_probe:
         description: 'Run the AltCover per-test coverage probe job (#5459). Off by default and never set by the scheduled re-dispatch; it only measures, publishes nothing and gates nothing.'
         type: boolean
@@ -59,7 +67,9 @@ jobs:
       - name: Re-dispatch this workflow onto the dev ref
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run nightly.yml --repo ${{ github.repository }} --ref dev -f from_schedule=true
+          # The 14:00 UTC cron builds the test map only (#5945); the 06:00 cron is the full nightly.
+          MAP_ONLY: ${{ github.event.schedule == '0 14 * * *' }}
+        run: gh workflow run nightly.yml --repo ${{ github.repository }} --ref dev -f from_schedule=true -f map_only=${MAP_ONLY}
 
   # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
   # manual one — which executes from the dispatched ref (dev for the scheduled path).
@@ -140,7 +150,7 @@ jobs:
     # Manual dispatches always build (from_schedule defaults false); the scheduled
     # re-dispatch sets from_schedule=true and builds only when dev changed in the last
     # 24h — the same policy the schedule applied when it ran these jobs directly.
-    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     runs-on: windows-latest
     # Full pipeline (restore, four publishes, cold pg-runtime fetch, vpk pack, release upload) is
     # well under an hour; 90 minutes means hung-not-slow. Nightly ships unsigned, so unlike build.yml's
@@ -377,7 +387,7 @@ jobs:
     needs: check
     # Same gating as the build job: manual dispatches always run, the scheduled
     # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
-    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     runs-on: windows-latest
     # Cold pg-runtime fetch + build + one shard of the live-PG suite. From numbers (#5616): build.yml's six legs
     # ran this suite's shards in 5.5 to 10.9 minutes of test step and 7.0 to 12.8 minutes per job over the last
@@ -648,7 +658,7 @@ jobs:
     needs: check
     # Same gating as the build job: manual dispatches always run, the scheduled
     # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
-    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     runs-on: windows-latest
     # From numbers (#5616): the unsharded step ran 32.4 to 44.2 minutes over the last 5 completed nightlies, so a
     # quarter is 8 to 11 minutes; build.yml's four legs ran this step for 5.6 to 19.9 minutes over the last 7
@@ -1392,7 +1402,7 @@ jobs:
   darling-upgrade-shapes:
     name: Darling upgrade shapes
     needs: check
-    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-upgrade-shapes.yml
 
   # #5701: the Darling web UI smoke check (darling-ui-smoke.yml, the same workflow a pull request touching the web
@@ -1402,7 +1412,7 @@ jobs:
   darling-ui-smoke:
     name: Darling web UI smoke
     needs: check
-    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-ui-smoke.yml
 
   # #5745: the WPF smoke check (wpf-smoke.yml, the same workflow a pull request touching Lite runs): the real Lite exe on a
@@ -1411,7 +1421,7 @@ jobs:
   wpf-smoke:
     name: WPF smoke (Lite)
     needs: check
-    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/wpf-smoke.yml
 
   # ── Linux artifact + container image (#1804) ─────────────────────────────────────────────────────
@@ -1427,6 +1437,7 @@ jobs:
     # nothing here consumes a windows artifact, so it runs in parallel with build rather than
     # waiting on it.
     needs: check
+    if: inputs.map_only != true
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

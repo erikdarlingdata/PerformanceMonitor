@@ -217,7 +217,7 @@ public sealed class DarlingUpgradeShapesWorkflowTests
 
         Assert.Contains("    uses: ./.github/workflows/darling-upgrade-shapes.yml\n", body, StringComparison.Ordinal);
         Assert.Contains("    needs: check\n", body, StringComparison.Ordinal);
-        Assert.Contains("    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true\n", body, StringComparison.Ordinal);
+        Assert.Contains("    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true\n", body, StringComparison.Ordinal);
 
         var publish = Regex.Match(nightly, @"(?m)^  publish:\n    needs: (?<needs>\[[^\]]*\])").Groups["needs"].Value;
         Assert.NotEmpty(publish);
