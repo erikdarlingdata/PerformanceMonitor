@@ -155,6 +155,22 @@ WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingA
         await command.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// The Level 2 recheck (#5915): locks the stored rule <c>FOR UPDATE</c> on this store's transaction and returns the server
+    /// and metric it is scoped to now, or <c>null</c> when the id is gone. Only the gate-bound store (connection and
+    /// transaction given) holds the lock to the write; on a pooled store it would release at once.
+    /// </summary>
+    internal async Task<(int? ServerId, string? MetricName)?> LockServerAndMetricAsync(string ruleId, CancellationToken cancellationToken = default)
+    {
+        await using var scope = await OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand("SELECT server_id, metric_name FROM config_mute_rules WHERE id = $1 FOR UPDATE", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = ruleId });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+        return (reader.IsDBNull(0) ? null : reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
     public async Task SetEnabledAsync(string ruleId, bool enabled)
     {
         await using var scope = await OpenAsync();

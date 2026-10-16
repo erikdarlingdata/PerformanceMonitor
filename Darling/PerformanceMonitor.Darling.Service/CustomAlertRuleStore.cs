@@ -274,6 +274,27 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// gone. $1 id.</summary>
     public const string EnabledStateProbeSql = "SELECT version, enabled FROM custom_alert_rules WHERE id = $1";
 
+    /// <summary>
+    /// The Level 2 recheck (#5915): locks the stored rule <c>FOR UPDATE</c> on this store's transaction and returns its
+    /// definition as stored now, or <c>null</c> when the id is gone.
+    /// </summary>
+    internal async Task<string?> LockDefinitionAsync(long id, CancellationToken cancellationToken = default)
+    {
+        await using var command = NewCommand("SELECT definition::text FROM custom_alert_rules WHERE id = $1 FOR UPDATE");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = id });
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    /// <summary>The storage name of a registered server (the name a rule's scope lists), or <c>null</c> when there is none (#5915).</summary>
+    internal async Task<string?> StorageServerNameAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = NewCommand("SELECT server_name FROM servers WHERE server_id = $1");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
     /// <summary>Lists every rule as a lightweight summary (no <c>definition</c>), ordered by name.</summary>
     public async Task<IReadOnlyList<CustomAlertRuleSummary>> ListAsync(CancellationToken cancellationToken = default)
     {

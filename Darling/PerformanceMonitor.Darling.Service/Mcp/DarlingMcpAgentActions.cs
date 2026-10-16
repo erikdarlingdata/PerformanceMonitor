@@ -228,18 +228,10 @@ internal static class DarlingMcpAgentActions
     internal static async Task StillTheSameMuteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string ruleId,
         MuteRule before, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand("SELECT server_id, metric_name FROM config_mute_rules WHERE id = $1 FOR UPDATE",
-            connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = ruleId });
-        int? serverId;
-        string? metric;
-        await using (var reader = await command.ExecuteReaderAsync(ct))
-        {
-            if (!await reader.ReadAsync(ct))
-                throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No mute rule with id '{ruleId}'."));
-            serverId = reader.IsDBNull(0) ? null : reader.GetInt32(0);
-            metric = reader.IsDBNull(1) ? null : reader.GetString(1);
-        }
+        var locked = await new PgMuteRuleStore(connection, transaction).LockServerAndMetricAsync(ruleId, ct);
+        if (locked is null)
+            throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No mute rule with id '{ruleId}'."));
+        var (serverId, metric) = locked.Value;
 
         if (serverId != before.ServerId || !string.Equals(metric, before.MetricName, StringComparison.Ordinal))
             throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("conflict",
@@ -362,12 +354,7 @@ internal static class DarlingMcpAgentActions
         if (definition is null && which == "after")
             return new AgentActionRefusal(AgentActionCodes.Invalid,
                 $"definition is not valid: {(parseError ?? "it does not parse").TrimEnd('.', ' ')}. Fix the definition field; it was not judged for scope.");
-        string? storageName;
-        await using (var command = new NpgsqlCommand("SELECT server_name FROM servers WHERE server_id = $1", connection, transaction))
-        {
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = requestServerId });
-            storageName = await command.ExecuteScalarAsync(ct) as string;
-        }
+        var storageName = await new CustomAlertRuleStore(connection, transaction).StorageServerNameAsync(requestServerId, ct);
 
         var inScope = definition is not null && storageName is not null
             && definition.ScopeMode == CustomAlertScopeMode.Servers
@@ -406,13 +393,7 @@ internal static class DarlingMcpAgentActions
     internal static async Task StillInScopeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, long ruleId,
         int requestServerId, CancellationToken ct)
     {
-        string? stored;
-        await using (var command = new NpgsqlCommand("SELECT definition::text FROM custom_alert_rules WHERE id = $1 FOR UPDATE",
-            connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
-        {
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = ruleId });
-            stored = await command.ExecuteScalarAsync(ct) as string;
-        }
+        var stored = await new CustomAlertRuleStore(connection, transaction).LockDefinitionAsync(ruleId, ct);
 
         if (stored is null)
             throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {ruleId}."));
