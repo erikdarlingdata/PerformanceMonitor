@@ -143,6 +143,52 @@ public sealed class QueryTagResolverTests
     }
 
     [Fact]
+    public void TagComment_NamingTwoTagsThatFoldTogether_IsAmbiguous_MatchesNoTag_AndDoesNotThrow()
+    {
+        // The store allows the same folded name under two parents, so an ordinary dictionary can hold both.
+        var twins = new Dictionary<string, long> { ["Billing"] = Billing, ["billing"] = Reports };
+        var rules = new[] { Rule(1, QueryTagRuleField.TextTag, null, tag: null) };
+
+        var r = QueryTagResolver.Resolve(Server, [Hash(text: "/* tag:BILLING */ SELECT 1")],
+            Array.Empty<QueryTagHandAssignment>(), rules, twins);
+
+        Assert.False(r.HasTag);
+        Assert.Equal(QueryTagSource.None, r.Source);
+    }
+
+    [Fact]
+    public void TagComment_AmbiguousNameOnOneKey_DoesNotStopAnotherNameResolving()
+    {
+        var tags = new Dictionary<string, long> { ["Billing"] = Billing, ["billing"] = Hand, ["Invoices"] = Reports };
+
+        var r = QueryTagResolver.Resolve(Server, [Hash(text: "/* tag:billing */ /* tag:INVOICES */ SELECT 1")],
+            Array.Empty<QueryTagHandAssignment>(), [Rule(1, QueryTagRuleField.TextTag, null, tag: null)], tags);
+
+        Assert.Equal(Reports, r.TagId);
+    }
+
+    [Fact]
+    public void TagComment_UnrelatedNamesInAnOrdinaryDictionary_StillResolve()
+    {
+        var tags = new Dictionary<string, long> { ["Billing"] = Billing, ["Invoices"] = Reports };
+
+        var r = QueryTagResolver.Resolve(Server, [Hash(text: "/* tag:billing */ SELECT 1")],
+            Array.Empty<QueryTagHandAssignment>(), [Rule(1, QueryTagRuleField.TextTag, null, tag: null)], tags);
+
+        Assert.Equal(Billing, r.TagId);
+    }
+
+    [Fact]
+    public void TextRule_MatchedValue_IsTheMatchedSpan_NotTheHeadOfTheSample()
+    {
+        string sample = new string('x', 300) + "SELECT total FROM dbo.Invoices WHERE id = 1" + new string('y', 300);
+
+        var r = Resolve([Hash(text: sample)], [Rule(1, QueryTagRuleField.Text, "select*dbo.invoices")]);
+
+        Assert.Equal("SELECT total FROM dbo.Invoices", r.MatchedValue);
+    }
+
+    [Fact]
     public void TagComment_NamingAnUnknownTag_DoesNotMatch_AndTheNextRuleIsTried()
     {
         var sightings = new[] { Hash(text: "/* tag:nosuch */ SELECT 1 FROM dbo.Invoices") };
@@ -299,12 +345,12 @@ public sealed class QueryTagResolverTests
     [Fact]
     public void Resolution_SaysWhy()
     {
-        var r = Resolve([Hash(host: "BILLING-01")], [Rule(33, QueryTagRuleField.Host, "billing*")]);
+        var r = Resolve([Hash(host: "BILLING-12")], [Rule(33, QueryTagRuleField.Host, "billing*")]);
 
         Assert.Equal(QueryTagSource.Rule, r.Source);
         Assert.Equal(33, r.RuleId);
         Assert.Equal(QueryTagRuleField.Host, r.MatchedField);
-        Assert.Equal("BILLING-01", r.MatchedValue);
+        Assert.Equal("BILLING-12", r.MatchedValue);
     }
 
     // ---------- which fields reach which key kind ----------

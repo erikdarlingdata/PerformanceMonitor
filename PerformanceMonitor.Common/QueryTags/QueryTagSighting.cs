@@ -72,7 +72,8 @@ public static class QueryTagLimits
     /// <summary>Text rules see at most this many characters of the query text.</summary>
     public const int TextSampleCap = 4000;
 
-    /// <summary>The most keys one pass resolves for one server. A pass that sees more stops at this many.</summary>
+    /// <summary>The most keys one pass resolves for one server. The collectors (#5980) enforce it; this type only
+    /// names the value, so the resolver and the matcher never cut a pass short themselves.</summary>
     public const int MaxKeysPerServerPerPass = 10000;
 
     /// <summary>The longest rule pattern, in characters.</summary>

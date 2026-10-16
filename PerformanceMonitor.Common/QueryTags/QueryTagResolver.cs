@@ -58,8 +58,11 @@ public static class QueryTagResolver
     /// <param name="sightings">Every sighting of the one key on that server.</param>
     /// <param name="assignments">The hand assignments (every server's; the resolver filters).</param>
     /// <param name="rules">The rules (every server's; the resolver filters).</param>
-    /// <param name="tagIdsByName">Tag id by tag name, for <see cref="QueryTagRuleField.TextTag"/> rules. Names
-    /// are looked up ignoring case whatever comparer the dictionary has; a name not in it matches no tag.</param>
+    /// <param name="tagIdsByName">Tag id by tag name, for <see cref="QueryTagRuleField.TextTag"/> rules. A
+    /// comment names a tag by name only, and names are looked up ignoring case whatever comparer the dictionary
+    /// has. A name not in it matches no tag. When two or more entries fold to the same name (<c>Billing</c> under
+    /// one parent, <c>billing</c> under another: the store allows it), the comment is ambiguous and matches no tag;
+    /// the resolver never throws for it.</param>
     public static QueryTagResolution Resolve(
         int serverId,
         IReadOnlyList<QueryTagSighting> sightings,
@@ -113,9 +116,24 @@ public static class QueryTagResolver
 
         // 4: the first matching rule by (priority, id). Tag names are compared ignoring case here, not by
         // the caller's dictionary, so an ordinary dictionary cannot silently stop "tag:Billing" matching "billing".
-        IReadOnlyDictionary<string, long> names = tagIdsByName is Dictionary<string, long> d && d.Comparer == StringComparer.OrdinalIgnoreCase
-            ? tagIdsByName
-            : new Dictionary<string, long>(tagIdsByName, StringComparer.OrdinalIgnoreCase);
+        // Built once per call. A name two tags share once case is ignored is ambiguous: it goes in "ambiguous"
+        // and resolves to nothing. A dictionary that is already case-insensitive cannot hold such a pair, so it
+        // is used as is.
+        HashSet<string>? ambiguous = null;
+        IReadOnlyDictionary<string, long> names = tagIdsByName;
+        if (!(tagIdsByName is Dictionary<string, long> d && d.Comparer == StringComparer.OrdinalIgnoreCase))
+        {
+            var folded = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, long> kv in tagIdsByName)
+            {
+                if (!folded.TryAdd(kv.Key, kv.Value))
+                {
+                    (ambiguous ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add(kv.Key);
+                }
+            }
+
+            names = folded;
+        }
 
         foreach (QueryTagRule rule in rules
                      .Where(r => r.Enabled
@@ -126,7 +144,7 @@ public static class QueryTagResolver
         {
             foreach (QueryTagSighting s in sightings)
             {
-                QueryTagResolution? hit = TryRule(rule, s, names);
+                QueryTagResolution? hit = TryRule(rule, s, names, ambiguous);
                 if (hit is not null)
                 {
                     return hit;
@@ -166,7 +184,7 @@ public static class QueryTagResolver
         _ => false,
     };
 
-    private static QueryTagResolution? TryRule(QueryTagRule rule, QueryTagSighting s, IReadOnlyDictionary<string, long> tagIdsByName)
+    private static QueryTagResolution? TryRule(QueryTagRule rule, QueryTagSighting s, IReadOnlyDictionary<string, long> tagIdsByName, HashSet<string>? ambiguous)
     {
         if (!FieldApplies(s.KeyKind, rule.Field))
         {
@@ -183,14 +201,20 @@ public static class QueryTagResolver
 
             case QueryTagRuleField.Text:
                 string? sample = Cut(s.TextSample);
-                return QueryTagPattern.MatchesAnywhere(rule.Pattern, sample)
-                    ? new QueryTagResolution(rule.TagId, QueryTagSource.Rule, rule.Id, rule.Field, Short(sample))
+                // What matched, not the head of the sample: from the first pattern piece to the end of the last.
+                return QueryTagPattern.TryMatchAnywhere(rule.Pattern, sample, out int at, out int len)
+                    ? new QueryTagResolution(rule.TagId, QueryTagSource.Rule, rule.Id, rule.Field, Short(sample!.Substring(at, len)))
                     : null;
 
             case QueryTagRuleField.TextTag:
                 // A name that matches no tag does not match; the next comment, then the next rule, is tried.
                 foreach (string name in QueryTagPattern.TagCommentNames(Cut(s.TextSample)))
                 {
+                    if (ambiguous is not null && ambiguous.Contains(name))
+                    {
+                        continue;
+                    }
+
                     if (tagIdsByName.TryGetValue(name, out long tagId))
                     {
                         return new QueryTagResolution(tagId, QueryTagSource.Rule, rule.Id, rule.Field, name);

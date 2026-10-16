@@ -33,8 +33,27 @@ public static class QueryTagPattern
     /// </summary>
     public static bool MatchesAnywhere(string? pattern, string? value) => Matches(pattern, value, true);
 
-    private static bool Matches(string? pattern, string? value, bool anywhere)
+    /// <summary>
+    /// Like <see cref="MatchesAnywhere"/>, and on a match also says where: <paramref name="start"/> is the position
+    /// of the first non-empty pattern piece and <paramref name="length"/> runs to the end of the last piece's
+    /// match, so the span is the text the pattern actually covered. A pattern with no piece at all (only stars)
+    /// covers the whole value.
+    /// </summary>
+    public static bool TryMatchAnywhere(string? pattern, string? value, out int start, out int length)
     {
+        bool matched = MatchSpan(pattern, value, true, out int s, out int e);
+        start = matched ? s : 0;
+        length = matched ? e - s : 0;
+        return matched;
+    }
+
+    private static bool Matches(string? pattern, string? value, bool anywhere) =>
+        MatchSpan(pattern, value, anywhere, out _, out _);
+
+    private static bool MatchSpan(string? pattern, string? value, bool anywhere, out int spanStart, out int spanEnd)
+    {
+        spanStart = 0;
+        spanEnd = 0;
         if (string.IsNullOrEmpty(pattern) || value is null)
         {
             return false;
@@ -49,12 +68,20 @@ public static class QueryTagPattern
         if (pieces.Length == 1)
         {
             // No wildcard at all.
-            return anywhere
-                ? value.Contains(pieces[0], Cmp)
-                : string.Equals(value, pieces[0], Cmp);
+            if (anywhere)
+            {
+                int at = value.IndexOf(pieces[0], Cmp);
+                spanStart = Math.Max(at, 0);
+                spanEnd = at < 0 ? 0 : at + pieces[0].Length;
+                return at >= 0;
+            }
+
+            spanEnd = value.Length;
+            return string.Equals(value, pieces[0], Cmp);
         }
 
         int position = 0;
+        int first = -1;
         int last = pieces.Length - 1;
         for (int i = 0; i <= last; i++)
         {
@@ -71,6 +98,7 @@ public static class QueryTagPattern
                     return false;
                 }
 
+                first = 0;
                 position = piece.Length;
                 continue;
             }
@@ -78,7 +106,14 @@ public static class QueryTagPattern
             if (i == last && anchoredEnd)
             {
                 // The tail must sit at the very end and must not reach back into what earlier pieces used.
-                return value.Length - piece.Length >= position && value.EndsWith(piece, Cmp);
+                if (value.Length - piece.Length >= position && value.EndsWith(piece, Cmp))
+                {
+                    spanStart = first < 0 ? value.Length - piece.Length : first;
+                    spanEnd = value.Length;
+                    return true;
+                }
+
+                return false;
             }
 
             int found = value.IndexOf(piece, position, Cmp);
@@ -87,9 +122,23 @@ public static class QueryTagPattern
                 return false;
             }
 
+            if (first < 0)
+            {
+                first = found;
+            }
+
             position = found + piece.Length;
         }
 
+        if (first < 0)
+        {
+            // Only stars: they cover the whole value.
+            spanEnd = value.Length;
+            return true;
+        }
+
+        spanStart = first;
+        spanEnd = position;
         return true;
     }
 
