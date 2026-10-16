@@ -45,7 +45,7 @@ internal static class RingBufferXml
 
 SET @ring_xml = TRY_CAST(@ring_text AS xml);
 
-/* #5948: SQL Server writes the objectname and indexname of a keylock in an xml_deadlock_report graph without escaping
+/* #5948: SQL Server writes the objectname and indexname of a keylock in a deadlock graph without escaping
    an ampersand, so a table or index named a&x makes the whole buffer unparseable. Protect the five named entities,
    escape every other ampersand, restore the five, and cast again. A numeric character reference (&#...;) becomes
    literal text here, which changes the text but not the parse. */

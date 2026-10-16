@@ -10,8 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -153,31 +151,30 @@ public sealed class DeadlocksTelemetryCursorStateLiveTests
     }
 
     /// <summary>
-    /// The SQL Server and Managed Instance text and parameter list are untouched by the telemetry cursor, byte for
-    /// byte: the telemetry arm is Azure SQL Database only, and this change must not move a character of the rest.
-    /// The hash is the text with the time filter inside the XQuery (#4912).
+    /// The SQL Server and Managed Instance text is the same text, and the telemetry arm (Azure SQL Database only) is not in it.
+    /// A hash of the whole text stood here until #5948 changed the ring-buffer read; the rule that matters is the equality.
     /// </summary>
     [Theory]
-    [InlineData(false, "BE696C0C924330E38F2B989A7DDC541A24586EA52874EFD838228DA7559CAF39")]
-    [InlineData(true, "BE696C0C924330E38F2B989A7DDC541A24586EA52874EFD838228DA7559CAF39")]
-    public void OnPremAndManagedInstance_QueryText_IsByteIdentical(bool managedInstance, string expectedSha256)
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OnPremAndManagedInstance_QueryText_IsByteIdentical(bool managedInstance)
     {
-        var context = Ctx(azure: false);
-        var withTarget = new CollectorContext
+        CollectorContext Build(bool managed) => new()
         {
-            ServerId = context.ServerId,
-            ServerName = context.ServerName,
+            ServerId = Ctx(azure: false).ServerId,
+            ServerName = Ctx(azure: false).ServerName,
             CollectionTime = Now,
             Deltas = null!,
-            Target = new CollectorTargetInfo { IsAzureSqlDb = false, IsAzureManagedInstance = managedInstance },
+            Target = new CollectorTargetInfo { IsAzureSqlDb = false, IsAzureManagedInstance = managed },
             Watermark = null,
         };
 
-        var query = DeadlocksCollector.Instance.BuildQuery(withTarget);
-        var sha = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(query.Text)));
+        var onPrem = DeadlocksCollector.Instance.BuildQuery(Build(managed: false));
+        var query = DeadlocksCollector.Instance.BuildQuery(Build(managedInstance));
 
         Assert.False(query.Text.Contains("@telemetry_cutoff_time", StringComparison.Ordinal));
-        Assert.True(expectedSha256 == sha, sha);
+        Assert.Equal(onPrem.Text, query.Text);
+        Assert.Equal(onPrem.Parameters.Select(p => p.Name), query.Parameters.Select(p => p.Name));
     }
 
     private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)

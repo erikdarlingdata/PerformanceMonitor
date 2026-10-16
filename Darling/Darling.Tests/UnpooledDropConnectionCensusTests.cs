@@ -79,6 +79,8 @@ public sealed class UnpooledDropConnectionCensusTests
             "operator_app_3914 is a bare CREATE DATABASE from template1, made to stand for an operator's own database; no extension or migration ever runs in it.",
         ["PgReadBinaryFileCapabilityLiveTests.cs::IsGrantedAsync_OnAWin1252Database_GrantsTheRoute_AndCachesItsEncoding"] =
             "pm_test_enc1252 is a bare WIN1252 database made from template0, so it never holds the TimescaleDB extension.",
+        ["RingBufferAmpersandLiveSqlTests.cs::DeadlockOnTablesNamedWithAnAmpersand_IsCollectedAndTheObjectNameReadsWithTheAmpersand"] =
+            "The DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
     };
 
     /// <summary>Matches case-insensitively: T-SQL and PostgreSQL both accept <c>drop database</c>.</summary>
