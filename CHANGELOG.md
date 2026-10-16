@@ -23,7 +23,6 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Added
 
-- **Store schema for Level 2 agent investigations** ([#5920]) - the store gains the tables and columns Level 2 needs, in one migration (store schema version 191). A notification route may now be set to agent level 2 (0 to 2) and an investigation request may carry autonomy level 2; any level outside the range is still refused. `config_service` gets an `agent_actions_enabled` switch that reads as on on a new and an upgraded store. A new `config_threshold_overrides` table holds per-server, per-database threshold overrides, is deleted with its server and bumps the `config_version` reload beacon on every change. A new `investigation_feedback` table holds a person's verdict (right, partly or wrong), corrected verdict, missed step and comment on a report, one per request per author, and goes with its request. Investigation requests gain a nullable `practice_of` column with no foreign key. The admin role can write both new tables, the viewer role can only read them, and the mcp role can write the overrides table and read feedback, in both the managed roles and `provision-roles.sql` (a bring-your-own store needs the script re-run after upgrading). Retention needs no new pass: feedback ages with its request and overrides are never aged. Nothing reads or writes the new tables yet; later Phase B slices do.
 - **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
 
 ### Fixed
@@ -5214,4 +5213,3 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
 [#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
 [#5682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5682
-[#5920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5920
