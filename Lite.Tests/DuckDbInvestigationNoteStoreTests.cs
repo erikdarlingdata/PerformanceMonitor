@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Investigations;
+using PerformanceMonitorLite.Windows;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -138,6 +139,38 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         Assert.Equal("approved|person:tester,rejected|person:tester", Scalar(
             "SELECT string_agg(state || '|' || decided_by, ',' ORDER BY note_id) FROM investigation_notes"));
         Assert.Equal("2", Scalar("SELECT count(*) FROM investigation_journal WHERE event IN ('note_approved', 'note_rejected')"));
+    }
+
+    /* #5903 (round 2): the window reads one more than it lists, so a queue of exactly 200 is not called cut and 201 lists 200
+       with the sentence the web Admin page shows. The window binds PendingNotesPage, the seam below the WPF surface. */
+    [Fact]
+    public async Task ThePendingPage_ListsTwoHundred_AndSaysSoOnlyWhenMoreWait()
+    {
+        PlantPending(200);
+        var exact = await PendingNotesPage.ReadAsync(_store, Ct);
+        Assert.Equal(200, exact.Notes.Count);
+        Assert.Null(exact.CutNotice);
+
+        PlantPending(1, firstId: 201);
+        var cut = await PendingNotesPage.ReadAsync(_store, Ct);
+        Assert.Equal(200, cut.Notes.Count);
+        Assert.Equal(1, cut.Notes[0].NoteId);
+        Assert.Equal(200, cut.Notes[^1].NoteId);
+        Assert.Equal("This list shows the oldest 200 pending notes and more are waiting. Approve or reject some and the next ones appear.", cut.CutNotice);
+    }
+
+    /// <summary>Plants <paramref name="count"/> pending notes straight into the table, one minute apart from the clock.</summary>
+    private void PlantPending(int count, long firstId = 1)
+    {
+        using var connection = _db.CreateConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $@"
+INSERT INTO investigation_notes (note_id, note_text, author, state, created_at, expires_at)
+SELECT {firstId} + g - 1, 'planted ' || ({firstId} + g - 1), 'agent-a', 'pending',
+       TIMESTAMP '2026-10-15 00:00:00' + to_minutes(CAST({firstId} + g - 1 AS BIGINT)), TIMESTAMP '2027-01-01 00:00:00'
+FROM generate_series(1, {count}) AS t(g)";
+        command.ExecuteNonQuery();
     }
 
     [Fact]

@@ -20,8 +20,13 @@
 
         <TextBlock Grid.Row="0" Text="Agent Notes" FontSize="18" FontWeight="Bold"
                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,0,0,12"
-                   Text="Notes an agent proposed with its investigation report. A note reaches later briefs only after you approve it. A rejected note is kept with your decision and never reaches a brief. The text can't be edited here."/>
+        <StackPanel Grid.Row="1" Margin="0,0,0,12">
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}"
+                       Text="Notes an agent proposed with its investigation report. A note reaches later briefs only after you approve it. A rejected note is kept with your decision and never reaches a brief. The text can't be edited here."/>
+            <!-- #5903: shown only when the list was cut at its 200 notes (the code sets it); the web Admin page says the same. -->
+            <TextBlock x:Name="CutNotice" TextWrapping="Wrap" Margin="0,6,0,0" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Visibility="Collapsed"/>
+        </StackPanel>
 
         <Grid Grid.Row="2">
             <DataGrid x:Name="NotesGrid"

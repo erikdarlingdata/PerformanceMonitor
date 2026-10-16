@@ -7,8 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using PerformanceMonitor.Common;
@@ -46,12 +49,15 @@ public partial class InvestigationNotesWindow : Window
     {
         try
         {
-            var notes = await _store.ListPendingNotesAsync();
+            var page = await PendingNotesPage.ReadAsync(_store);
             _rows.Clear();
-            foreach (var note in notes)
+            foreach (var note in page.Notes)
             {
                 _rows.Add(new PendingNoteRow(note));
             }
+
+            CutNotice.Text = page.CutNotice ?? "";
+            CutNotice.Visibility = page.CutNotice is null ? Visibility.Collapsed : Visibility.Visible;
 
             NoNotesMessage.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -95,6 +101,38 @@ public partial class InvestigationNotesWindow : Window
         MessageBox.Show(this, text, "Agent Notes", MessageBoxButton.OK, MessageBoxImage.Warning);
 
     private void ShowError(string what, Exception ex) => ShowMessage($"{what}: {ex.Message}");
+}
+
+/// <summary>
+/// One page of the pending list (#5903): the first <see cref="Limit"/> notes and, when more were waiting, the sentence that
+/// says so. The store is asked for <see cref="Limit"/> + 1, so a queue of exactly <see cref="Limit"/> is not called cut. The
+/// wording is the web Admin page's (<c>pendingNotesTruncatedNotice</c>): deciding the oldest notes shows the rest.
+/// </summary>
+internal sealed class PendingNotesPage
+{
+    /// <summary>How many notes the window lists.</summary>
+    internal const int Limit = 200;
+
+    private PendingNotesPage(IReadOnlyList<PendingInvestigationNote> notes, string? cutNotice)
+    {
+        Notes = notes;
+        CutNotice = cutNotice;
+    }
+
+    public IReadOnlyList<PendingInvestigationNote> Notes { get; }
+
+    /// <summary>The sentence over a list that was cut, else null.</summary>
+    public string? CutNotice { get; }
+
+    internal static async Task<PendingNotesPage> ReadAsync(IInvestigationNoteStore store, CancellationToken cancellationToken = default)
+    {
+        var read = await store.ListPendingNotesAsync(Limit + 1, cancellationToken);
+        var shown = read.Take(Limit).ToList();
+        return new PendingNotesPage(shown, read.Count > Limit
+            ? "This list shows the oldest " + shown.Count.ToString(CultureInfo.InvariantCulture)
+                + " pending notes and more are waiting. Approve or reject some and the next ones appear."
+            : null);
+    }
 }
 
 /// <summary>One line of the Agent Notes list: the pending note and the display text built from it.</summary>
