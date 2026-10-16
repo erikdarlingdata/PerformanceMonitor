@@ -1738,7 +1738,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.investigation_feedback TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {mcp};
 -- #5918: the Viewer opens a practice request (V191's practice_of) and copies its case's alert rows, so these two grants are here, after 10d's revoke.
 GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
-   window_until, opened_at, expires_at, lease_minutes, autonomy_level, practice_of) ON {config}.investigation_requests TO {admin};
+   window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
 GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
 
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the

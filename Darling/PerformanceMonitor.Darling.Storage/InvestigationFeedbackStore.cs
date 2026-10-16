@@ -65,13 +65,17 @@ FROM config.investigation_feedback
 WHERE request_id = ANY($1)
 ORDER BY created_at DESC, id DESC";
 
-    /// <summary>Reported requests opened since $1, optionally on server $2, newest report first, at most $3.</summary>
+    /// <summary>
+    /// Reported requests opened since $1, optionally on server $2, newest report first, at most $3. A practice request is not
+    /// real traffic (#5918): its report lives in the Practice tab's own list and scores, never in this one.
+    /// </summary>
     public const string ReportedSql = @"
 SELECT r.request_id, r.server_name, r.family, r.first_metric, r.opened_at, p.submitted_at, p.agent_id, p.verdict,
        p.root_cause, p.summary
 FROM config.investigation_requests AS r
 JOIN config.investigation_reports AS p ON p.request_id = r.request_id
 WHERE r.opened_at >= $1 AND ($2::integer IS NULL OR r.server_id = $2)
+  AND r.practice_of IS NULL
 ORDER BY p.submitted_at DESC, r.request_id
 LIMIT $3";
 
@@ -85,6 +89,7 @@ WITH rep AS (
     FROM config.investigation_requests AS r
     JOIN config.investigation_reports AS p ON p.request_id = r.request_id
     WHERE r.opened_at >= $1 AND ($2::integer IS NULL OR r.server_id = $2)
+      AND r.practice_of IS NULL
 ), newest AS (
     SELECT DISTINCT ON (f.request_id) f.request_id, f.verdict
     FROM config.investigation_feedback AS f

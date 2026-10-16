@@ -281,15 +281,18 @@ public sealed class InvestigationPracticeLiveTests
             Assert.Empty(node["earlier_reports"]!.AsArray());
             Assert.Empty(node["notes"]!.AsArray());
 
-            /* The control: the same story's live brief does carry the earlier report and the approved note, so the leak path was real. */
+            /* The practice brief's notes are empty and its note is not the case's; the live brief of the same story (read below, once
+               the practice is no longer live) does carry the earlier report and the approved note, so the leak path was real. */
+            Assert.Equal(original.ToString(), await ScalarAsync(dataSource, $"SELECT practice_of FROM config.investigation_requests WHERE request_id = '{practice.RequestId}'", ct));
+            Assert.Equal("1", await ScalarAsync(dataSource, $"SELECT autonomy_level FROM config.investigation_requests WHERE request_id = '{practice.RequestId}'", ct));
+            Assert.Equal("opened", await ScalarAsync(dataSource, $"SELECT event FROM config.investigation_journal WHERE request_id = '{practice.RequestId}'", ct));
+
+            /* The control, once the practice is done (a live practice also hides the case from other briefs, see the next fact). */
+            await ExecAsync(dataSource, $"UPDATE config.investigation_requests SET state = 'closed' WHERE request_id = '{practice.RequestId}'", ct);
             var live = (await store.OpenOrJoinAsync(Alert(Now.AddHours(-1)), ct)).RequestId!.Value;
             var liveBrief = await BriefAsync(dataSource, live, ct);
             Assert.Contains("ZEBRA-ROOT", liveBrief, StringComparison.Ordinal);
             Assert.Contains("ZEBRA-NOTE", liveBrief, StringComparison.Ordinal);
-
-            Assert.Equal(original.ToString(), await ScalarAsync(dataSource, $"SELECT practice_of FROM config.investigation_requests WHERE request_id = '{practice.RequestId}'", ct));
-            Assert.Equal("1", await ScalarAsync(dataSource, $"SELECT autonomy_level FROM config.investigation_requests WHERE request_id = '{practice.RequestId}'", ct));
-            Assert.Equal("opened", await ScalarAsync(dataSource, $"SELECT event FROM config.investigation_journal WHERE request_id = '{practice.RequestId}'", ct));
         });
     }
 
@@ -443,6 +446,115 @@ public sealed class InvestigationPracticeLiveTests
             var after = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, null, 24, ct, hideLivePracticeAnswers: true));
             Assert.Contains(replayed.ToString(), Ids(after, "reports"));
             Assert.Contains("ZEBRA-COMMENT", after.GetRawText(), StringComparison.Ordinal);
+        });
+    }
+
+    private static string[] EarlierIds(string brief) =>
+        JsonNode.Parse(brief)!["earlier_reports"]!.AsArray().Select(n => n!["request_id"]!.GetValue<string>()).ToArray();
+
+    private static string[] PriorLinkIds(string brief) =>
+        JsonNode.Parse(brief)!["prior_links"] is JsonArray links
+            ? links.Select(n => n!["request_id"]!.GetValue<string>()).ToArray()
+            : [];
+
+    [Fact]
+    public async Task AnotherBrief_OnTheSameServerAndFamily_ReadsNoPracticeReport_AndNoReportOfACaseALivePracticeReplays()
+    {
+        await RunAsync(async (dataSource, store, ct) =>
+        {
+            var link = new[] { new InvestigationReportLink("jira", "https://jira.example.invalid/browse/OPS-9", "OPS-9") };
+
+            async Task<Guid> ReportWithLinkAsync(Guid request, string agent, string root)
+            {
+                var claim = await store.ClaimAsync(request, agent, ct);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                    request, claim.ClaimId!.Value, agent, 1, "false_positive", root, true, "summary", "[{\"tool\":\"get_blocking\"}]", null, link), ct));
+                return request;
+            }
+
+            var original = await ReportWithLinkAsync((await store.OpenOrJoinAsync(Alert(Now.AddHours(-5)), ct)).RequestId!.Value, "agent-orig", "CASE-ROOT");
+            var bystander = await ReportWithLinkAsync((await store.OpenOrJoinAsync(Alert(Now.AddHours(-4)), ct)).RequestId!.Value, "agent-other", "OTHER-ROOT");
+            await new InvestigationFeedbackStore(dataSource, 30).RecordAsync(
+                new InvestigationFeedbackSubmission(original, "wrong", "false_positive", "missed", "comment", "lee"), ct);
+
+            var practice = (await new InvestigationPracticeStore(dataSource, 30, () => Now).OpenAsync(original, "person:lee", ct)).RequestId!.Value;
+            var live = (await store.OpenOrJoinAsync(Alert(Now), ct)).RequestId!.Value;
+            Assert.NotEqual(practice, live);
+
+            /* While the practice is live: a live brief on the same server and family reads the bystander only, and no link of the case. */
+            var whileLive = await BriefAsync(dataSource, live, ct);
+            Assert.Equal(new[] { bystander.ToString() }, EarlierIds(whileLive));
+            Assert.Equal(new[] { bystander.ToString() }, PriorLinkIds(whileLive));
+            Assert.DoesNotContain("CASE-ROOT", whileLive, StringComparison.Ordinal);
+
+            /* The practising agent reports. The practice report is never history for a live brief (neither report nor link), and the
+               case is no longer replayed by a live practice, so its report reads again like any judged report's. */
+            await ReportWithLinkAsync(practice, "agent-practice", "PRACTICE-ROOT");
+            var afterReport = await BriefAsync(dataSource, live, ct);
+            Assert.DoesNotContain(practice.ToString(), EarlierIds(afterReport));
+            Assert.DoesNotContain(practice.ToString(), PriorLinkIds(afterReport));
+            Assert.DoesNotContain("PRACTICE-ROOT", afterReport, StringComparison.Ordinal);
+            Assert.Equal(new[] { bystander.ToString(), original.ToString() }.OrderBy(x => x), EarlierIds(afterReport).OrderBy(x => x));
+
+            /* A practice that is open but dead (claimed three times) hides nothing: the case's report reads again. */
+            var replay = (await new InvestigationPracticeStore(dataSource, 30, () => Now).OpenAsync(original, "person:lee", ct)).RequestId!.Value;
+            Assert.DoesNotContain(original.ToString(), EarlierIds(await BriefAsync(dataSource, live, ct)));
+            await ExecAsync(dataSource, $"UPDATE config.investigation_requests SET state = 'open', claim_count = 3 WHERE request_id = '{replay}'", ct);
+            Assert.Contains(original.ToString(), EarlierIds(await BriefAsync(dataSource, live, ct)));
+        });
+    }
+
+    [Fact]
+    public async Task APracticeRequest_IsNotRealTraffic_ForTheFeedbackList_AndTheFamilyCounts_AndItCopiesTheAlertCount()
+    {
+        await RunAsync(async (dataSource, store, ct) =>
+        {
+            /* A case that took three alerts: the practice reads the same count. */
+            var request = (await store.OpenOrJoinAsync(Alert(Now.AddHours(-3)), ct)).RequestId!.Value;
+            Assert.Equal(request, (await store.OpenOrJoinAsync(Alert(Now.AddHours(-3).AddMinutes(1)), ct)).RequestId);
+            Assert.Equal(request, (await store.OpenOrJoinAsync(Alert(Now.AddHours(-3).AddMinutes(2)), ct)).RequestId);
+            Assert.Equal("3", await ScalarAsync(dataSource, $"SELECT alert_count FROM config.investigation_requests WHERE request_id = '{request}'", ct));
+            var claim = await store.ClaimAsync(request, "agent-orig", ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                request, claim.ClaimId!.Value, "agent-orig", 1, "false_positive", "root", true, "summary", "[{\"tool\":\"get_blocking\"}]"), ct));
+            var feedback = new InvestigationFeedbackStore(dataSource, 30);
+            await feedback.RecordAsync(new InvestigationFeedbackSubmission(request, "right", null, null, null, "lee"), ct);
+
+            var practiceStore = new InvestigationPracticeStore(dataSource, 30, () => Now);
+            var practice = (await practiceStore.OpenAsync(request, "person:lee", ct)).RequestId!.Value;
+            Assert.Equal("3", await ScalarAsync(dataSource, $"SELECT alert_count FROM config.investigation_requests WHERE request_id = '{practice}'", ct));
+            Assert.Equal(3, JsonNode.Parse(await BriefAsync(dataSource, practice, ct))!["request"]!["alert_count"]!.GetValue<int>());
+
+            var practiceClaim = await store.ClaimAsync(practice, "agent-practice", ct);
+            Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                practice, practiceClaim.ClaimId!.Value, "agent-practice", 1, "false_positive", "root", true, "summary", "[{\"tool\":\"get_blocking\"}]"), ct));
+            await feedback.RecordAsync(new InvestigationFeedbackSubmission(practice, "right", null, null, null, "lee"), ct);
+
+            /* The practice report and its feedback are in no real-traffic read, but they are in the Practice scores. */
+            var (rows, _) = await feedback.ListReportedAsync(Now.AddDays(-1), null, 50, ct);
+            Assert.Equal(request, Assert.Single(rows).RequestId);
+            var family = Assert.Single(await feedback.FamilyCountsAsync(Now.AddDays(-1), null, ct));
+            Assert.Equal((1, 1, 1), (family.Reported, family.WithFeedback, family.FalsePositives));
+            Assert.Single(await practiceStore.ReadScoresAsync(Now.AddDays(-1), ct));
+        });
+    }
+
+    [Fact]
+    public async Task ADeadPractice_DoesNotBlockAFreshReplayOfTheCase()
+    {
+        await RunAsync(async (dataSource, store, ct) =>
+        {
+            var original = await ReportedAsync(store, Now.AddHours(-3), "real", null, ct);
+            await new InvestigationFeedbackStore(dataSource, 30).RecordAsync(new InvestigationFeedbackSubmission(original, "right", null, null, null, "lee"), ct);
+            var practiceStore = new InvestigationPracticeStore(dataSource, 30, () => Now);
+            var first = await practiceStore.OpenAsync(original, "person:lee", ct);
+            Assert.Equal(InvestigationPracticeOutcome.AlreadyLive, (await practiceStore.OpenAsync(original, "person:lee", ct)).Outcome);
+
+            /* Claimed three times and released: the computed state reads expired, though the stored state still says open. */
+            await ExecAsync(dataSource, $"UPDATE config.investigation_requests SET state = 'open', claim_count = 3 WHERE request_id = '{first.RequestId}'", ct);
+            var second = await practiceStore.OpenAsync(original, "person:lee", ct);
+            Assert.Equal(InvestigationPracticeOutcome.Opened, second.Outcome);
+            Assert.NotEqual(first.RequestId, second.RequestId);
         });
     }
 }

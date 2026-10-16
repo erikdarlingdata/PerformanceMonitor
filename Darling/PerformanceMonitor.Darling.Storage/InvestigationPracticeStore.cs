@@ -133,7 +133,7 @@ public static class InvestigationPracticeScoring
 
 /// <summary>
 /// Opens practice requests and reads their runs (#5918, #5632 Phase B). A practice request replays a reported case that has
-/// feedback: the new request copies the case's route, server, family, first metric, story path, alert times and the alert
+/// feedback: the new request copies the case's route, server, family, first metric, story path, alert times, alert count and the alert
 /// rows' values (so the brief's alerts section reads what the original brief read), and carries <c>practice_of</c>. It copies
 /// no report, verdict, feedback or note. It is stamped level 1 like any request; the gate refuses every action on it with
 /// <c>practice</c> whatever its level, and a live alert never joins it nor counts it against a route's limits.
@@ -147,31 +147,34 @@ public sealed class InvestigationPracticeStore
     private readonly int _commandTimeoutSeconds;
     private readonly Func<DateTime> _utcNow;
 
-    /// <summary>The case to replay, locked so a feedback delete cannot race the copy. $1 request.</summary>
+    /// <summary>
+    /// The case to replay. <c>FOR SHARE OF r</c> locks the case's REQUEST row, so the case cannot be deleted under the copy (its
+    /// reports, feedback and alert rows reference it ON DELETE CASCADE). It does not lock the feedback table: a direct delete of
+    /// the case's feedback rows can still commit between this read and the insert, and the copy reads no feedback. $1 request.
+    /// </summary>
     internal const string SourceSql = @"
 SELECT r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.story_path_hash, r.first_alert_at, r.last_alert_at,
-       r.window_until, r.lease_minutes, r.expires_at - r.opened_at, r.practice_of,
+       r.window_until, r.lease_minutes, r.expires_at - r.opened_at, r.practice_of, r.alert_count,
        EXISTS (SELECT 1 FROM config.investigation_reports AS p WHERE p.request_id = r.request_id),
        EXISTS (SELECT 1 FROM config.investigation_feedback AS f WHERE f.request_id = r.request_id)
 FROM config.investigation_requests AS r
 WHERE r.request_id = $1
 FOR SHARE OF r";
 
-    /// <summary>A practice request of the case that is open or claimed and not expired. $1 case, $2 now.</summary>
-    internal const string LiveSql = @"
-SELECT request_id
-FROM config.investigation_requests
-WHERE practice_of = $1
-  AND state IN ('open', 'claimed')
-  AND expires_at > $2
-ORDER BY opened_at DESC
-LIMIT 1";
+    /// <summary>
+    /// A LIVE practice request of the case: the same computed state (<see cref="InvestigationRequestStore.LivePracticeRequestsSql"/>)
+    /// that hides the case's answers, so a practice that is dead (claimed three times, lease lapsed) no longer blocks a fresh
+    /// replay. $1 case, $2 now.
+    /// </summary>
+    internal static readonly string LiveSql =
+        "SELECT lp.request_id FROM (" + InvestigationRequestStore.LivePracticeRequestsSql("$2") + ") AS lp "
+        + "WHERE lp.practice_of = $1 ORDER BY lp.opened_at DESC LIMIT 1";
 
     internal const string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
-     window_until, opened_at, expires_at, lease_minutes, autonomy_level, practice_of)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11 + $12, $13, 1, $14)";
+     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11 + $12, $13, 1, $14, $15)";
 
     /// <summary>The case's alert rows, copied without the dedup key. $1 new request, $2 case.</summary>
     internal const string CopyAlertsSql = @"
@@ -212,7 +215,7 @@ ORDER BY rp.submitted_at DESC, p.request_id";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        int routeId, serverId, leaseMinutes;
+        int routeId, serverId, leaseMinutes, alertCount;
         string serverName, family, firstMetric;
         string? storyPath;
         DateTime firstAlert, lastAlert, windowUntil;
@@ -238,8 +241,9 @@ ORDER BY rp.submitted_at DESC, p.request_id";
             leaseMinutes = reader.GetInt32(9);
             life = reader.GetFieldValue<TimeSpan>(10);
             isPractice = !reader.IsDBNull(11);
-            hasReport = reader.GetBoolean(12);
-            hasFeedback = reader.GetBoolean(13);
+            alertCount = reader.GetInt32(12);
+            hasReport = reader.GetBoolean(13);
+            hasFeedback = reader.GetBoolean(14);
         }
 
         if (isPractice)
@@ -270,7 +274,7 @@ ORDER BY rp.submitted_at DESC, p.request_id";
         var practiceId = Guid.NewGuid();
         await using (var insert = Command(connection, transaction, OpenSql, Uuid(practiceId), Int(routeId), Int(serverId), Text(serverName),
             Text(family), Text(firstMetric), Text(storyPath), Ts(firstAlert), Ts(lastAlert), Ts(windowUntil), Ts(now),
-            new NpgsqlParameter<TimeSpan> { TypedValue = life, NpgsqlDbType = NpgsqlDbType.Interval }, Int(leaseMinutes), Uuid(sourceRequestId)))
+            new NpgsqlParameter<TimeSpan> { TypedValue = life, NpgsqlDbType = NpgsqlDbType.Interval }, Int(leaseMinutes), Int(alertCount), Uuid(sourceRequestId)))
         {
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }

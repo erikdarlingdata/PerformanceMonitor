@@ -271,23 +271,30 @@ WHERE ($2::uuid IS NULL OR r.request_id = $2)
 ORDER BY r.opened_at DESC, r.request_id
 LIMIT $5";
 
-    /* #5918: the cases a LIVE practice request replays: practice requests that read open or claimed (the computed state, as
-       ListSql computes it), so a submitted, released-to-expiry or expired practice no longer hides its case. $1 now. */
-    internal const string LivePracticeReplaysSql = @"
-SELECT DISTINCT s.practice_of
+    /* #5918: the one definition of "a LIVE practice request": a practice request that reads open or claimed (the computed state,
+       as ListSql computes it), so a submitted, released-to-expiry or expired practice is not live. It returns
+       (request_id, practice_of, opened_at). <paramref name="nowParameter"/> is the positional parameter that holds now ($1).
+       The hider (LivePracticeReplaysSql), the brief reader's earlier reports and links, and the practice store's "already live"
+       check all alias this text, so they cannot disagree about what is live. */
+    public static string LivePracticeRequestsSql(string nowParameter) => $@"
+SELECT s.request_id, s.practice_of, s.opened_at
 FROM (
-    SELECT r.practice_of,
+    SELECT r.request_id, r.practice_of, r.opened_at,
            CASE
-               WHEN r.state IN ('open', 'claimed') AND r.expires_at <= $1 THEN 'expired'
-               WHEN r.state = 'claimed' AND r.lease_until < $1 AND r.claim_count >= 3 THEN 'expired'
+               WHEN r.state IN ('open', 'claimed') AND r.expires_at <= {nowParameter} THEN 'expired'
+               WHEN r.state = 'claimed' AND r.lease_until < {nowParameter} AND r.claim_count >= 3 THEN 'expired'
                WHEN r.state = 'open' AND r.claim_count >= 3 THEN 'expired'
-               WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
+               WHEN r.state = 'claimed' AND r.lease_until < {nowParameter} THEN 'open'
                ELSE r.state
            END AS effective_state
     FROM config.investigation_requests AS r
     WHERE r.practice_of IS NOT NULL
 ) AS s
 WHERE s.effective_state IN ('open', 'claimed')";
+
+    /* #5918: the cases a LIVE practice request replays. $1 now. */
+    internal static readonly string LivePracticeReplaysSql =
+        "SELECT DISTINCT lp.practice_of FROM (" + LivePracticeRequestsSql("$1") + ") AS lp";
 
     internal const string ReportsSql = @"
 SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence::text
