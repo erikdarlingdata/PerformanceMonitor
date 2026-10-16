@@ -127,3 +127,14 @@ f1a1894fd8 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
 # on the same error. Attempt 2 of the same head passed every shard. A first-attempt environment fault of the
 # shard's server; the 28 changed files (viewer data-start work) did not cause it.
 3bb3ae8fe9 Darling.Tests.StoreMetricsLatestSkipScanLiveTests
+
+# Shared-project replay (#5951): four failures on three pull requests that changed PerformanceMonitor.Common files, found when
+# the keep-full rule for the shared projects was narrowed to constants, enums and registration files. None of the four classes has a
+# map edge to the shared file the pull request changed, and each failure is not caused by it. LiteDeltaSeederTests (7859d25653) and
+# DarlingUpgradeInstallTreeWaitTests (950bb7dbbd) failed on a first attempt and are green on the same sha now.
+# LatestValueLookbackLivePostgresTests (1e52a8e34f, 28c0765ab1) failed a plan-shape assertion on PgFactCollector.DatabaseSizeSql,
+# a file that pull request never touched.
+7859d25653 PerformanceMonitorLite.Tests.LiteDeltaSeederTests
+950bb7dbbd Darling.Tests.DarlingUpgradeInstallTreeWaitTests
+1e52a8e34f Darling.Tests.LatestValueLookbackLivePostgresTests
+28c0765ab1 Darling.Tests.LatestValueLookbackLivePostgresTests

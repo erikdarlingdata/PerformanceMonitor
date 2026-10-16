@@ -65,14 +65,16 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     {
         var path = Path.Combine(_dir, "map-" + Guid.NewGuid().ToString("N") + ".json");
         builtAt ??= DateTime.UtcNow.ToString("o");
-        // ids: 0 Lite/Services/A.cs, 1 Lite/Services/B.cs, 2 Own.cs, 3 assets/data.json, 4 Cov.cs, 5 Text.cs
+        // ids: 0 Lite/Services/A.cs, 1 Lite/Services/B.cs, 2 Own.cs, 3 assets/data.json, 4 Cov.cs, 5 Text.cs,
+        // 6 and 7 shared-project files, 8 the shared registration file McpSchemaCompat.cs (#5951)
         File.WriteAllText(path, """
             {"schema": @SCHEMA@, "sha": "0000000", "built_at": "@BUILT@", "tool": "synthetic",
              "files": ["Lite/Services/A.cs", "Lite/Services/B.cs", "Lite.Tests/Own.cs", "assets/data.json",
-                       "Lite.Tests/Cov.cs", "Lite.Tests/Text.cs"],
+                       "Lite.Tests/Cov.cs", "Lite.Tests/Text.cs", "PerformanceMonitor.Common/Shared.cs",
+                       "PerformanceMonitor.PlanAnalysis/Planner.cs", "PerformanceMonitor.Common/Mcp/McpSchemaCompat.cs"],
              "classes": {"lite": {
                 "OwnTests":   {"own": 2, "files": [0], "seconds": 1.5},
-                "CoverTests": {"own": 4, "files": [1, 3], "seconds": 2.5},
+                "CoverTests": {"own": 4, "files": [1, 3, 6, 7, 8], "seconds": 2.5},
                 "TextTests":  {"own": 5, "files": [], "seconds": 4.0}}},
              "text_patterns": {"TextTests": [@PATTERNS@]}}
             """.Replace("@SCHEMA@", schema.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)
@@ -82,7 +84,8 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     }
 
     private (int ExitCode, JsonElement Result) MapSelect(string map, string[] files, string[]? drift = null,
-        string eventName = "pull_request", string? root = null, string? baseRef = null, bool guardStageSeparate = false)
+        string eventName = "pull_request", string? root = null, string? baseRef = null, bool guardStageSeparate = false,
+        string? diff = null)
     {
         var psi = new ProcessStartInfo("python")
         {
@@ -103,6 +106,14 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         if (guardStageSeparate)
         {
             psi.ArgumentList.Add("--guard-stage-separate");
+        }
+
+        if (diff is not null)
+        {
+            var diffPath = Path.Combine(_dir, "diff-" + Guid.NewGuid().ToString("N") + ".patch");
+            File.WriteAllText(diffPath, diff);
+            psi.ArgumentList.Add("--diff-file");
+            psi.ArgumentList.Add(diffPath);
         }
 
         if (baseRef is not null)
@@ -365,10 +376,82 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     [InlineData(".github/workflows/build.yml")]
     [InlineData("Lite/Lite.csproj")]
     [InlineData("global.json")]
-    [InlineData("PerformanceMonitor.Common/Anything.cs")]
     public void KeepFullFile_InThePullRequest_RunsEverything(string file)
     {
         var (_, r) = MapSelect(WriteMap(), new[] { "Lite.Tests/Own.cs", file });
+
+        AssertFull(r, "keep-full");
+    }
+
+    /// <summary>A unified -U0 diff of one shared-project file, with the hunk header the csharp diff driver prints.</summary>
+    private static string SharedDiff(string file, string header, params string[] lines)
+    {
+        return $"diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n@@ -10,1 +10,1 @@ {header}\n"
+            + string.Concat(lines.Select(l => l + "\n"));
+    }
+
+    private const string SharedFile = "PerformanceMonitor.Common/Shared.cs";
+
+    [Fact]
+    public void SharedProject_DiffThatAddsAConst_RunsEverything()
+    {
+        var diff = SharedDiff(SharedFile, "public static class Shared", "+    public const int Limit = 5;");
+
+        var (_, r) = MapSelect(WriteMap(), new[] { SharedFile }, diff: diff);
+
+        AssertFull(r, "changes a const");
+    }
+
+    [Fact]
+    public void SharedProject_DiffThatChangesAnEnumMember_RunsEverything()
+    {
+        var diff = SharedDiff(SharedFile, "public enum Kind", "-        Two = 2,", "+        Two = 22,");
+
+        var (_, r) = MapSelect(WriteMap(), new[] { SharedFile }, diff: diff);
+
+        AssertFull(r, "changes an enum member");
+    }
+
+    [Fact]
+    public void SharedProject_DiffThatChangesAMethodBody_SelectsByTheMapsEdges()
+    {
+        var diff = SharedDiff(SharedFile, "public int Run(int x)", "-        return x + 1;", "+        return x + 2;");
+
+        var (_, r) = MapSelect(WriteMap(), new[] { SharedFile }, diff: diff);
+
+        Assert.False(r.GetProperty("full").GetBoolean(), "a method-body change must not run everything:\n" + r);
+        var why = Why(r);
+        Assert.Equal("covers a changed file", why["CoverTests"]);
+        Assert.DoesNotContain("OwnTests", why.Keys);
+    }
+
+    [Fact]
+    public void SharedProject_ChangeToARegistrationFile_RunsEverything_EvenForAMethodBody()
+    {
+        const string registration = "PerformanceMonitor.Common/Mcp/McpSchemaCompat.cs";
+        var diff = SharedDiff(registration, "public static void AddTools()", "-        var n = 1;", "+        var n = 2;");
+
+        var (_, r) = MapSelect(WriteMap(), new[] { registration }, diff: diff);
+
+        AssertFull(r, "registration file");
+    }
+
+    [Fact]
+    public void SharedProject_UnlistedFile_SelectsByEdges()
+    {
+        const string unlisted = "PerformanceMonitor.PlanAnalysis/Planner.cs";
+        var diff = SharedDiff(unlisted, "public int Score()", "+        // a comment");
+
+        var (_, r) = MapSelect(WriteMap(), new[] { unlisted }, diff: diff);
+
+        Assert.False(r.GetProperty("full").GetBoolean(), "an unlisted shared file selects by edges:\n" + r);
+        Assert.Equal("covers a changed file", Why(r)["CoverTests"]);
+    }
+
+    [Fact]
+    public void SharedProject_WithNoDiffToRead_RunsEverything()
+    {
+        var (_, r) = MapSelect(WriteMap(), new[] { SharedFile });
 
         AssertFull(r, "keep-full");
     }

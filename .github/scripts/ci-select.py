@@ -1063,6 +1063,82 @@ KEEP_FULL = (
     "**/xunit.runner.json",
 )
 
+# The shared projects (#5951). A change under one of them used to run everything, because both are referenced by
+# every product and a compiled `const` or `enum` value is copied into the caller at build time, so the map's call
+# edges cannot see the caller change. The measured price was 182 merged dev pull requests in four weeks, all FULL, 71
+# of which a map selection would have narrowed to a median 1,180 classes. The rule now reads the diff: FULL only for
+# a change to a constant or an enum, or to a registration file below; any other change selects by the map's edges.
+SHARED_PROJECT_DIRS = ("PerformanceMonitor.Common/", "PerformanceMonitor.PlanAnalysis/")
+
+# The files of the shared projects that register or discover types, or load a resource by name, so a census class
+# sees the change without any edge to the file: a change to one of them is FULL (#5951). Each has the one-line reason.
+# Found with: grep -rnE "AddSingleton|AddScoped|AddTransient|GetTypes\(\)|Assembly\." under the two projects.
+REGISTRATION_FILES = {
+    "PerformanceMonitor.Common/Mcp/McpSchemaCompat.cs":
+        "registers the MCP tool catalog and parameter types in the service collection (AddSingleton) and discovers "
+        "the tools by reflecting over a tool type's methods and attributes",
+    "PerformanceMonitor.Common/Mcp/McpToolParameterTypes.cs":
+        "holds the registry the reflection scan in McpSchemaCompat fills from each tool method's parameters",
+    "PerformanceMonitor.Common/Services/UpdateCheckService.cs":
+        "reads the running build's version from the entry assembly (Assembly.GetEntryAssembly)",
+    "PerformanceMonitor.PlanAnalysis/WaitStatsConfig.cs":
+        "loads the embedded Resources/WaitStats.json by manifest resource name (Assembly.GetManifestResourceNames)",
+}
+
+# A `const` declaration on a diff line (modifiers and attributes allowed before it), and an `enum` declaration.
+_CONST_DECL = re.compile(r"^\s*(?:\[[^\]]*\]\s*)*(?:(?:public|private|protected|internal|static|new|unsafe)\s+)*const\s+\S+\s+\w+\s*=")
+_ENUM_DECL = re.compile(r"^\s*(?:\[[^\]]*\]\s*)*(?:(?:public|private|protected|internal|new)\s+)*enum\s+\w+")
+_ENUM_HEADER = re.compile(r"\benum\b")
+
+
+def shared_change_reason(shared: list[str], diff_text: "str | None",
+                         registrations: "dict[str, str]" = REGISTRATION_FILES) -> "str | None":
+    """Why a change to these shared-project files runs everything (#5951), or None when the map may select by edges.
+
+    A file in `registrations` is FULL. Otherwise `diff_text` (`git diff -U0` with the csharp driver's hunk headers, as
+    symbol_diff_text() builds it) is read: FULL when a `+` or `-` line declares a `const` or an `enum`, or a hunk
+    sits inside an enum body (its header is the enum's declaration, the nearest type or member line above it).
+    Without a diff, or for a `.cs` file the diff does not hold, the answer is FULL: a change that is not read is not
+    narrowed. A shared file that is not C# holds no constant or enum, so it is never FULL for this rule."""
+    for f in shared:
+        if f in registrations:
+            return f"{f} is a shared-project registration file ({registrations[f]})"
+    cs_files = [f for f in shared if f.endswith(".cs")]
+    if not cs_files:
+        return None
+    if diff_text is None:
+        return f"{cs_files[0]} is in a shared project and its diff could not be read (keep-full)"
+    sections: dict[str, list[str]] = {}
+    current: "list[str] | None" = None
+    in_header = False
+    for line in diff_text.split("\n"):
+        if line.startswith("diff --git "):
+            m = re.match(r"diff --git a/(.+?) b/(.+)$", line)
+            current = sections.setdefault(m.group(2), []) if m else None
+            in_header = True
+        elif current is None:
+            continue
+        elif line.startswith("@@"):
+            in_header = False
+            current.append(line)
+        elif not in_header and line[:1] in ("+", "-"):
+            current.append(line)
+    for f in cs_files:
+        lines = sections.get(f)
+        if lines is None:
+            return f"{f} is in a shared project and the diff does not hold it (keep-full)"
+        for ln in lines:
+            if ln.startswith("@@"):
+                header = ln.split("@@", 2)[2] if ln.count("@@") >= 2 else ""
+                if _ENUM_HEADER.search(header):
+                    return f"{f} changes an enum member (a compiled value the map's edges cannot see)"
+            elif _CONST_DECL.match(ln[1:]):
+                return f"{f} changes a const (a compiled value the map's edges cannot see): {ln[1:].strip()[:80]}"
+            elif _ENUM_DECL.match(ln[1:]):
+                return f"{f} adds or removes an enum (a compiled value the map's edges cannot see)"
+    return None
+
+
 # map_select()'s `reason` for a change that holds documentation files only (#5894).
 DOCS_ONLY_REASON = ("documentation-only change: only a class that reads a changed document as text is selected "
                     "(CI's docs fast path runs no test)")
@@ -1173,7 +1249,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                doc_patterns: "tuple[str, ...] | list[str]" = DOC_PATTERNS,
                now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
                max_drift: int = MAP_MAX_DRIFT, base_ref: str = "",
-               named: "dict[str, set[str]] | None" = None, guard_stage_separate: bool = False) -> dict:
+               named: "dict[str, set[str]] | None" = None, guard_stage_separate: bool = False,
+               shared_diff: "str | None" = None, shared_dirs: "tuple[str, ...]" = SHARED_PROJECT_DIRS) -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -1205,7 +1282,10 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     call edges), but only when the change holds a product source file the map knows (#5872). `via` names, per
     "covers a changed file" class, the changed file the walk came from; `unknown` names each file the map did not know
     and the rule that took it; `drift` is how many drifted files counted.
-    A keep-full file forces FULL only when the pull request's own change holds it: one that changed on dev since
+    A change under a shared project (`shared_dirs`, #5951) is not keep-full as a whole: it is FULL only when
+    shared_change_reason() finds a registration file, or a const or enum in `shared_diff` (the pull request's
+    `-U0` diff text; None means the diff could not be read, which is FULL). Any other shared file selects by the
+    map's edges. A keep-full file forces FULL only when the pull request's own change holds it: one that changed on dev since
     the map goes through the class links like any other drifted file.
 
     Returns `{"full": bool, "reason": str, "selected": {suite: [Class, ...]}, "why": {suite: {Class: reason}},
@@ -1248,6 +1328,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     for f in changed:
         if any(matches(p, f) for p in keep_full):
             return _full(f"{f} is a keep-full file")
+    shared = [f for f in changed if f.startswith(shared_dirs) and not f.endswith(".md")]
+    if shared:
+        why_shared = shared_change_reason(shared, shared_diff)
+        if why_shared:
+            return _full(why_shared)
     known: set[str] = {u for u in universe if isinstance(u, str)}
     parsed: dict[str, dict[str, tuple[set[str], set[str]]]] = {}
     for suite, entries in classes.items():
@@ -1411,7 +1496,8 @@ def selection_args(rules: Rules) -> dict:
     """The keep-full and documentation patterns, read from the same filters the workflow evaluates."""
     keep = list(KEEP_FULL)
     for name in ("root", "core", "installer_core"):
-        keep.extend(rules.build.get(name, []))
+        # #5951: the shared projects are judged by map_select()'s shared_change_reason(), not as keep-full wholesale.
+        keep.extend(p for p in rules.build.get(name, []) if not p.startswith(SHARED_PROJECT_DIRS))
     return {"keep_full": tuple(dict.fromkeys(keep)), "doc_patterns": tuple(rules.build["docs"])}
 
 
@@ -1461,7 +1547,9 @@ def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, 
                 continue
             row = json.loads(line)
             rows += 1
-            sel = map_select(test_map, row["changed_files"], [], tree, event=row["event"], max_age_days=None, **extra)
+            sdiff = commit_diff_text(root, symbols_base, row["head_sha"]) if symbols_base else None
+            sel = map_select(test_map, row["changed_files"], [], tree, event=row["event"], max_age_days=None,
+                             shared_diff=sdiff, **extra)
             full_rows += bool(sel["full"])
             if symbols_base:
                 named = symbol_classes(root, symbols_base, head=row["head_sha"], index=index)
@@ -1469,9 +1557,9 @@ def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, 
                     no_commit += 1
                 else:
                     with_named = map_select(test_map, row["changed_files"], [], tree_sel, event=row["event"],
-                                            max_age_days=None, named=named, **extra)
+                                            max_age_days=None, named=named, shared_diff=sdiff, **extra)
                     without = map_select(test_map, row["changed_files"], [], tree_sel, event=row["event"],
-                                         max_age_days=None, **extra)
+                                         max_age_days=None, shared_diff=sdiff, **extra)
                     b, a = _selected_count(without, size), _selected_count(with_named, size)
                     before.append(b)
                     after.append(a)
@@ -1961,6 +2049,13 @@ def named_classes(match: dict) -> "dict[str, set[str]]":
     return out
 
 
+def commit_diff_text(root: str, base: str, head: str) -> "str | None":
+    """symbol_diff_text() of `head` against its merge base with `base`: the diff map_select()'s `shared_diff` reads
+    for a replayed commit (#5951). None when this clone lacks the commit, so a shared-project row stays FULL."""
+    mb = _git(root, "merge-base", base, head)
+    return symbol_diff_text(root, mb.strip(), head) if mb and mb.strip() else None
+
+
 def symbol_classes(root: str, base: str, cap: "int | None" = None, head: "str | None" = None,
                    index: "list | None" = None) -> "dict[str, set[str]] | None":
     """map_select()'s `named`: {suite: {Class, ...}} whose source names a TIGHT token of the change against `base`
@@ -2026,7 +2121,8 @@ def local_classes(root: str, base: str, map_path: "str | None" = None, wide: boo
         discovered = scan_classes(root)
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
-        sel = map_select(test_map, paths, drift, discovered, named=named_classes(match), **selection_args(Rules()))
+        sel = map_select(test_map, paths, drift, discovered, named=named_classes(match), shared_diff=text,
+                         **selection_args(Rules()))
         lines.append(f"MAP coverage answer ({map_path}):")
         if sel["full"]:
             lines.append(f"MAP FULL: {sel['reason']}")
@@ -2116,7 +2212,7 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             mapped = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         args = selection_args(Rules())
-        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), **args)
+        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), shared_diff=text, **args)
         count = sum(len(v) for v in sel["selected"].values())
         part = ("the classes that name a changed symbol, sit in a changed test file or have a text pattern in the "
                 "map that matches a changed file")
@@ -2387,6 +2483,9 @@ def main(argv: list[str]) -> int:
     ms.add_argument("--drift-file", help="the drift as one path per line, instead of --base (`-` for none)")
     ms.add_argument("--root", default=ROOT, help="the tree whose test classes are listed (default: this repository)")
     ms.add_argument("--files-from", help="the changed files as one path per line, in place of the arguments")
+    ms.add_argument("--diff-file", help="the pull request's `git diff -U0` text, in place of reading it from --base: "
+                                        "a shared-project change is FULL only for a const, an enum or a registration "
+                                        "file, and without a diff it is FULL (#5951)")
     ms.add_argument("--guard-stage-separate", action="store_true",
                     help="the caller runs the whole Stage=Guard trait itself (the pre-push gate): leave Guard classes "
                          "out of the selection (#5894)")
@@ -2469,8 +2568,17 @@ def main(argv: list[str]) -> int:
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         # #5776: with the base, the classes that name a changed symbol are one more reason (it only adds classes).
         named = symbol_classes(args.root, args.base) if args.base else None
+        # #5951: the diff a shared-project change is judged by: a planted file, else the change against the base.
+        shared_diff: "str | None" = None
+        if args.diff_file:
+            with open(args.diff_file, encoding="utf-8") as fh:
+                shared_diff = fh.read()
+        elif args.base:
+            sd = symbol_diff(args.root, args.base, untracked=False)
+            shared_diff = sd[1] if sd else None
         result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
-                            named=named, guard_stage_separate=args.guard_stage_separate, **selection_args(Rules()))
+                            named=named, guard_stage_separate=args.guard_stage_separate, shared_diff=shared_diff,
+                            **selection_args(Rules()))
         if result.get("docs_only"):
             print(f"::notice::test map: {result['reason']}")
         if result["full"]:
