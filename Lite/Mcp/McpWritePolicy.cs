@@ -115,7 +115,9 @@ internal static class McpWritePolicy
             var protocol = tool.ProtocolTool;
             var annotations = protocol.Annotations ?? new ToolAnnotations();
             var write = IsWrite(protocol.Name);
-            annotations.ReadOnlyHint = !write;
+            /* #5820: claim and submit change investigation state only, so they are neither read-only nor destructive. */
+            var stateOnly = !write && McpInvestigationPolicy.IsStateChanging(protocol.Name);
+            annotations.ReadOnlyHint = !write && !stateOnly;
             annotations.DestructiveHint = write;
             protocol.Annotations = annotations;
         }

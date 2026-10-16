@@ -57,6 +57,25 @@ internal sealed class McpSettings
     public bool AllowWrites { get; set; } = false;
 
     /// <summary>
+    /// Whether the four investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820) are
+    /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
+    /// at start, like <c>mcp_allow_writes</c>. They are served only when this is on AND <see cref="AllowWrites"/> is
+    /// off (<see cref="McpInvestigationPolicy.Served"/>): Lite has no token, so the agent tools reach local processes only
+    /// when the mute and route-disable tools are not also reachable. A file setting only, no Settings window control.
+    /// </summary>
+    public bool AllowInvestigations { get; set; } = false;
+
+    /// <summary>
+    /// How much collected data the MCP answers hand out (#5632 on Darling, #5820 here): full (the default),
+    /// maskLiterals or metadataOnly. Read from <c>mcp_data_detail</c> (<see cref="DataDetailSetting"/>) at start;
+    /// a word that is not one of the three leaves the endpoint off with the accepted words named, as for the other keys.
+    /// </summary>
+    public McpDataDetail DataDetail { get; set; } = McpDataDetail.Full;
+
+    /// <summary>The settings.json key for <see cref="DataDetail"/>.</summary>
+    public const string DataDetailSetting = "mcp_data_detail";
+
+    /// <summary>
     /// Why the MCP configuration could not be read, or null when it could.
     ///
     /// <para>Non-null covers two shapes that produce the identical user-visible outcome: settings.json is
@@ -149,6 +168,36 @@ internal sealed class McpSettings
                 }
 
                 settings.AllowWrites = allowWrites.GetBoolean();
+            }
+
+            if (root.TryGetProperty("mcp_allow_investigations", out var allowInvestigations))
+            {
+                if (allowInvestigations.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return Lost(WrongKind(McpInvestigationPolicy.InvestigationsSetting, allowInvestigations, "true or false"));
+                }
+
+                settings.AllowInvestigations = allowInvestigations.GetBoolean();
+            }
+
+            if (root.TryGetProperty("mcp_data_detail", out var dataDetail))
+            {
+                if (dataDetail.ValueKind != JsonValueKind.String)
+                {
+                    return Lost(WrongKind(DataDetailSetting, dataDetail, "full, maskLiterals or metadataOnly"));
+                }
+
+                /* TryParse treats a blank word as full and any other unknown word as metadataOnly with a false return.
+                   Darling runs an unknown word as metadataOnly with a warning; Lite follows its other keys and refuses to
+                   start with the accepted words named, so a typo is seen at once and never hands out more than asked for. */
+                if (!McpDataDetailModes.TryParse(dataDetail.GetString(), out var mode))
+                {
+                    return Lost(string.Format(CultureInfo.InvariantCulture,
+                        "'{0}' is '{1}', which is not one of full, maskLiterals or metadataOnly",
+                        DataDetailSetting, dataDetail.GetString()));
+                }
+
+                settings.DataDetail = mode;
             }
 
             return settings;

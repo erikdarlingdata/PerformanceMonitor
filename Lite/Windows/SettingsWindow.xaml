@@ -618,7 +618,7 @@
                                 </TextBlock>
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run FontFamily="Consolas" Text="{}{{investigation_json}}"/>
-                                    <Run Text=" : Darling only (the investigation request an alert opened); always empty in Lite."/>
+                                    <Run Text=" : the investigation request an alert opened or joined, when an agent route covers the alert; empty when it opened none."/>
                                 </TextBlock>
                                 <TextBlock Margin="20,6,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run FontWeight="SemiBold" Text="Example — re-run a GitHub Actions workflow when an alert fires:"/>

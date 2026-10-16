@@ -203,7 +203,21 @@ public sealed class NotificationRouteCacheBackgroundTests
             }
 
             sends++;
-            Assert.Contains("await NotificationRouteCache.WaitForFirstLoadAsync(", lines[i - 1], StringComparison.Ordinal);
+            /* #5820: the investigation dispatch core reads the routes too (the agent route, and whether the generic webhook
+               carries {{investigation_json}}), before the send on the webhook path. So the rule is read over the whole
+               method: the wait comes first, before the send core and before every investigation call. */
+            var start = i;
+            while (start > 0 && !lines[start].Contains(" async Task", StringComparison.Ordinal))
+            {
+                start--;
+            }
+
+            var waitAt = Array.FindIndex(lines, start, i - start,
+                l => l.Contains("await NotificationRouteCache.WaitForFirstLoadAsync(", StringComparison.Ordinal));
+            Assert.True(waitAt > start, "the send at line " + (i + 1) + " has no first-load wait before it in its method");
+            var investigationAt = Array.FindIndex(lines, start, i - start, l => l.Contains("_investigations.", StringComparison.Ordinal));
+            Assert.True(investigationAt < 0 || investigationAt > waitAt,
+                "an investigation call at line " + (investigationAt + 1) + " reads the routes before the first-load wait");
         }
 
         Assert.Equal(2, sends);

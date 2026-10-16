@@ -14,8 +14,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5632 Phase A head pins for the four investigation tools (<c>list_investigation_requests</c>,
-/// <c>claim_investigation_request</c>, <c>submit_investigation_report</c>, <c>get_investigation_reports</c>), Darling only
-/// (Lite has no investigation store, so there is no twin file). Follows the alerting family's pattern
+/// <c>claim_investigation_request</c>, <c>submit_investigation_report</c>, <c>get_investigation_reports</c>), Darling's
+/// side (Lite's twin, <c>Lite.Tests/McpToolGuideHeads.Investigations.cs</c>, checks the head length and the guide, #5820). Follows the alerting family's pattern
 /// (<see cref="McpToolGuideHeadsAlertingTests"/>): each head says what the tool does, whether it writes and its status
 /// words, and the facts that moved off the head to keep tools/list inside its budget stay in the guide tail.
 /// </summary>

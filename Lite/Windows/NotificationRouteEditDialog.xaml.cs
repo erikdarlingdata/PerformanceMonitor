@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -30,6 +31,9 @@ public partial class NotificationRouteEditDialog : Window
     private const string RestoreTable = "notification_routes";
     private const string ExactMetricChoice = "Exact metric name...";
     private const string WildcardChoice = "Every metric (*)";
+    private const string AgentInheritChoice = "Inherit";
+    private const string AgentOffChoice = "Off";
+    private const string AgentInvestigateChoice = "Investigate";
 
     private readonly Func<NotificationRoute, Task<bool>> _save;
     private readonly NotificationRoute? _stored;
@@ -57,6 +61,11 @@ public partial class NotificationRouteEditDialog : Window
         }
 
         MatchCombo.Items.Add(new ComboBoxItem { Content = ExactMetricChoice, Tag = null });
+
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInheritChoice, Tag = null });
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentOffChoice, Tag = NotificationRoute.AgentLevelOff });
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInvestigateChoice, Tag = NotificationRoute.AgentLevelInvestigate });
+        ShowAgent(existing);
 
         var selectedScope = existing is null ? _scopeOptions[0] : NotificationRouteUi.OptionFor(existing, _scopeOptions);
         foreach (var option in _scopeOptions)
@@ -97,6 +106,43 @@ public partial class NotificationRouteEditDialog : Window
         InitSecretBox(PagerDutyKeyBox, existing.PagerDutyRoutingKey, existing.IsOffFor(NotificationRouter.PagerDutyChannel));
         SmtpRecipientsBox.Text = existing.SmtpRecipients;
         EnabledCheckBox.IsChecked = existing.Enabled;
+    }
+
+    /// <summary>Puts the route's agent channel on the screen (#5820): a new route starts at Inherit with the default limits.</summary>
+    private void ShowAgent(NotificationRoute? route)
+    {
+        AgentLevelCombo.SelectedItem = AgentLevelCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, route?.AgentLevel));
+        AgentMaxPerHourBox.Text = (route?.AgentMaxPerHour ?? NotificationRoute.DefaultAgentMaxPerHour).ToString(CultureInfo.InvariantCulture);
+        AgentMaxPerDayBox.Text = (route?.AgentMaxPerDay ?? NotificationRoute.DefaultAgentMaxPerDay).ToString(CultureInfo.InvariantCulture);
+        AgentLeaseMinutesBox.Text = (route?.AgentLeaseMinutes ?? NotificationRoute.DefaultAgentLeaseMinutes).ToString(CultureInfo.InvariantCulture);
+        AgentExpiryMinutesBox.Text = (route?.AgentExpiryMinutes ?? NotificationRoute.DefaultAgentExpiryMinutes).ToString(CultureInfo.InvariantCulture);
+        UpdateAgentLimitsEnabled();
+    }
+
+    private int? SelectedAgentLevel() => (AgentLevelCombo.SelectedItem as ComboBoxItem)?.Tag as int?;
+
+    /// <summary>The four limits apply only where the level is Investigate (#5820); they stay shown, dimmed, otherwise.</summary>
+    private void UpdateAgentLimitsEnabled()
+    {
+        var investigates = SelectedAgentLevel() == NotificationRoute.AgentLevelInvestigate;
+        AgentMaxPerHourBox.IsEnabled = investigates;
+        AgentMaxPerDayBox.IsEnabled = investigates;
+        AgentLeaseMinutesBox.IsEnabled = investigates;
+        AgentExpiryMinutesBox.IsEnabled = investigates;
+    }
+
+    private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAgentLimitsEnabled();
+
+    /// <summary>One agent limit off its box (#5820). A box that is not a whole number is refused here, in words; the bounds are
+    /// the store's.</summary>
+    private static int ReadAgentNumber(TextBox box, string name)
+    {
+        if (int.TryParse(box.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var value))
+        {
+            return value;
+        }
+
+        throw new ArgumentException(name + " must be a whole number.");
     }
 
     private static void InitSecretBox(PasswordBox box, string stored, bool unreadable)
@@ -220,7 +266,12 @@ public partial class NotificationRouteEditDialog : Window
         {
             ScopeServerId = serverId,
             ScopeTagId = tagId,
-            OffChannels = keepOff.Count == 0 ? null : keepOff
+            OffChannels = keepOff.Count == 0 ? null : keepOff,
+            AgentLevel = SelectedAgentLevel(),
+            AgentMaxPerHour = ReadAgentNumber(AgentMaxPerHourBox, "Requests per hour"),
+            AgentMaxPerDay = ReadAgentNumber(AgentMaxPerDayBox, "Requests per day"),
+            AgentLeaseMinutes = ReadAgentNumber(AgentLeaseMinutesBox, "Lease minutes"),
+            AgentExpiryMinutes = ReadAgentNumber(AgentExpiryMinutesBox, "Expiry minutes")
         };
     }
 

@@ -118,10 +118,10 @@ internal static class DarlingMcpInstructions
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
         var families = adminServed
-            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding and investigation tools"
+            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding and investigation-wait tools"
             : writesServed
-                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and investigation tools"
-                : "the Custom Views, custom-alert-rule and investigation reads";
+                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and investigation-wait tools"
+                : "the Custom Views and custom-alert-rule reads and the investigation-wait tool";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
@@ -135,9 +135,9 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 188 tools. 91 are the same names Lite exposes. The remaining 97 are unique to Darling: " +
+        "This server exposes 188 tools. 95 are the same names Lite exposes. The remaining 93 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag, " +
-        "onboarding and investigation tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
+        "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
     /// <summary>
@@ -148,7 +148,7 @@ internal static class DarlingMcpInstructions
     internal static readonly IReadOnlySet<string> LiteToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-        "analyze_server", "audit_config", "compare_analysis", "delete_notification_route", "get_active_queries",
+        "analyze_server", "audit_config", "claim_investigation_request", "compare_analysis", "delete_notification_route", "get_active_queries",
         "get_alert_history", "get_alert_settings", "get_analysis_facts", "get_analysis_findings",
         "get_blocked_process_reports", "get_blocked_process_xml", "get_blocking_stats", "get_blocking_trend",
         "get_client_timeouts", "get_collection_health", "get_collection_log", "get_cpu_scheduler_pressure",
@@ -159,7 +159,7 @@ internal static class DarlingMcpInstructions
         "get_health_parser_memory_broker", "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom",
         "get_health_parser_scheduler_issues", "get_health_parser_severe_errors",
         "get_health_parser_significant_waits", "get_health_parser_system_health", "get_index_usage",
-        "get_latch_stats", "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks",
+        "get_investigation_reports", "get_latch_stats", "get_lock_wait_trend", "get_long_query_completions", "get_memory_clerks",
         "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend", "get_mute_rules",
         "get_notification_routes", "get_object_locking", "get_perfmon_stats", "get_perfmon_trend",
         "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
@@ -169,8 +169,8 @@ internal static class DarlingMcpInstructions
         "get_server_properties", "get_server_summary", "get_session_stats", "get_spinlock_stats",
         "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",
-        "get_wait_types", "get_waiting_tasks", "list_servers", "mute_analysis_finding",
-        "set_notification_route_enabled", "unmute_analysis_finding",
+        "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_servers",
+        "mute_analysis_finding", "set_notification_route_enabled", "submit_investigation_report", "unmute_analysis_finding",
     };
 
     private const string Preamble = """

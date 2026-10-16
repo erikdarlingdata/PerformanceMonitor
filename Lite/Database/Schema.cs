@@ -279,9 +279,180 @@ CREATE TABLE IF NOT EXISTS notification_routes (
     slack_secret_gen VARCHAR,
     generic_secret_gen VARCHAR,
     pagerduty_secret_gen VARCHAR,
+    agent_level INTEGER,
+    agent_max_per_hour INTEGER,
+    agent_max_per_day INTEGER,
+    agent_lease_minutes INTEGER,
+    agent_expiry_minutes INTEGER,
     CHECK (scope_server_id IS NULL OR scope_tag_id IS NULL),
     CHECK (metric_match <> '*' OR scope_server_id IS NOT NULL OR scope_tag_id IS NOT NULL)
 )";
+
+    /* #5820 (schema v69): the six tables of Level 1 investigations, the Lite twins of Darling's V184 tables (plus
+       V188's alert facts on investigation_request_alerts). Darling's text is InvestigationTables.CreateSql; the names
+       here are its bare table names. What DuckDB lacks shapes them, as for the route and tag tables above:
+       - No IDENTITY and no SEQUENCE: every BIGINT id is assigned max + 1 by the store under the write lock.
+       - No foreign keys and no ON DELETE CASCADE: retention deletes the child rows (alerts, reports, journal) first.
+       - No partial index: investigation_journal.once_key is a plain UNIQUE column. DuckDB treats NULLs as distinct
+         in it, so any number of rows carry no key, and INSERT ... ON CONFLICT (once_key) DO NOTHING skips a repeated
+         key (InvestigationDuckDbSpikeTests proves both).
+       - JSON is VARCHAR (DuckDB has no jsonb); the store validates the shape before it writes.
+       - No secondary index, and none on a column an UPDATE writes: DuckDB runs an UPDATE of an indexed column as a
+         delete and an insert, which a second update of the same row in one transaction trips over.
+       - CHECKs only on state, verdict and family, written out from InvestigationToolCore.States, Verdicts and
+         Families (and the note states). Darling's other CHECKs (claim count, agent id pattern, text lengths, the
+         evidence shape) are the store's and the tool core's to enforce here.
+       - Timestamps are TIMESTAMP holding UTC to the microsecond, and have no DEFAULT: DuckDB's current_timestamp is
+         local-zone, so the store binds every time. Request and claim ids are UUID, as in Darling. */
+
+    /// <summary>
+    /// One investigation request per server, alert family and 30-minute grouping window, with its state, the current
+    /// claim and its lease, the claim count, the expiry and the brief composed at claim. Mirrors Darling's
+    /// <c>config.investigation_requests</c>.
+    /// </summary>
+    public const string CreateInvestigationRequestsTable = @"
+CREATE TABLE IF NOT EXISTS investigation_requests (
+    request_id UUID PRIMARY KEY,
+    route_id INTEGER NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    family VARCHAR NOT NULL,
+    first_metric VARCHAR NOT NULL,
+    first_dedup_key VARCHAR,
+    story_path_hash VARCHAR,
+    first_alert_at TIMESTAMP NOT NULL,
+    last_alert_at TIMESTAMP NOT NULL,
+    window_until TIMESTAMP NOT NULL,
+    alert_count INTEGER NOT NULL DEFAULT 1,
+    state VARCHAR NOT NULL DEFAULT 'open',
+    autonomy_level SMALLINT NOT NULL DEFAULT 1,
+    opened_at TIMESTAMP NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    lease_minutes INTEGER NOT NULL DEFAULT 15,
+    claimed_by VARCHAR,
+    claim_id UUID,
+    claimed_at TIMESTAMP,
+    lease_until TIMESTAMP,
+    claim_count INTEGER NOT NULL DEFAULT 0,
+    brief_format SMALLINT,
+    brief VARCHAR,
+    reported_at TIMESTAMP,
+    closed_at TIMESTAMP,
+    closed_by VARCHAR,
+    closed_reason VARCHAR,
+    CHECK (family IN ('blocking', 'query_performance', 'resources', 'availability', 'jobs', 'self_monitor', 'other')),
+    CHECK (state IN ('open', 'claimed', 'reported', 'closed', 'expired'))
+)";
+
+    /// <summary>
+    /// One row per alert that opened or joined a request, and per incident dedup key of that alert, with the alert's
+    /// facts (value, threshold, muted, detail, context). Mirrors Darling's <c>config.investigation_request_alerts</c>
+    /// (V184 plus V188).
+    /// </summary>
+    public const string CreateInvestigationRequestAlertsTable = @"
+CREATE TABLE IF NOT EXISTS investigation_request_alerts (
+    request_alert_id BIGINT PRIMARY KEY,
+    request_id UUID NOT NULL,
+    alert_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    metric_name VARCHAR NOT NULL,
+    dedup_key VARCHAR,
+    current_value DOUBLE,
+    threshold_value DOUBLE,
+    muted BOOLEAN,
+    detail_text VARCHAR,
+    context_json VARCHAR
+)";
+
+    /// <summary>
+    /// The one report an agent returned for a request (UNIQUE request_id; the row is never updated). Mirrors Darling's
+    /// <c>config.investigation_reports</c>.
+    /// </summary>
+    public const string CreateInvestigationReportsTable = @"
+CREATE TABLE IF NOT EXISTS investigation_reports (
+    report_id BIGINT PRIMARY KEY,
+    request_id UUID NOT NULL UNIQUE,
+    report_format SMALLINT NOT NULL,
+    agent_id VARCHAR NOT NULL,
+    claim_id UUID NOT NULL,
+    submitted_at TIMESTAMP NOT NULL,
+    verdict VARCHAR NOT NULL,
+    root_cause VARCHAR NOT NULL,
+    root_cause_found BOOLEAN NOT NULL DEFAULT false,
+    summary VARCHAR,
+    evidence VARCHAR NOT NULL,
+    server_id INTEGER NOT NULL,
+    metric_name VARCHAR,
+    dedup_key VARCHAR,
+    story_path_hash VARCHAR,
+    CHECK (verdict IN ('real', 'false_positive', 'needs_person'))
+)";
+
+    /// <summary>
+    /// The append-only journal of every open, join, limit, claim, lease expiry, report and refusal. An event recorded
+    /// once carries a once_key, UNIQUE where set. Mirrors Darling's <c>config.investigation_journal</c>.
+    /// </summary>
+    public const string CreateInvestigationJournalTable = @"
+CREATE TABLE IF NOT EXISTS investigation_journal (
+    journal_id BIGINT PRIMARY KEY,
+    event_time TIMESTAMP NOT NULL,
+    request_id UUID,
+    route_id INTEGER,
+    server_id INTEGER,
+    event VARCHAR NOT NULL,
+    actor VARCHAR NOT NULL,
+    reason VARCHAR,
+    detail VARCHAR,
+    once_key VARCHAR UNIQUE
+)";
+
+    /// <summary>
+    /// Notes about a server or a finding that a person approves before a brief carries them. Mirrors Darling's
+    /// <c>config.investigation_notes</c>.
+    /// </summary>
+    public const string CreateInvestigationNotesTable = @"
+CREATE TABLE IF NOT EXISTS investigation_notes (
+    note_id BIGINT PRIMARY KEY,
+    server_id INTEGER,
+    story_path_hash VARCHAR,
+    dedup_key VARCHAR,
+    metric_name VARCHAR,
+    note_text VARCHAR NOT NULL,
+    author VARCHAR NOT NULL,
+    source_request_id UUID,
+    state VARCHAR NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    decided_at TIMESTAMP,
+    decided_by VARCHAR,
+    CHECK (state IN ('pending', 'approved', 'rejected'))
+)";
+
+    /// <summary>
+    /// The free-text environment profile an agent reads, per server, per tag or fleet-wide (both scopes NULL). One
+    /// profile per scope is the store's rule (DuckDB has no expression unique index). Mirrors Darling's
+    /// <c>config.agent_environment_profiles</c>.
+    /// </summary>
+    public const string CreateAgentEnvironmentProfilesTable = @"
+CREATE TABLE IF NOT EXISTS agent_environment_profiles (
+    profile_id BIGINT PRIMARY KEY,
+    scope_server_id INTEGER,
+    scope_tag_id INTEGER,
+    profile_text VARCHAR NOT NULL,
+    modified_at TIMESTAMP NOT NULL,
+    modified_by VARCHAR
+)";
+
+    /// <summary>The six investigation tables in the order the v69 step creates them (none depends on another).</summary>
+    public static IEnumerable<string> InvestigationTableStatements()
+    {
+        yield return CreateInvestigationRequestsTable;
+        yield return CreateInvestigationRequestAlertsTable;
+        yield return CreateInvestigationReportsTable;
+        yield return CreateInvestigationJournalTable;
+        yield return CreateInvestigationNotesTable;
+        yield return CreateAgentEnvironmentProfilesTable;
+    }
 
     /// <summary>
     /// All table creation statements: the hand-written non-collector tables, then one table per
@@ -305,6 +476,11 @@ CREATE TABLE IF NOT EXISTS notification_routes (
         yield return CreateServerTagsTable;
         yield return CreateServerTagMapTable;
         yield return CreateNotificationRoutesTable;
+
+        foreach (var statement in InvestigationTableStatements())
+        {
+            yield return statement;
+        }
 
         foreach (var statement in DuckDbSchemaGenerator.CreateTableStatements())
         {

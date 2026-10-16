@@ -14,6 +14,7 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -84,7 +85,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         new(0, match, teams, slack, generic, pager, smtp, true) { ScopeServerId = server, ScopeTagId = tag };
 
     private async Task<string> ReadAsync() =>
-        await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, await _data.GetServerTagsAsync());
+        await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, await _data.GetServerTagsAsync(), NoUse());
 
     private async Task<(int Fleet, int Server, int Tag, int Orphan, int Root, int Child)> SeedAsync()
     {
@@ -163,7 +164,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
             await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
-        using var doc = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags));
+        using var doc = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags, NoUse()));
         var routes = doc.RootElement.GetProperty("routes").EnumerateArray().ToDictionary(r => r.GetProperty("route_id").GetInt32());
 
         /* The tag route cannot be expanded: it matches nothing, is not orphaned, and says so. Same rule as Darling's loader (#5750). */
@@ -244,6 +245,100 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         Assert.Equal("not_found", second.RootElement.GetProperty("status").GetString());
     }
 
+    /* #5820: an agent route decides which alerts open investigation requests, and the agent tools are served over this same
+       listener, so MCP leaves a route with an agent level of 1 or more alone, as Darling's tools do. A null level (inherit) and 0
+       (the explicit Off) are ordinary routes. */
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    public async Task RouteWrites_RefuseOnlyAnAgentLevelOfOneOrMore(int? agentLevel, bool refused)
+    {
+        var id = await _store.InsertAsync(Route("Performance", teams: TeamsUrl) with { AgentLevel = agentLevel });
+
+        var enable = await McpAlertTools.SetRouteEnabledAsync(_store, _servers, await _data.GetServerTagsAsync(), id, enabled: false);
+        var delete = await McpAlertTools.DeleteRouteAsync(_store, id);
+
+        Assert.Equal(refused ? "refused" : "updated", JsonDocument.Parse(enable).RootElement.GetProperty("status").GetString());
+        Assert.Equal(refused ? "refused" : "deleted", JsonDocument.Parse(delete).RootElement.GetProperty("status").GetString());
+        var stored = await _store.GetAsync(id);
+        if (refused)
+        {
+            Assert.True(stored!.Enabled);
+            Assert.Contains("Manage Notification Routes", enable, StringComparison.Ordinal);
+            Assert.Equal(agentLevel, stored.AgentLevel);
+        }
+        else
+        {
+            Assert.Null(stored);
+        }
+    }
+
+    /// <summary>A request store that answers no use: every route's counts read zero.</summary>
+    private static IInvestigationRequestStore NoUse() => RouteUseStore.Create(new Dictionary<int, (int LastHour, int LastDay)>());
+
+    /* #5820: the read carries the five agent settings, and the two use counts when the request store answers. With a store whose
+       read throws, the route list is still answered: counts null, agent_use_read false. */
+    [Fact]
+    public async Task TheRead_CarriesTheAgentSettings_AndTheUseCountsOnlyWhenTheRequestStoreAnswers()
+    {
+        var agent = await _store.InsertAsync(Route("Blocking", teams: TeamsUrl) with
+        {
+            AgentLevel = 1, AgentMaxPerHour = 5, AgentMaxPerDay = 50, AgentLeaseMinutes = 20, AgentExpiryMinutes = 60,
+        });
+        var plain = await _store.InsertAsync(Route("Performance", teams: TeamsUrl));
+        var tags = await _data.GetServerTagsAsync();
+
+        var none = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags, NoUse())).RootElement;
+        Assert.True(none.GetProperty("agent_use_read").GetBoolean());
+        var noneAgent = none.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == agent);
+        Assert.Equal((1, 5, 50, 20, 60),
+            (noneAgent.GetProperty("agent_level").GetInt32(), noneAgent.GetProperty("agent_max_per_hour").GetInt32(), noneAgent.GetProperty("agent_max_per_day").GetInt32(),
+             noneAgent.GetProperty("agent_lease_minutes").GetInt32(), noneAgent.GetProperty("agent_expiry_minutes").GetInt32()));
+        Assert.Equal(0, noneAgent.GetProperty("agent_requests_last_hour").GetInt32());
+        var nonePlain = none.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == plain);
+        Assert.Equal(JsonValueKind.Null, nonePlain.GetProperty("agent_level").ValueKind);
+        Assert.Equal(NotificationRoute.DefaultAgentMaxPerHour, nonePlain.GetProperty("agent_max_per_hour").GetInt32());
+
+        var use = new Dictionary<int, (int LastHour, int LastDay)> { [agent] = (2, 7) };
+        var read = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags, RouteUseStore.Create(use))).RootElement;
+        Assert.True(read.GetProperty("agent_use_read").GetBoolean());
+        var withAgent = read.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == agent);
+        Assert.Equal((2, 7), (withAgent.GetProperty("agent_requests_last_hour").GetInt32(), withAgent.GetProperty("agent_requests_last_day").GetInt32()));
+        var withPlain = read.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == plain);
+        Assert.Equal((0, 0), (withPlain.GetProperty("agent_requests_last_hour").GetInt32(), withPlain.GetProperty("agent_requests_last_day").GetInt32()));
+
+        var failed = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags, RouteUseStore.Create(null))).RootElement;
+        Assert.False(failed.GetProperty("agent_use_read").GetBoolean());
+        Assert.Equal(2, failed.GetProperty("route_count").GetInt32());
+    }
+
+    /// <summary>An <see cref="IInvestigationRequestStore"/> that answers only RouteUseAsync (a null map throws, as a failed read
+    /// does); any other member throws.</summary>
+    public class RouteUseStore : System.Reflection.DispatchProxy
+    {
+        private IReadOnlyDictionary<int, (int LastHour, int LastDay)>? _use;
+
+        public static IInvestigationRequestStore Create(IReadOnlyDictionary<int, (int LastHour, int LastDay)>? use)
+        {
+            var proxy = Create<IInvestigationRequestStore, RouteUseStore>();
+            ((RouteUseStore)(object)proxy)._use = use;
+            return proxy;
+        }
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name != nameof(IInvestigationRequestStore.RouteUseAsync))
+            {
+                throw new NotSupportedException(targetMethod?.Name);
+            }
+
+            return _use is null
+                ? Task.FromException<IReadOnlyDictionary<int, (int LastHour, int LastDay)>>(new InvalidOperationException("the read failed"))
+                : Task.FromResult(_use);
+        }
+    }
+
     [Fact]
     public async Task BothWrites_AreRefused_WhileARestoreOfTheTableIsPending_AndChangeNothing()
     {
@@ -310,13 +405,11 @@ public sealed class NotificationRoutesMcpTests : IDisposable
            delegates to it (DarlingRoutePayloadTests pins that), so this is still the one body. */
         var darling = DarlingRouteFields("internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r, IReadOnlyDictionary<int, (int LastHour, int LastDay)>? agentUse) => new");
         Assert.NotEmpty(darling);
-        /* #5632: the agent channel is Darling's alone (Lite has no investigation requests), so its five settings and the
-           route's two request counts are the one named exception; every one of them must still be in Darling's projection.
-           #5825: the route's send-resolutions override is Darling's alone too (Lite is out of that issue's scope, decision 4). */
+        /* #5825: the route's send-resolutions override is Darling's alone (Lite is out of that issue's scope, decision 4).
+           #5820: Lite has the agent channel now, so its five settings and the route's two request counts are in both. */
         var darlingOnly = new[]
         {
-            "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes",
-            "agent_requests_last_hour", "agent_requests_last_day", "send_resolutions",
+            "send_resolutions",
         };
         Assert.All(darlingOnly, f => Assert.Contains(f, darling));
         Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
@@ -356,9 +449,8 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         var body = Regex.Replace(source[start..end], @"/\*.*?\*/", "", RegexOptions.Singleline);
         var darling = Regex.Matches(body, @"(?m)^ {16}([a-z_]+)\s*=").Select(m => m.Groups[1].Value).ToList();
 
-        /* #5632: agent_use_read says whether the routes' investigation request counts were read; Lite has no agent channel,
-           so it is the one Darling-only top-level field, and it must still be there. */
+        /* #5632, #5820: agent_use_read says whether the routes' investigation request counts were read; both products report it. */
         Assert.Contains("agent_use_read", darling);
-        Assert.Equal(darling.Where(n => n != "agent_use_read").OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Equal(darling.OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
     }
 }

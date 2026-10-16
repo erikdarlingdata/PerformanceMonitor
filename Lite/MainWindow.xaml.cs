@@ -116,6 +116,15 @@ public partial class MainWindow : Window
     private readonly MuteRuleService _muteRuleService;
     /// <summary>#5750: the scoped notification-route store, for the Settings window (its writes invalidate the route cache).</summary>
     internal DuckDbNotificationRouteStore NotificationRouteStore { get; private set; } = null!;
+
+    /// <summary>The Level 1 investigation store (#5820): Lite's DuckDB twin of Darling's, behind the shared interface the
+    /// route list (its use counts), the dispatcher and the MCP tools read.</summary>
+    internal IInvestigationRequestStore InvestigationStore { get; private set; } = null!;
+    /* #5820: the mcp_data_detail level of the running MCP host, for the webhook token's brief; the setting's default (full)
+       while no host runs. Set when the host starts and reset when it stops. */
+    private McpDataDetail _mcpDataDetail = McpDataDetail.Full;
+    /* #5820: the investigation expiry sweep's loop, started with the background service and ended by the same token. */
+    private Task? _investigationSweepLoop;
     private EmailAlertService _emailAlertService;
 
     /// <summary>The webhook service the email service fans out to, held so the status timer can read each
@@ -142,11 +151,21 @@ public partial class MainWindow : Window
         _alertHistoryStore = new DuckDbAlertHistoryStore(_databaseInitializer);
         _webhookAlertService = new WebhookAlertService(
             _alertSettings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>(), _alertHistoryStore);
+        /* #5820: the investigation store is built before the email service, which opens requests in it through the shared
+           dispatch core. The core reads the agent routes through _alertSettings (the route cache the route store below
+           fills); Lite has no wait tool, so the open signal is null. The webhook token's brief is masked at the running
+           MCP host's mcp_data_detail, and at that setting's default (full) while no host runs. */
+        InvestigationStore = new DuckDbInvestigationStore(_databaseInitializer);
+        var investigationStore = InvestigationStore;
         _emailAlertService = new EmailAlertService(
             _alertSettings,
             _alertHistoryStore,
             _webhookAlertService,
-            new AppLoggerAdapter<EmailAlertService>());
+            new AppLoggerAdapter<EmailAlertService>(),
+            new InvestigationDispatchCore(
+                investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null),
+            (requestId, token) => investigationStore.ReadRequestAsync(requestId, token),
+            () => _mcpDataDetail);
         _muteRuleService = new MuteRuleService(
             new DuckDbMuteRuleStore(_databaseInitializer),
             new AppLoggerAdapter<MuteRuleService>());
@@ -317,6 +336,11 @@ public partial class MainWindow : Window
             /* #2761 moved the CTS construction above the slice-repair launch so that call can take the same
                app-lifetime token; this stays the only place the background service is started with it. */
             _ = Task.Run(() => _backgroundService.StartAsync(_backgroundCts.Token));
+
+            /* #5820: the investigation expiry sweep, every 60 seconds whatever the MCP settings say: a lapsed claim is
+               journaled once and an old request expires even while no agent can reach Lite. Ends with the same token. */
+            var investigationSweep = new InvestigationSweepService(InvestigationStore, new AppLoggerAdapter<InvestigationSweepService>());
+            _investigationSweepLoop = Task.Run(() => investigationSweep.RunAsync(_backgroundCts.Token));
 
             // Initialize system tray
             _trayService = new SystemTrayService(this, RestoreFromTray, _backgroundService);
@@ -586,6 +610,19 @@ public partial class MainWindow : Window
             }
         }
 
+        /* #5820: the sweep loop ends on _backgroundCts, cancelled above; a pass in flight gets the same five seconds. */
+        if (_investigationSweepLoop != null)
+        {
+            try
+            {
+                await _investigationSweepLoop.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (TimeoutException)
+            {
+                /* Shutdown timed out, proceeding anyway */
+            }
+        }
+
         /* #3916 PR B: drop the analysis hold-back queue unstamped once collection has stopped — a page queued
            at close is not a delivery, so nothing holds its story and the next launch re-attempts it. */
         _analysisNotificationService?.Dispose();
@@ -688,7 +725,8 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, _scheduleManager, mcpSettings.AllowWrites);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail);
+            _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
         catch (Exception ex)
@@ -711,6 +749,7 @@ public partial class MainWindow : Window
                 /* MCP shutdown timed out */
             }
             _mcpService = null;
+            _mcpDataDetail = McpDataDetail.Full;
         }
     }
 
