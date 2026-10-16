@@ -297,6 +297,25 @@ internal static class InvestigationToolCore
             }, masker, ("root_cause", r.RootCause), ("summary", r.Summary));
             node["evidence"] = evidence;
             node["labels"] = new JsonArray(InvestigationRules.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
+            /* #5913: what people said about this report. The free text is masked as the report's is; the author is a login. */
+            var feedbackNodes = new JsonArray();
+            foreach (var f in (read.Feedback ?? []).Where(f => f.RequestId == r.RequestId))
+            {
+                var fb = InvestigationFieldMasking.Mask(new JsonObject
+                {
+                    ["verdict"] = f.Verdict,
+                    ["corrected_verdict"] = f.CorrectedVerdict,
+                    ["missed_step"] = null,
+                    ["comment"] = null,
+                    ["recorded_at"] = JsonSerializer.SerializeToNode(f.CreatedAtUtc, McpHelpers.JsonOptions),
+                }, masker, ("missed_step", f.MissedStep), ("comment", f.Comment));
+                if (!fb.ContainsKey("withheld"))
+                    fb["author"] = masker.Field("login_name", f.Author);
+                feedbackNodes.Add(fb);
+            }
+
+            if (read.Feedback is not null)
+                node["feedback"] = feedbackNodes;
             reports.Add(node);
         }
 
@@ -330,7 +349,34 @@ internal static class InvestigationToolCore
             ["journal"] = journal,
             ["brief"] = read.Brief is null ? null : InvestigationFieldMasking.StoredBrief(read.Brief, mode, masker),
         };
+        /* #5913: only a store that keeps feedback (Darling's) sends the counts; Lite's answer keeps its shape. */
+        if (read.FamilyCounts is not null)
+            answer["family_counts"] = FamilyCountsPayload(read.FamilyCounts);
         return answer.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// The false-positive counts per alert family (#5913), one entry per family that had a report in the window:
+    /// <c>reported</c>, <c>with_feedback</c>, <c>marked_wrong</c>, <c>agent_false_positives</c> (reports that say false_positive)
+    /// and <c>false_positives</c> (the same after people's corrected verdicts; see <see cref="InvestigationFamilyCounts"/>).
+    /// </summary>
+    internal static JsonArray FamilyCountsPayload(IReadOnlyList<InvestigationFamilyCounts> counts)
+    {
+        var array = new JsonArray();
+        foreach (var c in counts)
+        {
+            array.Add(new JsonObject
+            {
+                ["family"] = c.Family,
+                ["reported"] = c.Reported,
+                ["with_feedback"] = c.WithFeedback,
+                ["marked_wrong"] = c.MarkedWrong,
+                ["agent_false_positives"] = c.AgentFalsePositives,
+                ["false_positives"] = c.FalsePositives,
+            });
+        }
+
+        return array;
     }
 
     internal static object RequestPayload(InvestigationRequestRow r) => new

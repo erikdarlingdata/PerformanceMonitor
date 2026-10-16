@@ -218,6 +218,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "POST \"/api/servers\""] = "admin write",
         [WebFile + "PATCH \"/api/servers/{id:int}\""] = "admin write",
         [WebFile + "POST \"/api/alert-history/dismiss\""] = "write",
+        [WebFile + "GET \"/api/investigation-feedback\""] = "definition read: reported requests with their feedback and the false-positive counts (two small config-table reads, capped at 100 requests; #5913)",
+        [WebFile + "PUT \"/api/investigation-feedback/{requestId}\""] = "write",
         [WebFile + "POST \"/api/server-tags\""] = "write",
         [WebFile + "PATCH \"/api/server-tags/{id:int}\""] = "write",
         [WebFile + "DELETE \"/api/server-tags/{id:int}\""] = "write",
