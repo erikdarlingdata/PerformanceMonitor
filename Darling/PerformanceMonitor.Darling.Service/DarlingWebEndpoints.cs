@@ -166,6 +166,11 @@ public static class DarlingWebEndpoints
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        "create_query_tag",
+        "update_query_tag",
+        "delete_query_tag",
+        "assign_query_tag",
+        "unassign_query_tag",
         "run_collectors_now",
         "get_tool_guide",
         "wait_for_investigation_requests",
@@ -6227,6 +6232,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_wait_trend"] = R(CatData, "One wait type's totals over time (requires wait_type).", PReqText("wait_type"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_wait_types"] = R(CatData, "The wait types observed in the window.", PServer(), PHours(24), PAsOf()),
             ["list_servers"] = R(CatData, "The monitored servers known to the store."),
+            ["list_query_tags"] = R(CatData, "The query tag tree with each tag's hand assignments, their precedence over rules, and whether the tag map has caught up."),
 
             /* ── trends (DarlingMcpTrendTools) ── */
             ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
@@ -7252,6 +7258,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : MissingParam("wait_type"),
             ["get_wait_types"] = (c, pg, an) => DarlingMcpDataTools.GetWaitTypes(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg, c.RequestAborted),
+            ["list_query_tags"] = (c, pg, an) => DarlingMcpQueryTagTools.ListQueryTags(pg, c.RequestAborted),
 
             /* ── trends ── */
             /* #3897: the trends a page charts pass the CHART budget — a browser draws far more points than a model

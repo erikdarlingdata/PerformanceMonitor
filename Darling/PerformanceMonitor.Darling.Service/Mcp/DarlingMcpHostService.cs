@@ -1551,6 +1551,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                role carries the narrow INSERT/UPDATE/DELETE grant on ONLY those two tables (the admin gate), never
                the config pivot or the secret columns. */
             .WithGeminiCompatibleTools<DarlingMcpServerTagTools>()
+            /* The query-tag tools (#5981): create/update/delete/assign/unassign_query_tag (writes, mcp.allowWrites) and list_query_tags
+               (a read). They write config.query_tags and config.query_tag_assignments through QueryTagStore with the shared TagTreeRules;
+               a write bumps config.query_tag_state and the collector's next pass builds the map. The mcp role carries the narrow
+               INSERT/UPDATE/DELETE grant on only those tables. */
+            .WithGeminiCompatibleTools<DarlingMcpQueryTagTools>()
             /* #5941: run_collectors_now queues a one-time collector pass for one server through the same guarded request the web
                buttons use. The mcp role queues through config.request_snapshot_now (fixed command type, collector names only),
                never a grant on the command queue. */
