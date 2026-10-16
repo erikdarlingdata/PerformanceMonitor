@@ -152,6 +152,22 @@ public sealed class InvestigationPracticeTests
     }
 
     [Fact]
+    public void TheRequestRow_NamesWhatAPracticeReplays_AndOtherRowsKeepTheirShapeWithNoKey()
+    {
+        var plain = new InvestigationRequestRow(Guid.NewGuid(), 1, 7, "srv", "blocking", "Blocking", Now, Now, 1, "open", Now, Now.AddHours(4), null, null, 0, null);
+        var replayed = Guid.NewGuid();
+        var practice = plain with { RequestId = Guid.NewGuid(), PracticeOf = replayed };
+
+        var plainNode = JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(plain))!.AsObject();
+        var practiceNode = JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(practice))!.AsObject();
+
+        Assert.False(plainNode.ContainsKey("practice_of"), "absent, not null");
+        Assert.Equal(replayed.ToString(), practiceNode["practice_of"]!.GetValue<string>());
+        Assert.Equal(plainNode.Select(p => p.Key), practiceNode.Where(p => p.Key != "practice_of").Select(p => p.Key));
+        Assert.Equal("reported_at", plainNode.Last().Key);
+    }
+
+    [Fact]
     public void WithoutReplayedAnswers_DropsTheReportFeedbackAndJournalOfTheReplayedCaseOnly()
     {
         var a = Guid.NewGuid();
@@ -675,6 +691,12 @@ public sealed class InvestigationPracticePanelLiveStaTests
                 Assert.StartsWith("Practice request opened (", panel.PracticeStatusText.Text, StringComparison.Ordinal);
                 practice = Guid.Parse(panel.PracticeStatusText.Text.Split('(', ')')[1]);
 
+                /* The Requests tab's read marks the practice request and no other. */
+                var requests = await viewer.GetInvestigationRequestsAsync(null);
+                var marked = Assert.Single(requests, r => r.PracticeOf is not null);
+                Assert.Equal((practice, judged, "Practice"), (marked.RequestId, marked.PracticeOf!.Value, marked.PracticeDisplay));
+                Assert.All(requests.Where(r => r.PracticeOf is null), r => Assert.Equal("", r.PracticeDisplay));
+
                 var claim = await store.ClaimAsync(practice, "agent-b", ct);
                 Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
                     practice, claim.ClaimId!.Value, "agent-b", 1, "real", "root", true, "same", "[{\"tool\":\"get_blocking\"}]"), ct));
@@ -693,5 +715,53 @@ public sealed class InvestigationPracticePanelLiveStaTests
         Assert.NotEqual(Guid.Empty, practice);
         await using var check = dataSource.CreateCommand($"SELECT practice_of::text FROM config.investigation_requests WHERE request_id = '{practice}'");
         Assert.Equal(judged.ToString(), Convert.ToString(await check.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+    }
+}
+
+/// <summary>
+/// The Admin page's Practice Scores rows and score words (#5918), run under Node through the Admin page's pure-function
+/// harness (<c>admin-server-edit-harness.mjs</c>, scenario <c>pure</c>): points of possible and the percentage, "not scored yet"
+/// when nothing was scored (null or absent percent, a zero is still a score), one row per agent with every column, and no rows
+/// for an answer that is not a list. Skipped when Node is not installed.
+/// </summary>
+[Trait("Cost", "Slow")]
+public sealed class AdminPracticeScoresBehaviourTests
+{
+    private static JsonElement[] Calls(params (string Fn, object?[] Args)[] calls) =>
+        AdminServerEditBehaviourTests.Run("pure", JsonSerializer.Serialize(new { calls = calls.Select(c => new { fn = c.Fn, args = c.Args }) }))
+            .GetProperty("results").EnumerateArray().ToArray();
+
+    [Fact]
+    public void ThePracticeScoreText_ReadsInPoints_AndSaysWhenNothingWasScored()
+    {
+        var text = Calls(
+            ("practiceScoreText", [new { points = 3.5, possible = 4, percent = 88 }]),
+            ("practiceScoreText", [new { points = 0, possible = 2, percent = 0 }]),
+            ("practiceScoreText", [new { points = 0, possible = 0, percent = (int?)null }]),
+            ("practiceScoreText", [new { points = 0, possible = 0 }]))
+            .Select(r => r.GetString()).ToArray();
+        Assert.Equal(["3.5 of 4 (88%)", "0 of 2 (0%)", "not scored yet", "not scored yet"], text);
+    }
+
+    [Fact]
+    public void ThePracticeRows_CarryEveryColumnPerAgent_AndNothingForANonList()
+    {
+        var results = Calls(
+            ("practiceRows", [new object[]
+            {
+                new { agent_id = "agent-a", cases = 3, scored = 2, matched = 1, unscored = 1, missed_step_cases = 2, points = 1.5, possible = 2, percent = 75 },
+                new { agent_id = "agent-b", cases = 1, scored = 0, matched = 0, unscored = 1, missed_step_cases = 0, points = 0, possible = 0, percent = (int?)null },
+            }]),
+            ("practiceRows", [null]),
+            ("practiceRows", [new { not = "a list" }]));
+        var rows = results[0].EnumerateArray().ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.Equal("agent-a", rows[0].GetProperty("agent_id").GetString());
+        Assert.Equal((3, 2, 1, 1, 2), (rows[0].GetProperty("cases").GetInt32(), rows[0].GetProperty("scored").GetInt32(),
+            rows[0].GetProperty("matched").GetInt32(), rows[0].GetProperty("unscored").GetInt32(), rows[0].GetProperty("missed_step_cases").GetInt32()));
+        Assert.Equal("1.5 of 2 (75%)", rows[0].GetProperty("score").GetString());
+        Assert.Equal("not scored yet", rows[1].GetProperty("score").GetString());
+        Assert.Empty(results[1].EnumerateArray());
+        Assert.Empty(results[2].EnumerateArray());
     }
 }
