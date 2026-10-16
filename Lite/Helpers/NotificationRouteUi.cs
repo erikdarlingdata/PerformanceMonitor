@@ -181,12 +181,37 @@ internal static class NotificationRouteUi
         return route.Enabled ? "OK" : "Disabled";
     }
 
-    /// <summary>The list's Agent column (#5820): Inherit, Off, or Investigate with its hourly and daily limits. The same words as
+    /// <summary>The choice shown for a stored Level 2 route (#5912), which Lite reads but never writes.</summary>
+    internal const string AgentActChoice = "Act (set in SQL)";
+
+    /// <summary>The agent-level combo's item for a stored level (#5912). A level the combo does not offer (a Level 2 row, set by raw
+    /// SQL) gets a DISABLED item showing it, added to the combo and returned: the dialog neither throws on it (it used to
+    /// <c>.First(...)</c>) nor saves it as another level. Lite's store then refuses to save a 2 (Lite is advise-only), so the user
+    /// moves the row to a level Lite writes.</summary>
+    internal static System.Windows.Controls.ComboBoxItem AgentLevelItemFor(System.Windows.Controls.ItemCollection items, int? level)
+    {
+        var item = items.Cast<System.Windows.Controls.ComboBoxItem>().FirstOrDefault(i => Equals(i.Tag, level));
+        if (item is null)
+        {
+            item = new System.Windows.Controls.ComboBoxItem
+            {
+                Content = level == NotificationRoute.AgentLevelAct ? AgentActChoice : $"Level {level}",
+                Tag = level,
+                IsEnabled = false,
+            };
+            items.Add(item);
+        }
+
+        return item;
+    }
+
+    /// <summary>The list's Agent column (#5820): Inherit, Off, Investigate, or Act (#5912, a Level 2 row Lite cannot write but can read) with its hourly and daily limits. The same words as
     /// Darling's viewer.</summary>
     internal static string AgentDisplay(NotificationRoute route) => route.AgentLevel switch
     {
         null => "Inherit",
         NotificationRoute.AgentLevelInvestigate => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Investigate ({route.AgentMaxPerHour}/h, {route.AgentMaxPerDay}/day)"),
+        NotificationRoute.AgentLevelAct => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Act ({route.AgentMaxPerHour}/h, {route.AgentMaxPerDay}/day)"),
         _ => "Off",
     };
 

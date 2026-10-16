@@ -73,7 +73,8 @@ public sealed class NotificationRouteUiTests : IDisposable
     [InlineData(null, "Inherit")]
     [InlineData(0, "Off")]
     [InlineData(1, "Investigate (7/h, 70/day)")]
-    public void TheAgentColumn_SaysInheritOffOrInvestigateWithItsLimits(int? level, string expected)
+    [InlineData(2, "Act (7/h, 70/day)")] /* #5912: a Level 2 row (raw SQL; Lite never writes one) reads "Act", not "Off" */
+    public void TheAgentColumn_SaysInheritOffInvestigateOrActWithItsLimits(int? level, string expected)
     {
         var route = new NotificationRoute(1, "High CPU", "", "", "", "", "", true) { AgentLevel = level, AgentMaxPerHour = 7, AgentMaxPerDay = 70 };
 
@@ -287,6 +288,45 @@ public sealed class NotificationRouteUiTests : IDisposable
                 .InsertAsync(Route(match: "*")).GetAwaiter().GetResult());
         Assert.StartsWith("The every-metric match ('*') needs a server or tag scope", NotificationRouteUi.InlineMessage(star), StringComparison.Ordinal);
         Assert.DoesNotContain("(Parameter", NotificationRouteUi.InlineMessage(star), StringComparison.Ordinal);
+    }
+
+    /* #5912 review round 1: Lite is advise-only, so its store refuses to WRITE a level above Investigate. A Level 2 row can still
+       arrive by raw SQL (the DuckDB column has no CHECK), and every reader must name it and not throw on it. */
+    [Fact]
+    public void LitesStore_RefusesToWriteLevelTwo_InTheWordsOfItsAgentChannel()
+    {
+        var act = Assert.Throws<ArgumentException>(() =>
+            new DuckDbNotificationRouteStore(null!, () => Array.Empty<int>(), new FakeRouteSecrets().Access)
+                .InsertAsync(new NotificationRoute(0, "performance", "", "", "", "", "", true) { AgentLevel = NotificationRoute.AgentLevelAct })
+                .GetAwaiter().GetResult());
+        Assert.Equal("The agent channel is Inherit, Off or Investigate.", NotificationRouteUi.InlineMessage(act));
+    }
+
+    /* The dialog's combo holds Inherit, Off and Investigate. Its Lite window needs the app's theme resources, which the test host
+       does not load, so the choice the dialog makes for a stored level is the helper's, run on the same kind of combo: a Level 2
+       row gets a disabled "Act" item, selected, so the dialog neither throws (it used to .First(...)) nor reads it back as another level. */
+    [Fact]
+    public void ALevelTwoRow_GetsADisabledActItem_AndTheOfferedLevelsKeepTheirOwn()
+    {
+        StaTestThread.Run(() =>
+        {
+            var combo = new System.Windows.Controls.ComboBox();
+            combo.Items.Add(new System.Windows.Controls.ComboBoxItem { Content = "Inherit", Tag = null });
+            combo.Items.Add(new System.Windows.Controls.ComboBoxItem { Content = "Off", Tag = NotificationRoute.AgentLevelOff });
+            combo.Items.Add(new System.Windows.Controls.ComboBoxItem { Content = "Investigate", Tag = NotificationRoute.AgentLevelInvestigate });
+
+            Assert.Equal("Off", NotificationRouteUi.AgentLevelItemFor(combo.Items, NotificationRoute.AgentLevelOff).Content);
+            Assert.Equal("Inherit", NotificationRouteUi.AgentLevelItemFor(combo.Items, null).Content);
+            Assert.Equal(3, combo.Items.Count);
+
+            var act = NotificationRouteUi.AgentLevelItemFor(combo.Items, NotificationRoute.AgentLevelAct);
+            Assert.Equal("Act (set in SQL)", act.Content);
+            Assert.False(act.IsEnabled);
+            Assert.Equal(NotificationRoute.AgentLevelAct, act.Tag);
+            combo.SelectedItem = act;
+            Assert.Same(act, combo.SelectedItem);
+            Assert.Equal(4, combo.Items.Count);
+        });
     }
 
     // ---- pending-restore refusal and wiring (source pins) --------------------------------------

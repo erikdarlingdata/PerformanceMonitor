@@ -97,6 +97,20 @@ public sealed class AdminServerEditBehaviourTests
         Run("pure", JsonSerializer.Serialize(new { calls = calls.Select(c => new { fn = c.Fn, args = c.Args }) }))
             .GetProperty("results").EnumerateArray().ToArray();
 
+    // #5912: the Notification Routes tab's Agent column names every level; Level 2 reads "Act", not "Off" (same words as the viewers).
+    [Fact]
+    public void TheRouteAgentColumn_NamesEveryLevel_ActIsNotOff_Pure()
+    {
+        var limits = new { agent_max_per_hour = 7, agent_max_per_day = 70 };
+        var text = PureAll(
+            ("routeAgentText", [new { agent_level = (int?)null, limits.agent_max_per_hour, limits.agent_max_per_day }]),
+            ("routeAgentText", [new { agent_level = 0, limits.agent_max_per_hour, limits.agent_max_per_day }]),
+            ("routeAgentText", [new { agent_level = 1, limits.agent_max_per_hour, limits.agent_max_per_day }]),
+            ("routeAgentText", [new { agent_level = 2, limits.agent_max_per_hour, limits.agent_max_per_day }]))
+            .Select(r => r.GetString()).ToArray();
+        Assert.Equal(["Inherit", "Off", "Investigate (7/h, 70/day)", "Act (7/h, 70/day)"], text);
+    }
+
     // The form's values for one kind of server, shaped as editFormValues returns them (the engine rides along).
     private static JsonObject Base(string kind)
     {

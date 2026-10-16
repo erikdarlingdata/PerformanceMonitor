@@ -271,11 +271,12 @@ export function routeStatusText(r) {
 }
 
 /** The Agent column (#5632): whether a matching alert opens an investigation request for an agent. agent_level null
-    inherits from a broader route, 0 is off (and stops the lookup), 1 investigates within the route's hourly and daily
+    inherits from a broader route, 0 is off (and stops the lookup), 1 investigates and 2 acts (#5912), both within the route's hourly and daily
     limits. A read with no agent_level (Lite's shape, or an older service) reads as Inherit. */
 export function routeAgentText(r) {
   if (!r || r.agent_level === null || r.agent_level === undefined) return "Inherit";
   if (r.agent_level === 1) return `Investigate (${r.agent_max_per_hour}/h, ${r.agent_max_per_day}/day)`;
+  if (r.agent_level === 2) return `Act (${r.agent_max_per_hour}/h, ${r.agent_max_per_day}/day)`;
   return "Off";
 }
 

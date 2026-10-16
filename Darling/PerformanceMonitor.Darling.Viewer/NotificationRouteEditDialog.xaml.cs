@@ -33,6 +33,8 @@ public partial class NotificationRouteEditDialog : Window
     internal const string ResolutionsAlwaysChoice = "Always";
     internal const string ResolutionsNeverChoice = "Never";
     private const string AgentOffChoice = "Off";
+    /* #5912: shown only on a route already stored at Level 2, and never chosen from here (the write path for Act is a later slice). */
+    private const string AgentActChoice = "Act (set in SQL)";
     private const string AgentInvestigateChoice = "Investigate";
 
     /// <summary>The "Every metric (*)" entry of the Matches list. It is in the list only while a server or a tag is chosen
@@ -229,12 +231,32 @@ public partial class NotificationRouteEditDialog : Window
     /// <summary>Puts a route's agent channel on screen (#5632): the level's choice, and its four numbers.</summary>
     private void ShowAgent(NotificationRouteRow row)
     {
-        AgentLevelCombo.SelectedItem = AgentLevelCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, row.AgentLevel));
+        AgentLevelCombo.SelectedItem = AgentLevelItemFor(row.AgentLevel);
         AgentMaxPerHourBox.Text = row.AgentMaxPerHour.ToString(CultureInfo.InvariantCulture);
         AgentMaxPerDayBox.Text = row.AgentMaxPerDay.ToString(CultureInfo.InvariantCulture);
         AgentLeaseMinutesBox.Text = row.AgentLeaseMinutes.ToString(CultureInfo.InvariantCulture);
         AgentExpiryMinutesBox.Text = row.AgentExpiryMinutes.ToString(CultureInfo.InvariantCulture);
         UpdateAgentLimitsEnabled();
+    }
+
+    /// <summary>The combo item for a stored level. A level the combo does not offer (a Level 2 row, #5912: an operator set it in SQL) gets
+    /// a DISABLED item showing it, selected and so kept on save: the dialog neither throws on it nor silently saves it as Inherit, Off or
+    /// Investigate. It cannot be picked again once the user moves off it.</summary>
+    private ComboBoxItem AgentLevelItemFor(int? level)
+    {
+        var item = AgentLevelCombo.Items.Cast<ComboBoxItem>().FirstOrDefault(i => Equals(i.Tag, level));
+        if (item is null)
+        {
+            item = new ComboBoxItem
+            {
+                Content = level == NotificationRoute.AgentLevelAct ? AgentActChoice : $"Level {level}",
+                Tag = level,
+                IsEnabled = false,
+            };
+            AgentLevelCombo.Items.Add(item);
+        }
+
+        return item;
     }
 
     /// <summary>The selected agent level: null for Inherit.</summary>
@@ -243,7 +265,7 @@ public partial class NotificationRouteEditDialog : Window
     /// <summary>The limits apply only to a route that investigates, so they are editable only then.</summary>
     private void UpdateAgentLimitsEnabled()
     {
-        var investigates = SelectedAgentLevel() == NotificationRoute.AgentLevelInvestigate;
+        var investigates = SelectedAgentLevel() is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct;
         AgentMaxPerHourBox.IsEnabled = investigates;
         AgentMaxPerDayBox.IsEnabled = investigates;
         AgentLeaseMinutesBox.IsEnabled = investigates;

@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -108,7 +109,10 @@ public sealed class AgentActionArgumentTests
         {
             var refusal = InvestigationToolCore.ParseAgentAction(arg, out _)!;
             Assert.Equal(AgentActionCodes.Invalid, refusal.Reason);
-            Assert.Contains("agent_action." + field, refusal.Message, StringComparison.Ordinal);
+            var lead = field == "agent_action" ? "agent_action: " : "agent_action." + field + ": ";
+            Assert.StartsWith(lead, refusal.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(field + ": " + field + ":", refusal.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("agent_action.agent_action", refusal.Message, StringComparison.Ordinal);
         }
 
         Bad("[1]", "agent_action");
@@ -119,6 +123,11 @@ public sealed class AgentActionArgumentTests
         Bad(Arg(reason: new string('r', InvestigationToolCore.MaxActionReasonChars + 1)), "reason");
         Bad(Arg(evidence: "[]"), "evidence");
         Bad(Arg(evidence: "[{\"tool\":\"t\",\"arguments\":{},\"key_numbers\":\"" + new string('k', 1001) + "\"}]"), "evidence");
+        /* The cap text reads "5 items, over 4", once: the field is named by the lead, not again by the cap. */
+        var tooMany = "[" + string.Join(",", Enumerable.Repeat("{\"tool\":\"t\",\"arguments\":{},\"key_numbers\":\"1\"}", InvestigationToolCore.MaxEvidenceItems + 1)) + "]";
+        Bad(Arg(evidence: tooMany), "evidence");
+        Assert.Contains($"{InvestigationToolCore.MaxEvidenceItems + 1} items, over {InvestigationToolCore.MaxEvidenceItems}.",
+            InvestigationToolCore.ParseAgentAction(Arg(evidence: tooMany), out _)!.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -194,7 +203,7 @@ public sealed class AgentActionGateLiveTests
 
     private AgentActionHooks Hooks(int? resolved = 2, AgentActionRefusal? kind = null) => new()
     {
-        ResolveLevel = (_, _, _) => Task.FromResult(resolved),
+        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => resolved),
         KindRule = kind is null ? null : (_, _, _, _) => Task.FromResult<AgentActionRefusal?>(kind),
         ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
         Write = (_, _, _) => { _writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
@@ -336,7 +345,11 @@ public sealed class AgentActionGateLiveTests
             var hooks = new AgentActionHooks
             {
                 /* Live in the gate's transaction, lowered before the write's re-check. */
-                ResolveLevel = (_, _, _) => Task.FromResult<int?>(++calls == 1 ? 2 : 1),
+                LoadLevels = (_, _, _) =>
+                {
+                    var level = ++calls == 1 ? 2 : 1;
+                    return Task.FromResult<Func<string, int, int?>>((_, _) => level);
+                },
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { _writes++; return Task.FromResult<string?>(null); },
             };
@@ -386,6 +399,63 @@ public sealed class AgentActionGateLiveTests
     }
 
     [Fact]
+    public async Task ARouteDeletedAfterOpen_LowersTheRequestToNothing_AndRefusesNotLevel2()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 2)", ct);
+            var (request, claim) = await OpenAndClaimAsync(store);
+            var arg = AgentActionArgumentTests.Arg(request.ToString(), claim.ToString());
+            var agentArm = new DarlingMcpWritePolicy.Effective(false, false, Investigations: true);
+            await using var dataSource = NpgsqlDataSource.Create(connection.ConnectionString);
+
+            Task<AgentActionGateOutcome> Run() => DarlingAgentActionGate.RunAsync(
+                agentArm, dataSource, store, NullLogger.Instance, "create_mute_rule", "mute", arg, new AgentActionTarget(7, "srv-7", null, null), null,
+                (_, _, _) => Task.FromResult<string?>(null), (_, _, _) => { _writes++; return Task.FromResult<string?>("{}"); }, ct);
+
+            /* The stamp on the request still says 2; the route that sent it there is gone. No route means level 0, not "unchanged". */
+            Assert.Equal("2", await ScalarAsync(connection, $"SELECT autonomy_level FROM config.investigation_requests WHERE request_id = '{request}'", ct));
+            await ExecAsync(connection, "DELETE FROM config.config_notification_routes", ct);
+            var refused = await Run();
+            Assert.Equal(AgentActionCodes.NotLevel2, refused.Refusal?.Reason);
+            Assert.Null(refused.CalledId);
+            Assert.Equal(0, _writes);
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{request}' AND event LIKE 'action_%'", ct));
+            Assert.Equal("1", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'refused'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheRoutesAreReadOncePerGatePass_NotOncePerMetric()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var (request, claim) = await OpenAndClaimAsync(store);
+            _now = T0.AddMinutes(5);
+            var joined = await store.OpenOrJoinAsync(Alert(_now, level: 2, metric: "Blocking Detected"), ct);
+            Assert.Equal(request, joined.RequestId);
+            var loads = 0;
+            var seen = new List<string>();
+            var hooks = new AgentActionHooks
+            {
+                LoadLevels = (_, _, _) =>
+                {
+                    loads++;
+                    return Task.FromResult<Func<string, int, int?>>((metric, _) => { seen.Add(metric); return 2; });
+                },
+                ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
+                Write = (_, _, _) => { _writes++; return Task.FromResult<string?>(null); },
+            };
+            Assert.True((await store.RunAgentActionAsync(Call(request, claim), hooks, ct)).Done);
+
+            /* Two metrics, two passes (the gate's transaction and the write's re-check): two reads, four resolutions. */
+            Assert.Equal(2, loads);
+            Assert.Equal(4, seen.Count);
+            Assert.Equal(2, seen.Distinct().Count());
+        });
+    }
+
+    [Fact]
     public async Task TheServiceGate_ReResolvesOverTheStoredRoutes_AndIgnoresTheArgumentUnderTheWritesArm()
     {
         await RunAsync(async (store, connection, ct) =>
@@ -398,7 +468,7 @@ public sealed class AgentActionGateLiveTests
             await using var dataSource = NpgsqlDataSource.Create(connection.ConnectionString);
 
             Task<AgentActionGateOutcome> Run(DarlingMcpWritePolicy.Effective policy, string? a) => DarlingAgentActionGate.RunAsync(
-                policy, dataSource, store, "create_mute_rule", "mute", a, target, null,
+                policy, dataSource, store, NullLogger.Instance, "create_mute_rule", "mute", a, target, null,
                 (_, _, _) => Task.FromResult<string?>(null), (_, _, _) => { _writes++; return Task.FromResult<string?>("{}"); }, ct);
 
             Assert.True((await Run(new DarlingMcpWritePolicy.Effective(true, false), null)).IsUngated);

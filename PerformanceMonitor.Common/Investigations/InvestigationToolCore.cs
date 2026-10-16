@@ -115,7 +115,7 @@ internal static class InvestigationToolCore
             return Invalid("evidence", evidenceProblem);
         var caps = CapProblems(null, evidenceJson);
         if (caps.Count > 0)
-            return Invalid("evidence", caps[0].Problem);
+            return Invalid("evidence", caps[0].Problem["evidence: ".Length..]); /* the cap text carries its own "evidence: " lead, as a report lists it */
 
         action = new AgentAction(requestId, claimId, agentId!, reason, evidenceJson!);
         return null;
@@ -123,8 +123,9 @@ internal static class InvestigationToolCore
         static string? Text(JsonObject o, string key) =>
             o[key] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
 
+        /* The argument itself is "agent_action:"; a field in it is "agent_action.<field>:" (never "agent_action.agent_action"). */
         static AgentActionRefusal Invalid(string field, string problem) =>
-            new(AgentActionCodes.Invalid, $"agent_action.{field}: {problem}");
+            new(AgentActionCodes.Invalid, field == "agent_action" ? $"agent_action: {problem}" : $"agent_action.{field}: {problem}");
     }
 
     /// <summary>The <c>invalid</c> answer's message: every problem at once, each as <c>field: sentence</c>, so an agent

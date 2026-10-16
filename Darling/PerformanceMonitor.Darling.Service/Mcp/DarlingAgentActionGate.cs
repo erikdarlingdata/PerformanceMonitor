@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -41,6 +42,7 @@ internal static class DarlingAgentActionGate
         DarlingMcpWritePolicy.Effective policy,
         NpgsqlDataSource postgres,
         InvestigationRequestStore store,
+        ILogger logger,
         string tool,
         string kind,
         string? agentAction,
@@ -52,6 +54,7 @@ internal static class DarlingAgentActionGate
     {
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(target);
 
         if (policy.Writes)
@@ -70,7 +73,7 @@ internal static class DarlingAgentActionGate
 
         var hooks = new AgentActionHooks
         {
-            ResolveLevel = (metric, serverId, ct) => ResolveLevelAsync(postgres, metric, serverId, ct),
+            LoadLevels = (connection, _, ct) => LoadLevelsAsync(connection, logger, ct),
             KindRule = kindRule,
             ReadBefore = readBefore,
             Write = write,
@@ -86,20 +89,16 @@ internal static class DarlingAgentActionGate
         JsonSerializer.Serialize(new { status = "refused", reason = refusal.Reason, message = refusal.Message }, McpHelpers.JsonOptions);
 
     /// <summary>
-    /// The level the routes as stored now send <paramref name="metric"/> on <paramref name="serverId"/> at (#5912, check 5):
-    /// <see cref="NotificationRouter.ResolveAgent"/> over a fresh read of the route table, so a route an operator lowered
-    /// refuses the next change, not the next reload.
+    /// Reads the routes as stored now, once, on the gate's own connection (inside its transaction), and answers the resolver
+    /// of the level they send a metric on a server at (#5912, check 5): <see cref="NotificationRouter.ResolveAgent"/> over
+    /// that one list, so a route an operator lowered refuses the next change, not the next reload. A failed tag read logs
+    /// through <paramref name="logger"/> and leaves a tag-scoped route unexpanded, so it matches nothing: fail closed.
     /// </summary>
-    internal static async Task<int?> ResolveLevelAsync(NpgsqlDataSource postgres, string metric, int serverId,
+    internal static async Task<Func<string, int, int?>> LoadLevelsAsync(NpgsqlConnection connection, ILogger logger,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<NotificationRoute> routes;
-        await using (var connection = await postgres.OpenConnectionAsync(cancellationToken))
-        {
-            routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, null, cancellationToken);
-        }
-
-        return NotificationRouter.ResolveAgent(metric, routes, serverId)?.AgentLevel;
+        var routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, logger, cancellationToken);
+        return (metric, serverId) => NotificationRouter.ResolveAgent(metric, routes, serverId)?.AgentLevel;
     }
 
     /// <summary>The request id of a refused argument, when one parses, so its refusal is journaled with its request.</summary>

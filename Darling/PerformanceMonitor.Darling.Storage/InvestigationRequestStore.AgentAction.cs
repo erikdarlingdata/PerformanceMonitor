@@ -27,16 +27,22 @@ public sealed record AgentActionCall(string Tool, string Kind, AgentAction Actio
 public sealed record AgentActionContext(AgentActionCall Call, int RequestServerId, string RequestServerName, int ClaimNo);
 
 /// <summary>
-/// The tool's part of a Level 2 change (#5912). <see cref="ResolveLevel"/> re-resolves a metric over the live routes
-/// (<c>NotificationRouter.ResolveAgent</c>'s level, null when no route sends it to an agent). <see cref="KindRule"/> is
+/// The tool's part of a Level 2 change (#5912). <see cref="LoadLevels"/> reads the live routes ONCE, on the gate's own
+/// connection and transaction, and answers a resolver over that one list (<c>NotificationRouter.ResolveAgent</c>'s level
+/// for a metric, null when no route sends it to an agent). <see cref="KindRule"/> is
 /// check 7, run inside the gate's transaction; null has none. <see cref="ReadBefore"/> reads the before image (JSON, or
 /// null when the object does not exist yet) inside the gate's transaction. <see cref="Write"/> makes the change inside
 /// the write's own transaction and answers the after image.
 /// </summary>
 public sealed class AgentActionHooks
 {
-    /// <summary>The level the live routes send <c>metric</c> on server <c>serverId</c> at; null when none does.</summary>
-    public required Func<string, int, CancellationToken, Task<int?>> ResolveLevel { get; init; }
+    /// <summary>
+    /// Reads the live routes once, inside the gate's own transaction (check 5), and answers the resolver every metric of the
+    /// request is read against: the level the routes send <c>metric</c> on server <c>serverId</c> at, null when none does. Called
+    /// at most once per gate pass, so a request with several metrics does not read the route table (and its scope inputs) again
+    /// for each one.
+    /// </summary>
+    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> LoadLevels { get; init; }
 
     /// <summary>Check 7, the kind rule; null when the kind has none.</summary>
     public Func<NpgsqlConnection, NpgsqlTransaction, AgentActionContext, CancellationToken, Task<AgentActionRefusal?>>? KindRule { get; init; }
@@ -119,7 +125,7 @@ RETURNING journal_id";
             var refusal = !enabled
                 ? new AgentActionRefusal(AgentActionCodes.ActionsOff,
                     "Agent changes are turned off for this service (config_service.agent_actions_enabled). Report what you would change instead.")
-                : await LiveChecksAsync(request, call, hooks, now, cancellationToken);
+                : await LiveChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
 
             AgentActionContext? context = null;
             if (refusal is null)
@@ -184,7 +190,7 @@ RETURNING journal_id";
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             var writeNow = Now();
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
-            var recheck = await LiveChecksAsync(request, call, hooks, writeNow, cancellationToken, practice: false);
+            var recheck = await LiveChecksAsync(connection, transaction, request, call, hooks, writeNow, cancellationToken, practice: false);
             if (recheck is not null)
             {
                 await JournalReturningAsync(connection, transaction, writeNow, action.RequestId, request?.ServerId,
@@ -244,8 +250,9 @@ RETURNING journal_id";
     }
 
     /// <summary>Checks 3 to 6 (4 only in the gate's own transaction: practice is fixed at open).</summary>
-    private static async Task<AgentActionRefusal?> LiveChecksAsync(AgentActionRequest? request, AgentActionCall call,
-        AgentActionHooks hooks, DateTime now, CancellationToken cancellationToken, bool practice = true)
+    private static async Task<AgentActionRefusal?> LiveChecksAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        AgentActionRequest? request, AgentActionCall call, AgentActionHooks hooks, DateTime now, CancellationToken cancellationToken,
+        bool practice = true)
     {
         var action = call.Action;
         if (request is null
@@ -262,13 +269,18 @@ RETURNING journal_id";
             return new AgentActionRefusal(AgentActionCodes.Practice,
                 "This is a practice request: it changes nothing. Report what you would change instead.");
 
+        /* The routes are read once per pass, and only when the stamp still says 2. A metric whose route was deleted after the
+           request opened resolves to null and lowers the request to 0: not Level 2, fail closed (pinned live). */
         var level = request.AutonomyLevel;
-        foreach (var metric in request.Metrics)
+        if (level >= 2)
         {
-            if (level < 2)
-                break;
-            var resolved = await hooks.ResolveLevel(metric, request.ServerId, cancellationToken);
-            level = Math.Min(level, resolved ?? 0);
+            var resolve = await hooks.LoadLevels(connection, transaction, cancellationToken);
+            foreach (var metric in request.Metrics)
+            {
+                if (level < 2)
+                    break;
+                level = Math.Min(level, resolve(metric, request.ServerId) ?? 0);
+            }
         }
 
         if (level != 2)

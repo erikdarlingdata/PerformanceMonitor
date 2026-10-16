@@ -111,7 +111,7 @@ public partial class NotificationRouteEditDialog : Window
     /// <summary>Puts the route's agent channel on the screen (#5820): a new route starts at Inherit with the default limits.</summary>
     private void ShowAgent(NotificationRoute? route)
     {
-        AgentLevelCombo.SelectedItem = AgentLevelCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, route?.AgentLevel));
+        AgentLevelCombo.SelectedItem = NotificationRouteUi.AgentLevelItemFor(AgentLevelCombo.Items, route?.AgentLevel);
         AgentMaxPerHourBox.Text = (route?.AgentMaxPerHour ?? NotificationRoute.DefaultAgentMaxPerHour).ToString(CultureInfo.InvariantCulture);
         AgentMaxPerDayBox.Text = (route?.AgentMaxPerDay ?? NotificationRoute.DefaultAgentMaxPerDay).ToString(CultureInfo.InvariantCulture);
         AgentLeaseMinutesBox.Text = (route?.AgentLeaseMinutes ?? NotificationRoute.DefaultAgentLeaseMinutes).ToString(CultureInfo.InvariantCulture);
