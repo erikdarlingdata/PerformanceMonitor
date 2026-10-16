@@ -34,8 +34,8 @@ namespace Darling.Tests;
 /// <summary>
 /// The pending-notes decisions (#5903) on a live store. An agent's proposed note is absent from the brief composer's
 /// approved-note read until a person approves it; rejecting it keeps it out and keeps the row, with who and when;
-/// a note cannot be decided twice. The second fact runs the web routes as the managed <c>viewer</c> role (the web host's only
-/// store identity), whose grants are replayed from the shipped provisioning SQL.
+/// a note cannot be decided twice. The web-route facts run the routes as the managed <c>admin</c> role (it decides, as on dev) and as the
+/// managed <c>viewer</c> role (it lists, and the decide routes answer 403 and change nothing), the grants replayed from the shipped provisioning SQL.
 /// </summary>
 public sealed class InvestigationNoteDecisionLiveTests
 {
@@ -150,8 +150,11 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected')", ct));
     }
 
-    [Fact]
-    public async Task TheWebRoutes_ListApproveAndReject_AsTheManagedViewerRole_AndItCannotEditANotesText()
+    /// <summary>Runs <paramref name="body"/> against the web routes (a test server over the endpoints) with the web host's data
+    /// source logging in as a role holding exactly what the managed <paramref name="managedRole"/> holds, on a scratch store with
+    /// two pending notes (the older one first). The body gets the owner source, the web login's source and a sender for the routes.</summary>
+    private static async Task WithWebRoutesAsync(
+        string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Func<string, string, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation note decision live tests.");
@@ -168,7 +171,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         try
         {
             await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "viewer"))
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, managedRole))
             {
                 await ExecAsync(owner, statement, ct);
             }
@@ -180,19 +183,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
                 SearchPath = "config,public",
                 Pooling = false,
             }.ConnectionString;
-            await using var viewer = NpgsqlDataSource.Create(asSeat);
-
-            /* The grant is the two decision columns and nothing else: the text cannot be rewritten, and no row can be removed. */
-            foreach (var statement in new[]
-            {
-                "UPDATE config.investigation_notes SET note_text = 'rewritten'",
-                "UPDATE config.investigation_notes SET author = 'person:me'",
-                "DELETE FROM config.investigation_notes",
-            })
-            {
-                var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(viewer, statement, ct));
-                Assert.Equal("42501", refused.SqlState);
-            }
+            await using var webLogin = NpgsqlDataSource.Create(asSeat);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -201,9 +192,9 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             });
             builder.WebHost.UseTestServer();
             builder.Logging.ClearProviders();
-            builder.Services.AddSingleton(viewer);
+            builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
-            DarlingWebEndpoints.MapAll(app, viewer, new CollectorRuntimeState(), new CapturingTestLogger());
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -226,6 +217,25 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
                 return (context.Response.StatusCode, string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text));
             }
 
+            await body(owner, webLogin, Send, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
+            {
+                NpgsqlConnection.ClearAllPools();
+                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await drop.ExecuteNonQueryAsync(token);
+            });
+        }
+    }
+
+    [Fact]
+    public async Task TheWebRoutes_ListApproveAndReject_AsTheManagedAdminRole()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
             var list = await Send("GET", "/api/investigation-notes/pending", null);
             Assert.Equal(200, list.Status);
             Assert.Equal(2, (int)list.Body!["count"]!);
@@ -261,16 +271,46 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
                 "SELECT string_agg(state || '|' || decided_by, ',' ORDER BY note_id) FROM config.investigation_notes", ct));
             Assert.Equal("2", await ScalarAsync(owner,
                 "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor = 'person:viewer'", ct));
-            bodySucceeded = true;
-        }
-        finally
+        });
+    }
+
+    [Fact]
+    public async Task TheWebRoutes_AsTheManagedViewerRole_ListNotes_ButRefuseADecision_With403_AndLeaveEveryNotePending()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
         {
-            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
+            var list = await Send("GET", "/api/investigation-notes/pending", null);
+            Assert.Equal(200, list.Status);
+            Assert.Equal(2, (int)list.Body!["count"]!);
+            var firstId = (long)list.Body["notes"]![0]!["note_id"]!;
+            var secondId = (long)list.Body["notes"]![1]!["note_id"]!;
+
+            /* The store refuses the viewer role any note write: a decision, a rewrite, a delete. */
+            foreach (var statement in new[]
             {
-                NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
-                await drop.ExecuteNonQueryAsync(token);
-            });
-        }
+                $"UPDATE config.investigation_notes SET state = 'approved' WHERE note_id = {firstId}",
+                "UPDATE config.investigation_notes SET note_text = 'rewritten'",
+                "DELETE FROM config.investigation_notes",
+            })
+            {
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(viewer, statement, ct));
+                Assert.Equal("42501", refused.SqlState);
+            }
+
+            /* Both decide routes pass the refusal through as a 403 whose sentence says which login is needed. */
+            foreach (var route in new[] { $"/api/investigation-notes/{firstId}/approve", $"/api/investigation-notes/{secondId}/reject" })
+            {
+                var answer = await Send("PUT", route, "application/json");
+                Assert.Equal(403, answer.Status);
+                Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage, (string)answer.Body!["error"]!);
+                Assert.Contains("admin role", (string)answer.Body["error"]!, StringComparison.Ordinal);
+            }
+
+            Assert.Equal("pending|pending", await ScalarAsync(owner,
+                "SELECT string_agg(state, '|' ORDER BY note_id) FROM config.investigation_notes", ct));
+            Assert.Equal("0", await ScalarAsync(owner,
+                "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected')", ct));
+            Assert.Equal(2, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["count"]!);
+        });
     }
 }
