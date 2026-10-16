@@ -250,6 +250,10 @@ public static class DarlingRetention
     /// <summary>
     /// config.investigation_requests and config.investigation_journal (#5632 Phase A) keep their rows this long: a year, like
     /// <see cref="PlanForceLedgerRetentionDays"/>, because an investigation records what an agent was asked and answered.
+    /// <para>config.investigation_feedback (V191, #5909) needs no pass of its own: it references its request with
+    /// <c>ON DELETE CASCADE</c>, and the request purge below is a DELETE, so a report's feedback goes with the aged request
+    /// and a younger request's stays. A practice request (<c>practice_of</c>) is a request and ages like any other.
+    /// config.config_threshold_overrides is configuration and is never aged.</para>
     /// <para>config.investigation_notes and config.agent_environment_profiles get no retention pass: a person writes or
     /// approves them, so they are configuration, and a note already carries its own <c>expires_at</c>, past which no brief
     /// states it.</para>

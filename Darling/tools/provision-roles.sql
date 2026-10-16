@@ -54,7 +54,7 @@
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
--- V117, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 -- so re-run this script after upgrading past each.
+-- V117, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 and the Level 2 tables (step 3j: config_threshold_overrides and investigation_feedback, #5909) are V191 -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
@@ -1701,6 +1701,32 @@ BEGIN
    GRANT INSERT, DELETE ON config.investigation_notes TO admin;
    GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
+END $do$;
+
+-- 3j. Level 2 tables (V191, #5909), mirroring managed provisioning's section 10e grant for grant. The default privileges
+--     give admin INSERT/UPDATE/DELETE and viewer SELECT on a table made after them, but REVOKE ALL ... CASCADE (which also
+--     takes TRIGGER and REFERENCES) and the explicit grants below make the result independent of when the table was made.
+--     admin (the desktop Viewer) writes the threshold overrides and the report feedback. viewer reads both and writes
+--     neither. mcp (the agent's change tools) writes the overrides only and reads the feedback; the overrides' reload
+--     beacon trigger UPDATEs config_service.config_version as the caller, which mcp's two-column grant in step 3d covers.
+--     The mcp write grant on the overrides is table-level on purpose (an override IS the agent's action, and the table has
+--     no authority column to protect, unlike the notes' state column); see managed section 10e.
+--     The two tables are created by V191: on a store below it the block warns and skips, so the rest of the script still
+--     runs; re-run the script once the service has migrated the store to V191.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.config_threshold_overrides') IS NULL
+      OR pg_catalog.to_regclass('config.investigation_feedback') IS NULL THEN
+      RAISE WARNING 'The Level 2 tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.config_threshold_overrides, config.investigation_feedback FROM PUBLIC, admin, viewer, mcp CASCADE;
+   GRANT SELECT ON config.config_threshold_overrides, config.investigation_feedback TO admin, viewer;
+   GRANT SELECT ON config.config_threshold_overrides, config.investigation_feedback TO mcp;
+   GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO admin;
+   GRANT INSERT, UPDATE, DELETE ON config.investigation_feedback TO admin;
+   GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO mcp;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
