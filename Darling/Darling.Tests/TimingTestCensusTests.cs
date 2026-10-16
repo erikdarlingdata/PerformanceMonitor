@@ -50,7 +50,6 @@ public sealed class TimingTestCensusTests
         ["CollectionLogDrainForensicsStoreTests.cs"] = "the clock is handed to a counting reader under test; the assertions are on the readings it records (rows, bytes, a last-read stamp >= 0), with no upper bound on any time",
         ["CollectionLogSegmentByLiveTests.cs"] = LiveStore + "; the 30 s ceiling is a hang guard on a lock wait",
         ["ComposeTimeoutPhaseLiveTests.cs"] = HangGuard + " (60 s against a 5 s compose timeout)",
-        ["DarlingManagedPostgresTests.cs"] = PollLoop + " (a retry of a file operation the OS may still hold)",
         ["MoveDirectoryOnceReleasedTests.cs"] = "lower bound only: it asserts the retry waited its patience before giving up; load makes the wait longer, never shorter",
         ["PerDatabaseFaultPathSplitTests.cs"] = "the clock is a running slice the code under test reads; the test spins until it passes a minimum and asserts it keeps running and freezes when stopped, with no upper bound",
         ["PgWaitSamplerLiveTests.cs"] = LiveStore + "; the bound is the sampling window plus 30 s, with the window as the lower bound",

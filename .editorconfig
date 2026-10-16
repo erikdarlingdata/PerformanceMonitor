@@ -11,3 +11,7 @@ root = true
 # the proper fix is migrating to LoggerMessage source generators, which is
 # a larger separate effort. Until then, this rule is pure noise.
 dotnet_diagnostic.CA1873.severity = none
+
+# RS0030: a symbol listed in a BannedSymbols.txt is an error (#5943). Only the two test projects carry the
+# analyzer and a BannedSymbols.txt (Thread.Sleep); the rule is idle everywhere else.
+dotnet_diagnostic.RS0030.severity = error
