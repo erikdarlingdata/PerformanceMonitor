@@ -468,7 +468,9 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
             .Select(statement => string.Join(' ', statement.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)))
             .Where(statement => statement.StartsWith("GRANT ", StringComparison.Ordinal)
                 && statement.EndsWith(" TO mcp", StringComparison.Ordinal)
-                && statement.Contains(" config.investigation_", StringComparison.Ordinal))
+                && statement.Contains(" config.investigation_", StringComparison.Ordinal)
+                /* The Level 2 read on the feedback table (V191, #5909) is pinned by AgentLevel2StoreGrantLiveTests. */
+                && !statement.Contains("investigation_feedback", StringComparison.Ordinal))
             .Select(statement => statement[..^" TO mcp".Length] + " TO " + roleName)
             .ToList();
 
@@ -576,6 +578,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {mcp};";
 
             Assert.Equal("false|true|true|true|true", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
 
+            await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);

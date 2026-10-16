@@ -321,6 +321,7 @@ public sealed class CaggGroupIndexDropLiveTests
         if (simulatedVersion < 190)
         {
             /* V190 (#5857) - the store metrics size-estimate marker is the probe's newest sentinel. */
+            await RungRewindArtifacts.DropV191SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
         }
 

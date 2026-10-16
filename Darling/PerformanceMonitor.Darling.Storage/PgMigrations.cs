@@ -1384,6 +1384,115 @@ ALTER TABLE collect.store_metrics
     ADD COLUMN IF NOT EXISTS size_estimated boolean;";
 
     /// <summary>
+    /// V191 (#5909, Phase B of #5632): the store for Level 2. An agent may change alert settings, so the store needs a place
+    /// to hold what an agent may do and what it has changed. This is the only migration in Phase B; every later slice uses
+    /// these tables and columns.
+    ///
+    /// <para><b>Levels.</b> The route's <c>agent_level</c> allowed NULL, 0 and 1; it now allows 0 to 2. A request's
+    /// <c>autonomy_level</c> allowed 1; it now allows 1 to 2. A level outside the range is still refused. The two CHECKs
+    /// are replaced in place, under their own names, only when the stored definition does not already name level 2, so a
+    /// second run replaces nothing. Widening a CHECK cannot be violated by a stored row.</para>
+    ///
+    /// <para><b>The switch.</b> <c>config.config_service.agent_actions_enabled</c>, default <c>true</c>, so it reads as on on
+    /// a new store and on an upgraded one. It is not a second opt-in: a route set to Level 2 is the opt-in, and this switch
+    /// is the operator's way to turn every agent change off at once. A constant default, so the <c>ADD COLUMN</c> is
+    /// catalog-only.</para>
+    ///
+    /// <para><b>Threshold overrides.</b> <c>config.config_threshold_overrides</c>: one value per server, database and
+    /// threshold key. It is deleted with its server (foreign key, <c>ON DELETE CASCADE</c>). The unique index covers a
+    /// NULL database name through <c>coalesce(database_name, '')</c>. It joins the <c>config_version</c> reload beacon with
+    /// V117's trigger shape (statement level, <c>config.config_bump_version()</c> verbatim), so a change reaches the engine
+    /// the way every other config change does. <c>request_id</c> names the request that asked for the change and has no
+    /// foreign key: the override outlives the request. Overrides are configuration and are never aged.</para>
+    ///
+    /// <para><b>Feedback.</b> <c>config.investigation_feedback</c>: a person's verdict on a report (right, partly or wrong),
+    /// the corrected verdict, the step the agent missed, a comment and the author; one row per request per author. It is
+    /// deleted with its request (<c>ON DELETE CASCADE</c>), so it ages with the request through retention's DELETE.</para>
+    ///
+    /// <para><b>Practice.</b> <c>config.investigation_requests.practice_of</c>, nullable with no default and <b>no foreign
+    /// key</b>: a practice request survives deletion of the request it replays.</para>
+    ///
+    /// <para>The journal needs no schema change. Grants are provisioning's (managed section 10e and provision-roles.sql step
+    /// 3j); the default privileges give admin the writes and viewer the read on a table made here. <b>No Lite twin:</b> Lite
+    /// has no investigation store.</para>
+    /// </summary>
+    private const string V191Sql = @"
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'ck_config_notification_routes_agent'
+                 AND conrelid = 'config.config_notification_routes'::regclass
+                 AND pg_get_constraintdef(oid) !~ 'ARRAY\[0, 1, 2\]') THEN
+        ALTER TABLE config.config_notification_routes DROP CONSTRAINT ck_config_notification_routes_agent;
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_agent CHECK (
+                (agent_level IS NULL OR agent_level IN (0, 1, 2))
+                AND agent_max_per_hour BETWEEN 1 AND 60
+                AND agent_max_per_day BETWEEN 1 AND 500
+                AND agent_lease_minutes BETWEEN 5 AND 120
+                AND agent_expiry_minutes BETWEEN 15 AND 1440);
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'ck_investigation_requests_autonomy'
+                 AND conrelid = 'config.investigation_requests'::regclass
+                 AND pg_get_constraintdef(oid) !~ 'ARRAY\[1, 2\]') THEN
+        ALTER TABLE config.investigation_requests DROP CONSTRAINT ck_investigation_requests_autonomy;
+        ALTER TABLE config.investigation_requests
+            ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level IN (1, 2));
+    END IF;
+END $do$;
+
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS agent_actions_enabled boolean NOT NULL DEFAULT true;
+
+ALTER TABLE config.investigation_requests
+    ADD COLUMN IF NOT EXISTS practice_of uuid;
+
+CREATE TABLE IF NOT EXISTS config.config_threshold_overrides
+(
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    server_id integer NOT NULL,
+    database_name text,
+    threshold_key text NOT NULL,
+    value integer NOT NULL,
+    set_by text NOT NULL,
+    request_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pk_config_threshold_overrides PRIMARY KEY (id),
+    CONSTRAINT fk_config_threshold_overrides_server FOREIGN KEY (server_id)
+        REFERENCES config.config_monitored_servers (server_id) ON DELETE CASCADE,
+    CONSTRAINT ck_config_threshold_overrides_key CHECK (btrim(threshold_key) <> ''),
+    CONSTRAINT ck_config_threshold_overrides_set_by CHECK (btrim(set_by) <> '')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_threshold_overrides_scope
+    ON config.config_threshold_overrides (server_id, (coalesce(database_name, '')), threshold_key);
+
+DROP TRIGGER IF EXISTS trg_bump_threshold_overrides ON config.config_threshold_overrides;
+CREATE TRIGGER trg_bump_threshold_overrides
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_threshold_overrides
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();
+
+CREATE TABLE IF NOT EXISTS config.investigation_feedback
+(
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    request_id uuid NOT NULL,
+    verdict text NOT NULL,
+    corrected_verdict text,
+    missed_step text,
+    comment text,
+    author text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pk_investigation_feedback PRIMARY KEY (id),
+    CONSTRAINT fk_investigation_feedback_request FOREIGN KEY (request_id)
+        REFERENCES config.investigation_requests (request_id) ON DELETE CASCADE,
+    CONSTRAINT uq_investigation_feedback_author UNIQUE (request_id, author),
+    CONSTRAINT ck_investigation_feedback_verdict CHECK (verdict IN ('right', 'partly', 'wrong'))
+);";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1685,6 +1794,7 @@ $rung$;";
         new Migration(188, "investigation-alert-facts", V188Sql),
         new Migration(189, "query-store-compose-failures", V189Sql),
         new Migration(190, "store-metrics-size-estimated", V190Sql),
+        new Migration(191, "agent-level-2-store", V191Sql),
     };
 
     /// <summary>

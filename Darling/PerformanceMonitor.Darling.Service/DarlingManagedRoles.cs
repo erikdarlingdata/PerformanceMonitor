@@ -1716,6 +1716,22 @@ GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
 GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
 
+-- 10e. Level 2 tables (V191, #5909): the threshold overrides an agent sets and the feedback on a report. The default
+--     privileges already give admin INSERT/UPDATE/DELETE and viewer SELECT on a table made after them, but the grants are
+--     spelled out here, after a REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES), so the result does not
+--     depend on when the table was made. admin (the desktop Viewer) writes both. viewer reads both and writes neither.
+--     mcp (the agent's change tools) writes the overrides only, and reads the feedback. The overrides carry V191's reload
+--     beacon trigger, which UPDATEs config_service.config_version as the caller, and mcp already holds the two-column
+--     UPDATE grant on config_service that it needs (the mute rules use it too), so no grant moves there. An identity
+--     column needs no sequence grant. It runs after every blanket grant above, and before 10a.
+REVOKE ALL ON {config}.config_threshold_overrides, {config}.investigation_feedback
+   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feedback TO {admin}, {viewer};
+GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feedback TO {mcp};
+GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {admin};
+GRANT INSERT, UPDATE, DELETE ON {config}.investigation_feedback TO {admin};
+GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {mcp};
+
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so
