@@ -1532,6 +1532,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                role carries the narrow INSERT/UPDATE/DELETE grant on ONLY those two tables (the admin gate), never
                the config pivot or the secret columns. */
             .WithGeminiCompatibleTools<DarlingMcpServerTagTools>()
+            /* #5941: run_collectors_now queues a one-time collector pass for one server through the same guarded request the web
+               buttons use. The mcp role queues through config.request_snapshot_now (fixed command type, collector names only),
+               never a grant on the command queue. */
+            .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
             /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service

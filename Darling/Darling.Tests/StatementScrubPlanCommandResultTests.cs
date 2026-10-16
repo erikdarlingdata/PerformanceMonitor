@@ -88,7 +88,7 @@ public sealed class StatementScrubPlanCommandResultTests
         public Task<CommandOutcome> ExecuteActualPlanAsync(int serverId, ActualPlanRequest request, CancellationToken cancellationToken)
             => Task.FromResult(DarlingWorker.PlanResultOutcome("actual plan captured", StatementScrubCanary.CanaryPlan()));
 
-        public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
+        public Task<CommandOutcome> SnapshotNowAsync(int serverId, System.Collections.Generic.IReadOnlyList<string>? collectors, CancellationToken cancellationToken)
             => throw new InvalidOperationException("not this command");
 
         public Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken)

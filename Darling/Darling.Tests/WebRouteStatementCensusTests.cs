@@ -65,6 +65,8 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/servers\""] = "server registry",
         ["\"/api/servers/{id:int}\""] = "server registry",
         ["\"/api/admin/servers/{id:int}\""] = "server registry",
+        ["\"/api/collectors/run\""] = "queues one command through a store function; no statement read (#5941)",
+        ["\"/api/collectors/run/{commandId:long}\""] = "one command row by id (#5941)",
         ["DarlingAdminServersReader.Route"] = "server registry",
         ["\"/api/alert-history/dismiss\""] = "a dismissal receipt",
         ["\"/api/server-tags\""] = "server tags",

@@ -281,7 +281,11 @@ WHERE status = 'in_progress'
             }
 
             case CommandKind.Snapshot:
-                return await _host.SnapshotNowAsync(command.TargetServerId!.Value, cancellationToken);
+            {
+                /* args_json {"collectors":[...]} (#5941); ResolvePlan already refused a bad one, so this parse cannot fail. */
+                SnapshotNowArgs.TryParse(command.ArgsJson, out var snapshotCollectors, out _);
+                return await _host.SnapshotNowAsync(command.TargetServerId!.Value, snapshotCollectors, cancellationToken);
+            }
 
             case CommandKind.Analyze:
                 return await _host.AnalyzeNowAsync(command.TargetServerId!.Value, cancellationToken);
@@ -398,9 +402,15 @@ WHERE status = 'in_progress'
                     : new CommandPlan(CommandKind.Probe, null, null, "connected", null);
 
             case "snapshot_now":
-                return command.TargetServerId is int
+                if (command.TargetServerId is null)
+                {
+                    return Fail("snapshot_now requires target_server_id");
+                }
+
+                /* #5941: an optional collector list. A name that is not in the catalog refuses the command, naming it. */
+                return SnapshotNowArgs.TryParse(command.ArgsJson, out _, out var snapshotArgsError)
                     ? new CommandPlan(CommandKind.Snapshot, null, null, "snapshot complete", null)
-                    : Fail("snapshot_now requires target_server_id");
+                    : Fail(snapshotArgsError!);
 
             case "analyze_now":
                 return command.TargetServerId is int
@@ -887,7 +897,11 @@ public sealed record CommandPlan(CommandKind Kind, string? Sql, object?[]? Param
 /// </summary>
 public interface IDarlingCommandHost
 {
-    Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken);
+    /// <summary>
+    /// <c>snapshot_now</c>: run collectors for a server now. <paramref name="collectors"/> null or empty = every ENABLED
+    /// collector (run all); a list = only those, each run even when disabled (run one, #5941).
+    /// </summary>
+    Task<CommandOutcome> SnapshotNowAsync(int serverId, IReadOnlyList<string>? collectors, CancellationToken cancellationToken);
 
     Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken);
 

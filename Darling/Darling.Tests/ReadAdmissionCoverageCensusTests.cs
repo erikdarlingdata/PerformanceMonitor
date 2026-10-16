@@ -230,6 +230,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/reject\""] = "write",
         [WebFile + "GET \"/api/threshold-overrides\""] = "definition read: the threshold overrides, one small config table, plus the registry's names (#5916)",
         [WebFile + "PUT \"/api/threshold-overrides\""] = "write",
+        [WebFile + "POST \"/api/collectors/run\""] = "write",
+        [WebFile + "GET \"/api/collectors/run/{commandId:long}\""] = "definition read: one command row's status and result (a single indexed row, #5941)",
         [WebFile + "POST \"/api/server-tags\""] = "write",
         [WebFile + "PATCH \"/api/server-tags/{id:int}\""] = "write",
         [WebFile + "DELETE \"/api/server-tags/{id:int}\""] = "write",

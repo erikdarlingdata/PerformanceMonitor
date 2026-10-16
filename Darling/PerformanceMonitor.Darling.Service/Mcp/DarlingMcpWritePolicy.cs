@@ -91,6 +91,7 @@ internal static class DarlingMcpWritePolicy
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        "run_collectors_now",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -137,6 +138,7 @@ internal static class DarlingMcpWritePolicy
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        "run_collectors_now",
         "add_servers",
         "remove_server",
         "edit_server",

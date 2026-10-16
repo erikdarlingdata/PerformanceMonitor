@@ -166,6 +166,7 @@ public static class DarlingWebEndpoints
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        "run_collectors_now",
         "get_tool_guide",
         "wait_for_investigation_requests",
     };
@@ -631,6 +632,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapServerTags(app, postgres, logger);
         MapAdminServers(app, postgres);
+        MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct); return (r.ServerId, err); });
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
@@ -2896,6 +2898,159 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// lets a read-only seat make a GET); the read runs on the viewer-role pool, whose column grant on
     /// <c>config_monitored_servers</c> leaves out the credential columns, and the statement names none of them.
     /// </summary>
+    /// <summary>The most request-body bytes the run-collectors route reads (a list of collector names).</summary>
+    internal const int MaxCollectorRunBodyBytes = 16 * 1024;
+
+    /// <summary>
+    /// The run-collectors-now routes (#5941). <c>POST /api/collectors/run</c> (body: the server name, optional collectors) queues a <c>snapshot_now</c> for
+    /// one server: an empty body runs every enabled collector, <c>{"collectors":["name", ...]}</c> runs only those, each
+    /// even when disabled. It needs the edit seat (a read-only seat gets 403) and goes through <see cref="SnapshotNowRequests"/>,
+    /// the same guard the MCP tool uses: 202 queued, 409 when a run for the server is queued or going, 429 (with Retry-After)
+    /// within 60 seconds of the last one, 400 for an unknown collector name, 404 for an unknown server. The page then polls
+    /// <c>GET /api/collectors/run/{commandId}</c> for the result the service wrote: the collectors run,
+    /// the rows, and the ones it skipped with the reason.
+    /// </summary>
+    internal static void MapCollectorRuns(
+        WebApplication app, ISnapshotNowStore store, ILogger logger,
+        Func<string, CancellationToken, Task<(int ServerId, string? Error)>> resolveServer, TimeProvider? clock = null)
+    {
+        var requests = new SnapshotNowRequests(store, clock);
+
+        app.MapPost("/api/collectors/run", async (HttpContext context) =>
+        {
+            var seat = DarlingWebSeat.FromContext(context);
+            if (!seat.CanEdit)
+            {
+                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+            }
+
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string body;
+            try
+            {
+                body = await ReadBoundedBodyAsync(context, MaxCollectorRunBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            string? serverName;
+            IReadOnlyList<string>? collectors = null;
+            try
+            {
+                var parsedBody = JsonNode.Parse(body) as JsonObject;
+                serverName = parsedBody?["server"]?.GetValue<string>();
+                if (parsedBody?["collectors"] is JsonNode list)
+                {
+                    if (!SnapshotNowArgs.TryParse(new JsonObject { ["collectors"] = list.DeepClone() }.ToJsonString(), out var parsed, out var parseError))
+                    {
+                        return ErrorResult(parseError!, StatusCodes.Status400BadRequest);
+                    }
+
+                    collectors = parsed;
+                }
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+            {
+                return ErrorResult("The body must be a JSON object with a \"server\" name and an optional \"collectors\" list.", StatusCodes.Status400BadRequest);
+            }
+
+            if (string.IsNullOrWhiteSpace(serverName))
+            {
+                return ErrorResult("The body must name the server.", StatusCodes.Status400BadRequest);
+            }
+
+            SnapshotRequestOutcome outcome;
+            var stopwatch = Stopwatch.StartNew();
+            int id;
+            try
+            {
+                var (resolvedId, resolveError) = await resolveServer(serverName, context.RequestAborted);
+                if (resolveError is not null)
+                {
+                    return ErrorResult(resolveError, StatusCodes.Status404NotFound);
+                }
+
+                id = resolvedId;
+                outcome = await requests.RequestAsync(id, collectors, seat.EditorPrincipal ?? "web", context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"run collectors request failed ({ex.GetType().Name})", "/api/collectors/run", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+
+            if (outcome.Accepted)
+            {
+                logger.LogInformation("Web: {Principal} queued a collector run for server {ServerId} ({Scope}).",
+                    seat.EditorPrincipal, id, collectors is { Count: > 0 } ? string.Join(",", collectors) : "all enabled");
+                return JsonNodeResult(
+                    new JsonObject { ["status"] = "queued", ["command_id"] = outcome.CommandId }, StatusCodes.Status202Accepted);
+            }
+
+            var refusal = new JsonObject { ["error"] = outcome.Text, ["code"] = outcome.Code };
+            if (outcome.NextAllowedUtc is { } next)
+            {
+                refusal["next_allowed_utc"] = next.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+                var wait = (int)Math.Ceiling(Math.Max(1, (next - (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime).TotalSeconds));
+                context.Response.Headers["Retry-After"] = wait.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            var status = outcome.Code switch
+            {
+                SnapshotRequestOutcome.InFlightCode => StatusCodes.Status409Conflict,
+                SnapshotRequestOutcome.RateLimitedCode => StatusCodes.Status429TooManyRequests,
+                SnapshotRequestOutcome.UnknownServerCode => StatusCodes.Status404NotFound,
+                _ => StatusCodes.Status400BadRequest,
+            };
+            return JsonNodeResult(refusal, status);
+        });
+
+        app.MapGet("/api/collectors/run/{commandId:long}", async (HttpContext context, long commandId) =>
+        {
+            SnapshotCommandState? state;
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                state = await store.ReadStateAsync(commandId, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"run collectors read failed ({ex.GetType().Name})", "/api/collectors/run/{commandId}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+
+            if (state is null)
+            {
+                return ErrorResult("No such collector run.", StatusCodes.Status404NotFound);
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            var node = new JsonObject
+            {
+                ["status"] = state.Status,
+                ["finished"] = state.Status is "succeeded" or "failed",
+                ["result_status"] = state.ResultStatus,
+            };
+            if (state.ResultJson is not null)
+            {
+                try
+                {
+                    node["result"] = JsonNode.Parse(state.ResultJson);
+                }
+                catch (JsonException)
+                {
+                    /* The service wrote it; if it is not JSON the page shows the status alone. */
+                }
+            }
+
+            return JsonNodeResult(node);
+        });
+    }
+
     internal static void MapAdminServers(WebApplication app, NpgsqlDataSource postgres)
     {
         app.MapGet(DarlingAdminServersReader.Route, async (HttpContext context) =>

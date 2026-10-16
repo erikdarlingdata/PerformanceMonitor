@@ -600,6 +600,12 @@ public sealed class DarlingWorker : BackgroundService
     internal Func<ServerLoopState, ServerRuntime, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
 
     /// <summary>
+    /// The fleet sweep gate (#5941), set once the collection loop builds it. A <c>snapshot_now</c> takes a permit from it
+    /// like a scheduled pass does. Null before the loop starts (and in tests that do not stand one in): no permit is taken.
+    /// </summary>
+    internal SemaphoreSlim? SweepGate { get; set; }
+
+    /// <summary>
     /// Test seam: awaited by <see cref="RecomputeNextDueAsync"/> right after it reads the persisted watermarks for a
     /// collector, before it writes that collector's schedule, so a test can land a run's record in that window (#5033).
     /// Null in production.
@@ -3683,6 +3689,7 @@ LIMIT 1";
 #pragma warning disable CA2000
         var serverSweepGate = new SemaphoreSlim(initialSweepWidth, SweepGateCeiling);
 #pragma warning restore CA2000
+        SweepGate = serverSweepGate;
         lock (_gateLock)
         {
             /* The permits the gate was never given ARE the absorbed ones — seed both counts so the first
@@ -13350,8 +13357,8 @@ AND   j.hypertable_name = '{relation}'", connection))
             _stoppingToken = stoppingToken;
         }
 
-        public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
-            => _worker.RunSnapshotAsync(_servers, _runner, serverId, cancellationToken);
+        public Task<CommandOutcome> SnapshotNowAsync(int serverId, IReadOnlyList<string>? collectors, CancellationToken cancellationToken)
+            => _worker.RunSnapshotAsync(_servers, _runner, serverId, cancellationToken, collectors);
 
         public Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken)
             => _worker.RunAnalyzeNowAsync(_servers, _planFetcher, _notificationService, _config, serverId, cancellationToken);
@@ -14424,8 +14431,55 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// gate (unlike the main loop, which skips) because an explicit operator snapshot should not be dropped.
     /// </summary>
     internal async Task<CommandOutcome> RunSnapshotAsync(
-        List<ServerLoopState> servers, DarlingCollectorRunner runner, int serverId, CancellationToken cancellationToken)
+        List<ServerLoopState> servers, DarlingCollectorRunner runner, int serverId, CancellationToken cancellationToken,
+        IReadOnlyList<string>? collectors = null)
     {
+        /* #5941: an optional collector list. Empty or absent = the run-all form (every ENABLED collector). A list is
+           the per-collector form: only those collectors, each run even when disabled (its enabled state and its
+           schedule are not touched; the override map is only read). Every name is checked against the catalog first,
+           so a typo refuses the whole command and names the bad name instead of running part of it. */
+        var requested = new List<string>();
+        foreach (var raw in collectors ?? [])
+        {
+            var name = raw?.Trim() ?? string.Empty;
+            if (!CollectorScheduleDefaults.All.ContainsKey(name))
+            {
+                return new CommandOutcome(false, "unknown collector",
+                    JsonError($"unknown collector '{name}'. Use a name from the collector list."));
+            }
+
+            if (!requested.Contains(name, StringComparer.Ordinal))
+            {
+                requested.Add(name);
+            }
+        }
+
+        /* #5941 fleet cap: the snapshot takes a permit from the same gate (width 4 by default) a scheduled pass takes, so
+           clicks on several servers cannot run more collection than the sweeps do. The permit comes BEFORE the
+           per-server collection gate; the scheduled pass holds a permit and only TRIES the collection gate, so the two
+           cannot wait on each other. */
+        var sweepGate = SweepGate;
+        if (sweepGate is not null)
+        {
+            await sweepGate.WaitAsync(cancellationToken);
+        }
+
+        try
+        {
+            return await RunSnapshotUnderPermitAsync(servers, runner, serverId, requested, cancellationToken);
+        }
+        finally
+        {
+            sweepGate?.Release();
+        }
+    }
+
+    private async Task<CommandOutcome> RunSnapshotUnderPermitAsync(
+        List<ServerLoopState> servers, DarlingCollectorRunner runner, int serverId, List<string> requested,
+        CancellationToken cancellationToken)
+    {
+        var explicitList = requested.Count > 0;
+
         ServerLoopState? server;
         lock (_serversLock)
         {
@@ -14458,14 +14512,17 @@ AND   j.hypertable_name = '{relation}'", connection))
             var collectorsRun = 0;
             var totalRows = 0;
             var skippedDaily = new List<string>();
-            foreach (var name in CollectorScheduleDefaults.All.Keys)
+            var skippedOther = new List<(string Collector, string Reason)>();
+            foreach (var name in explicitList ? requested : CollectorScheduleDefaults.All.Keys.ToList())
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
                 /* Honor a disabled-by-override collector (mirrors the on-load/scheduled gates); run every
-                   enabled one NOW regardless of frequency or NextDue — that is what "snapshot" means. */
+                   enabled one NOW regardless of frequency or NextDue — that is what "snapshot" means. A collector the
+                   operator NAMED is run even when disabled (#5941): that is an explicit choice, and nothing is written
+                   to the override map. */
                 var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
-                if (!effective.Enabled)
+                if (!effective.Enabled && !explicitList)
                 {
                     continue;
                 }
@@ -14480,6 +14537,13 @@ AND   j.hypertable_name = '{relation}'", connection))
                 if (!CollectorCatalog.EngineMatches(name, runtime.Target)
                     || !CollectorCatalog.AppliesTo(name, runtime.Target))
                 {
+                    /* The run-all form leaves these out without a word (a PostgreSQL target has dozens of them); a
+                       collector the operator named is reported, with the reason (#5941). */
+                    if (explicitList)
+                    {
+                        skippedOther.Add((name, "it does not apply to this server's engine"));
+                    }
+
                     continue;
                 }
 
@@ -14522,13 +14586,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                 {
                     collector,
                     reason = "its scheduled daily run is still going",
-                }).ToList(),
+                }).Concat(skippedOther.Select(o => new { collector = o.Collector, reason = o.Reason })).ToList(),
             });
+            var skippedCount = skippedDaily.Count + skippedOther.Count;
             return new CommandOutcome(
                 true,
-                skippedDaily.Count == 0
+                skippedCount == 0
                     ? "snapshot complete"
-                    : $"snapshot complete; {skippedDaily.Count} collector(s) skipped because their scheduled daily run is still going",
+                    : $"snapshot complete; {skippedCount} collector(s) skipped",
                 json);
         }
         finally

@@ -681,7 +681,7 @@ VALUES ($1, $2, $3, $4, 'appdb', 1000, 10, 100, 9000, 0, 0, 0, NULL)");
             "RunSnapshotAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var task = (Task)method.Invoke(worker, new object?[]
         {
-            NewLoopStateList(loopState), runner, serverId, TestContext.Current.CancellationToken,
+            NewLoopStateList(loopState), runner, serverId, TestContext.Current.CancellationToken, null,
         })!;
         await task;
 

@@ -1640,6 +1640,14 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSig
 --     p_columns, so a caller of the old signature can neither change nor clear a role. Same grants, same owner.
 {BuildEditMonitoredServerLegacyWrapperSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) TO {viewer}, {mcp};
+-- #5941: the run-collectors-now request. The web route (viewer) and the MCP run_collectors_now tool (mcp) queue a
+--     snapshot_now command through {config}.request_snapshot_now, the only way those two roles write a command row.
+--     The command type is fixed in the body; the caller supplies a server id and an optional list of collector names
+--     and nothing else, so it cannot reach the service-credential pivot that test_connect's args_json is. Owned by
+--     the store owner, pinned search_path, no dynamic SQL; created and REVOKEd from PUBLIC by the shared builder.
+--     NOT a versioned migration, for the same reason as the edit function above.
+{BuildRequestSnapshotNowFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {viewer}, {mcp};
 -- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
 --     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
 --     password. Created here, not in a migration: CREATE OR REPLACE is idempotent and owner-run every start. A
@@ -2225,6 +2233,47 @@ AS $fn$
        false, 'none', NULL, false, p_detail_text, NULL);
 $fn$;
 REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
+
+    /// <summary>
+    /// The SECURITY DEFINER function (#5941) the web route and the MCP tool queue a <c>snapshot_now</c> command through:
+    /// a fixed command type, a server id and an optional list of collector names, nothing else. Created and REVOKEd from
+    /// PUBLIC here; the caller adds the narrow GRANT EXECUTE.
+    /// </summary>
+    internal static string BuildRequestSnapshotNowFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.request_snapshot_now(
+   p_server_id integer,
+   p_args_json text,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_args jsonb;
+   v_id bigint;
+BEGIN
+   IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF p_args_json IS NOT NULL THEN
+      v_args := p_args_json::jsonb;
+      IF jsonb_typeof(v_args) IS DISTINCT FROM 'object'
+         OR EXISTS (SELECT 1 FROM jsonb_object_keys(v_args) AS k(key) WHERE k.key <> 'collectors')
+         OR jsonb_typeof(v_args -> 'collectors') IS DISTINCT FROM 'array'
+         OR jsonb_array_length(v_args -> 'collectors') > 200
+         OR EXISTS (SELECT 1 FROM jsonb_array_elements(v_args -> 'collectors') AS e(value)
+                    WHERE jsonb_typeof(e.value) <> 'string' OR length(e.value #>> '{{}}') > 100) THEN
+         RAISE EXCEPTION 'The only argument is a list of collector names.' USING ERRCODE = 'DL400';
+      END IF;
+   END IF;
+   INSERT INTO {config}.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'snapshot_now', p_server_id, v_args, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM PUBLIC;";
 
     // A new column on config.config_monitored_servers is added to this list. A column that holds a secret goes into the
     // exclusion list of ServerEditLiveTests (the NOT IN (...) beside the column-set check) instead, and stays out of the grant.

@@ -41,7 +41,7 @@ public sealed class DarlingCommandExecutorTests
            lives beside the other worker-delegated verbs. */
         public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
             => throw new InvalidOperationException("host should not be called for this command");
-        public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
+        public Task<CommandOutcome> SnapshotNowAsync(int serverId, System.Collections.Generic.IReadOnlyList<string>? collectors, CancellationToken cancellationToken)
             => throw new InvalidOperationException("host should not be called for this command");
 
         public Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken)
@@ -72,7 +72,7 @@ public sealed class DarlingCommandExecutorTests
         public bool WasCalled { get; private set; }
         public int? ReceivedCustomRetentionDays { get; private set; }
 
-        public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
+        public Task<CommandOutcome> SnapshotNowAsync(int serverId, System.Collections.Generic.IReadOnlyList<string>? collectors, CancellationToken cancellationToken)
             => throw new InvalidOperationException("not this command");
 
         public Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken)
@@ -108,7 +108,7 @@ public sealed class DarlingCommandExecutorTests
         public PlanFetchRequest? Received { get; private set; }
         public int ReceivedServerId { get; private set; }
 
-        public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
+        public Task<CommandOutcome> SnapshotNowAsync(int serverId, System.Collections.Generic.IReadOnlyList<string>? collectors, CancellationToken cancellationToken)
             => throw new InvalidOperationException("not this command");
 
         public Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken)
@@ -142,7 +142,7 @@ public sealed class DarlingCommandExecutorTests
             => throw new InvalidOperationException("host should not be called for this command");
         public int ReceivedServerId { get; private set; } = int.MinValue;
 
-        public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
+        public Task<CommandOutcome> SnapshotNowAsync(int serverId, System.Collections.Generic.IReadOnlyList<string>? collectors, CancellationToken cancellationToken)
             => throw new InvalidOperationException("not this command");
 
         public Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken)
