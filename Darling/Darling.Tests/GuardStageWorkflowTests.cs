@@ -33,7 +33,6 @@ namespace Darling.Tests;
 /// job succeeds having built nothing; the shards' own path filters are untouched.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class GuardStageWorkflowTests
 {
     private const string ShardIf =

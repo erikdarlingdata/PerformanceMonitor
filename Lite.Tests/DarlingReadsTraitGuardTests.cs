@@ -21,14 +21,13 @@ namespace Lite.Tests;
 /// <para>#5833 removed this class's census of the <c>Reads=Darling</c> trait (a trait roster); this check of the
 /// linked-file filter stays because a gap in it skips a suite.</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
 public sealed class DarlingReadsTraitGuardTests
 {
     /// <summary>
     /// Every Darling.Tests file that Lite.Tests.csproj compiles into itself is named in
     /// <c>.github/lite-paths-filter.yml</c>'s <c>lite_linked_shard</c> filter, which sends a diff that edits one to the WHOLE Lite suite. Such a file
-    /// is code the Lite classes run, so the narrow Reads=Darling selection would miss what an edit breaks.
+    /// is code the Lite classes run, so the narrow Darling-reads selection would miss what an edit breaks.
     /// </summary>
     [Fact]
     public void EveryDarlingFileLiteTestsCompiles_IsInTheFullSuiteFilter()

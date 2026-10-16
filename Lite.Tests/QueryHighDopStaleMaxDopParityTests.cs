@@ -56,7 +56,6 @@ namespace Lite.Tests;
 /// to read at least one side out of the checked-out tree anyway (that is what <see cref="ParitySource"/>
 /// exists for).</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class QueryHighDopStaleMaxDopParityTests
 {

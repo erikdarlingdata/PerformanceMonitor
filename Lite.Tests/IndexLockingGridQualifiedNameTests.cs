@@ -28,7 +28,6 @@ namespace Lite.Tests;
 /// a hand-duplicated copy of this grid (no shared XAML across SKUs), so the XAML pin reads both files, the same
 /// drift-guard shape as <see cref="AvailabilityGroupsGridSortTests"/>.</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class IndexLockingGridQualifiedNameTests
 {
     /* ---------------- the row property ---------------- */

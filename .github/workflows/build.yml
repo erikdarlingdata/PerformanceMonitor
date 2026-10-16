@@ -1012,8 +1012,8 @@ jobs:
               - '.github/scripts/run-lite-shard.ps1'
             # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
             # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
-            # Lite entries above runs the Stage=Guard classes and the classes tagged Reads=Lite, which are the ones
-            # that read a Lite file (.github/scripts/tag-reads-lite.py writes that tag). The decision lives in
+            # Lite entries above runs the Stage=Guard classes and the classes that read a Lite file, which
+            # `ci-select.py reads-classes` derives from the test sources (#5961: no Reads trait). The decision lives in
             # .github/scripts/ci-select.py.
             darling_full:
               - 'Darling/**/!(*.md)'
@@ -1329,8 +1329,32 @@ jobs:
           if ($env:SLOW_EVENT -eq 'pull_request' -and $scopeArgs.Count -eq 0) {
               $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
           }
-          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @scopeArgs @slowArgs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # #5961: the `-trait Reads=Lite` part of a scope is the classes ci-select.py's source scan says read a Lite path, run
+          # by `-class`. xunit ANDs filters of different kinds, so it is a second run (without the Guard classes the first
+          # run already ran). An EMPTY scan skips it: a runner given no -class argument runs the whole suite, and the
+          # empty trait filter it replaces ran nothing.
+          $readsLite = $false
+          $restArgs = @()
+          for ($i = 0; $i -lt $scopeArgs.Count; $i++) {
+              if ($scopeArgs[$i] -eq '-trait' -and ($i + 1) -lt $scopeArgs.Count -and $scopeArgs[$i + 1] -eq 'Reads=Lite') { $readsLite = $true; $i++ }
+              else { $restArgs += $scopeArgs[$i] }
+          }
+          $exitCode = 0
+          if (-not $readsLite -or $restArgs.Count -gt 0) {
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @restArgs @slowArgs
+              if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
+          }
+          if ($readsLite) {
+              $readsArgs = @(python .github/scripts/ci-select.py reads-classes --suite darling --args | Where-Object { $_ })
+              if ($LASTEXITCODE -ne 0) { Write-Host 'ci-select.py reads-classes failed'; exit 1 }
+              if ($readsArgs.Count -gt 0) {
+                  Write-Host "Lite-reads scan: $($readsArgs.Count / 2) Darling.Tests classes read a Lite path"
+                  dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @readsArgs -trait- Stage=Guard
+                  if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
+              }
+              else { Write-Host '::warning title=Lite-reads scan is empty::No Darling.Tests class reads a Lite path, so only the Guard stage runs here.' }
+          }
+          if ($exitCode -ne 0) { exit $exitCode }
 
       # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
       # while any statement-column census entry or watched writer is pending, in every normal Darling
@@ -2946,9 +2970,30 @@ jobs:
           # The whole suite, with no Cost=Slow skip (#5459 change 5 leaves this job alone): CrossAppGuardCiGateTests pins
           # this invocation because the exemptions in DarlingTestsBackstopped rest on this job running every class.
           # The reads-lite scope (#5505) only narrows it for a Lite-only change.
-          if ($scopeArgs.Count -gt 0 -and $env:GUARD_BUILD_USED -eq 'true') { $scopeArgs = @('-trait', 'Reads=Lite') }
-          $guardFilter = @($scopeArgs) + @($guardFilter)
-          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter
+          if ($scopeArgs.Count -eq 0) {
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter
+              exit $LASTEXITCODE
+          }
+          # #5961: the Lite-reads classes are the ones ci-select.py's source scan says read a Lite path, run by `-class`, not
+          # by a Reads trait. xunit ANDs filters of different kinds, so the Guard stage (when the Guard job did not run it)
+          # and the scanned classes are two runs. An EMPTY scan skips the second run: a runner given no -class argument
+          # runs the whole suite, and the empty `-trait Reads=Lite` it replaces ran nothing.
+          $readsArgs = @(python .github/scripts/ci-select.py reads-classes --suite darling --args | Where-Object { $_ })
+          if ($LASTEXITCODE -ne 0) { Write-Host 'ci-select.py reads-classes failed'; exit 1 }
+          $exitCode = 0
+          if ($env:GUARD_BUILD_USED -ne 'true') {
+              # The Guard job did not run the Guard classes: run them here, then the scanned classes without them.
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trait Stage=Guard
+              if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
+              $guardFilter = @("-trait-", "Stage=Guard")
+          }
+          if ($readsArgs.Count -gt 0) {
+              Write-Host "Lite-reads scan: $($readsArgs.Count / 2) Darling.Tests classes read a Lite path"
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @readsArgs @guardFilter
+              if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
+          }
+          else { Write-Host '::warning title=Lite-reads scan is empty::No Darling.Tests class reads a Lite path, so only the Guard stage runs here.' }
+          exit $exitCode
 
   # #5669: the Lite scope of a pull request, decided once from the files it changes, so the four Lite shards are not
   # started (a Windows runner each, about two minutes of checkout and filtering) when the diff touches nothing the

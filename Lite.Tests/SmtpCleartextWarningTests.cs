@@ -16,7 +16,6 @@ namespace Lite.Tests;
 /// windows warn at Save, Test and Validate when that would happen. The rule is one shared predicate; these
 /// tests pin it, and pin that both windows (Lite, and the Darling viewer) call it from all three handlers.
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class SmtpCleartextWarningTests
 {
     [Fact]

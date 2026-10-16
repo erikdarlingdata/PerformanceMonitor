@@ -23,7 +23,6 @@ namespace PerformanceMonitorLite.Tests;
 /// writes and no reads), so no data file reached the read chart and the lane averaged zeros. Each chart now ranks its own subject:
 /// the ten busiest files by reads feed the read chart and the ten busiest by writes feed the write chart.
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 548900;

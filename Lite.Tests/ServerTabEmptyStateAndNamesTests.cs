@@ -24,7 +24,6 @@ namespace PerformanceMonitorLite.Tests;
 /// Lite click-through F15 (empty grids and charts say so), F17 (tabs and column headers have accessible names), F18 (the tab
 /// strip never reorders its rows) and F19 (lane labels carry units).
 /// </summary>
-[Trait("Reads", "Darling")]
 public class ServerTabEmptyStateAndNamesTests
 {
     private static string RepoFile(string relative, [CallerFilePath] string thisFile = "") =>

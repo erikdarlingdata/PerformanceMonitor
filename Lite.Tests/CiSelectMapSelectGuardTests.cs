@@ -27,7 +27,6 @@ namespace Lite.Tests;
 /// knows nothing about, and any event but a pull request). Nothing in build.yml calls <c>map-select</c> yet.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Darling")]
 public sealed class CiSelectMapSelectGuardTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "ci-map-select-" + Guid.NewGuid().ToString("N"));

@@ -50,7 +50,6 @@ namespace Darling.Tests;
 /// every persisted column exactly as it was. These tests pin the arithmetic, the emit, the caveats on the two
 /// surfaces that drew the wrong inference, and the premise the FLOOR caveat rests on.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public class CollectionLogStoreProbeAttributionTests
 {

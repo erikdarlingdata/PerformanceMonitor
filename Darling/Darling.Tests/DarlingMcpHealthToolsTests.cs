@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// positional-param; the daily band wires through the shared calculator; and the advertised tools/list schema
 /// is Gemini-clean.
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
 {
@@ -411,7 +410,6 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
 /// get_daily_summary bands the day Critical (a deadlock fired).
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class DarlingMcpHealthToolsLivePostgresTests
 {
     private const string ServerName = "darling-mcp-health-e2e";

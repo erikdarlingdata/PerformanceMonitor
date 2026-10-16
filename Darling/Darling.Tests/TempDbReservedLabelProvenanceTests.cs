@@ -62,7 +62,6 @@ namespace Darling.Tests;
 /// property: this pin is about the percentage.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public class TempDbReservedLabelProvenanceTests
 {
     /// <summary>

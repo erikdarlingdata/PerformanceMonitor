@@ -243,7 +243,8 @@ def tree_scope(event: str, all_count: int, lite_count: int) -> str:
 
 
 def scope_filter(scope: str) -> str:
-    """The Darling.Tests runner arguments for a scope ('' is the whole suite)."""
+    """The Darling.Tests runner arguments for a scope ('' is the whole suite). `-trait Reads=Lite` is a token the consumers
+    expand (#5961): no assembly trait of that name exists, the classes come from `reads-classes --suite darling`."""
     if scope == "guard":
         return "-trait Stage=Guard"
     if scope == "reads-lite":
@@ -461,6 +462,8 @@ def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
             t.difference_update({x for x in t if x == _HOLDS_MARK or x.startswith(_BASE_MARK)})
             if c not in holds:
                 t.add(NO_TESTS_TRAIT)
+    # #5961: Reads=Lite / Reads=Darling are derived from the source, not read off a [Trait] attribute.
+    with_reads_traits(out, root)
     return out
 
 
@@ -487,6 +490,358 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
     if suite == "installer":
         return d["build_installer_tests"]
     return True
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The classes that read the OTHER product's files (#5961), derived from the source, not from a trait.
+# ---------------------------------------------------------------------------------------------------------
+#
+# A pull request that changes only Lite files runs the Darling.Tests classes that read a Lite path (and the Guard stage);
+# one that changes only Darling files named in lite-paths-filter.yml's reads filter runs the Lite.Tests classes that read a
+# Darling path. Those two class sets used to be hand-written `[Trait("Reads", ...)]` attributes with a C# census beside
+# them, and the runners filtered on the trait. They now run `-class` lists from reads_classes() below, so there is no
+# roster to keep: a new class that reads a Lite path is in the set the moment it is written.
+#
+# This is a port of GuardStageScanner.ReadsALitePath and of the Darling-path detector Lite.Tests had (comments are ignored,
+# a string literal is read for a path segment, a recursive enumeration from the repo root reads every file). The scan is per
+# FILE, as the census was: a helper class in the same file may hold the path a test reads, so every test class (one that
+# holds a [Fact] or [Theory] in its own body) in a file that reads the other tree is in the set. A path assembled from a
+# constant another file declares is not visible to a source scan; the replay and the nightly are the backstop for that.
+
+_RC_ENUM_CALL = re.compile(
+    r"\b(?:EnumerateFiles|EnumerateFileSystemEntries|EnumerateDirectories|GetFiles|GetFileSystemEntries|GetDirectories)\s*\(")
+# Darling.Tests' spelling of "the repo root" (GuardStageScanner.s_repoRootExpression); Lite.Tests' was narrower.
+_RC_ROOT_DARLING = re.compile(r"^(?:\w+\.)*\w*(?:RepoRoot|FindRoot|ResolveRoot)\w*\(\s*\)$|^(?:RepoFile\.)?Root$")
+_RC_ROOT_LITE = re.compile(r"^(?:\w+\.)*(?:RepoRoot|FindRepoRoot)\(\s*\)$")
+_RC_ASSIGN = re.compile(r"\b(\w+)\s*(?:=>|=)\s*([^;=]+);")
+_RC_RECURSE = re.compile(r"RecurseSubdirectories\s*=\s*true")
+_RC_CLASS = re.compile(
+    r"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*class\s+(\w+)", re.MULTILINE)
+_RC_NAMESPACE = re.compile(r"^[ \t]*namespace\s+([\w.]+)", re.MULTILINE)
+_RC_TEST_ATTR = re.compile(r"\[(?:Fact|Theory)\b")
+_RC_ENUM_WORD = r"Enumerate|GetFiles|GetDirectories|GetFileSystemEntries"
+# The detectors need the other tree's name (the copyright header says "Darling Data", so a bare Darling is no signal).
+_RC_CHEAP = {"darling": re.compile(r"Lite|" + _RC_ENUM_WORD), "lite": re.compile(r'Darling[./\\"]|' + _RC_ENUM_WORD)}
+
+
+def _rc_run(text: str, i: int, c: str) -> int:
+    j = i
+    while j < len(text) and text[j] == c:
+        j += 1
+    return j - i
+
+
+def _rc_char_literal_end(text: str, i: int) -> int:
+    j = i + 1
+    while j < len(text):
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == "'":
+            return j + 1
+        if text[j] == "\n":
+            return i + 1
+        j += 1
+    return j
+
+
+def _rc_opener(text: str, i: int):
+    """(kind, dollars, quote_run, body_start) of a string literal opening at i, or None. kind: R regular, V verbatim, W raw."""
+    j, dollars, verbatim = i, 0, False
+    while j < len(text) and text[j] in "$@":
+        if text[j] == "$":
+            dollars += 1
+        elif verbatim:
+            return None
+        else:
+            verbatim = True
+        j += 1
+    if j >= len(text) or text[j] != '"':
+        return None
+    if verbatim:
+        return "V", dollars, 1, j + 1
+    quotes = _rc_run(text, j, '"')
+    if quotes >= 3:
+        return "W", dollars, quotes, j + quotes
+    if quotes == 2:
+        return "R", dollars, 0, j + 2
+    return "R", dollars, 1, j + 1
+
+
+def _rc_scan_code(text: str, i: int, code: bytearray, hole, bodies) -> int:
+    """Port of CSharpSourceWalker.ScanCode: marks code characters, collects string-literal bodies as (start, end)."""
+    depth, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if hole is not None and depth == 0:
+            if c == "}" and _rc_run(text, i, "}") >= hole[1]:
+                return i
+            if c == ":":
+                if i + 1 < n and text[i + 1] == ":":
+                    code[i] = code[i + 1] = 1
+                    i += 2
+                    continue
+                return i
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            close = text.find("*/", i + 2)
+            i = n if close < 0 else close + 2
+            continue
+        if c == "'":
+            i = _rc_char_literal_end(text, i)
+            continue
+        op = _rc_opener(text, i) if c in "$@\"" else None
+        if op is not None:
+            _kind, _dollars, run, body_start = op
+            if run == 0:
+                bodies.append((body_start, body_start))
+                i = body_start
+                continue
+            i, body_end = _rc_scan_literal(text, body_start, code, op, bodies)
+            bodies.append((body_start, body_end))
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        code[i] = 1
+        i += 1
+    return i
+
+
+def _rc_scan_literal(text: str, i: int, code: bytearray, frame, bodies) -> "tuple[int, int]":
+    """(index just past the literal, index where its body ends)."""
+    kind, dollars, quote_run, _ = frame
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if kind == "W" and c == '"':
+            run = _rc_run(text, i, '"')
+            if run >= quote_run:
+                return i + run, i
+            i += run
+            continue
+        if kind == "V" and c == '"':
+            if i + 1 < n and text[i + 1] == '"':
+                i += 2
+                continue
+            return i + 1, i
+        if kind == "R" and c == "\\":
+            i += 2
+            continue
+        if kind == "R" and c == '"':
+            return i + 1, i
+        if kind == "R" and c == "\n":
+            return i, i
+        if dollars > 0 and c == "{":
+            run = _rc_run(text, i, "{")
+            if dollars == 1:
+                i += run // 2 * 2
+                if run % 2 == 0:
+                    continue
+                i = _rc_scan_hole(text, i + 1, code, frame, bodies)
+                continue
+            if run >= dollars:
+                i = _rc_scan_hole(text, i + dollars, code, frame, bodies)
+                continue
+            i += run
+            continue
+        if dollars > 0 and c == "}":
+            i += _rc_run(text, i, "}")
+            continue
+        i += 1
+    return i, i
+
+
+def _rc_scan_hole(text: str, i: int, code: bytearray, frame, bodies) -> int:
+    dollars = frame[1]
+    i = _rc_scan_code(text, i, code, frame, bodies)
+    if i < len(text) and text[i] == ":":
+        while i < len(text) and not (text[i] == "}" and _rc_run(text, i, "}") >= dollars):
+            i += 1
+    if i < len(text) and text[i] == "}":
+        i += min(_rc_run(text, i, "}"), dollars)
+    return i
+
+
+def cs_code_and_literals(text: str) -> "tuple[str, list[tuple[int, str]]]":
+    """(source with comments and literal text blanked, newlines kept; [(start, body)] of every string literal) -
+    CSharpSourceWalker.StripCommentsAndStrings and .StringLiteralBodies, from one walk."""
+    code = bytearray(len(text))
+    spans: list[tuple[int, int]] = []
+    _rc_scan_code(text, 0, code, None, spans)
+    stripped = "".join(ch if code[k] else ("\n" if ch == "\n" else " ") for k, ch in enumerate(text))
+    bodies = [(s, "".join(" " if code[k] else text[k] for k in range(s, e))) for s, e in spans]
+    return stripped, bodies
+
+
+def _rc_brace_end(code: str, open_at: int) -> int:
+    """Index just past the brace block opening at open_at (CSharpSourceWalker.BraceBalanced); len(code) if it never closes."""
+    depth = 0
+    for i in range(open_at, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(code)
+
+
+def _rc_call_args(code: str, start: int) -> "list[str]":
+    args, depth, frm = [], 0, start
+    for i in range(start, len(code)):
+        c = code[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                args.append(code[frm:i])
+                return args
+            depth -= 1
+        elif c == "," and depth == 0:
+            args.append(code[frm:i])
+            frm = i + 1
+    return []
+
+
+def enumerates_repo_root_recursively(code: str, root_re: "re.Pattern[str]") -> bool:
+    """Whether a call such as Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories) starts at the repo root:
+    its first argument is a repo-root call or a variable the file sets from one, and it is recursive."""
+    root_vars = {m.group(1) for m in _RC_ASSIGN.finditer(code) if root_re.match(m.group(2).strip())}
+    recursive_options = bool(_RC_RECURSE.search(code))
+    for call in _RC_ENUM_CALL.finditer(code):
+        args = _rc_call_args(code, call.end())
+        if not args:
+            continue
+        first = args[0].strip()
+        from_root = bool(root_re.match(first)) or first in root_vars
+        recursive = any("AllDirectories" in a for a in args) \
+            or (recursive_options and len(args) >= 3 and "TopDirectoryOnly" not in args[-1])
+        if from_root and recursive:
+            return True
+    return False
+
+
+def _rc_bare_literal_is_a_path(text: str, start: int) -> bool:
+    before = text[max(0, start - 150):start]
+    cut = before.rfind(";")
+    if cut >= 0:
+        before = before[cut + 1:]
+    return "Combine(" in before or "new[]" in before or "new string[]" in before
+
+
+def reads_lite_path(text: str) -> bool:
+    """GuardStageScanner.ReadsALitePath: a string literal (not a comment) naming a path segment Lite (alone, or beside a
+    slash), Lite.Tests or a PerformanceMonitorLite* project, or a recursive enumeration from the repo root."""
+    code, bodies = cs_code_and_literals(text)
+    for _start, body in bodies:
+        norm = body.replace("\\", "/")
+        segs = [s for s in norm.split("/") if s]
+        if any(s.startswith("PerformanceMonitorLite") or s == "Lite.Tests" for s in segs):
+            return True
+        if body == "Lite" or ("/" in norm and "Lite" in segs):
+            return True
+    return enumerates_repo_root_recursively(code, _RC_ROOT_DARLING)
+
+
+def reads_darling_path(text: str) -> bool:
+    """The Darling-path twin Lite.Tests had: a literal naming PerformanceMonitor.Darling.*, Darling.Tests, Darling beside a
+    slash, or a bare "Darling" that is a path-join argument or a segment-array element; or a recursive repo-root walk."""
+    code, bodies = cs_code_and_literals(text)
+    for start, body in bodies:
+        norm = body.replace("\\", "/")
+        segs = [s for s in norm.split("/") if s]
+        if any(s.startswith("PerformanceMonitor.Darling.") or s == "Darling.Tests" for s in segs):
+            return True
+        if "/" in norm and "Darling" in segs:
+            return True
+        if body == "Darling" and _rc_bare_literal_is_a_path(text, start):
+            return True
+    return enumerates_repo_root_recursively(code, _RC_ROOT_LITE)
+
+
+def test_classes_of_text(text: str) -> "list[str]":
+    """Full names (Namespace.Outer+Inner) of the classes in one source text that hold a [Fact] or [Theory] in their OWN body
+    (a nested class does not take its enclosing class's tests). The namespace is the nearest `namespace` line above."""
+    code, _ = cs_code_and_literals(text)
+    found: list[tuple[str, int, int, int]] = []
+    for m in _RC_CLASS.finditer(code):
+        open_at = code.find("{", m.start())
+        if open_at >= 0:
+            found.append((m.group(1), m.start(), open_at, _rc_brace_end(code, open_at)))
+    spaces = [(m.start(), m.group(1)) for m in _RC_NAMESPACE.finditer(code)]
+    out: list[str] = []
+    for name, idx, open_at, end in found:
+        own = list(code[open_at:end])
+        for _n, nidx, _o, nend in found:
+            if nidx > open_at and nend <= end:
+                for k in range(nidx - open_at, nend - open_at):
+                    own[k] = " "
+        if not _RC_TEST_ATTR.search("".join(own)):
+            continue
+        outers = sorted((f for f in found if f[2] < idx and f[3] >= end and f[1] != idx), key=lambda f: f[2])
+        ns = next((n for pos, n in reversed(spaces) if pos < idx), "")
+        out.append((ns + "." if ns else "") + "+".join([f[0] for f in outers] + [name]))
+    return out
+
+
+def _rc_project_links(project: str) -> "list[str]":
+    """The files a csproj compiles in through an explicit Compile Include with a Link (wildcards skipped)."""
+    try:
+        with open(project, encoding="utf-8-sig") as fh:
+            xml = fh.read()
+    except OSError:
+        return []
+    base = os.path.dirname(project)
+    out = []
+    for m in re.finditer(r"<Compile\s+[^>]*Include=\"([^\"*]+)\"[^>]*Link=\"[^\"]+\"", xml):
+        out.append(os.path.normpath(os.path.join(base, m.group(1).replace("\\", os.sep))))
+    return out
+
+
+def _rc_suite_files(root: str, suite: str) -> "list[str]":
+    base = os.path.join(root, SUITE_DIRS[suite])
+    files = []
+    for dp, dn, fn in os.walk(base):
+        dn[:] = [d for d in dn if d not in ("bin", "obj")]
+        files += [os.path.join(dp, f) for f in fn if f.endswith(".cs")]
+    project = os.path.join(base, ("Darling.Tests" if suite == "darling" else "Lite.Tests") + ".csproj")
+    have = set(files)
+    files += [f for f in _rc_project_links(project) if f not in have]
+    return sorted(files)
+
+
+def reads_classes(root: str = ROOT, suites: "tuple[str, ...]" = ("darling", "lite")) -> "dict[str, set[str]]":
+    """{"darling": full names of the Darling.Tests classes that read a Lite path, "lite": full names of the Lite.Tests
+    classes that read a Darling path}. Replaces the [Trait("Reads", "Lite")] and [Trait("Reads", "Darling")] attributes."""
+    out: dict[str, set[str]] = {"darling": set(), "lite": set()}
+    for suite, detector in (("darling", reads_lite_path), ("lite", reads_darling_path)):
+        for path in (_rc_suite_files(root, suite) if suite in suites else []):
+            try:
+                with open(path, encoding="utf-8-sig") as fh:
+                    text = fh.read().replace("\r\n", "\n")
+            except OSError:
+                continue
+            # A file that names neither tree and calls no file enumeration cannot read a path: skip the character walk.
+            if not _RC_CHEAP[suite].search(text) or not _RC_TEST_ATTR.search(text):
+                continue
+            if detector(text):
+                out[suite].update(test_classes_of_text(text))
+    return out
+
+
+def with_reads_traits(classes: "dict[str, dict[str, set[str]]]", root: str = ROOT) -> None:
+    """Put Reads=Lite / Reads=Darling on the scanned classes the source scan names, in place (the rules in class_selected())."""
+    reads = reads_classes(root)
+    for suite, trait in (("darling", "Reads=Lite"), ("lite", "Reads=Darling")):
+        simple = {re.split(r"[.+]", n)[-1] for n in reads[suite]}
+        for name, traits in classes[suite].items():
+            if name in simple:
+                traits.add(trait)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -2065,6 +2420,12 @@ def main(argv: list[str]) -> int:
     qr.add_argument("--now", help="the clock as ISO 8601 UTC (default: now)")
     qr.add_argument("--out", help="also write the decision JSON to this file")
 
+    rc = sub.add_parser("reads-classes", help="the test classes that read the other product's files, one full name a line (workflow step, #5961)")
+    rc.add_argument("--suite", required=True, choices=["darling", "lite"],
+                    help="darling: Darling.Tests classes that read a Lite path; lite: Lite.Tests classes that read a Darling path")
+    rc.add_argument("--args", action="store_true", help="print `-class` / name line pairs for a runner instead of bare names")
+    rc.add_argument("--root", default=ROOT, help="the repository (default: this one)")
+
     qa = sub.add_parser("quarantine-args", help="the runner arguments that leave a suite's honored quarantined tests out (workflow step)")
     qa.add_argument("--quarantine", required=True, help="the JSON `quarantine --out` wrote; missing or unreadable leaves nothing out")
     qa.add_argument("--suite", required=True, choices=("darling", "lite"))
@@ -2190,6 +2551,12 @@ def main(argv: list[str]) -> int:
         if args.out:
             with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
                 json.dump(decided, fh)
+        return 0
+    if args.cmd == "reads-classes":
+        names = sorted(reads_classes(args.root, (args.suite,))[args.suite])
+        lines = [t for n in names for t in (("-class", n) if args.args else (n,))]
+        if lines:
+            print("\n".join(lines))
         return 0
     if args.cmd == "quarantine-args":
         print("\n".join(quarantine_args(args.quarantine, args.suite)))

@@ -42,13 +42,38 @@ $guardFilter = @(if ($GuardBuildUsed -eq 'true') { '-trait-'; 'Stage=Guard' })
 # parameter, which turns the array back into one string, and splatting a string hands the runner its characters as
 # separate arguments (exit 3 on every pull request that changes only Lite files).
 $scopeArgs = @($ScopeFilter -split ' ' | Where-Object { $_ })
-$lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter @scopeArgs)
-if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
-# Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
-# and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.
-$json = @($lines | Where-Object { $_ -match '^\s*\[' })
-if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
-$classes = @($json[0] | ConvertFrom-Json)
+function Get-DarlingClasses([string[]] $scopeArgs) {
+    # The parameter shadows the caller's $scopeArgs on purpose: the listing takes the Guard exclusion first, then a scope.
+    $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter @scopeArgs)
+    if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+    # Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
+    # and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.
+    $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+    if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+    return @($json[0] | ConvertFrom-Json)
+}
+# #5961: the Lite-reads part of a scope is the classes ci-select.py's source scan says read a Lite path, not a trait on
+# the assembly. xunit ANDs filters of different kinds, so the part cannot ride in the one listing call: the listing runs
+# once for the rest of the scope (the Guard stage) and once, unfiltered, to match the scan's names against. An empty scan
+# adds no class, which is what an empty `-trait Reads=Lite` listing did; a scope that ends up with no class at all still
+# stops at the zero check below, never at a runner given no -class arguments (that runs the whole suite).
+$readsLite = $false
+$restArgs = [System.Collections.Generic.List[string]]::new()
+for ($i = 0; $i -lt $scopeArgs.Count; $i++) {
+    if ($scopeArgs[$i] -eq '-trait' -and ($i + 1) -lt $scopeArgs.Count -and $scopeArgs[$i + 1] -eq 'Reads=Lite') { $readsLite = $true; $i++ }
+    else { $restArgs.Add($scopeArgs[$i]) }
+}
+if ($readsLite) {
+    $readsNames = @(python .github/scripts/ci-select.py reads-classes --suite darling | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { throw "ci-select.py reads-classes failed with exit code $LASTEXITCODE" }
+    Write-Host "Lite-reads scan: $($readsNames.Count) Darling.Tests classes read a Lite path"
+    $everyClass = @(Get-DarlingClasses @())
+    $restClasses = if ($restArgs.Count -gt 0) { @(Get-DarlingClasses $restArgs.ToArray()) } else { @() }
+    $classes = @($everyClass | Where-Object { $readsNames -contains $_ -or $restClasses -contains $_ })
+}
+else {
+    $classes = @(Get-DarlingClasses $scopeArgs)
+}
 if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
 # #5669: the cut balances the shards by recorded class duration (.github/scripts/darling-shard-pack.py, from the committed

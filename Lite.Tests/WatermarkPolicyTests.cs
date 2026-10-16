@@ -24,7 +24,6 @@ namespace Lite.Tests;
 /// permanently (#2102, hours-wide). The clamp floors a stale watermark to now-MaxCatchup; a fresh
 /// watermark and a null watermark pass through untouched.
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class WatermarkPolicyTests
 {
     private static readonly DateTime Now = new(2026, 7, 17, 12, 0, 0, DateTimeKind.Utc);

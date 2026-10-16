@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// 2.3, 1.95 and 1.56 into 2, so the tie broke on database name and the top-N cut dropped the busiest database.
 /// The average now travels unrounded (<c>AvgCpuMs</c>) and is what the ranking and the wire row use.
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class FinOpsTopAvgRankingTests
 {
     private static string Read(string relative, [CallerFilePath] string thisFile = "") =>

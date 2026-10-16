@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// (<c>analysis_time</c> is the latest pass's, <c>entries_from</c> the newest FAILING pass's, so a recovery is
 /// readable as a recovery rather than as a current fault).</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class CollectionCaveatLedgerTests
 {
     private static readonly JsonSerializerOptions Options = new JsonSerializerOptions { WriteIndented = false };
@@ -388,7 +387,6 @@ public sealed class CollectionCaveatLedgerTests
 /// </description></item>
 /// </list>
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class CollectionCaveatLedgerParityTests
 {
     private const string Attach = "CollectionCaveatLedger.Shared.Attach(";

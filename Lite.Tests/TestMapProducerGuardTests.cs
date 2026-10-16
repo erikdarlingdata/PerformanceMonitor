@@ -31,7 +31,6 @@ namespace Lite.Tests;
 /// before a nightly spends 100 runner-minutes producing a map with a hole in it.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Darling")]
 public sealed class TestMapProducerGuardTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "testmap-guard-" + Guid.NewGuid().ToString("N"));

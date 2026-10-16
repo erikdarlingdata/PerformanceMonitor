@@ -40,7 +40,6 @@ namespace Darling.Tests;
 /// itself lives in the shared <see cref="QueryStorePerDatabaseState"/> so a prefix cannot end up pruned on
 /// one SKU and orphaning on the other.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class QueryStoreStatePruneTests
 {

@@ -33,7 +33,6 @@ namespace Darling.Tests;
 /// agent's empty result), against the scorer's own switch arms (a subset — two sources carry context and
 /// are deliberately not scored), and against the two tools' descriptions and refusals.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class FactSourceRegistryTests
 {

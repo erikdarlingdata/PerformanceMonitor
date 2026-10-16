@@ -41,7 +41,6 @@ namespace Darling.Tests;
 /// and so is a raw re-assignment after a judge. Also not seen: SQL built by concatenation (<c>"LEFT(" + col + ", 500)"</c>)
 /// and a JSON-generic local.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementCutSourceScanTests
 {

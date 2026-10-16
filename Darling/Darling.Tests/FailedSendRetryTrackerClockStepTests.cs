@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// the same rule from the same copy of it. The raw stamp is <see cref="FailedSendRetryTracker.StampedDueUtc"/>,
 /// which only tests read.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class FailedSendRetryTrackerClockStepTests
 {

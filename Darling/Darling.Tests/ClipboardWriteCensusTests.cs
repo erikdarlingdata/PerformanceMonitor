@@ -25,7 +25,6 @@ namespace Darling.Tests;
 /// name) and is excluded, matching every other census in this file's family.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class ClipboardWriteCensusTests
 {
     [Fact]

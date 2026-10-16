@@ -31,7 +31,6 @@ namespace Darling.Tests;
 /// the latest-snapshot read SQL pins (v_memory_grant_stats, the ceiling columns, per-pool SUM), and the
 /// Gemini-clean advertised schema.
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
 {
@@ -247,7 +246,6 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
 /// the per-pool detail; an empty store returns the miss.
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class DarlingMcpMemoryGrantToolsLivePostgresTests
 {
     private const string ServerName = "darling-mcp-grants-e2e";

@@ -29,7 +29,6 @@ namespace Darling.Tests;
 /// The zero-items branch needs a live SQL Server, so its wiring is pinned at source (the #1805
 /// DarlingLockTimeoutYieldTests idiom). The record's carrying behavior is pinned for real.
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class DarlingEmptyEnumerationNoteTests
 {
     [Fact]

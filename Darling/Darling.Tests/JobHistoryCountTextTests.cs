@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// cannot be instantiated here, so the writers are pinned from their source, the way <c>LiteJobHistoryLoadingCapTests</c>
 /// pins Lite's.
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class JobHistoryCountTextTests
 {
     private const int Cap = 2000;

@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// break every positional caller, so they keep their place; the SET only shrinks (an entry that is now last fails
 /// the stale-entry test), and every other tool, including every tool the filter work widens, must keep it last.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class DatabaseNameParamTwinTests
 {

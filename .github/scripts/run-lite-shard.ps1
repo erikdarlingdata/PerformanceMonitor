@@ -57,12 +57,15 @@ if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the s
 if ($ScopeMode -eq 'reads') {
     # A diff that reaches only the Darling trees Lite.Tests reads: run the classes that carry the
     # trait, all of them, in this one leg. The trait set is read off the built assembly, so it is
-    # whatever exists on THIS commit; DarlingReadsTraitGuardTests fails a class that reads a
-    # Darling path without the trait. An empty set is not "nothing to run": it would mean the trait
-    # went missing, so this leg runs the WHOLE suite rather than none of it.
-    $mine = @(Get-LiteClasses @('-trait', 'Reads=Darling'))
+    # whatever exists on THIS commit. #5961: the set is the classes ci-select.py's source scan says
+    # read a Darling path, matched by full name against the listing above (no Reads trait). An empty
+    # set is not "nothing to run": it would mean the scan went blind, so this leg runs the WHOLE
+    # suite rather than none of it.
+    $readsNames = @(python .github/scripts/ci-select.py reads-classes --suite lite | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { throw "ci-select.py reads-classes failed with exit code $LASTEXITCODE" }
+    $mine = @($classes | Where-Object { $readsNames -contains $_ })
     if ($mine.Count -eq 0) {
-        Write-Host '::warning title=Lite Darling-reads selection is empty::No Lite.Tests class carries [Trait("Reads", "Darling")], so this leg runs the whole Lite suite instead.'
+        Write-Host '::warning title=Lite Darling-reads selection is empty::The source scan found no Lite.Tests class that reads a Darling path, so this leg runs the whole Lite suite instead.'
         $mine = $classes
     }
     Write-Host "Darling-reads run: $($mine.Count) of $($classes.Count) classes"

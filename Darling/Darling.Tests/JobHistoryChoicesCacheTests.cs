@@ -26,7 +26,6 @@ namespace Darling.Tests;
 /// real window (<see cref="ViewerTimeRangeWindow"/>) through several refreshes against <see cref="JobHistoryChoicesFreshness"/>.
 /// The Lite twin is Lite.Tests' JobHistoryChoicesCacheTests.
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class JobHistoryChoicesCacheTests
 {
     private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(5);

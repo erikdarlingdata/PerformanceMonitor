@@ -20,7 +20,6 @@ namespace Darling.Tests;
 /// Lite.Tests' Windows-only fact plus a local DuckDB check recorded in the PR body — this pin only proves the
 /// text is present, not that DuckDB accepts it.
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class LitePerfmonWaitStatisticsArtifactSourceTests
 {
     [Fact]

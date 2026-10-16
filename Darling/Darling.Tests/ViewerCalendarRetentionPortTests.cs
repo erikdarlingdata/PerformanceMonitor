@@ -31,7 +31,6 @@ namespace Darling.Tests;
 /// the viewer's row makes the MCP row's decision from the same facts, that the horizon it judges against is the
 /// horizon the MCP publishes and the purge enforces, and that a grey cell now says why it is grey.
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class ViewerCalendarRetentionPortTests
 {
@@ -289,7 +288,6 @@ public sealed class ViewerCalendarRetentionPortTests
 /// wrong state), and the fixture's rows for these servers are removed either way.
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class ViewerCalendarRetentionLivePostgresTests
 {
     private const int ServerId = -936537;

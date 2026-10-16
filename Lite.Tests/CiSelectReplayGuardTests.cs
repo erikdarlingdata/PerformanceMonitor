@@ -29,7 +29,6 @@ namespace Lite.Tests;
 /// .github/ci-history/replay-accepted.txt; a miss that is not listed there fails this test.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Darling")]
 public sealed class CiSelectReplayGuardTests
 {
     private static string Script() => Path.Combine(ParitySource.RepoRoot(), ".github", "scripts", "ci-select.py");

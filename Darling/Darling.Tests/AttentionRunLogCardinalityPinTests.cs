@@ -23,7 +23,6 @@ namespace Darling.Tests;
 /// <c>collection_log</c> row of its own, and the one place each product logs a finished run is called once.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class AttentionRunLogCardinalityPinTests
 {
     /// <summary>The code of a source file with comments and literal text blanked, so prose and strings are not mistaken for calls.</summary>

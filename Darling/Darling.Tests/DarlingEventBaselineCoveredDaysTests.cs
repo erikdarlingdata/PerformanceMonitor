@@ -32,7 +32,6 @@ namespace Darling.Tests;
 /// filter, the collector names or the covered-day divisor. The behaviour itself is proved live in
 /// <see cref="DarlingEventBaselineCoveredDaysLiveTests"/> (and in Lite's <c>EventBaselineCoveredDaysTests</c> over DuckDB).
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")]
 public sealed class DarlingEventBaselineCoveredDaysTests
 {
@@ -260,7 +259,6 @@ public sealed class DarlingEventBaselineCoveredDaysTests
 /// 14:00: Feb 3, 10, 17, 24 and Mar 3 make five covered days.</para>
 /// </summary>
 [Collection("live-postgres")]
-[Trait("Reads", "Lite")]
 public sealed class DarlingEventBaselineCoveredDaysLiveTests
 {
     private const int Tuesday = (int)DayOfWeek.Tuesday;

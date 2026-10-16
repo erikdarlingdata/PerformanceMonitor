@@ -22,7 +22,6 @@ namespace PerformanceMonitorLite.Tests;
 /// is. V12c: "Select All" in the Databases filter means All (no filter), not a real filter naming every database collected
 /// so far. V12d: a Compare window the store holds nothing for says so, on the Overview lanes and on the comparison grids.
 /// </summary>
-[Trait("Reads", "Darling")]
 public sealed class ReleaseWalkFilterAndCompareTests
 {
     private static string RepoFile(string relativePath)

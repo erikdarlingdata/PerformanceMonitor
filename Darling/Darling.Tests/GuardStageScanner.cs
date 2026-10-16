@@ -58,9 +58,6 @@ internal static class GuardStageScanner
         ["WebDataStartNoteTests"] = "slow: 257 s in the nightly map of 2026-10-13",
     };
 
-    /// <summary>The attribute a class that reads a Lite file carries, as it is written in source (#5459 cut 3a).</summary>
-    internal const string LiteTraitText = "[Trait(\"Reads\", \"Lite\")]";
-
     /// <summary>The name shapes the census treats as guard-style (ruling 2, R1).</summary>
     internal static readonly Regex GuardStyleName = new(
         @"(?:Hygiene|Census|Convention|Adoption|Ratchet|Guard|SourcePin|Pins?|Drift|Inventory)Tests$",
@@ -111,8 +108,6 @@ internal static class GuardStageScanner
         bool EnumeratesRepoRoot,
         bool ReadsTestVariable,
         bool UsesStoreHelper,
-        bool ReadsLite = false,
-        bool TaggedLite = false,
         bool ReachesACatalog = false)
     {
         /// <summary>Whether the class is guard-style by name (R1).</summary>
@@ -147,8 +142,6 @@ internal static class GuardStageScanner
         bool EnumeratesRepoRoot,
         bool ReadsTestVariable,
         string OwnCode,
-        bool ReadsLite,
-        bool TaggedLite,
         bool ReachesACatalog);
 
     /// <summary>
@@ -210,8 +203,6 @@ internal static class GuardStageScanner
                 EnumeratesRepoRoot: group.Any(d => d.EnumeratesRepoRoot),
                 ReadsTestVariable: group.Any(d => d.ReadsTestVariable),
                 UsesStoreHelper: usesHelper,
-                ReadsLite: group.Any(d => d.ReadsLite),
-                TaggedLite: group.Any(d => d.TaggedLite),
                 ReachesACatalog: group.Any(d => d.ReachesACatalog)));
         }
 
@@ -308,9 +299,6 @@ internal static class GuardStageScanner
         var rootVariables = RepoRootVariables(code);
         var recursiveOptions = Regex.IsMatch(code, @"RecurseSubdirectories\s*=\s*true", RegexOptions.CultureInvariant);
         var literals = CSharpSourceWalker.StringLiteralBodies(text).ToList();
-        /* File-level, like Lite.Tests' Darling census: a helper class in the same file may hold the path a test
-           class in it reads, so every test class in a file that reads Lite needs the trait. */
-        var fileReadsLite = ReadsALitePath(text, code, rootVariables, recursiveOptions);
 
         foreach (var d in found)
         {
@@ -340,8 +328,6 @@ internal static class GuardStageScanner
                 EnumeratesRepoRootRecursively(ownCode, rootVariables, recursiveOptions),
                 readsVariable,
                 ownCode,
-                fileReadsLite,
-                attributes.Any(a => Squash(a).Contains(Squash(LiteTraitText), StringComparison.Ordinal)),
                 ReachesACatalog(ownCode));
         }
     }
@@ -375,49 +361,6 @@ internal static class GuardStageScanner
     /// <summary>The R4 question over one source text, comments and strings blanked first, for the detector tests.</summary>
     internal static bool ReachesACatalogInText(string text) =>
         ReachesACatalog(CSharpSourceWalker.StripCommentsAndStrings(text));
-
-    /// <summary>
-    /// Whether a source file reads a file under <c>Lite/</c> or <c>Lite.Tests/</c>: a string literal (not a comment)
-    /// naming a path segment <c>Lite</c> (alone, or beside a slash), <c>Lite.Tests</c> or a <c>PerformanceMonitorLite*</c>
-    /// project, or a recursive enumeration from the repo root, which reads every Lite file without naming one. The bare
-    /// literal <c>"Lite"</c> counts in any position: a label such as <c>("Lite", source)</c> also counts, which only ever
-    /// over-tags (the safe direction). A path assembled from a constant another file declares is not visible to a
-    /// source scan; the replay of the failure corpus and the nightly are the backstop for that.
-    /// </summary>
-    private static bool ReadsALitePath(string text, string code, HashSet<string> rootVariables, bool recursiveOptions)
-    {
-        foreach (var (_, body) in CSharpSourceWalker.StringLiteralBodies(text))
-        {
-            var normalized = body.Replace('\\', '/');
-            var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
-
-            if (segments.Any(seg => seg.StartsWith("PerformanceMonitorLite", StringComparison.Ordinal)
-                || seg.Equals("Lite.Tests", StringComparison.Ordinal)))
-            {
-                return true;
-            }
-
-            if (body.Equals("Lite", StringComparison.Ordinal)
-                || (normalized.Contains('/', StringComparison.Ordinal)
-                    && segments.Any(seg => seg.Equals("Lite", StringComparison.Ordinal))))
-            {
-                return true;
-            }
-        }
-
-        return EnumeratesRepoRootRecursively(code, rootVariables, recursiveOptions);
-    }
-
-    /// <summary>The same question over one source text, for the census's own detector tests.</summary>
-    internal static bool ReadsALitePath(string text)
-    {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
-        return ReadsALitePath(
-            text,
-            code,
-            RepoRootVariables(code),
-            Regex.IsMatch(code, @"RecurseSubdirectories\s*=\s*true", RegexOptions.CultureInvariant));
-    }
 
     private static string Squash(string s) => s.Replace(" ", string.Empty, StringComparison.Ordinal);
 
@@ -501,7 +444,7 @@ internal static class GuardStageScanner
         return decls
             .Select(d => new Row(
                 d.Name, d.File, true, d.Tagged, d.LiveCollection, d.EnumeratesRepoRoot, d.ReadsTestVariable, false,
-                d.ReadsLite, d.TaggedLite, d.ReachesACatalog))
+                d.ReachesACatalog))
             .ToList();
     }
 

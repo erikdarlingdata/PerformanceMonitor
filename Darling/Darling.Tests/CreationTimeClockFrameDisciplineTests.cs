@@ -40,7 +40,6 @@ namespace Darling.Tests;
 /// runs the same two regexes over literals written for the purpose, because a scan whose discriminator
 /// has quietly stopped matching reports a clean bill of health, and that is worse than no scan.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 public sealed class CreationTimeClockFrameDisciplineTests
 {
     /// <summary>

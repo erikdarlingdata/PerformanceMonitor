@@ -37,7 +37,6 @@ namespace Lite.Tests;
 /// category, so it offered the event-collector resting-state sentence to every zero-row window that left no
 /// note; it now takes both.</para>
 /// </summary>
-[Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
 public sealed class SwallowedItemFailureTests
 {

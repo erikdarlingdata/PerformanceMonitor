@@ -36,7 +36,6 @@ namespace Darling.Tests;
 /// answer BEFORE the call. A method added to any file that calls the executor without all three fails here.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class ActualPlanModificationCheckGuardTests
 {
     private const string Controller = "PerformanceMonitor.Ui/PlanNavigationController.cs";

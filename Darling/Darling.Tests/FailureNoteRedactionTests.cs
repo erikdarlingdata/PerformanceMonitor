@@ -39,7 +39,6 @@ namespace Darling.Tests;
 /// call sites — over comment/string-stripped source, so a re-introduced <c>ex.Message</c> fails here rather
 /// than in a support ticket that pastes a ping response into a chat.</para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class FailureNoteRedactionTests
 {

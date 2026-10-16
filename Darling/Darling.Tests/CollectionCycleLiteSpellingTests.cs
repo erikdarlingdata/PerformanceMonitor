@@ -20,7 +20,6 @@ namespace Darling.Tests;
 /// it carries the Lite trait and a Lite-only change runs it.
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class CollectionCycleLiteSpellingTests
 {
     [Fact]

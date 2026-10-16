@@ -77,7 +77,6 @@ namespace Darling.Tests;
 /// shared reader costs nothing.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
-[Trait("Reads", "Lite")]
 public sealed class ViewerButtonAccessKeyTests
 {
     /// <summary>

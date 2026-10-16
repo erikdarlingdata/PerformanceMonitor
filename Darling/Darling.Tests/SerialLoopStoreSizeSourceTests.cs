@@ -49,7 +49,6 @@ namespace Darling.Tests;
 /// evades it. Narrower in function coverage, wider in reach; the two overlap deliberately.</item>
 /// </list></para>
 /// </summary>
-[Trait("Reads", "Lite")]
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class SerialLoopStoreSizeSourceTests
 {

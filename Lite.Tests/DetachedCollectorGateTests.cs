@@ -25,7 +25,6 @@ namespace Lite.Tests;
 /// detached run stall the caller that keyed the dictionary, recreating the #2148 wedge this whole family of
 /// gates exists to avoid.
 /// </summary>
-[Trait("Reads", "Darling")]
 [Collection("timing")]
 public sealed class DetachedCollectorGateTests
 {
