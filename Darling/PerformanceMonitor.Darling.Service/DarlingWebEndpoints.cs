@@ -6722,7 +6722,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// registers once per start (the same value the MCP host serves). A host with none registered (a test host that maps the
     /// routes directly) serves <see cref="McpDataDetail.Full"/>.</summary>
     private static McpDataDetail WebDataDetail(HttpContext context) =>
-        context.RequestServices.GetService<McpDataDetailSetting>()?.Mode ?? McpDataDetail.Full;
+        (context.RequestServices.GetService(typeof(McpDataDetailSetting)) as McpDataDetailSetting)?.Mode ?? McpDataDetail.Full;
 
     private static string? Server(HttpContext context) => First(context, "server") ?? First(context, "server_name");
 
