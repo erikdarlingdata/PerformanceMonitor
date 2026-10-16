@@ -1127,6 +1127,56 @@ try {
       const disabledCannotFocus = activeElement === null;
       return { afterFocus, keptWhenSiblingRepaints, lostWhenAncestorCleared, sameNodeBack, ancestorRecorded, lostOnTextReset, detachedCannotFocus, disabledCannotFocus };
     },
+    /* #5913: the Report Feedback tab. `kind` is what the service answers a record with: recorded, refused (403, the store login is
+       not an admin one), invalid (400) or gone (404); "listonly" is a seat that cannot make changes (no form at all). The page
+       reads the list again after a record or a 404 (the list is stale) and does NOT after a 403 or a 400 (the list is right and
+       the person is told why). */
+    feedback: async (kind) => {
+      state.canEdit = kind !== "listonly";
+      const id = "11111111-1111-1111-1111-111111111111";
+      let held = [];
+      const report = () => ({
+        request_id: id, server_name: "alpha", family: "blocking", first_metric: "Blocking", opened_at_utc: "2026-10-01T00:00:00Z",
+        reported_at_utc: "2026-10-01T00:10:00Z", agent_id: "agent-a", report_verdict: "real", root_cause: "the nightly load blocks", summary: null,
+        feedback: held,
+      });
+      const answers = {
+        recorded: (sent) => { held = [{ verdict: sent.verdict, corrected_verdict: sent.corrected_verdict, missed_step: sent.missed_step, comment: sent.comment, author: "web", recorded_at_utc: "2026-10-01T01:00:00Z" }]; return { status: 200, body: { status: "recorded", request_id: id, author: "web" } }; },
+        refused: () => ({ status: 403, body: { error: "Recording feedback needs a store login with the admin role." } }),
+        invalid: () => ({ status: 400, body: { error: "The feedback was not recorded. verdict: 'great' is not right, partly or wrong." } }),
+        gone: () => ({ status: 404, body: { error: "No investigation request has that id." } }),
+      };
+      state.responder = (method, url, sent) => {
+        if (method === "GET" && url === "/api/investigation-feedback") {
+          return { status: 200, body: { hours_back: 168, requests_returned: 1, truncated: false,
+            families: [{ family: "blocking", reported: 1, with_feedback: held.length, marked_wrong: 0, agent_false_positives: 0, false_positives: 0 }], requests: [report()] } };
+        }
+        if (method === "PUT" && url === "/api/investigation-feedback/" + id) return (answers[kind] || answers.recorded)(sent);
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("feedback");
+      const field = (name) => byAttr(main, "data-fb-field", name)[0] || null;
+      const reads = () => requests.filter((r) => r.method === "GET" && r.url === "/api/investigation-feedback").length;
+      const formsBefore = byAttr(main, "data-fb-form").length;
+      const readsBefore = reads();
+      const result = { formsBefore, readsBefore, tabs: all(main, (n) => n.tag === "a").map((n) => n.textContent) };
+      if (formsBefore === 0) return result;
+      field("verdict").value = "wrong";
+      await fire(field("verdict"), "change");
+      field("corrected_verdict").value = "false_positive";
+      await fire(field("corrected_verdict"), "change");
+      await typeInto(field("comment"), "never a real block");
+      await fire(byAttr(main, "data-fb-save", id)[0], "click");
+      await settle(30);
+      return {
+        ...result,
+        readsAfter: reads(),
+        writes: requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body, contentType: r.contentType })),
+        lines: byAttr(main, "data-fb-line").map((n) => n.textContent),
+        status: byAttr(main, "data-fb-status").map((n) => n.textContent),
+        familyRow: all(main, (n) => n.tag === "td").map((n) => n.textContent),
+      };
+    },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
        An export that is not a function (EDIT_FIELDS) is returned as it is. */

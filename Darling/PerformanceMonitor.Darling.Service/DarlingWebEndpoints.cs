@@ -2130,20 +2130,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 var result = await store.RecordAsync(submission!, context.RequestAborted);
-                return result.Outcome switch
+                if (result.Outcome is not (InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced))
                 {
-                    InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced => DarlingWebStatementSweep.JsonText(
-                        new JsonObject
-                        {
-                            ["status"] = result.Outcome == InvestigationFeedbackOutcome.Recorded ? "recorded" : "replaced",
-                            ["request_id"] = request.ToString(),
-                            ["author"] = submission!.Author,
-                        },
-                        "/api/investigation-feedback/{requestId}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted),
-                    InvestigationFeedbackOutcome.NotFound => ErrorResult(result.Message!, StatusCodes.Status404NotFound),
-                    InvestigationFeedbackOutcome.NoReport => ErrorResult(result.Message!, StatusCodes.Status409Conflict),
-                    _ => ErrorResult(result.Message!, StatusCodes.Status400BadRequest),
-                };
+                    return ErrorResult(result.Message!, FeedbackRefusalStatus(result.Outcome));
+                }
+
+                var receipt = FeedbackReceipt(result.Outcome, request, submission!.Author);
+                return DarlingWebStatementSweep.JsonText(
+                    receipt, "/api/investigation-feedback/{requestId}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
             {
@@ -2156,6 +2150,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
         });
     }
+
+    internal static JsonObject FeedbackReceipt(InvestigationFeedbackOutcome outcome, Guid request, string author) => new()
+    {
+        ["status"] = outcome == InvestigationFeedbackOutcome.Recorded ? "recorded" : "replaced",
+        ["request_id"] = request.ToString(),
+        ["author"] = author,
+    };
+
+    /// <summary>The status a refused feedback record answers: 404 for an unknown request, 409 for one with no report, else 400.</summary>
+    private static int FeedbackRefusalStatus(InvestigationFeedbackOutcome outcome) => outcome switch
+    {
+        InvestigationFeedbackOutcome.NotFound => StatusCodes.Status404NotFound,
+        InvestigationFeedbackOutcome.NoReport => StatusCodes.Status409Conflict,
+        _ => StatusCodes.Status400BadRequest,
+    };
 
     /// <summary>True when the store refused the feedback write for privilege (SQLSTATE 42501).</summary>
     private static bool IsFeedbackPrivilegeRefusal(Exception ex) => ex is PostgresException { SqlState: "42501" };
