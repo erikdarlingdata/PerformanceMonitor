@@ -89,7 +89,8 @@ public sealed class CollectionLogHourlyLiveTests
         Assert.Equal(StorageVersion.SchemaVersion, await ProbeAsync(scratch.ConnectionString, ct));
 
         /* Back to V185: the table gone and the ladder at 185. The probe must say 185, not 186. */
-        /* V189 (#5867) sits above this rung too, so its sentinel goes first. */
+        /* V190 (#5857) and V189 (#5867) sit above this rung too, so their sentinels go first. */
+        await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
         /* V187 (#5825) sits above this rung, so its sentinel goes too. */
         await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);

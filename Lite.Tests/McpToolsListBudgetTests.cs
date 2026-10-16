@@ -106,6 +106,47 @@ public sealed class McpToolsListBudgetTests
         Assert.True(offenders.Count == 0, "near-miss guide marker in: " + string.Join(", ", offenders));
     }
 
+    /// <summary>
+    /// #5820 L5c: the four investigation tools are in the served <c>tools/list</c> only with the gate on (the setting on and
+    /// the writes off) and absent otherwise, and what they add stays inside a byte budget. Measured through the real policies
+    /// over the real tool classes, so a fifth tool, a longer head or a gate that stops filtering fails here.
+    /// </summary>
+    [Fact]
+    public void InvestigationTools_AreInTheServedList_OnlyWithTheGateOn_AndAddWithinTheBudget()
+    {
+        var names = McpInvestigationPolicy.InvestigationTools;
+        var off = ServedList(allowWrites: false, allowInvestigations: false);
+        var on = ServedList(allowWrites: false, allowInvestigations: true);
+
+        Assert.DoesNotContain(off.Names, names.Contains);
+        Assert.Equal(names.OrderBy(n => n, StringComparer.Ordinal), on.Names.Where(names.Contains).OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Equal(off.Names.Count + names.Count, on.Names.Count);
+        Assert.DoesNotContain(ServedList(allowWrites: true, allowInvestigations: true).Names, names.Contains);
+
+        var added = on.Bytes - off.Bytes;
+        Assert.True(added > 0 && added <= InvestigationToolsBytesBudget,
+            $"the four investigation tools add {added} bytes to tools/list; the budget is {InvestigationToolsBytesBudget}");
+    }
+
+    /// <summary>What the four investigation tools may add to the served <c>tools/list</c> (heads, parameter descriptions and
+    /// schemas), measured at 3,280 bytes when L5c landed; raising it is a deliberate change.</summary>
+    private const int InvestigationToolsBytesBudget = 4_000;
+
+    private static (IReadOnlyList<string> Names, int Bytes) ServedList(bool allowWrites, bool allowInvestigations)
+    {
+        var collection = new McpServerPrimitiveCollection<McpServerTool>();
+        foreach (var tool in BuildServedTools().Tools)
+        {
+            collection.Add(tool);
+        }
+
+        McpInvestigationPolicy.Apply(collection, McpInvestigationPolicy.Served(allowInvestigations, allowWrites));
+        McpWritePolicy.Apply(collection, allowWrites);
+        var protocolTools = collection.Select(t => t.ProtocolTool).OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
+        var bytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(new ListToolsResult { Tools = protocolTools }, McpJsonUtilities.DefaultOptions));
+        return (protocolTools.Select(t => t.Name).ToList(), bytes);
+    }
+
     /* ---------------- measurement ---------------- */
 
     internal sealed record MeasuredTool(

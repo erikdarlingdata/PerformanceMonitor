@@ -1,0 +1,889 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Services;
+
+namespace PerformanceMonitorLite.Database;
+
+/// <summary>
+/// Lite's store of Level 1 investigations (#5820): the DuckDB port of Darling's <c>InvestigationRequestStore</c> behind the
+/// shared <see cref="IInvestigationRequestStore"/>. Each statement keeps the name of the Darling statement it ports, so the
+/// two can be read side by side. The semantics are Darling's: open or join within the 30-minute window, the route limits
+/// with <c>limit_reached</c> journaled once per route-hour, a claim as one conditional UPDATE, a report accepted from the
+/// current claim until a newer claim supersedes it, and a sweep that only expires.
+///
+/// <para><b>Locking.</b> Darling takes advisory locks (the group and the route) and a row lock (the submit); DuckDB has
+/// neither, so every write here holds <see cref="DuckDbInitializer.AcquireWriteLock"/> with the 5-second budget
+/// (<see cref="LocalDataService.DefaultWriteLockBudget"/>) for its whole transaction. That lock is process-wide and
+/// covers what the three PostgreSQL locks covered: no two writers of this store interleave, and every max + 1 id is
+/// assigned under it. The lock is NoRecursion, so no method calls another store method while it holds the lock. A read
+/// takes no lock: it assigns no id, and DuckDB gives each connection a consistent snapshot.</para>
+///
+/// <para><b>Times.</b> Every time is bound from the injected clock, truncated to the microsecond DuckDB keeps, and read
+/// back with <see cref="DateTimeKind.Utc"/>. DuckDB's <c>current_timestamp</c> is never used: it is local-zone.</para>
+/// </summary>
+public sealed class DuckDbInvestigationStore : IInvestigationRequestStore
+{
+    /* Darling's GroupLockSql and RouteLockSql (pg_advisory_xact_lock) have no twin: the write lock each write holds for its
+       whole transaction covers them. SubmitLockSql keeps its name; its FOR UPDATE is the write lock. */
+
+    internal const string FindJoinSql = @"
+SELECT r.request_id
+FROM investigation_requests AS r
+WHERE r.server_id = $1
+  AND r.family = $2
+  AND r.state IN ('open', 'claimed')
+  AND r.expires_at > $3
+  AND r.opened_at >= $3 - INTERVAL 30 MINUTE
+  AND $4 <= r.window_until
+ORDER BY r.opened_at DESC
+LIMIT 1";
+
+    internal const string JoinSql = @"
+UPDATE investigation_requests
+SET alert_count = alert_count + 1,
+    last_alert_at = greatest(last_alert_at, $2)
+WHERE request_id = $1";
+
+    internal const string CountRouteSql = @"
+SELECT count(*) FILTER (WHERE opened_at > $2 - INTERVAL 1 HOUR),
+       count(*)
+FROM investigation_requests
+WHERE route_id = $1
+  AND opened_at > $2 - INTERVAL 1 DAY";
+
+    internal const string OpenSql = @"
+INSERT INTO investigation_requests
+    (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
+     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + INTERVAL 30 MINUTE, $10, $10 + to_minutes(CAST($11 AS BIGINT)), $12)";
+
+    /* One row per key of the bound list; the ids continue from the table's max under the write lock. */
+    internal const string AlertRowsSql = @"
+INSERT INTO investigation_request_alerts
+    (request_alert_id, request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted,
+     detail_text, context_json)
+SELECT (SELECT coalesce(max(request_alert_id), 0) FROM investigation_request_alerts) + row_number() OVER (),
+       $1, $2, $3, $4, k.key, $6, $7, $8, $9, $10
+FROM (SELECT unnest($5::VARCHAR[]) AS key) AS k";
+
+    /* InvestigationDuckDbSpikeTests (a): a NULL once_key never conflicts, and a repeated key inserts nothing, so Darling's
+       partial-index arbiter (WHERE once_key IS NOT NULL) is not needed. */
+    internal const string JournalSql = @"
+INSERT INTO investigation_journal (journal_id, event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
+VALUES ((SELECT coalesce(max(journal_id), 0) + 1 FROM investigation_journal), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (once_key) DO NOTHING";
+
+    internal const string AgentJournalCountSql = @"
+SELECT count(*)
+FROM investigation_journal
+WHERE request_id = $1
+  AND actor LIKE 'agent:%'";
+
+    internal const string ClaimSql = @"
+UPDATE investigation_requests
+SET state = 'claimed',
+    claimed_by = $2,
+    claim_id = $3,
+    claimed_at = $4,
+    lease_until = $4 + to_minutes(CAST(lease_minutes AS BIGINT)),
+    claim_count = claim_count + 1
+WHERE request_id = $1
+  AND (state = 'open' OR (state = 'claimed' AND lease_until < $4))
+  AND claim_count < 3
+  AND expires_at > $4
+RETURNING lease_until, claim_count, server_id";
+
+    internal const string ClaimWhySql = @"
+SELECT state, lease_until, claim_count, expires_at, server_id
+FROM investigation_requests
+WHERE request_id = $1";
+
+    internal const string SubmitLockSql = @"
+SELECT state, claim_id, server_id, first_metric, first_dedup_key, story_path_hash
+FROM investigation_requests
+WHERE request_id = $1";
+
+    internal const string ReportInsertSql = @"
+INSERT INTO investigation_reports
+    (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary,
+     evidence, server_id, metric_name, dedup_key, story_path_hash)
+VALUES ((SELECT coalesce(max(report_id), 0) + 1 FROM investigation_reports), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        $12, $13, $14)";
+
+    internal const string ReportedSql = @"
+UPDATE investigation_requests
+SET state = 'reported', reported_at = $2, lease_until = NULL
+WHERE request_id = $1";
+
+    internal const string SetBriefSql = @"
+UPDATE investigation_requests
+SET brief_format = $3, brief = $4
+WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
+
+    internal const string ReleaseSql = @"
+UPDATE investigation_requests
+SET state = 'open', claimed_by = NULL, claim_id = NULL, claimed_at = NULL, lease_until = NULL
+WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
+
+    internal const string OpenedSinceSql = @"
+SELECT request_id, route_id, server_name, family, opened_at
+FROM investigation_requests
+WHERE opened_at > $1
+  AND ($2::INTEGER[] IS NULL OR list_contains($2::INTEGER[], route_id))
+ORDER BY opened_at, request_id::VARCHAR
+LIMIT $3";
+
+    internal const string ListSql = @"
+SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
+       effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at
+FROM (
+    SELECT r.*,
+           CASE
+               WHEN r.state IN ('open', 'claimed') AND r.expires_at <= $1 THEN 'expired'
+               WHEN r.state = 'claimed' AND r.lease_until < $1 AND r.claim_count >= 3 THEN 'expired'
+               WHEN r.state = 'open' AND r.claim_count >= 3 THEN 'expired'
+               WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
+               ELSE r.state
+           END AS effective_state
+    FROM investigation_requests AS r
+    WHERE ($3::INTEGER IS NULL OR r.server_id = $3)
+      AND ($4::VARCHAR IS NULL OR r.family = $4)
+) AS s
+WHERE ($2::VARCHAR IS NULL OR s.effective_state = $2)
+ORDER BY s.opened_at DESC, s.request_id::VARCHAR
+LIMIT $5";
+
+    internal const string RenewSql = @"
+UPDATE investigation_requests
+SET lease_until = least($3 + to_minutes(CAST(lease_minutes AS BIGINT)), expires_at)
+WHERE request_id = $1
+  AND claim_id = $2
+  AND state = 'claimed'
+  AND lease_until >= $3
+  AND expires_at > $3
+RETURNING lease_until";
+
+    internal const string ClaimHolderSql = @"
+SELECT claimed_by
+FROM investigation_requests
+WHERE request_id = $1
+  AND claim_id = $2";
+
+    internal const string RouteUseSql = @"
+SELECT route_id,
+       count(*) FILTER (WHERE opened_at > $1 - INTERVAL 1 HOUR),
+       count(*)
+FROM investigation_requests
+WHERE opened_at > $1 - INTERVAL 1 DAY
+GROUP BY route_id";
+
+    internal const string RefusalServerSql = @"
+SELECT server_id
+FROM investigation_requests
+WHERE request_id = $1";
+
+    /* Darling fills created_at and expires_at (90 days) by default; DuckDB's default clock is local-zone, so both are bound. */
+    internal const string ProposedNoteSql = @"
+INSERT INTO investigation_notes
+    (note_id, server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id, state, created_at, expires_at)
+SELECT (SELECT coalesce(max(note_id), 0) FROM investigation_notes) + 1,
+       r.server_id, r.story_path_hash, r.first_dedup_key, r.first_metric, $2, $3, r.request_id, 'pending', $4,
+       $4 + INTERVAL 90 DAY
+FROM investigation_requests AS r
+WHERE r.request_id = $1";
+
+    internal const string ReportsRequestsSql = @"
+SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.last_alert_at,
+       r.alert_count,
+       CASE
+           WHEN r.state IN ('open', 'claimed') AND r.expires_at <= $1 THEN 'expired'
+           WHEN r.state = 'claimed' AND r.lease_until < $1 AND r.claim_count >= 3 THEN 'expired'
+           WHEN r.state = 'open' AND r.claim_count >= 3 THEN 'expired'
+           WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
+           ELSE r.state
+       END AS effective_state,
+       r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief
+FROM investigation_requests AS r
+WHERE ($2::UUID IS NULL OR r.request_id = $2)
+  AND ($3::INTEGER IS NULL OR r.server_id = $3)
+  AND ($2::UUID IS NOT NULL OR r.opened_at >= $4)
+ORDER BY r.opened_at DESC, r.request_id::VARCHAR
+LIMIT $5";
+
+    internal const string ReportsSql = @"
+SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence
+FROM investigation_reports
+WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
+ORDER BY submitted_at DESC";
+
+    internal const string ReportsJournalSql = @"
+SELECT event_time, request_id, server_id, event, actor, reason, detail
+FROM investigation_journal
+WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
+ORDER BY event_time DESC, journal_id DESC
+LIMIT $2";
+
+    /* DuckDB has no writable CTE, so Darling's two sweep statements become three under one write lock and one
+       transaction: SweepLapsedSql as Darling's; SweepExpireSql's journal INSERT from a SELECT with the UPDATE's own
+       predicate; then SweepExpireUpdateSql. The INSERT runs first, while the rows still match. */
+    internal const string SweepLapsedSql = @"
+INSERT INTO investigation_journal (journal_id, event_time, request_id, server_id, event, actor, reason, once_key)
+SELECT (SELECT coalesce(max(journal_id), 0) FROM investigation_journal) + row_number() OVER (ORDER BY r.request_id::VARCHAR),
+       $1, r.request_id, r.server_id, 'lease_expired', 'service', r.claimed_by, 'lease_expired:' || r.claim_id::VARCHAR
+FROM investigation_requests AS r
+WHERE r.state = 'claimed' AND r.lease_until < $1
+ON CONFLICT (once_key) DO NOTHING";
+
+    internal const string SweepExpireSql = @"
+INSERT INTO investigation_journal (journal_id, event_time, request_id, server_id, event, actor, once_key)
+SELECT (SELECT coalesce(max(journal_id), 0) FROM investigation_journal) + row_number() OVER (ORDER BY r.request_id::VARCHAR),
+       $1, r.request_id, r.server_id, CASE WHEN r.expires_at > $1 THEN 'claims_exhausted' ELSE 'expired' END, 'service',
+       'expired:' || r.request_id::VARCHAR
+FROM investigation_requests AS r
+WHERE (r.state IN ('open', 'claimed') AND r.expires_at <= $1)
+   OR (r.state = 'claimed' AND r.lease_until < $1 AND r.claim_count >= 3)
+   OR (r.state = 'open' AND r.claim_count >= 3)
+ON CONFLICT (once_key) DO NOTHING";
+
+    internal const string SweepExpireUpdateSql = @"
+UPDATE investigation_requests
+SET state = 'expired'
+WHERE (state IN ('open', 'claimed') AND expires_at <= $1)
+   OR (state = 'claimed' AND lease_until < $1 AND claim_count >= 3)
+   OR (state = 'open' AND claim_count >= 3)";
+
+    /* Retention, as Darling's (DarlingRetention.InvestigationRetentionDays and InvestigationBriefRetentionDays): a finished
+       request and its journal keep a year, a brief 90 days. There is no ON DELETE CASCADE here, so a request's alert rows
+       and report go first, then the request, then the journal rows past the cutoff. Notes and profiles are configuration
+       and get no pass, as in Darling. */
+    internal const int RetentionDays = 365;
+
+    internal const int BriefRetentionDays = 90;
+
+    internal const string RetentionDoomedRequests = @"
+SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claimed') AND opened_at < $1";
+
+    internal const string RetentionAlertRowsSql =
+        "DELETE FROM investigation_request_alerts WHERE request_id IN (" + RetentionDoomedRequests + ")";
+
+    internal const string RetentionReportsSql =
+        "DELETE FROM investigation_reports WHERE request_id IN (" + RetentionDoomedRequests + ")";
+
+    internal const string RetentionRequestsSql =
+        "DELETE FROM investigation_requests WHERE state NOT IN ('open', 'claimed') AND opened_at < $1";
+
+    internal const string RetentionJournalSql = "DELETE FROM investigation_journal WHERE event_time < $1";
+
+    internal const string ClearBriefSql =
+        "UPDATE investigation_requests SET brief = NULL WHERE brief IS NOT NULL AND opened_at < $1";
+
+    private readonly DuckDbInitializer _db;
+    private readonly Func<DateTime> _utcNow;
+    private readonly TimeSpan _lockBudget;
+
+    /// <summary><paramref name="utcNow"/> is the clock (tests move it); it defaults to the wall clock.
+    /// <paramref name="lockBudget"/> bounds every wait for the write lock; it defaults to
+    /// <see cref="LocalDataService.DefaultWriteLockBudget"/> (5 s), the same budget Darling's store gives its locks.</summary>
+    public DuckDbInvestigationStore(DuckDbInitializer db, Func<DateTime>? utcNow = null, TimeSpan? lockBudget = null)
+    {
+        _db = db ?? throw new ArgumentNullException(nameof(db));
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _lockBudget = lockBudget ?? LocalDataService.DefaultWriteLockBudget;
+    }
+
+    private DateTime Now() => Micro(_utcNow());
+
+    /// <summary>A time as DuckDB keeps it: UTC, truncated to the microsecond (InvestigationDuckDbSpikeTests (d)).</summary>
+    internal static DateTime Micro(DateTime value)
+    {
+        var utc = DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        return new DateTime(utc.Ticks - utc.Ticks % 10, DateTimeKind.Utc);
+    }
+
+    /// <inheritdoc />
+    public async Task<InvestigationOpenResult> OpenOrJoinAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        var now = Now();
+        var alertTime = Micro(alert.AlertTimeUtc);
+        var keys = alert.DedupKeys.Where(k => !string.IsNullOrEmpty(k)).Distinct(StringComparer.Ordinal).ToArray();
+
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+
+        Guid? joinId = null;
+        using (var find = Command(connection, FindJoinSql, alert.ServerId, alert.Family, now, alertTime))
+        {
+            if (await find.ExecuteScalarAsync(cancellationToken) is Guid id)
+            {
+                joinId = id;
+            }
+        }
+
+        if (joinId is Guid join)
+        {
+            await ExecAsync(connection, JoinSql, cancellationToken, join, alertTime);
+            await InsertAlertRowsAsync(connection, join, alert, alertTime, keys, cancellationToken);
+            await JournalAsync(connection, now, join, alert.RouteId, alert.ServerId, "joined", "service",
+                alert.MetricName, null, null, cancellationToken);
+            transaction.Commit();
+            return new InvestigationOpenResult(InvestigationOpenOutcome.Joined, join);
+        }
+
+        long lastHour, lastDay;
+        using (var count = Command(connection, CountRouteSql, alert.RouteId, now))
+        using (var reader = await count.ExecuteReaderAsync(cancellationToken))
+        {
+            await reader.ReadAsync(cancellationToken);
+            lastHour = reader.GetInt64(0);
+            lastDay = reader.GetInt64(1);
+        }
+
+        if (lastHour >= alert.MaxPerHour || lastDay >= alert.MaxPerDay)
+        {
+            var which = lastHour >= alert.MaxPerHour ? "hourly" : "daily";
+            var detail = string.Create(CultureInfo.InvariantCulture,
+                $"{{\"limit\":\"{which}\",\"last_hour\":{lastHour},\"last_day\":{lastDay},\"max_per_hour\":{alert.MaxPerHour},\"max_per_day\":{alert.MaxPerDay}}}");
+            var onceKey = string.Create(CultureInfo.InvariantCulture, $"limit_reached:{alert.RouteId}:{now:yyyy-MM-ddTHH}");
+            await JournalAsync(connection, now, null, alert.RouteId, alert.ServerId, "limit_reached", "service",
+                which, detail, onceKey, cancellationToken);
+            transaction.Commit();
+            return new InvestigationOpenResult(InvestigationOpenOutcome.LimitReached, null);
+        }
+
+        var requestId = Guid.NewGuid();
+        await ExecAsync(connection, OpenSql, cancellationToken,
+            requestId, alert.RouteId, alert.ServerId, alert.ServerName, alert.Family, alert.MetricName,
+            keys.FirstOrDefault(), alert.StoryPathHash, alertTime, now, alert.ExpiryMinutes, alert.LeaseMinutes);
+        await InsertAlertRowsAsync(connection, requestId, alert, alertTime, keys, cancellationToken);
+        await JournalAsync(connection, now, requestId, alert.RouteId, alert.ServerId, "opened", "service",
+            alert.MetricName, null, null, cancellationToken);
+        transaction.Commit();
+        return new InvestigationOpenResult(InvestigationOpenOutcome.Opened, requestId);
+    }
+
+    /// <inheritdoc />
+    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default)
+    {
+        if (!InvestigationRules.IsValidAgentId(agentId))
+        {
+            /* Before the lock: RecordRefusalAsync takes it itself, and the lock does not nest. */
+            await RecordRefusalAsync(requestId, InvestigationRules.InvalidAgentId, "claim", "agent_id_invalid", null, cancellationToken);
+            return new InvestigationClaimResult(InvestigationClaimOutcome.AgentIdInvalid, null, null, 0, "agent_id_invalid");
+        }
+
+        var now = Now();
+        var claimId = Guid.NewGuid();
+        var actor = "agent:" + agentId;
+
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+
+        if (await JournalCappedAsync(connection, now, requestId, actor, "claim", cancellationToken))
+        {
+            transaction.Commit();
+            return new InvestigationClaimResult(InvestigationClaimOutcome.JournalCapped, null, null, 0, "journal_capped");
+        }
+
+        DateTime? claimedLease = null;
+        int claimedCount = 0, claimedServer = 0;
+        using (var claim = Command(connection, ClaimSql, requestId, agentId, claimId, now))
+        using (var reader = await claim.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                claimedLease = Utc(reader.GetDateTime(0));
+                claimedCount = reader.GetInt32(1);
+                claimedServer = reader.GetInt32(2);
+            }
+        }
+
+        if (claimedLease is DateTime leaseUntilClaimed)
+        {
+            await JournalAsync(connection, now, requestId, null, claimedServer, "claimed", actor,
+                null, null, "claimed:" + claimId.ToString(), cancellationToken);
+            transaction.Commit();
+            return new InvestigationClaimResult(InvestigationClaimOutcome.Claimed, claimId, leaseUntilClaimed, claimedCount, null);
+        }
+
+        InvestigationClaimOutcome outcome;
+        string reason;
+        int count = 0;
+        int? server = null;
+        using (var why = Command(connection, ClaimWhySql, requestId))
+        using (var reader = await why.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                outcome = InvestigationClaimOutcome.NotFound;
+                reason = "not_found";
+            }
+            else
+            {
+                var state = reader.GetString(0);
+                DateTime? leaseUntil = reader.IsDBNull(1) ? null : Utc(reader.GetDateTime(1));
+                count = reader.GetInt32(2);
+                var expiresAt = Utc(reader.GetDateTime(3));
+                server = reader.GetInt32(4);
+                (outcome, reason) = state switch
+                {
+                    "claimed" when leaseUntil >= now && expiresAt > now => (InvestigationClaimOutcome.AlreadyClaimed, "already_claimed"),
+                    "reported" => (InvestigationClaimOutcome.NotOpen, "reported"),
+                    "closed" => (InvestigationClaimOutcome.NotOpen, "closed"),
+                    _ when expiresAt <= now || state == "expired" => (InvestigationClaimOutcome.NotOpen, "expired"),
+                    _ when count >= InvestigationRules.MaxClaims => (InvestigationClaimOutcome.NotOpen, "claim_limit"),
+                    _ => (InvestigationClaimOutcome.NotOpen, state),
+                };
+            }
+        }
+
+        var onceKey = outcome == InvestigationClaimOutcome.NotFound
+            ? string.Create(CultureInfo.InvariantCulture, $"refused:claim:not_found:{now:yyyy-MM-ddTHH}")
+            : "refused:claim:" + requestId.ToString() + ":" + reason;
+        await JournalAsync(connection, now, outcome == InvestigationClaimOutcome.NotFound ? null : requestId, null, server,
+            "refused", actor, "claim:" + reason, null, onceKey, cancellationToken);
+        transaction.Commit();
+        return new InvestigationClaimResult(outcome, null, null, count, reason);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> SetBriefAsync(Guid requestId, Guid claimId, short briefFormat, string briefJson, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(briefJson);
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        return await ExecAsync(connection, SetBriefSql, cancellationToken, requestId, claimId, briefFormat, briefJson) == 1;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> ReleaseAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
+    {
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        return await ExecAsync(connection, ReleaseSql, cancellationToken, requestId, claimId) == 1;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Darling's V184 CHECKs hold the report caps in the database (root cause, evidence size, agent id); DuckDB's
+    /// tables carry no such CHECK, so this store refuses a report over a cap with an <see cref="ArgumentException"/> before
+    /// it writes anything, where PostgreSQL would raise 23514. The tool validates first, so only a caller that skips it
+    /// reaches this.</remarks>
+    public async Task<InvestigationSubmitOutcome> SubmitAsync(InvestigationReportSubmission report, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        if (!InvestigationRules.IsValidAgentId(report.AgentId))
+        {
+            await RecordRefusalAsync(report.RequestId, InvestigationRules.InvalidAgentId, "submit", "agent_id_invalid", null, cancellationToken);
+            return InvestigationSubmitOutcome.AgentIdInvalid;
+        }
+
+        var caps = InvestigationToolCore.CapProblems(report.RootCause, report.EvidenceJson);
+        if (caps.Count > 0)
+        {
+            throw new ArgumentException(string.Join(" ", caps.Select(c => c.Problem)), nameof(report));
+        }
+
+        var now = Now();
+        var actor = "agent:" + report.AgentId;
+
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+
+        string? state = null;
+        Guid? currentClaim = null;
+        int serverId = 0;
+        string? metric = null, dedupKey = null, story = null;
+        using (var command = Command(connection, SubmitLockSql, report.RequestId))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                state = reader.GetString(0);
+                currentClaim = reader.IsDBNull(1) ? null : reader.GetGuid(1);
+                serverId = reader.GetInt32(2);
+                metric = reader.GetString(3);
+                dedupKey = reader.IsDBNull(4) ? null : reader.GetString(4);
+                story = reader.IsDBNull(5) ? null : reader.GetString(5);
+            }
+        }
+
+        if (state is not null
+            && await JournalCappedAsync(connection, now, report.RequestId, actor, "submit", cancellationToken))
+        {
+            transaction.Commit();
+            return InvestigationSubmitOutcome.JournalCapped;
+        }
+
+        var outcome = state switch
+        {
+            null => InvestigationSubmitOutcome.NotFound,
+            "reported" => InvestigationSubmitOutcome.AlreadyReported,
+            "closed" => InvestigationSubmitOutcome.NotOpen,
+            _ when currentClaim != report.ClaimId => InvestigationSubmitOutcome.LeaseLost,
+            "claimed" or "expired" => InvestigationSubmitOutcome.Reported,
+            _ => InvestigationSubmitOutcome.LeaseLost,
+        };
+
+        if (outcome != InvestigationSubmitOutcome.Reported)
+        {
+            var reason = outcome switch
+            {
+                InvestigationSubmitOutcome.NotFound => "not_found",
+                InvestigationSubmitOutcome.AlreadyReported => "already_reported",
+                InvestigationSubmitOutcome.NotOpen => "closed",
+                _ => "lease_lost",
+            };
+            var onceKey = state is null
+                ? string.Create(CultureInfo.InvariantCulture, $"refused:submit:not_found:{now:yyyy-MM-ddTHH}")
+                : "refused:submit:" + report.RequestId.ToString() + ":" + reason;
+            await JournalAsync(connection, now, state is null ? null : report.RequestId, null, state is null ? null : serverId,
+                "refused", actor, "submit:" + reason, null, onceKey, cancellationToken);
+            transaction.Commit();
+            return outcome;
+        }
+
+        await ExecAsync(connection, ReportInsertSql, cancellationToken,
+            report.RequestId, report.ReportFormat, report.AgentId, report.ClaimId, now, report.Verdict,
+            report.RootCause, report.RootCauseFound, report.Summary, report.EvidenceJson, serverId,
+            metric, dedupKey, story);
+        if (!string.IsNullOrWhiteSpace(report.ProposedNote))
+        {
+            await ExecAsync(connection, ProposedNoteSql, cancellationToken, report.RequestId, report.ProposedNote, actor, now);
+        }
+
+        await ExecAsync(connection, ReportedSql, cancellationToken, report.RequestId, now);
+        await JournalAsync(connection, now, report.RequestId, null, serverId, "reported", actor,
+            report.Verdict, null, null, cancellationToken);
+        transaction.Commit();
+        return InvestigationSubmitOutcome.Reported;
+    }
+
+    /// <inheritdoc />
+    public async Task<InvestigationRenewResult> RenewAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
+    {
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, RenewSql, requestId, claimId, Now());
+        var lease = await command.ExecuteScalarAsync(cancellationToken);
+        return lease is DateTime until
+            ? new InvestigationRenewResult(true, Utc(until))
+            : new InvestigationRenewResult(false, null);
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> ClaimHolderAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
+    {
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, ClaimHolderSql, requestId, claimId);
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>> RouteUseAsync(CancellationToken cancellationToken = default)
+    {
+        var use = new Dictionary<int, (int LastHour, int LastDay)>();
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, RouteUseSql, Now());
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            use[reader.GetInt32(0)] = ((int)reader.GetInt64(1), (int)reader.GetInt64(2));
+        }
+
+        return use;
+    }
+
+    /// <inheritdoc />
+    public async Task RecordRefusalAsync(Guid requestId, string agentId, string operation, string reason, string? detailJson,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(operation);
+        ArgumentException.ThrowIfNullOrEmpty(reason);
+        if (!InvestigationRules.IsValidAgentId(agentId))
+        {
+            agentId = InvestigationRules.InvalidAgentId;
+        }
+
+        var now = Now();
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+        int? serverId = null;
+        using (var command = Command(connection, RefusalServerSql, requestId))
+        {
+            if (await command.ExecuteScalarAsync(cancellationToken) is int server)
+            {
+                serverId = server;
+            }
+        }
+
+        var onceKey = serverId is null
+            ? string.Create(CultureInfo.InvariantCulture, $"refused:{operation}:not_found:{reason}:{now:yyyy-MM-ddTHH}")
+            : "refused:" + operation + ":" + requestId.ToString() + ":" + reason;
+        await JournalAsync(connection, now, serverId is null ? null : requestId, null, serverId, "refused",
+            "agent:" + agentId, operation + ":" + reason, detailJson, onceKey, cancellationToken);
+        transaction.Commit();
+    }
+
+    /// <inheritdoc />
+    public async Task<(InvestigationRequestRow Row, string? Brief)?> ReadRequestAsync(Guid requestId,
+        CancellationToken cancellationToken = default)
+    {
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, ReportsRequestsSql, Now(), requestId, null, DateTime.MinValue, 1);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return (RequestRow(reader), reader.IsDBNull(16) ? null : reader.GetString(16));
+    }
+
+    /// <inheritdoc />
+    public async Task<InvestigationReportsRead> ReadReportsAsync(Guid? requestId, int? serverId, DateTime sinceUtc, int limit,
+        int journalLimit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(journalLimit, 1);
+        using var connection = await OpenAsync(cancellationToken);
+        var requests = new List<InvestigationRequestRow>();
+        string? brief = null;
+        using (var command = Command(connection, ReportsRequestsSql, Now(), requestId, serverId, Micro(sinceUtc), limit + 1))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                requests.Add(RequestRow(reader));
+                if (requestId is not null && !reader.IsDBNull(16))
+                {
+                    brief = reader.GetString(16);
+                }
+            }
+        }
+
+        var requestsTruncated = requests.Count > limit;
+        if (requestsTruncated)
+        {
+            requests.RemoveRange(limit, requests.Count - limit);
+        }
+
+        var reports = new List<InvestigationReportRow>();
+        var journal = new List<InvestigationJournalRow>();
+        if (requests.Count == 0)
+        {
+            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated);
+        }
+
+        var ids = requests.Select(r => r.RequestId.ToString("D")).ToList();
+        using (var command = Command(connection, ReportsSql, ids))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                reports.Add(new InvestigationReportRow(
+                    reader.GetGuid(0), reader.GetInt16(1), reader.GetString(2), Utc(reader.GetDateTime(3)), reader.GetString(4),
+                    reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
+            }
+        }
+
+        using (var command = Command(connection, ReportsJournalSql, ids, journalLimit + 1))
+        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                journal.Add(new InvestigationJournalRow(
+                    Utc(reader.GetDateTime(0)), reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                    reader.IsDBNull(2) ? null : reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
+            }
+        }
+
+        var journalTruncated = journal.Count > journalLimit;
+        if (journalTruncated)
+        {
+            journal.RemoveRange(journalLimit, journal.Count - journalLimit);
+        }
+
+        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<InvestigationRequestRow>> ListAsync(
+        string? state, int? serverId, string? family, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, ListSql, Now(), state, serverId, family, limit);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<InvestigationRequestRow>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(RequestRow(reader));
+        }
+
+        return rows;
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<InvestigationOpenedRow>> OpenedSinceAsync(
+        DateTime sinceUtc, IReadOnlyCollection<int>? routeIds, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, OpenedSinceSql,
+            Micro(sinceUtc), routeIds is { Count: > 0 } ? routeIds.ToList() : null, limit);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<InvestigationOpenedRow>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new InvestigationOpenedRow(
+                reader.GetGuid(0), reader.GetInt32(1), reader.GetString(2), reader.GetString(3), Utc(reader.GetDateTime(4))));
+        }
+
+        return rows;
+    }
+
+    /// <inheritdoc />
+    public async Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default)
+    {
+        var now = Now();
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+        var lapsed = await ExecAsync(connection, SweepLapsedSql, cancellationToken, now);
+        await ExecAsync(connection, SweepExpireSql, cancellationToken, now);
+        var expired = await ExecAsync(connection, SweepExpireUpdateSql, cancellationToken, now);
+        transaction.Commit();
+        return new InvestigationSweepResult(lapsed, expired);
+    }
+
+    /// <summary>
+    /// The retention pass (#5820, Darling's <c>InvestigationRetentionDays</c> and <c>InvestigationBriefRetentionDays</c>):
+    /// clears the brief of every request opened more than 90 days ago, and deletes every finished request (not open or
+    /// claimed) opened more than a year ago with its alert rows and report, and the journal rows older than a year. The
+    /// children go first: there is no cascade. Returns the requests deleted.
+    /// </summary>
+    public async Task<int> PurgeAsync(CancellationToken cancellationToken = default)
+    {
+        var now = Now();
+        var cutoff = now.AddDays(-RetentionDays);
+        using var writeLock = _db.AcquireWriteLock(_lockBudget);
+        using var connection = await OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
+        await ExecAsync(connection, ClearBriefSql, cancellationToken, now.AddDays(-BriefRetentionDays));
+        await ExecAsync(connection, RetentionAlertRowsSql, cancellationToken, cutoff);
+        await ExecAsync(connection, RetentionReportsSql, cancellationToken, cutoff);
+        var requests = await ExecAsync(connection, RetentionRequestsSql, cancellationToken, cutoff);
+        await ExecAsync(connection, RetentionJournalSql, cancellationToken, cutoff);
+        transaction.Commit();
+        return requests;
+    }
+
+    private static InvestigationRequestRow RequestRow(System.Data.Common.DbDataReader reader) => new(
+        reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
+        reader.GetString(5), Utc(reader.GetDateTime(6)), Utc(reader.GetDateTime(7)), reader.GetInt32(8),
+        reader.GetString(9), Utc(reader.GetDateTime(10)), Utc(reader.GetDateTime(11)),
+        reader.IsDBNull(12) ? null : reader.GetString(12),
+        reader.IsDBNull(13) ? null : Utc(reader.GetDateTime(13)),
+        reader.GetInt32(14),
+        reader.IsDBNull(15) ? null : Utc(reader.GetDateTime(15)));
+
+    private Task<int> InsertAlertRowsAsync(DuckDBConnection connection, Guid requestId, InvestigationAlert alert,
+        DateTime alertTime, string[] keys, CancellationToken cancellationToken)
+    {
+        /* A row per incident dedup key; an alert with no key still gets its one row (a list holding one NULL). */
+        var rowKeys = keys.Length == 0 ? new List<string?> { null } : keys.Cast<string?>().ToList();
+        var facts = alert.Facts;
+        return ExecAsync(connection, AlertRowsSql, cancellationToken,
+            requestId, alertTime, alert.ServerId, alert.MetricName, rowKeys,
+            facts?.CurrentValue, facts?.ThresholdValue, facts?.Muted,
+            DerivedStoreScrub.Text(facts?.DetailText), DerivedStoreScrub.Json(facts?.ContextJson));
+    }
+
+    /// <summary>True when the request already holds <see cref="InvestigationRules.MaxAgentJournalRows"/> agent-written
+    /// rows; then journals <c>journal_capped</c> once per request. Runs under the caller's write lock, so the count and
+    /// the write that follows it are not interleaved by another agent call (Darling's count could be passed by calls in
+    /// flight; this one cannot).</summary>
+    private async Task<bool> JournalCappedAsync(DuckDBConnection connection, DateTime now, Guid requestId, string actor,
+        string operation, CancellationToken cancellationToken)
+    {
+        long rows;
+        using (var count = Command(connection, AgentJournalCountSql, requestId))
+        {
+            rows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        }
+
+        if (rows < InvestigationRules.MaxAgentJournalRows)
+        {
+            return false;
+        }
+
+        await JournalAsync(connection, now, requestId, null, null, "journal_capped", actor, operation,
+            null, "journal_capped:" + requestId.ToString(), cancellationToken);
+        return true;
+    }
+
+    private static Task<int> JournalAsync(DuckDBConnection connection, DateTime now, Guid? requestId, int? routeId, int? serverId,
+        string journalEvent, string actor, string? reason, string? detailJson, string? onceKey, CancellationToken cancellationToken) =>
+        ExecAsync(connection, JournalSql, cancellationToken,
+            now, requestId, routeId, serverId, journalEvent, actor, reason, detailJson, onceKey);
+
+    private async Task<DuckDBConnection> OpenAsync(CancellationToken cancellationToken)
+    {
+        var connection = _db.CreateConnection();
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    private static DuckDBCommand Command(DuckDBConnection connection, string sql, params object?[] values)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var value in values)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = value switch
+            {
+                null => DBNull.Value,
+                DateTime time => Micro(time),
+                _ => value,
+            } });
+        }
+
+        return command;
+    }
+
+    private static async Task<int> ExecAsync(DuckDBConnection connection, string sql, CancellationToken cancellationToken,
+        params object?[] values)
+    {
+        using var command = Command(connection, sql, values);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static DateTime Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
+}

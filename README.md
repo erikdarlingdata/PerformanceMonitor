@@ -53,7 +53,7 @@ These steps are for Windows. For Linux, the full steps, and the web dashboard, r
 | [Tabs](docs/tabs.md) | What each tab shows |
 | [Alerts and notifications](docs/alerts.md) | Alert types, channels, routes, email |
 | [Agent job monitoring](docs/agent-job-monitoring.md) | Running SQL Agent jobs and jobs that run longer than expected |
-| [MCP server](docs/mcp-server.md) | Setup and the tool list for AI analysis |
+| [MCP server](docs/mcp-server.md) | Setup, the tool list and the Lite investigation tools for AI analysis |
 | [Authentication](docs/authentication.md) | Authentication types and credential profiles |
 | [Permissions](docs/permissions.md) | Grants for on-premises, Azure, and AWS RDS |
 | [Platform notes](docs/platform-notes.md) | AWS RDS and Aurora configuration |

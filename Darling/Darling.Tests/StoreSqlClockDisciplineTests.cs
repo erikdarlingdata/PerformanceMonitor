@@ -63,7 +63,7 @@ public sealed class StoreSqlClockDisciplineTests
 {
     /* Floors, so the scan cannot pass by finding nothing. Measured on dev: 602 files, 20,843 string literal
        bodies welded into 1,681 SQL-shaped UNITS (815 units weld two or more bodies; the widest welds 55),
-       57 naive timestamp column names. Set well below those so ordinary growth never trips them, but high
+       110 naive timestamp column names in Darling's store DDL and 33 in Lite's (#5820: scraped per store, floors 80 and 25). Set well below those so ordinary growth never trips them, but high
        enough that a broken glob or a desynchronised literal walk fails instead of reporting a clean bill of
        health. The column-vocabulary floor is the one that matters most: the discriminator needs those names,
        and a DDL scrape that quietly returned four of them would make every offender below invisible while
@@ -76,7 +76,8 @@ public sealed class StoreSqlClockDisciplineTests
     private const int MinimumFilesScanned = 200;
     private const int MinimumLiteralsScanned = 12_000;
     private const int MinimumSqlLiteralsScanned = 1_200;
-    private const int MinimumTimestampColumnsKnown = 40;
+    private const int MinimumDarlingTimestampColumnsKnown = 80;
+    private const int MinimumLiteTimestampColumnsKnown = 25;
 
     /// <summary>
     /// Column NAMES whose timestamp frame depends on which table they are in, so a name-keyed scan cannot
@@ -132,29 +133,40 @@ public sealed class StoreSqlClockDisciplineTests
     [Fact]
     public void NoStoreSqlComparesANaiveTimestampToABareClock()
     {
-        var columns = NaiveTimestampColumns();
+        /* #5820: one vocabulary PER STORE. A name is naive in one store and timestamptz in the other (Lite's DuckDB
+           investigation tables declare expires_at, lease_until, submitted_at as TIMESTAMP; Darling's PostgreSQL ones
+           declare them timestamptz), and a union flagged Darling's correct timestamptz-vs-now() comparisons. Each
+           store's files are judged with the names ITS OWN DDL declares naive. */
+        var darlingColumns = NaiveTimestampColumns(StoreKind.Darling);
+        var liteColumns = NaiveTimestampColumns(StoreKind.Lite);
 
         Assert.True(
-            columns.Count >= MinimumTimestampColumnsKnown,
-            $"only {columns.Count} naive timestamp column names were scraped from the store DDL (floor "
-            + $"{MinimumTimestampColumnsKnown}) — the discriminator is blind without them, so this scan "
+            darlingColumns.Count >= MinimumDarlingTimestampColumnsKnown,
+            $"only {darlingColumns.Count} naive timestamp column names were scraped from Darling's store DDL (floor "
+            + $"{MinimumDarlingTimestampColumnsKnown}) — the discriminator is blind without them, so this scan "
+            + "would pass vacuously. Check the DDL globs below.");
+        Assert.True(
+            liteColumns.Count >= MinimumLiteTimestampColumnsKnown,
+            $"only {liteColumns.Count} naive timestamp column names were scraped from Lite's store DDL (floor "
+            + $"{MinimumLiteTimestampColumnsKnown}) — the discriminator is blind without them, so this scan "
             + "would pass vacuously. Check the DDL globs below.");
 
         /* collection_time is the column every windowed read is written against; naming it explicitly means a
            scrape that collects 40 obscure names and misses the load-bearing one still fails. */
-        Assert.Contains("collection_time", columns);
+        Assert.Contains("collection_time", darlingColumns);
+        Assert.Contains("collection_time", liteColumns);
 
         var files = 0;
         var literals = 0;
         var sqlUnits = 0;
         var offenders = new List<string>();
 
-        foreach (var path in StoreSourceFiles())
+        foreach (var (path, store) in StoreSourceFiles())
         {
             files++;
             var text = File.ReadAllText(path);
             var name = Path.GetFileName(path);
-            var scan = ScanSource(text, columns);
+            var scan = ScanSource(text, store == StoreKind.Lite ? liteColumns : darlingColumns);
 
             literals += scan.Literals;
             sqlUnits += scan.SqlUnits;
@@ -270,6 +282,42 @@ public sealed class StoreSqlClockDisciplineTests
                 MixedClockComparisons(sql, columns).Any(),
                 "the discriminator FLAGGED a benign form: " + sql
                     + " => " + string.Join("; ", MixedClockComparisons(sql, columns)));
+        }
+    }
+
+    /// <summary>
+    /// #5820: the vocabulary is per store. A name declared naive in Lite's DuckDB DDL and <c>timestamptz</c> in
+    /// Darling's PostgreSQL DDL is NOT an offender when a Darling file compares it to <c>now()</c> (timestamptz
+    /// against timestamptz is correct), and IS one when a Lite file does. Pinned on fixture DDL, then on the real
+    /// stores: Lite declares the investigation names naive, Darling does not.
+    /// </summary>
+    [Fact]
+    public void ANameNaiveInLiteAndTimestamptzInDarling_IsJudgedPerStore()
+    {
+        var liteDdl = "CREATE TABLE investigation_requests (request_id VARCHAR, expires_at TIMESTAMP NOT NULL, lease_until TIMESTAMP)";
+        var darlingDdl = "CREATE TABLE investigation_requests (request_id text, expires_at timestamptz NOT NULL, lease_until timestamptz)";
+        var liteColumns = DeclaredNaiveColumns("const string Ddl = @\"" + liteDdl + "\";");
+        var darlingColumns = DeclaredNaiveColumns("const string Ddl = @\"" + darlingDdl + "\";");
+
+        Assert.Contains("expires_at", liteColumns);
+        Assert.DoesNotContain("expires_at", darlingColumns);
+
+        var sql = "SELECT 1 FROM investigation_requests AS r WHERE r.expires_at <= now()";
+
+        Assert.False(
+            MixedClockComparisons(sql, darlingColumns).Any(),
+            "a Darling timestamptz column compared with now() was flagged by a name Lite declares naive");
+        Assert.True(
+            MixedClockComparisons(sql, liteColumns).Any(),
+            "a Lite naive column compared with a bare now() was not flagged");
+
+        var darlingReal = NaiveTimestampColumns(StoreKind.Darling);
+        var liteReal = NaiveTimestampColumns(StoreKind.Lite);
+
+        foreach (var name in new[] { "expires_at", "lease_until", "submitted_at" })
+        {
+            Assert.Contains(name, liteReal);
+            Assert.DoesNotContain(name, darlingReal);
         }
     }
 
@@ -901,41 +949,26 @@ public sealed class StoreSqlClockDisciplineTests
 
     /* ---------------- corpus ---------------- */
 
+    private enum StoreKind
+    {
+        Darling,
+        Lite,
+    }
+
     /// <summary>
-    /// Column names declared <c>timestamp</c> / <c>TIMESTAMP</c> (never <c>timestamptz</c>) by either store's
-    /// DDL. Scraped from the DDL's own literals rather than listed here, so a column added by a new migration
-    /// rung is covered the day it lands — and read through the literal walk, so a name written in a comment
-    /// cannot enter the vocabulary.
+    /// Column names declared <c>timestamp</c> / <c>TIMESTAMP</c> (never <c>timestamptz</c>) by ONE store's DDL
+    /// (#5820: per store, because a name can be naive in one and timestamptz in the other). Scraped from the
+    /// DDL's own literals rather than listed here, so a column added by a new migration rung is covered the day
+    /// it lands — and read through the literal walk, so a name written in a comment cannot enter the vocabulary.
     /// </summary>
-    private static HashSet<string> NaiveTimestampColumns([CallerFilePath] string thisFile = "")
+    private static HashSet<string> NaiveTimestampColumns(StoreKind store, [CallerFilePath] string thisFile = "")
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var declaration = new Regex(
-            @"(?:^|[(,])\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s+timestamp\b(?!\s*(?:with|tz))",
-            RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-        foreach (var path in DdlFiles(thisFile))
+        foreach (var path in DdlFiles(store, thisFile))
         {
-            var text = File.ReadAllText(path);
-
-            /* The same welded units the SQL scan reads, not raw bodies, because a DDL literal assembled by
-               concatenation splits its own column list and this vocabulary is what the discriminator has -
-               a name it never learns is an offender it cannot see. Measured, this changes nothing today:
-               57 names either way, because every rung's DDL is one literal. It is here so the two sites
-               cannot disagree about what a literal IS, which is the way the split above went unnoticed. */
-            foreach (var (_, body, _) in ConcatenatedLiteralUnits(text))
-            {
-                foreach (Match match in declaration.Matches(body))
-                {
-                    names.Add(match.Groups["name"].Value);
-                }
-            }
+            names.UnionWith(DeclaredNaiveColumns(File.ReadAllText(path)));
         }
-
-        /* `timestamp` is the type keyword, not a column; it turns up when a cast is written across a line
-           break inside a DDL literal. Left in, it would match every SQL literal that casts anything. */
-        names.Remove("timestamp");
 
         foreach (var ambiguous in AmbiguousFrameColumns)
         {
@@ -945,14 +978,40 @@ public sealed class StoreSqlClockDisciplineTests
         return names;
     }
 
-    private static IEnumerable<string> DdlFiles(string thisFile)
+    /// <summary>The naive-timestamp column names one source text declares, through the welded literal units.</summary>
+    private static HashSet<string> DeclaredNaiveColumns(string text)
     {
-        foreach (var dir in new[] { StorageDir(thisFile), LiteDir(thisFile, "Database") })
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var declaration = new Regex(
+            @"(?:^|[(,])\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s+timestamp\b(?!\s*(?:with|tz))",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+        /* The same welded units the SQL scan reads, not raw bodies, because a DDL literal assembled by
+           concatenation splits its own column list and this vocabulary is what the discriminator has -
+           a name it never learns is an offender it cannot see. */
+        foreach (var (_, body, _) in ConcatenatedLiteralUnits(text))
         {
-            foreach (var path in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+            foreach (Match match in declaration.Matches(body))
             {
-                yield return path;
+                names.Add(match.Groups["name"].Value);
             }
+        }
+
+        /* `timestamp` is the type keyword, not a column; it turns up when a cast is written across a line
+           break inside a DDL literal. Left in, it would match every SQL literal that casts anything. */
+        names.Remove("timestamp");
+
+        return names;
+    }
+
+    private static IEnumerable<string> DdlFiles(StoreKind store, string thisFile)
+    {
+        var dir = store == StoreKind.Lite ? LiteDir(thisFile, "Database") : StorageDir(thisFile);
+
+        foreach (var path in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+        {
+            yield return path;
         }
     }
 
@@ -968,20 +1027,20 @@ public sealed class StoreSqlClockDisciplineTests
     /// project carries 225 <c>collection_time</c> references across its SQL literals — the exact corpus this
     /// scan exists to judge.</para>
     /// </summary>
-    private static IEnumerable<string> StoreSourceFiles([CallerFilePath] string thisFile = "")
+    private static IEnumerable<(string Path, StoreKind Store)> StoreSourceFiles([CallerFilePath] string thisFile = "")
     {
         var roots = new[]
         {
-            StorageDir(thisFile),
-            ServiceDir(thisFile),
-            ViewerDir(thisFile),
-            AnalysisDir(thisFile),
-            LiteDir(thisFile, "Services"),
-            LiteDir(thisFile, "Database"),
-            LiteDir(thisFile, "Analysis"),
+            (StorageDir(thisFile), StoreKind.Darling),
+            (ServiceDir(thisFile), StoreKind.Darling),
+            (ViewerDir(thisFile), StoreKind.Darling),
+            (AnalysisDir(thisFile), StoreKind.Darling),
+            (LiteDir(thisFile, "Services"), StoreKind.Lite),
+            (LiteDir(thisFile, "Database"), StoreKind.Lite),
+            (LiteDir(thisFile, "Analysis"), StoreKind.Lite),
         };
 
-        foreach (var root in roots)
+        foreach (var (root, store) in roots)
         {
             foreach (var path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
             {
@@ -991,7 +1050,7 @@ public sealed class StoreSqlClockDisciplineTests
                     continue;
                 }
 
-                yield return path;
+                yield return (path, store);
             }
         }
     }

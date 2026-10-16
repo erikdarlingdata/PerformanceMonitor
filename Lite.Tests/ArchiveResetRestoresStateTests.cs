@@ -253,6 +253,40 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM collector_state WHERE server_id = 1 AND collector_name = 'default_trace_events' AND state_key = 'last_file' AND state_value = 'log_42.trc'"));
     }
 
+    private const string Request = "11111111-2222-3333-4444-555555555555";
+
+    /// <summary>One row in each of the six investigation tables (#5820), keyed to one reported request.</summary>
+    private static readonly string[] InvestigationSeed =
+    [
+        $"INSERT INTO investigation_requests (request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, window_until, state, opened_at, expires_at, claim_id, claim_count, reported_at) VALUES ('{Request}', 1, 7, 'srv-7', 'blocking', 'Blocking', {Ts(T1)}, {Ts(T1)}, {Ts(T2)}, 'reported', {Ts(T1)}, {Ts(T3)}, '{Request}', 1, {Ts(T2)})",
+        $"INSERT INTO investigation_request_alerts (request_alert_id, request_id, alert_time, server_id, metric_name, dedup_key) VALUES (1, '{Request}', {Ts(T1)}, 7, 'Blocking', '7:Blocking')",
+        $"INSERT INTO investigation_reports (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, evidence, server_id) VALUES (1, '{Request}', 1, 'agent-a', '{Request}', {Ts(T2)}, 'real', 'a long blocking chain', true, '[]', 7)",
+        $"INSERT INTO investigation_journal (journal_id, event_time, request_id, server_id, event, actor, once_key) VALUES (1, {Ts(T1)}, '{Request}', 7, 'claimed', 'agent:agent-a', 'claimed:{Request}')",
+        $"INSERT INTO investigation_notes (note_id, server_id, note_text, author, source_request_id, state, created_at, expires_at, decided_at, decided_by) VALUES (1, 7, 'the nightly ETL holds this lock', 'agent:agent-a', '{Request}', 'approved', {Ts(T2)}, {Ts(T3)}, {Ts(T3)}, 'person:admin')",
+        $"INSERT INTO agent_environment_profiles (profile_id, scope_server_id, profile_text, modified_at) VALUES (1, 7, 'a reporting server', {Ts(T3)})"
+    ];
+
+    /// <summary>#5820: the six investigation tables survive a size-triggered reset the way the route table does, through
+    /// <see cref="ArchiveService.PreservedConfigTables"/>: a reported request with its alert row, report and journal, an
+    /// approved note and an environment profile all come back, and the store reads the report through them.</summary>
+    [Fact]
+    public async Task InvestigationTables_SurviveRealReset_WithTheReportAndTheApprovedNote()
+    {
+        await SeedAsync(InvestigationSeed);
+        await ResetAsync();
+
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_requests WHERE request_id = '{Request}' AND state = 'reported'"));
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_request_alerts WHERE request_id = '{Request}'"));
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_reports WHERE request_id = '{Request}' AND verdict = 'real'"));
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM investigation_journal WHERE once_key = 'claimed:{Request}'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM investigation_notes WHERE state = 'approved' AND decided_by = 'person:admin'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM agent_environment_profiles WHERE scope_server_id = 7"));
+
+        var read = await new DuckDbInvestigationStore(_duckDb).ReadReportsAsync(
+            Guid.Parse(Request), null, DateTime.MinValue, 10, 10, TestContext.Current.CancellationToken);
+        Assert.Equal("a long blocking chain", Assert.Single(read.Reports).RootCause);
+    }
+
     [Fact]
     public async Task EdgeTriggerWatermarkLoads_AfterRealReset_ReturnTheSeededRows()
     {
@@ -277,7 +311,9 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     [
         "config_mute_rules", "dismissed_archive_alerts", "config_edge_trigger_watermarks",
         "config_incident_occurrences", "config_alert_persistence_state", "config_database_state_expected",
-        "collector_state", "analysis_muted", "server_tags", "server_tag_map", "notification_routes"
+        "collector_state", "analysis_muted", "server_tags", "server_tag_map", "notification_routes",
+        "investigation_requests", "investigation_request_alerts", "investigation_reports", "investigation_journal",
+        "investigation_notes", "agent_environment_profiles"
     ];
 
     /// <summary>Rows seeded per preserved table; two in the two tables the pins also count by value.</summary>
@@ -293,10 +329,17 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         ["analysis_muted"] = 1,
         ["server_tags"] = 1,
         ["server_tag_map"] = 1,
-        ["notification_routes"] = 1
+        ["notification_routes"] = 1,
+        ["investigation_requests"] = 1,
+        ["investigation_request_alerts"] = 1,
+        ["investigation_reports"] = 1,
+        ["investigation_journal"] = 1,
+        ["investigation_notes"] = 1,
+        ["agent_environment_profiles"] = 1
     };
 
     private Task SeedAllPreservedTablesAsync() => SeedAsync(
+    [
         $"INSERT INTO config_mute_rules (id, enabled, created_at_utc, reason, metric_name) VALUES ('m1', true, {Ts(T1)}, 'first', 'High CPU')",
         $"INSERT INTO config_mute_rules (id, enabled, created_at_utc, reason, server_name) VALUES ('m2', false, {Ts(T2)}, 'second', 'S9')",
         $"INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name, dismissed_at) VALUES ({Ts(T1)}, 1, 'Deadlocks', {Ts(T3)})",
@@ -310,7 +353,9 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         "INSERT INTO analysis_muted (mute_id, server_id, database_name, story_path_hash, story_path, reason) VALUES (41, 1, 'DbA', 'hash41', 'a>b>c', 'noise')",
         "INSERT INTO server_tags (id, name, parent_id, sort_order, colour) VALUES (7, 'Prod', NULL, 3, '#ff0000')",
         "INSERT INTO server_tag_map (server_id, tag_id) VALUES (1, 7)",
-        "INSERT INTO notification_routes (route_id, metric_match, scope_tag_id, teams_set, smtp_recipients, enabled) VALUES (3, '*', 7, true, 'ops@example.test', true)");
+        "INSERT INTO notification_routes (route_id, metric_match, scope_tag_id, teams_set, smtp_recipients, enabled) VALUES (3, '*', 7, true, 'ops@example.test', true)",
+        .. InvestigationSeed
+    ]);
 
     private async Task AssertAllPreservedRowsBackAsync()
     {

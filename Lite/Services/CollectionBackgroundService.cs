@@ -773,6 +773,19 @@ public class CollectionBackgroundService : BackgroundService
                    alone so the next housekeeping tick retries instead of waiting out the interval. */
                 if (await _retentionService.CleanupOldArchivesAndRefreshViewsAsync(_duckDb, RetentionService.ArchiveRetentionMonths) == null)
                     return;
+
+                /* #5820: the investigation tables' retention, as Darling's daily purge (a finished request and its
+                   journal a year, a brief 90 days). They are not archived, so nothing else ages them out. Its own
+                   catch: a busy lock or a failed purge is retried at the next pass and does not hold the archive
+                   cleanup's stamp back. */
+                try
+                {
+                    await new PerformanceMonitorLite.Database.DuckDbInvestigationStore(_duckDb).PurgeAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "Investigation retention skipped; the next retention pass retries");
+                }
             }
             else
                 _retentionService.CleanupOldArchives(retentionMonths: RetentionService.ArchiveRetentionMonths);

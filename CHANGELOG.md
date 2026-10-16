@@ -23,6 +23,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Added
 
+- **Lite: Level 1 agent investigations** ([#5820]) - when an alert fires on a notification route whose agent level is 1, Lite opens an investigation request for it, and when `mcp_allow_investigations` is on with MCP writes off it serves four tools (`list_investigation_requests`, `claim_investigation_request`, `submit_investigation_report`, `get_investigation_reports`) so a local agent can claim the request, read its brief, and file a report that Lite keeps beside the alert. Requests, reports, notes and the journal live in Lite's own DuckDB file; nothing writes to a monitored server; with both MCP settings on the investigation tools stay off and Lite logs one Critical line saying so.
 - **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
 
 ### Fixed
@@ -5213,3 +5214,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
 [#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
 [#5682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5682
+[#5820]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/5820

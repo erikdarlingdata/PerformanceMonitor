@@ -27,9 +27,23 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 93 tools; **Darling** exposes 186 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 97 tools (89 by default); **Darling** exposes 186 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
 
 By default Lite serves its 89 read tools only. Its four write tools, `mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled` and `delete_notification_route`, are served when `mcp_allow_writes` is `true` in `settings.json`. Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. Lite's MCP endpoint has no token or caller check, so with the setting on, any program on this computer that can reach the port can mute or unmute findings, and disable or delete notification routes. Leave it off unless you trust every program that runs on this computer.
+
+Two more file settings, both off or at `full` by default and read at start (restart Lite after a change). `mcp_allow_investigations` serves the four investigation tools (`list_investigation_requests`, `claim_investigation_request`, `submit_investigation_report` and `get_investigation_reports`) only when it is `true` AND `mcp_allow_writes` is `false`; with both on, the investigation tools stay off and Lite logs one Critical line. There is no token, so with it on any program on this computer that can reach the port can list, claim and report on investigation requests. `mcp_data_detail` sets how much collected data the tool answers hand out: `full` (the default), `maskLiterals` (statement text keeps its shape with every literal replaced) or `metadataOnly` (statement text, error text, plans and input buffers are withheld, and logins and host names are masked). Any other word keeps the MCP endpoint off and the log names the accepted words.
+
+#### Investigation tools (Lite)
+
+The four investigation tools let your own agent pick up an alert, look into it with the read tools and report back. Lite runs no agent; you bring one (a starter set of instructions for it is in [Lite/AGENTS.example.md](../Lite/AGENTS.example.md)).
+
+- **Turn them on.** Set `mcp_allow_investigations` to `true` and leave `mcp_allow_writes` at `false` in `settings.json`, then restart Lite. They are served only in that combination. With both settings on, the investigation tools stay off and Lite logs one Critical line; turn writes off to get them. With `mcp_allow_investigations` off, a call to one fails as an unknown tool.
+- **Pick the alerts.** In a notification route's dialog, set **Agent investigation** to `Investigate` on the routes whose alerts your agent should look at. `Off` stops it for that route; `Inherit` takes the setting from a less specific route. The route also sets a limit per hour and per day, and how long a claim lasts.
+- **The tools.** `list_investigation_requests` lists the open requests. `claim_investigation_request` takes one and returns its brief (what fired, what changed, earlier reports and the next calls to make), a `claim_id` and a lease. `submit_investigation_report` returns the agent's verdict (`real`, `false_positive` or `needs_person`), root cause, the calls it made as evidence and a summary. `get_investigation_reports` reads the reports and the journal back.
+- **The flow.** Alerts of one server and one alert family within 30 minutes join one request. The agent lists, claims, makes the calls the brief names and submits one report under its `claim_id`. To keep a request past its lease it claims again with the same `claim_id`. A request takes at most three claims and then expires.
+- **Anyone on this computer can claim.** Lite's MCP endpoint has no token or caller check, so any program on this computer that can reach the port can list, claim and report on requests. A claim only stops two agents working one request; it does not say who the agent is. Reports are what an agent said, not findings.
+- **What it cannot do.** The agent investigates; it changes nothing on a monitored server and proposes no action (`action_proposals` is refused). An optional `proposed_note` stays pending: Lite has no screen to approve it, so it does not reach a later brief.
+- **Data detail.** `mcp_data_detail` masks briefs and reports the same way it masks every other answer.
 
 | Category | Tools |
 |---|---|

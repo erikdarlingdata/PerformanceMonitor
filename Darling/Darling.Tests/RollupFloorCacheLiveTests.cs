@@ -60,7 +60,12 @@ public sealed class RollupFloorCacheLiveTests
         }
 
         var now = LiveClock.Now();
-        var oldest = now.AddDays(-3);
+        /* #5905: the start is a fixed hour inside a one-day chunk (SeedStart), not "now minus three days". A refresh window
+           that starts at 23:01-23:59 rounds UP to the next midnight, so a clock-relative start in that hour left the first
+           materialized bucket sitting exactly on the oldest chunk's range start. The cache is right to treat that floor as
+           the chunk's own start (nothing in the chunk can be earlier) and skip the bounded earlier-floor read, so the
+           guard below that counts that read saw 0 instead of 1, only late in the UTC day. */
+        var oldest = SeedStart(now);
 
         /* ── 1. Plant three days of collect.query_store_stats and materialize the interval-honest hourly
                rollup over all of it. ── */

@@ -27,6 +27,9 @@ public sealed class McpHostService : BackgroundService
     private readonly ScheduleManager? _scheduleManager;
     private readonly int _port;
     private readonly bool _allowWrites;
+    private readonly bool _allowInvestigations;
+    private readonly McpDataDetail _dataDetail;
+    private readonly IInvestigationRequestStore _investigationStore;
     private WebApplication? _app;
 
     /// <summary>
@@ -36,12 +39,15 @@ public sealed class McpHostService : BackgroundService
     /// </summary>
     public int Port => _port;
 
+    /// <param name="investigationStore">#5820: the one investigation store, required: <c>get_notification_routes</c> is served in every
+    /// configuration and takes it as a service parameter, so a host without it would advertise it as a tool argument nobody can fill.</param>
     /// <param name="scheduleManager">#3896: the collector schedules, so the analysis tools bound each
     /// latest-value read by the cadence its collector runs at. Null bounds by the shipped defaults.</param>
     /// <param name="allowWrites">Whether the write tools are served (<see cref="McpSettings.AllowWrites"/>, the
     /// <c>mcp_allow_writes</c> setting). Default off: a write tool is then absent from the served set and a call
     /// to it fails as an unknown tool. See <see cref="McpWritePolicy"/>.</param>
-    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, ScheduleManager? scheduleManager = null, bool allowWrites = false)
+    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore, ScheduleManager? scheduleManager = null, bool allowWrites = false,
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full)
     {
         _dataService = dataService;
         _serverManager = serverManager;
@@ -50,6 +56,9 @@ public sealed class McpHostService : BackgroundService
         _port = port;
         _scheduleManager = scheduleManager;
         _allowWrites = allowWrites;
+        _allowInvestigations = allowInvestigations;
+        _dataDetail = dataDetail;
+        _investigationStore = investigationStore ?? throw new ArgumentNullException(nameof(investigationStore));
 
         /* #4999: the health read judges each collector by the interval it is scheduled at on that server, the
            same answer the analysis tools bound their reads by (see RegisterAnalysisService below), not by the
@@ -124,8 +133,18 @@ public sealed class McpHostService : BackgroundService
     /// transport option the host serves. Extracted so the tests that drive <c>tools/call</c> through a real web
     /// host register the SAME tools and the SAME policy production does, not a hand-built set.
     /// </summary>
-    internal static void RegisterMcpServer(IServiceCollection services, bool allowWrites)
+    internal static void RegisterMcpServer(IServiceCollection services, bool allowWrites,
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full)
     {
+        /* #5820: the four investigation tools are served only with mcp_allow_investigations on AND the writes off
+           (McpInvestigationPolicy). Registered BEFORE the write policy so its instructions census (built there) counts
+           only the tools this start offers. */
+        services.AddMcpInvestigationPolicy(McpInvestigationPolicy.Served(allowInvestigations, allowWrites));
+
+        /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on
+           every call; Full passes everything through. */
+        services.AddSingleton(new McpDataDetailSetting(dataDetail));
+
         /* The write switch (McpWritePolicy): once the SDK has gathered every registered tool, drop the writes
            unless mcp_allow_writes is on and stamp the annotation hints. Registered here, ahead of AddMcpServer,
            so it is a PostConfigure over the SDK's own options and sees the full tool set. */
@@ -167,6 +186,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpTempDbTools>()
             .WithGeminiCompatibleTools<McpPerfmonTools>()
             .WithGeminiCompatibleTools<McpAlertTools>()
+            /* #5820: the Level 1 investigation tools, served only by the mcp_allow_investigations gate (McpInvestigationPolicy). */
+            .WithGeminiCompatibleTools<McpInvestigationTools>()
             .WithGeminiCompatibleTools<McpJobTools>()
             .WithGeminiCompatibleTools<McpPlanTools>()
             .WithGeminiCompatibleTools<McpConfigTools>()
@@ -231,10 +252,14 @@ public sealed class McpHostService : BackgroundService
             var planFetcher = new SqlPlanFetcher(_serverManager);
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
+            /* #5820: the investigation brief's reader and composer, for the claim tool (the composer's own file registers both). */
+            PerformanceMonitorLite.Investigations.LiteInvestigationServices.AddInvestigationBrief(builder.Services, _duckDb);
+            /* #5820: the one investigation store MainWindow built, as a singleton, for the four tools and get_notification_routes. */
+            builder.Services.AddSingleton<IInvestigationRequestStore>(_investigationStore);
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
-            RegisterMcpServer(builder.Services, _allowWrites);
+            RegisterMcpServer(builder.Services, _allowWrites, _allowInvestigations, _dataDetail);
 
             _app = builder.Build();
 
@@ -277,6 +302,19 @@ public sealed class McpHostService : BackgroundService
                     $"MCP write tools are off (the default): the write tools (mute_analysis_finding, unmute_analysis_finding, set_notification_route_enabled, delete_notification_route) are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json and restart.");
             }
 
+            var gateLine = McpInvestigationPolicy.StartupLine(_allowInvestigations, _allowWrites);
+            if (gateLine is { } line)
+            {
+                if (line.Level == LogLevel.Critical)
+                {
+                    AppLogger.Error(LogLevel.Critical, "MCP", line.Message, null);
+                }
+                else
+                {
+                    AppLogger.Info("MCP", line.Message);
+                }
+            }
+
             await _app.RunAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -290,12 +328,14 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>
-    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), then the statement filter
-    /// (#4348). The same two objects Darling's host registers, from <c>PerformanceMonitor.Common</c>, so the two SKUs
-    /// cannot answer differently. Registered through this one method so a test can start a server with the REAL list.
+    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), the data-detail filter
+    /// (#5820, <c>mcp_data_detail</c>), then the statement filter (#4348). The same objects Darling's host registers, in
+    /// its order, from <c>PerformanceMonitor.Common</c>, so the two SKUs cannot answer differently. Lite's write and
+    /// investigation gates are not filters: an unserved tool is absent from the served collection. Registered through this one method so a test can start a server with the REAL list.
     /// </summary>
     internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) => filters
         .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+        .AddCallToolFilter(McpDataDetailFilter.Instance)
         .AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
 
     public override async Task StopAsync(CancellationToken cancellationToken)

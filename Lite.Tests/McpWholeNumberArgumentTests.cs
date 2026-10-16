@@ -41,13 +41,18 @@ public sealed class McpWholeNumberArgumentTests
     private static bool IsServiceParameter(Type t) =>
         McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
 
-    /// <summary>Lite's tool services are all concrete classes, so none needs a hand-made stand-in.</summary>
+    /// <summary>Lite's tool services are concrete classes, so none needs a hand-made stand-in, except the investigation
+    /// request store (#5820), an interface the host registers as one instance: the stand-in answers only the route-use read.</summary>
     /// <param name="installGuard">False to leave the call-tool guard out, so a call meets the SDK's binder alone.</param>
     /// <param name="extraToolTypes">Test-only tool classes to register beside the shipped ones, through the same
     /// <c>McpSchemaCompat</c> path.</param>
     internal static Task<McpInProcessHost> StartHostAsync(bool installGuard = true, params Type[] extraToolTypes) =>
         McpInProcessHost.StartAsync(
-            LiteToolTypes().Concat(extraToolTypes).ToList(), IsServiceParameter, _ => null, installGuard,
+            LiteToolTypes().Concat(extraToolTypes).ToList(), IsServiceParameter,
+            t => t == typeof(PerformanceMonitor.Common.IInvestigationRequestStore)
+                ? PerformanceMonitorLite.Tests.NotificationRoutesMcpTests.RouteUseStore.Create(new Dictionary<int, (int LastHour, int LastDay)>())
+                : null,
+            installGuard,
             TestContext.Current.CancellationToken);
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();

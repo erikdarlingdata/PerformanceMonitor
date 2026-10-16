@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Notification Routes"
-        Height="520" Width="1000"
+        Height="520" Width="1160"
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResizeWithGrip"
         Icon="/EDD.ico"
@@ -57,6 +57,8 @@
                     <DataGridTextColumn Header="PagerDuty" Binding="{Binding PagerDutyMarker}" Width="80"
                                         ElementStyle="{StaticResource DataGridCellText}"/>
                     <DataGridTextColumn Header="Email" Binding="{Binding EmailMarker}" Width="70"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Agent" Binding="{Binding AgentDisplay}" Width="150"
                                         ElementStyle="{StaticResource DataGridCellText}"/>
                     <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="200"
                                         ElementStyle="{StaticResource DataGridCellText}"/>

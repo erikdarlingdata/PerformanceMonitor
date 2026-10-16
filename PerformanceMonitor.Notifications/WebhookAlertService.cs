@@ -2324,12 +2324,12 @@ public class WebhookAlertService
     /// flattened structure.
     /// </para>
     /// <para>
-    /// #5821: <c>{{investigation_json}}</c> is the investigation request the alert opened or joined (Darling only), as one
+    /// #5821: <c>{{investigation_json}}</c> is the investigation request the alert opened or joined (Darling and, since #5820, Lite), as one
     /// JSON object the caller has already composed and masked at <c>mcp.dataDetail</c>. It is the one token whose
     /// rendering follows where the template puts it: unquoted (<c>"investigation": {{investigation_json}}</c>) it is the
     /// raw object, and inside a string literal (<c>"investigation": "{{investigation_json}}"</c>) it is that object's text,
     /// JSON-escaped, so both templates post well-formed JSON. With no request (no agent route, a muted alert, a report,
-    /// a recovery, a route at its limit, Lite) it is the empty string: <c>""</c> bare, nothing inside quotes.
+    /// a recovery, a route at its limit) it is the empty string: <c>""</c> bare, nothing inside quotes.
     /// </para>
     /// </summary>
     internal static string BuildGenericPayload(

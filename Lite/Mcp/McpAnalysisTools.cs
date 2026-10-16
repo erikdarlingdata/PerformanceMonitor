@@ -1510,6 +1510,14 @@ internal static class ToolRecommendations
     /// than sending an agent to a call that returns an error.</summary>
     internal static IReadOnlyCollection<string> FactKeys => ByFactKey.Keys;
 
+    /// <summary>Every distinct tool name this table's <c>next_tools</c> can name (#5820): the investigation brief's
+    /// nameable tools read this, so a brief names exactly what <c>analyze_server</c> can. Ordinal, deduplicated.</summary>
+    internal static IReadOnlyCollection<string> AllToolNames { get; } =
+        ByFactKey.Values
+            .SelectMany(recommendations => recommendations)
+            .Select(recommendation => recommendation.Tool)
+            .ToHashSet(StringComparer.Ordinal);
+
     /// <summary>
     /// Returns tool recommendations for every fact key one finding is about — its chain AND the config levers
     /// hanging off it (<see cref="StoryKeys"/>). Deduplicates, so each tool appears at most once.

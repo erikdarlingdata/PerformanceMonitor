@@ -53,7 +53,8 @@ public sealed class StoreMetricsLatestSkipScanLiveTests
             total_runs,
             total_failures,
             toast_bytes,
-            toast_live_bytes
+            toast_live_bytes,
+            size_estimated
         FROM collect.store_metrics
         WHERE object_name LIKE 'skipscan3934-%'
         ORDER BY object_kind, object_name, metric_time DESC
