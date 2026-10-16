@@ -144,24 +144,21 @@ public class EmailAlertService : IFindingAlertSender
                DarlingAlertDeliverer does the same). The context is kept as the caller gave it: the route record added
                below belongs to the history row, not to the incident keys the request links. */
             var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
-            var investigationContext = context;
 
-            /* #5820 (#5821's token): when the generic webhook this alert posts to carries {{investigation_json}}, the request
-               is opened or joined BEFORE the channels post, so the post can carry it; the link rows carry the values the
-               history row below will store. Every other alert opens or joins after its row is written. The core never
-               throws: a store failure or a cancel posts the token empty and the delivery goes on. */
-            string? investigationJson = null;
-            var investigationAsked = false;
-            if (_investigations is not null && !muted && _investigations.GenericPostCarriesToken(serverId.ToString(), metricName))
-            {
-                investigationAsked = true;
-                investigationJson = await _investigations.OpenForWebhookAsync(
+            /* #5820 / #5821: the request is opened or joined BEFORE the channels post, for every alert, whether or not the
+               generic webhook's template names {{investigation_json}} (Darling's DarlingAlertDeliverer does the same), so a
+               failed post still leaves it open. The link rows carry the values the history row below will store; the core
+               returns the token's value only when the template names it, and null when no request opened (a muted alert,
+               a report, a recovery, no agent route). It never throws: a store failure or a cancel posts the token empty and
+               the delivery goes on. */
+            var investigationJson = _investigations is null
+                ? null
+                : await _investigations.OpenForWebhookAsync(
                     serverId.ToString(), serverName, metricName, muted, alertTimeUtc, context, storyPathHash,
                     InvestigationDispatchCore.Facts(
                         currentValue, numericCurrentValue, thresholdValue, numericThresholdValue, muted, detailText,
                         context is not null ? AlertContextSerializer.Serialize(context) : null),
                     _readInvestigation, _investigationDataDetail(), cancellationToken);
-            }
 
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
@@ -209,15 +206,6 @@ public class EmailAlertService : IFindingAlertSender
                 AlertTimeUtc = alertTimeUtc,
             };
             await _historyStore.RecordAlertAsync(record);
-
-            /* #5820 (#5632 Phase A, ruling R1): after its row, an alert an agent route covers opens or joins a request,
-               unless the webhook path above already asked for this one. A muted row, a report, a recovery and an
-               unrouted alert open nothing. The core never throws, so a store failure or a cancel leaves the delivery
-               as recorded. */
-            if (_investigations is not null && !investigationAsked)
-            {
-                await _investigations.DispatchAsync(record, investigationContext, storyPathHash, cancellationToken);
-            }
 
             /* #3916: the recorded disposition, for the analysis path's hold (a hold is earned by a
                delivery). The engine callers discard it. */
@@ -309,6 +297,27 @@ public class EmailAlertService : IFindingAlertSender
             named = AlertStatementFilter.Apply(named);
             var (serverName, currentValue, context) = FindingSummary.Compose(named);
             await NotificationRouteCache.WaitForFirstLoadAsync(s_routeFirstLoadWait);
+
+            /* #5820 / #5821: each held page the summary names opens or joins its request BEFORE the one message posts, with its
+               own full story path hash, at the instant its row below is stamped with; a failed post still leaves them open.
+               The message names pages, not one request, so no readback is asked for and the post carries no token. Never
+               throws. */
+            var pageTimes = new DateTime[named.Count];
+            for (var i = 0; i < named.Count; i++)
+            {
+                var page = named[i];
+                pageTimes[i] = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+                if (_investigations is not null)
+                {
+                    await _investigations.OpenForWebhookAsync(
+                        page.ServerId, page.ServerName, page.MetricName, muted: false, pageTimes[i], page.Context, page.StoryPathHash,
+                        InvestigationDispatchCore.Facts(
+                            page.CurrentValue, page.Severity, page.ThresholdValue, page.NotifyThreshold, muted: false,
+                            page.DetailText, page.Context is not null ? AlertContextSerializer.Serialize(page.Context) : null),
+                        readRequest: null, _investigationDataDetail(), CancellationToken.None);
+                }
+            }
+
             var result = await _core.TrySendAsync(
                 FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),
                 named[0].ServerId, context, attemptChannels: true);
@@ -316,8 +325,9 @@ public class EmailAlertService : IFindingAlertSender
                the one declared producer shape (trayChannelPresent: trayShown) the tray-channel pin reads. */
             const bool trayShown = false;
             var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: trayShown);
-            foreach (var alert in named)
+            for (var i = 0; i < named.Count; i++)
             {
+                var alert = named[i];
                 var record = new AlertHistoryRecord(
                     alert.ServerId, alert.ServerName, alert.MetricName,
                     alert.CurrentValue, alert.ThresholdValue,
@@ -326,16 +336,9 @@ public class EmailAlertService : IFindingAlertSender
                     false, FindingSummary.RowDetailText(alert, named.Count),
                     alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null)
                 {
-                    AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+                    AlertTimeUtc = pageTimes[i],
                 };
                 await _historyStore.RecordAlertAsync(record);
-
-                /* #5820 (#5632 Phase A, ruling R1): each held page the summary names opens or joins a request after its
-                   row, with its own full story path hash, as Darling's DarlingFindingAlertSender does. Never throws. */
-                if (_investigations is not null)
-                {
-                    await _investigations.DispatchAsync(record, alert.Context, alert.StoryPathHash);
-                }
             }
             return delivery;
         }

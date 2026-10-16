@@ -55,9 +55,11 @@ public sealed class LiteInvestigationDispatchTests
     }
 
     private static (EmailAlertService Email, AlertWebhookCancelTests.CapturingHistoryStore History, List<InvestigationAlert> Asked) Build(
-        RouteSettings settings, Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>>? store = null)
+        RouteSettings settings, Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>>? store = null,
+        Action<AlertWebhookCancelTests.CapturingHistoryStore>? onHistory = null)
     {
         var history = new AlertWebhookCancelTests.CapturingHistoryStore();
+        onHistory?.Invoke(history);
         var asked = new List<InvestigationAlert>();
         var core = new InvestigationDispatchCore(
             (alert, token) =>
@@ -292,7 +294,7 @@ FROM investigation_requests AS r"));
     }
 
     /// <summary>The template without the token posts no investigation value at all, and the alert still opens its request,
-    /// after its history row.</summary>
+    /// before the post, as it does with the token.</summary>
     [Fact]
     public async Task AGenericTemplateWithoutTheToken_PostsNoTokenValue_AndStillOpensTheRequest()
     {
@@ -314,6 +316,70 @@ FROM investigation_requests AS r"));
         Assert.DoesNotContain(stored!, body, StringComparison.OrdinalIgnoreCase);
         using var json = JsonDocument.Parse(body);
         Assert.False(json.RootElement.TryGetProperty("investigation", out _));
+    }
+
+    /// <summary>One path since #5821: every alert opens its request ONCE, BEFORE the channels post and before its history row
+    /// is written, whether or not the generic template names the token, and the row and the request share one instant.</summary>
+    [Theory]
+    [InlineData("{\"metric\": \"{{metric}}\", \"investigation\": {{investigation_json}}}")]
+    [InlineData("{\"metric\": \"{{metric}}\"}")]
+    public async Task EveryAlert_OpensItsRequestOnce_BeforeThePostAndBeforeItsRow(string template)
+    {
+        using var endpoint = new CapturingWebhookEndpoint();
+        var settings = new RouteSettings(AgentRoute(5, "Deadlocks Detected")) { GenericUrl = endpoint.Url, Template = template };
+        var seen = new List<(int Posted, int Rows)>();
+        AlertWebhookCancelTests.CapturingHistoryStore? historyRef = null;
+        var (email, history, asked) = Build(settings, (alert, _) =>
+        {
+            seen.Add((endpoint.Bodies.Count, historyRef!.Records.Count));
+            return Task.FromResult(new InvestigationOpenResult(InvestigationOpenOutcome.Opened, Guid.NewGuid()));
+        }, h => historyRef = h);
+
+        Assert.NotNull(await SendAsync(email, "Deadlocks Detected"));
+
+        Assert.Equal((0, 0), Assert.Single(seen));
+        Assert.Single(endpoint.Bodies);
+        Assert.Equal(Assert.Single(history.Records).AlertTimeUtc, Assert.Single(asked).AlertTimeUtc);
+    }
+
+    /// <summary>A post that fails leaves the request open: it was opened before the post, and nothing undoes it.</summary>
+    [Fact]
+    public async Task AFailedPost_StillLeavesTheRequestOpen()
+    {
+        var settings = new RouteSettings(AgentRoute(5, "Deadlocks Detected"))
+        {
+            GenericUrl = "http://127.0.0.1:1/",
+            Template = "{\"investigation\": {{investigation_json}}}",
+        };
+        var (email, history, asked) = Build(settings);
+
+        Assert.NotNull(await SendAsync(email, "Deadlocks Detected"));
+
+        Assert.Single(asked);
+        Assert.Single(history.Records);
+        Assert.Equal(history.Records[0].AlertTimeUtc, asked[0].AlertTimeUtc);
+    }
+
+    /// <summary>The held-pages summary opens one request per page, each before the one message posts and each at the instant
+    /// of the row it names.</summary>
+    [Fact]
+    public async Task TheFindingSummary_OpensOneRequestPerHeldPage_BeforeItsMessagePosts()
+    {
+        using var endpoint = new CapturingWebhookEndpoint();
+        var settings = new RouteSettings(AgentRoute(5, AlertFamily.Performance)) { GenericUrl = endpoint.Url, Template = "{\"m\": \"{{metric}}\"}" };
+        var seen = new List<(int Posted, int Rows)>();
+        AlertWebhookCancelTests.CapturingHistoryStore? historyRef = null;
+        var (email, history, asked) = Build(settings, (alert, _) =>
+        {
+            seen.Add((endpoint.Bodies.Count, historyRef!.Records.Count));
+            return Task.FromResult(new InvestigationOpenResult(InvestigationOpenOutcome.Opened, Guid.NewGuid()));
+        }, h => historyRef = h);
+
+        await email.SendFindingSummaryAsync(new[] { Finding("Analysis: blocking [cccc3333]"), Finding("Analysis: memory [dddd4444]") });
+
+        Assert.Equal(new[] { (0, 0), (0, 0) }, seen);
+        Assert.Single(endpoint.Bodies);
+        Assert.Equal(history.Records.Select(r => r.AlertTimeUtc), asked.Select(a => (DateTime?)a.AlertTimeUtc));
     }
 
     private static async Task RunOnePassAsync(IInvestigationRequestStore store, ILogger log)
