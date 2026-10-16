@@ -479,6 +479,56 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # #5947: actionlint reads the workflow files for what the text tests do not look for: YAML and expression
+      # mistakes, a `needs:` or `steps.<id>` that names nothing, and `with:` inputs a known action does not take.
+      # It runs when a pull request changes a file under .github/workflows/, and on every push to main or dev.
+      # The binary is pinned to a version and a SHA-256, so a moved release cannot change what the guard checks,
+      # and it is installed in RUNNER_TEMP, outside the checkout. No -ignore is passed: a finding is fixed in the
+      # workflow, not silenced here.
+      # Both steps wait for the producer's decision like every other step here (GuardStageWorkflowTests): a docs-only
+      # change cannot touch a workflow file.
+      #
+      # -shellcheck= and -pyflakes= are off on purpose. This job runs on Windows, and actionlint 1.7.12 hangs there
+      # as soon as it pipes a `run:` script to shellcheck.exe (measured on claude-review-guard.yml with shellcheck
+      # 0.10.0 and 0.11.0: no output and no exit). The bash-script checks need an ubuntu runner, where both tools
+      # are installed.
+      - name: Detect changed workflow files
+        id: workflow-filter
+        if: needs.guard-build.outputs.run == 'true'
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Lint the workflow files with actionlint
+        if: needs.guard-build.outputs.run == 'true' && (github.event_name == 'push' || steps.workflow-filter.outputs.workflows == 'true')
+        shell: pwsh
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          ACTIONLINT_SHA256: '6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:RUNNER_TEMP 'actionlint-tools'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+
+          $url = "https://github.com/rhysd/actionlint/releases/download/v$env:ACTIONLINT_VERSION/actionlint_${env:ACTIONLINT_VERSION}_windows_amd64.zip"
+          $zip = Join-Path $tools 'actionlint.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+          if ($actual -ne $env:ACTIONLINT_SHA256) {
+              Write-Host "::error title=actionlint download does not match its pinned checksum::$url hashed to $actual, expected $env:ACTIONLINT_SHA256."
+              exit 1
+          }
+          Expand-Archive -Path $zip -DestinationPath $tools -Force
+
+          & (Join-Path $tools 'actionlint.exe') -no-color -shellcheck= -pyflakes=
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error title=actionlint found problems::Fix them in the workflow file. The findings are listed above."
+              exit 1
+          }
+
       - name: Setup .NET 10.0
         if: needs.guard-build.outputs.run == 'true'
         uses: actions/setup-dotnet@v6
