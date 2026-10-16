@@ -42,7 +42,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>claims_exhausted</c>, once per request). A release keeps its claim counted. It never reopens a lease;
 /// the claim's own WHERE takes a lapsed lease over.</para>
 /// </summary>
-public sealed class InvestigationRequestStore : IInvestigationRequestStore
+public sealed partial class InvestigationRequestStore : IInvestigationRequestStore
 {
     /// <summary>The first key of the route lock, <c>pg_advisory_xact_lock(5632, route_id)</c>.</summary>
     public const int RouteLockKey = 5632;
@@ -65,10 +65,22 @@ WHERE r.server_id = $1
 ORDER BY r.opened_at DESC
 LIMIT 1";
 
-    internal const string JoinSql = @"
+    /// <summary>
+    /// The level an alert stamps (#5912): the route's level, except 1 for an alert of a custom rule an agent last wrote
+    /// (<c>updated_by</c> <c>agent:&lt;id&gt;</c>), so an agent cannot open its own Level 2 window. Custom rule alerts are named
+    /// <c>Custom:&lt;rule id&gt;</c>. <c>{metric}</c> and <c>{level}</c> are the statement's parameter numbers.
+    /// </summary>
+    internal static string StampLevelSql(int metric, int level) => $@"CASE WHEN EXISTS (
+        SELECT 1 FROM config.custom_alert_rules AS c
+        WHERE 'Custom:' || c.id::text = ${metric}
+          AND c.updated_by LIKE 'agent:%') THEN 1 ELSE ${level}::smallint END";
+
+    /// <summary>A join lowers the request to the joining alert's level (#5912): the lowest level among its routes wins.</summary>
+    internal static readonly string JoinSql = @"
 UPDATE config.investigation_requests
 SET alert_count = alert_count + 1,
-    last_alert_at = greatest(last_alert_at, $2)
+    last_alert_at = greatest(last_alert_at, $2),
+    autonomy_level = least(autonomy_level, " + StampLevelSql(3, 4) + @")
 WHERE request_id = $1";
 
     internal const string CountRouteSql = @"
@@ -78,11 +90,12 @@ FROM config.investigation_requests
 WHERE route_id = $1
   AND opened_at > $2 - interval '1 day'";
 
-    internal const string OpenSql = @"
+    internal static readonly string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
-     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + interval '30 minutes', $10, $10 + make_interval(mins => $11), $12)";
+     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + interval '30 minutes', $10, $10 + make_interval(mins => $11), $12,
+        " + StampLevelSql(6, 13) + ")";
 
     internal const string AlertRowsSql = @"
 INSERT INTO config.investigation_request_alerts
@@ -326,7 +339,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         if (joinId is Guid join)
         {
-            await ExecAsync(connection, transaction, JoinSql, cancellationToken, P(join), P(alertTime));
+            await ExecAsync(connection, transaction, JoinSql, cancellationToken, P(join), P(alertTime), P(alert.MetricName),
+                P((short)alert.AutonomyLevel));
             await InsertAlertRowsAsync(connection, transaction, join, alert, alertTime, keys, cancellationToken);
             await JournalAsync(connection, transaction, now, join, alert.RouteId, alert.ServerId, "joined", "service",
                 alert.MetricName, null, null, cancellationToken);
@@ -361,7 +375,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await ExecAsync(connection, transaction, OpenSql, cancellationToken,
             P(requestId), P(alert.RouteId), P(alert.ServerId), P(alert.ServerName), P(alert.Family), P(alert.MetricName),
             PNullable(keys.FirstOrDefault()), PNullable(alert.StoryPathHash), P(alertTime), P(now), P(alert.ExpiryMinutes),
-            P(alert.LeaseMinutes));
+            P(alert.LeaseMinutes), P((short)alert.AutonomyLevel));
         await InsertAlertRowsAsync(connection, transaction, requestId, alert, alertTime, keys, cancellationToken);
         await JournalAsync(connection, transaction, now, requestId, alert.RouteId, alert.ServerId, "opened", "service",
             alert.MetricName, null, null, cancellationToken);

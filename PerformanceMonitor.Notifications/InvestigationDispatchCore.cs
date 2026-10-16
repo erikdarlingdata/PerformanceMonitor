@@ -153,7 +153,12 @@ public sealed class InvestigationDispatchCore
                 route.AgentMaxPerDay,
                 route.AgentLeaseMinutes,
                 route.AgentExpiryMinutes,
-                facts);
+                facts)
+            {
+                /* #5912: the route's level is stamped on the request; the store lowers it to 1 for an alert of a custom rule
+                   an agent last wrote, and to the lowest level on a join. */
+                AutonomyLevel = route.AgentLevel ?? NotificationRoute.AgentLevelInvestigate,
+            };
 
             var result = await _openOrJoin(alert, cancellationToken);
             switch (result.Outcome)

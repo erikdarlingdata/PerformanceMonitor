@@ -35,7 +35,13 @@ public sealed record InvestigationAlert(
     int MaxPerDay,
     int LeaseMinutes,
     int ExpiryMinutes,
-    InvestigationAlertFacts? Facts = null);
+    InvestigationAlertFacts? Facts = null)
+{
+    /// <summary>The level the answering route sends this alert at (#5912): 1 (investigate) or 2 (act). The store stamps it on a
+    /// new request and lowers a joined request to it, so the lowest level among a request's routes wins. An init member with
+    /// the Level 1 default, so every existing construction keeps its meaning; Lite never sets it.</summary>
+    public int AutonomyLevel { get; init; } = 1;
+}
 
 /// <summary>
 /// #5821: the alert's values as its <c>config_alert_log</c> row stores them: <c>current_value</c> and
@@ -201,3 +207,49 @@ public sealed record InvestigationRequestRow(
 
 /// <summary>What one expiry sweep did.</summary>
 public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);
+
+/// <summary>
+/// The <c>agent_action</c> argument a Level 2 tool carries under the investigations arm (#5912), validated: the request and
+/// the live claim the change is made under, the caller's declared agent id, why, and the evidence (shaped and capped like a
+/// report's). <c>agent_id</c> is the caller's word; the claim is what confines it to one server and one lease.
+/// </summary>
+public sealed record AgentAction(Guid RequestId, Guid ClaimId, string AgentId, string Reason, string EvidenceJson);
+
+/// <summary>What a Level 2 change targets (#5912): the server, the object's id when it has one, and the database.</summary>
+public sealed record AgentActionTarget(int ServerId, string ServerName, string? Id, string? Database);
+
+/// <summary>A gate refusal (#5912): <c>{status: refused, reason, message}</c>.</summary>
+public sealed record AgentActionRefusal(string Reason, string Message);
+
+/// <summary>The gate's refusal codes (#5912), in the order the gate checks them.</summary>
+public static class AgentActionCodes
+{
+    /// <summary>1: no <c>agent_action</c> under the investigations arm.</summary>
+    public const string Required = "agent_action_required";
+
+    /// <summary>1: an <c>agent_action</c> field is missing or malformed; the message names the field.</summary>
+    public const string Invalid = "agent_action_invalid";
+
+    /// <summary>2: <c>config_service.agent_actions_enabled</c> is off.</summary>
+    public const string ActionsOff = "actions_off";
+
+    /// <summary>3: the claim is not live (one message for every cause, so it is not an oracle).</summary>
+    public const string ClaimNotLive = "claim_not_live";
+
+    /// <summary>4: the request is a practice request.</summary>
+    public const string Practice = "practice";
+
+    /// <summary>5: the request is not stamped Level 2, or its routes no longer answer Level 2.</summary>
+    public const string NotLevel2 = "not_level_2";
+
+    /// <summary>6: the change targets a server other than the request's.</summary>
+    public const string OtherServer = "other_server";
+
+    /// <summary>8: the request's agent journal is full.</summary>
+    public const string JournalCapped = "journal_capped";
+
+    /// <summary>The one <see cref="ClaimNotLive"/> message.</summary>
+    public const string ClaimNotLiveMessage =
+        "Your claim is not live: it lapsed, was released, its report was submitted, or another agent holds it. " +
+        "Changes are allowed only while your claim is live.";
+}

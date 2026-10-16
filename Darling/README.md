@@ -782,7 +782,20 @@ Darling ships no agent. It can hand an alert to one you run yourself, and that a
    - **Started from a webhook instead (#5821):** the generic webhook body template takes `{{investigation_json}}`, the request the alert opened or joined as one JSON object: the fields `list_investigation_requests` returns, `outcome` (`opened` or `joined`), the brief masked at `mcp.dataDetail` once a claim has composed it (null before), and the claim and report tool names. Unquoted it is the object; inside quotes it is the object's escaped text. It is empty when the alert opened none: no agent level on its route, a muted alert, a report, a recovery, or a route at its limit. A POST runner still claims and reports through the MCP tools.
 5. **Read the results.** The viewer's **Manage Investigations...** window (Settings > Notifications) shows each request, its brief, its report and its journal, and lets a person close a request, approve or reject a note, write a note, and set the environment profile. The web alert page has a read-only Investigations panel.
 
-What the agent cannot do: change a monitored server, call a write tool (they are off while investigations are on), propose an action (`action_proposals` is refused at this level), or put a note in front of a later brief without a person's approval. `mcp.dataDetail` masks the brief and every tool answer at the level you set. [`AGENTS.example.md`](AGENTS.example.md) is a starting point for your agent's instructions.
+What the agent cannot do: change a monitored server, call a write tool other than the Level 2 action tools below (the rest are off while investigations are on), propose an action (`action_proposals` is refused at this level), or put a note in front of a later brief without a person's approval. `mcp.dataDetail` masks the brief and every tool answer at the level you set. [`AGENTS.example.md`](AGENTS.example.md) is a starting point for your agent's instructions.
+
+**Level 2: the `agent_action` argument (#5912).** A route's agent level 2 lets an agent also change alert settings for the request's server while it holds a live claim. The tools that make those changes (mutes, custom rules, threshold overrides) come in later releases; this release adds the gate they all go through. Under the investigations arm (`mcp.allowInvestigations` on, `mcp.allowWrites` off, a token set) each such tool needs an `agent_action` argument, `{request_id, claim_id, agent_id, reason, evidence}`: the request and the claim you hold, your agent id, why (1 to 2,000 characters), and the evidence, shaped and capped like a report's. Under the writes arm (`mcp.allowWrites` on) the same tools are ordinary write tools and `agent_action` is ignored. A call the gate refuses answers `{status: refused, reason, message}`, changes nothing and is journaled at most once an hour. The reasons, in the order they are checked:
+
+- `agent_action_required` or `agent_action_invalid`: the argument is missing, or a field of it is wrong (the message names the field).
+- `actions_off`: the service's agent switch is off (`config_service.agent_actions_enabled`).
+- `claim_not_live`: your claim lapsed, was released, its report was submitted, or another agent holds it.
+- `practice`: the request is a practice request.
+- `not_level_2`: the request was not opened at Level 2, or its routes no longer answer Level 2. A request joined by an alert of a Level 1 route stays Level 1, and so does a request opened by a custom rule an agent last wrote.
+- `other_server`: the change targets a server other than the request's.
+- a rule of the change's own kind, from the tool that makes it.
+- `journal_capped`: the request's agent journal is full (200 rows).
+
+Each change is journaled with the request: `action_called` (the tool, the target, the claim number, the evidence and the object as it was) before the change, then `action_done` (the object as it is) or `action_failed`. No journal row holds the claim id. `mcp.dataDetail` masks the evidence and the free text of those images (a mute's reason, a pattern, a rule's name, description and definition) on every MCP read; the viewer reads them in full.
 
 ### mcp
 
