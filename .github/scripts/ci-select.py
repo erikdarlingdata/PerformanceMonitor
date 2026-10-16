@@ -23,6 +23,9 @@ These readers use the same code:
   classes that name a changed symbol, which CI selects too. A note on stderr says which. A suite with more than 40
   classes gets one filter line per 40. Run it as
   `python .github/scripts/ci-select.py local-filter [--base origin/dev] [--map test-map.json.gz]`.
+* `quarantine` (#5942) decides, once per pull request run in the test-map-select job, which entries of
+  .github/ci-quarantine.txt the run honors, and `quarantine-args` turns the decision into `-method- <test>` runner
+  arguments for the Guard job and the two shard runners. See quarantine_decide() for the rule.
 * `--replay` reads .github/ci-history/failures.jsonl (a trimmed record of every run with a real test failure)
   and checks that each failing class would have been selected for that run's changed files. A cut to the rules
   lands only while the replay finds 0 misses. A Guard-tagged test runs it on every pull request.
@@ -1805,6 +1808,173 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
     return 0, lines, notes
 
 
+# ---------------------------------------------------------------------------------------------------------
+# The CI quarantine (#5942): a test that dev's own latest push broke is left out of an unrelated pull request.
+# ---------------------------------------------------------------------------------------------------------
+
+QUARANTINE_FILE = os.path.join(ROOT, ".github", "ci-quarantine.txt")
+QUARANTINE_HOURS = 72
+# map_select()'s `why` reasons that mean the pull request reaches the class through a file or a symbol of its own.
+# "reads the tree", "guard stage", "new class" and "gated on an environment" are NOT reach: they select a class for
+# nearly every change, and an unrelated pull request failing on one of them is the case this list exists for.
+QUARANTINE_REACH = ("own file changed", "covers a changed file", "text pattern", "names a changed symbol",
+                    "shares a collection with a changed class")
+# A test runner's name prefix says which suite a test belongs to.
+QUARANTINE_SUITES = (("Darling.Tests.", "darling"), ("Lite.Tests.", "lite"))
+_FAIL_LINE = re.compile(r"^\S+Z\s+(?P<name>\S.*?)\s+\[FAIL\]\s*$")
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def parse_quarantine(text: str) -> "tuple[list[dict], list[str]]":
+    """(entries, malformed lines) of the quarantine file's text. A line is `<test> | <dev run id> | <UTC time> | #<issue>`:
+    the test is `Namespace.Class.Method` as the runner prints it (arguments of a theory case left off), the run is the
+    dev push run that failed it, the time is ISO 8601 UTC and the issue is the bug filed for the test. Blank lines and
+    lines starting with `#` are comments. A malformed line is reported and never honored."""
+    entries: list[dict] = []
+    bad: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        at = _parse_time(parts[2]) if len(parts) == 4 else None
+        if len(parts) != 4 or not parts[0] or not parts[1].isdigit() or at is None or not re.fullmatch(r"#\d+", parts[3]):
+            bad.append(line)
+            continue
+        entries.append({"name": parts[0], "run": parts[1], "at": at, "issue": parts[3]})
+    return entries, bad
+
+
+def failed_tests_of_log(text: str) -> set[str]:
+    """The tests a job log reports as failed: the runner prints `<time>Z     Namespace.Class.Method [FAIL]`, with the
+    arguments of a theory case in parentheses before the marker, which are left off."""
+    out: set[str] = set()
+    for line in text.splitlines():
+        m = _FAIL_LINE.match(_ANSI.sub("", line).lstrip("﻿"))
+        if m:
+            out.add(m.group("name").split("(")[0].strip())
+    return out
+
+
+def _gh_text(args: list[str], timeout: int = 120) -> "str | None":
+    try:
+        r = subprocess.run(["gh", "api", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"quarantine: gh api {args[0]} failed ({e})", file=sys.stderr)
+        return None
+    if r.returncode != 0:
+        print(f"quarantine: gh api {args[0]} exited {r.returncode}", file=sys.stderr)
+        return None
+    return r.stdout
+
+
+def dev_failures(repo: str, max_jobs: int = 30) -> "tuple[str, set[str] | None]":
+    """(run id, failed tests) of the latest COMPLETED push run of build.yml on dev that ended success or failure (a
+    cancelled or skipped run says nothing). The tests come from the `[FAIL]` lines of that run's failed jobs. None for
+    the tests when anything could not be read: the caller then honors nothing and every test runs (fail open)."""
+    listing = _gh_text([f"repos/{repo}/actions/workflows/build.yml/runs?branch=dev&event=push&status=completed&per_page=10"])
+    try:
+        runs = json.loads(listing or "")["workflow_runs"]
+    except (ValueError, KeyError, TypeError):
+        return "", None
+    latest = next((r for r in runs if isinstance(r, dict) and r.get("conclusion") in ("success", "failure")), None)
+    if latest is None:
+        return "", None
+    run_id = str(latest.get("id"))
+    if latest.get("conclusion") == "success":
+        return run_id, set()
+    jobs_text = _gh_text([f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"])
+    try:
+        jobs = json.loads(jobs_text or "")["jobs"]
+    except (ValueError, KeyError, TypeError):
+        return run_id, None
+    failed = [j for j in jobs if isinstance(j, dict) and j.get("conclusion") == "failure"]
+    if len(failed) > max_jobs:
+        return run_id, None
+    found: set[str] = set()
+    for j in failed:
+        log = _gh_text([f"repos/{repo}/actions/jobs/{j.get('id')}/logs"], timeout=300)
+        if log is None:
+            return run_id, None
+        found |= failed_tests_of_log(log)
+    return run_id, found
+
+
+def quarantine_decide(entries: list[dict], now: "datetime.datetime", dev_failed: "set[str] | None",
+                      selection: object, hours: float = QUARANTINE_HOURS) -> dict:
+    """Which quarantine entries a pull request honors. Pure. An entry is HONORED only when all of these hold; any
+    other state is IGNORED (the test runs), so every doubt fails open:
+
+    * it is younger than `hours` from its timestamp, whatever else is true (it never renews itself);
+    * `dev_failed`, the tests the latest completed dev push run failed, holds this exact test (None: the Actions API
+      could not be read);
+    * `selection`, map_select()'s answer for this pull request, is usable (not FULL) and no class named in the test's
+      name is selected for a reason in QUARANTINE_REACH: the pull request touches the test's own file or a file the
+      map says reaches it, so it runs the test;
+    * the name says which suite it belongs to.
+
+    Returns {"honored": [{name, suite, issue, run}], "ignored": [{name, reason}]}."""
+    honored: list[dict] = []
+    ignored: list[dict] = []
+    why = selection.get("why") if isinstance(selection, dict) and not selection.get("full") else None
+    seen: set[str] = set()
+    for e in entries:
+        name = e["name"]
+
+        def no(reason: str) -> None:
+            ignored.append({"name": name, "reason": reason})
+
+        if name in seen:
+            no("listed twice; the first line counts")
+            continue
+        seen.add(name)
+        age = now - e["at"]
+        if age > datetime.timedelta(hours=hours):
+            no(f"expired: {age.total_seconds() / 3600:.0f} hours old, the limit is {hours:g}")
+            continue
+        if age < datetime.timedelta(minutes=-5):
+            no("its timestamp is in the future")
+            continue
+        if dev_failed is None:
+            no("the latest dev run's failures could not be read, so the test runs")
+            continue
+        if name not in dev_failed:
+            no("the latest completed dev push run did not fail this test")
+            continue
+        suite = next((s for prefix, s in QUARANTINE_SUITES if name.startswith(prefix)), "")
+        if not suite:
+            no("the name does not start with Darling.Tests. or Lite.Tests.")
+            continue
+        if not isinstance(why, dict):
+            no("no usable test map selection, so the pull request's reach is unknown and the test runs")
+            continue
+        segments = set(re.split(r"[.+/]", name))
+        hit = next(((cls, reason) for per in why.values() if isinstance(per, dict) for cls, reason in per.items()
+                    if cls in segments and reason in QUARANTINE_REACH), None)
+        if hit:
+            no(f"this pull request reaches it ({hit[0]}: {hit[1]}), so it runs the test")
+            continue
+        honored.append({"name": name, "suite": suite, "issue": e["issue"], "run": e["run"]})
+    return {"honored": honored, "ignored": ignored}
+
+
+def quarantine_args(path: str, suite: str) -> list[str]:
+    """The runner arguments that leave a suite's honored tests out: `-method- <name>` for each. [] when the decision
+    file is missing or unreadable (nothing is left out)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            decided = json.load(fh)
+        honored = [h for h in decided["honored"] if isinstance(h, dict) and h.get("suite") == suite
+                   and isinstance(h.get("name"), str)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    out: list[str] = []
+    for h in honored:
+        out += ["-method-", h["name"]]
+    return out
+
+
 def _bool(s: str) -> bool:
     return s.strip().lower() == "true"
 
@@ -1887,6 +2057,18 @@ def main(argv: list[str]) -> int:
     mk.add_argument("--selection", required=True, help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
     mk.add_argument("--suite", required=True, choices=("darling", "lite"))
 
+    qr = sub.add_parser("quarantine", help="which entries of the CI quarantine file this pull request honors (test-map-select job, #5942)")
+    qr.add_argument("--file", default=QUARANTINE_FILE, help="the quarantine file (default: .github/ci-quarantine.txt)")
+    qr.add_argument("--repo", default="", help="owner/name: the repository whose latest completed dev push run is read")
+    qr.add_argument("--selection", help="the JSON map-select --out wrote; missing, unreadable or FULL honors nothing")
+    qr.add_argument("--dev-failures-file", help="instead of the Actions API: one failed test per line (a missing file counts as unreadable)")
+    qr.add_argument("--now", help="the clock as ISO 8601 UTC (default: now)")
+    qr.add_argument("--out", help="also write the decision JSON to this file")
+
+    qa = sub.add_parser("quarantine-args", help="the runner arguments that leave a suite's honored quarantined tests out (workflow step)")
+    qa.add_argument("--quarantine", required=True, help="the JSON `quarantine --out` wrote; missing or unreadable leaves nothing out")
+    qa.add_argument("--suite", required=True, choices=("darling", "lite"))
+
     sc = sub.add_parser("shadow-check", help="classes that failed but a map selection would not have run (workflow step)")
     sc.add_argument("--selection", help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
     sc.add_argument("--reports", required=True, help="a folder with one subfolder per timing artifact")
@@ -1966,6 +2148,51 @@ def main(argv: list[str]) -> int:
         else:
             print(f"SELECTED {len(names)}")
             print("\n".join(sorted(names)))
+        return 0
+    if args.cmd == "quarantine":
+        try:
+            with open(args.file, encoding="utf-8") as fh:
+                entries, bad = parse_quarantine(fh.read())
+        except OSError:
+            entries, bad = [], []
+        clock = _parse_time(args.now) if args.now else datetime.datetime.now(datetime.timezone.utc)
+        decided: dict = {"honored": [], "ignored": []}
+        if entries and clock is not None:
+            dev_run = ""
+            dev_failed: "set[str] | None" = None
+            if args.dev_failures_file:
+                try:
+                    with open(args.dev_failures_file, encoding="utf-8") as fh:
+                        dev_failed = {ln.strip() for ln in fh if ln.strip()}
+                except OSError:
+                    dev_failed = None
+            elif args.repo:
+                dev_run, dev_failed = dev_failures(args.repo)
+            selection = None
+            if args.selection:
+                try:
+                    with open(args.selection, encoding="utf-8") as fh:
+                        selection = json.load(fh)
+                except (OSError, ValueError):
+                    selection = None
+            decided = quarantine_decide(entries, clock, dev_failed, selection)
+            decided["dev_run"] = dev_run
+        elif entries:
+            decided["ignored"] = [{"name": e["name"], "reason": "the clock could not be read"} for e in entries]
+        for b in bad:
+            decided["ignored"].append({"name": b, "reason": "malformed line (expected: test | dev run id | UTC time | #issue)"})
+        for h in decided["honored"]:
+            print(f"::notice title=CI quarantine honored::{h['name']} is left out of the {h['suite']} run on this pull request "
+                  f"(dev run {h['run']} failed it; {h['issue']})")
+        for i in decided["ignored"]:
+            print(f"::notice title=CI quarantine ignored::{i['name']}: {i['reason']}")
+        print(f"quarantine: {len(decided['honored'])} honored, {len(decided['ignored'])} ignored, {len(entries)} entries")
+        if args.out:
+            with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(decided, fh)
+        return 0
+    if args.cmd == "quarantine-args":
+        print("\n".join(quarantine_args(args.quarantine, args.suite)))
         return 0
     if args.cmd == "shadow-check":
         selection = None

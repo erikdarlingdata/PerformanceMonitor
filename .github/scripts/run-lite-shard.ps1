@@ -178,6 +178,20 @@ elseif ($EventName -eq 'pull_request') {
     if ($mine.Count -eq 0) { Write-Host "shard ${Shard}: every class of this shard is a skipped Cost=Slow class, so nothing runs"; exit 0 }
 }
 
+# #5942 the CI quarantine: a test that dev's own latest push broke is left out of an unrelated pull request. The
+# test-map-select job decided it once and put quarantine.json beside the selection (ci-select.py quarantine); the
+# honored tests of this suite become `-method- <test>` arguments on every chunk below. A missing or unreadable decision
+# leaves nothing out, so every doubt runs the test.
+$quarantineArgs = @()
+if ($EventName -eq 'pull_request' -and $SelectionFile) {
+    $quarantineFile = Join-Path (Split-Path -Parent $SelectionFile) 'quarantine.json'
+    if (Test-Path -LiteralPath $quarantineFile) {
+        $quarantineArgs = @(python .github/scripts/ci-select.py quarantine-args --quarantine $quarantineFile --suite lite | Where-Object { $_ })
+        if ($LASTEXITCODE -ne 0) { $quarantineArgs = @() }
+        if ($quarantineArgs.Count -gt 0) { Write-Host "shard ${Shard}: the CI quarantine leaves out $($quarantineArgs.Count / 2) test(s): $(($quarantineArgs | Where-Object { $_ -ne '-method-' }) -join ', ')" }
+    }
+}
+
 # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
 # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
 # (#5100). The budget counts only the -class arguments; the other ~170 characters (the dotnet
@@ -211,7 +225,7 @@ foreach ($chunk in $chunks) {
     $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
     Write-Host "shard ${Shard} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
     # -xml: per-test durations for the lite-tests-timing artifact (#5208).
-    dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs -xml TestResults/lite-timing-${Shard}-$chunkNumber-a${RunAttempt}.xml -longRunning 300 | Tee-Object -FilePath TestResults/lite-runner-${Shard}.log -Append
+    dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs @quarantineArgs -xml TestResults/lite-timing-${Shard}-$chunkNumber-a${RunAttempt}.xml -longRunning 300 | Tee-Object -FilePath TestResults/lite-runner-${Shard}.log -Append
     if ($LASTEXITCODE -ne 0) {
         $failedChunks++
         Write-Host "shard ${Shard} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"

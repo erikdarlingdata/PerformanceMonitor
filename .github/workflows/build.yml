@@ -475,6 +475,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read
 
     steps:
       - uses: actions/checkout@v7
@@ -525,6 +526,26 @@ jobs:
             }
           }
 
+      # #5942 the CI quarantine: the test-map-select job decides which quarantined tests this pull request leaves out and ships
+      # the decision in the test-map-selection artifact, in parallel with the Guard build. This job reads it only when
+      # the quarantine file has an entry (it ships empty), waits up to 90 seconds for it, and runs every test when it
+      # never shows up.
+      - name: Fetch the CI quarantine decision
+        if: needs.guard-build.outputs.run == 'true' && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          if (-not (Select-String -Path .github/ci-quarantine.txt -Pattern '^\s*[^#\s]' -Quiet)) { Write-Host 'The quarantine file has no entry.'; exit 0 }
+          for ($i = 0; $i -lt 9; $i++) {
+              gh run download ${{ github.run_id }} -n test-map-selection -D quarantine
+              if ($LASTEXITCODE -eq 0 -and (Test-Path quarantine/quarantine.json)) { break }
+              Start-Sleep -Seconds 10
+          }
+
       - name: Run the Stage=Guard classes of both suites
         if: needs.guard-build.outputs.run == 'true'
         shell: pwsh
@@ -555,7 +576,14 @@ jobs:
 
               # -failSkips: this job has no PostgreSQL, so a tagged test that needs a store would SKIP, and a skip
               # exits 0. Failing skips turns that into a red job (#5471 review M1). Both suites skip none today.
-              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -failSkips -xml "TestResults/guard-$($suite.Key)-a${{ github.run_attempt }}.xml"
+              # #5942: the tests of this suite the CI quarantine leaves out, as `-method- <test>` pairs (none without a decision).
+              $quarantineArgs = @()
+              if (Test-Path quarantine/quarantine.json) {
+                  $quarantineArgs = @(python .github/scripts/ci-select.py quarantine-args --quarantine quarantine/quarantine.json --suite $suite.Key | Where-Object { $_ })
+                  if ($LASTEXITCODE -ne 0) { $quarantineArgs = @() }
+                  if ($quarantineArgs.Count -gt 0) { Write-Host "$($suite.Name): the CI quarantine leaves out $($quarantineArgs.Count / 2) test(s): $(($quarantineArgs | Where-Object { $_ -ne '-method-' }) -join ', ')" }
+              }
+              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -failSkips @quarantineArgs -xml "TestResults/guard-$($suite.Key)-a${{ github.run_attempt }}.xml"
               if ($LASTEXITCODE -ne 0) {
                   Write-Host "::error title=Guard tests failed::$($suite.Name) failed its Stage=Guard classes (exit $LASTEXITCODE). The shards were skipped on this pull request."
                   $failed += $suite.Name
@@ -3200,12 +3228,32 @@ jobs:
           cat shadow/summary.md >> "$GITHUB_STEP_SUMMARY" || true
           exit 0
 
+      # #5942 the CI quarantine: which entries of .github/ci-quarantine.txt this pull request honors, decided once here
+      # and shipped beside the selection (quarantine.json in the same artifact), so the Guard job and the shards leave out
+      # the same tests. An entry counts only while the latest completed dev push run failed that exact test, for 72 hours
+      # at most, and never when the selection says this pull request reaches the test. Every doubt (the Actions API, a
+      # FULL or missing selection, a step failure) honors nothing and the test runs. The file ships empty.
+      - name: Decide the CI quarantine
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          mkdir -p shadow
+          timeout 150 python .github/scripts/ci-select.py quarantine --repo "${GH_REPO}" --selection shadow/selection.json --out shadow/quarantine.json | tee shadow/quarantine.log
+          grep -a -v '^::' shadow/quarantine.log >> "$GITHUB_STEP_SUMMARY" || true
+          exit 0
+
       - name: Upload the selection
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: test-map-selection
-          path: shadow/selection.json
+          path: |
+            shadow/selection.json
+            shadow/quarantine.json
           retention-days: 7
           overwrite: true
           if-no-files-found: ignore

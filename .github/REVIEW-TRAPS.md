@@ -89,6 +89,7 @@ reviewer is reading. Keep each line one line — the review quotes them.
 - `gh api --paginate --jq` runs the filter once PER PAGE: a `max_by` or `last` is per-page, not global; the newest row is the last LINE of the emitted stream (claude-review-guard.yml's verdict scan).
 - A summary helper reading `"$1"` truncates every message whose `echo` wraps with a trailing backslash — the wrapped pieces are separate arguments; read `"$*"` (claude-review-guard.yml).
 - `claude-code-action` refuses to run when `.github/workflows/claude-review.yml` differs from the DEFAULT branch's copy, exits SUCCESS in seconds and sets no output (#2229 cause 1); a PR that edits that file cannot be Claude-reviewed until it merges, and every dev PR after it goes unreviewed until the next release sync (#3657's pending-release arm).
+- Our wrong test is a bug we introduced, never a flake: a test that dev's own push broke (a pinned date that aged out, a census that two merged PRs broke together) failed ten unrelated PRs in a week (#5942). It gets an issue and a fix, and a line in `.github/ci-quarantine.txt` only while that fix lands: `<Namespace.Class.Method> | <dev push run id> | <UTC time> | #<issue>`, honored for 72 hours, only while the latest completed dev push run failed that exact test, and never on a PR that touches the test's file or one the test map says reaches it. A line without an issue is not a quarantine, it is a hidden failure; do not add a retry or a skip in the test instead.
 
 ## Repository mechanics
 
