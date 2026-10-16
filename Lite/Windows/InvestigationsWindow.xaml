@@ -1,0 +1,127 @@
+<Window x:Class="PerformanceMonitorLite.Windows.InvestigationsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Investigations"
+        Height="720" Width="1180"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip"
+        Icon="/EDD.ico"
+        Background="{DynamicResource BackgroundBrush}">
+    <!-- #5904: the investigation requests agents were asked to look into, with each report and the journal per request.
+         Read only: nothing here claims, releases, reports or approves anything. The same columns and grouping as the
+         Investigations page in the Darling web UI. Reports and the stored brief are masked at the level the MCP
+         investigation tools serve (mcp_data_detail), so a masked brief stays masked here. -->
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="3*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="4*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Investigations" FontSize="18" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,0,0,8"
+                   Text="Requests Lite opened for agents to look into, newest first. Read only. A report is an agent's own claim: unreviewed and self-attributed, not a finding."/>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="State" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,6,0"/>
+            <ComboBox x:Name="StateCombo" Width="130" DisplayMemberPath="Label" SelectedValuePath="Value"
+                      SelectionChanged="Filter_SelectionChanged" Margin="0,0,16,0"/>
+            <TextBlock Text="Family" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,6,0"/>
+            <ComboBox x:Name="FamilyCombo" Width="170" DisplayMemberPath="Label" SelectedValuePath="Value"
+                      SelectionChanged="Filter_SelectionChanged" Margin="0,0,16,0"/>
+            <Button Content="Refresh" Click="Refresh_Click" Padding="12,2"/>
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Margin="16,0,0,0"
+                       Foreground="{DynamicResource ForegroundDimBrush}"/>
+        </StackPanel>
+
+        <DataGrid Grid.Row="3" x:Name="RequestsGrid"
+                  AutoGenerateColumns="False"
+                  IsReadOnly="True"
+                  SelectionMode="Single"
+                  CanUserAddRows="False"
+                  CanUserDeleteRows="False"
+                  CanUserSortColumns="False"
+                  HeadersVisibility="Column"
+                  GridLinesVisibility="Horizontal"
+                  SelectionChanged="RequestsGrid_SelectionChanged">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="State" Binding="{Binding State}" Width="80"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
+                <DataGridTextColumn Header="Metric" Binding="{Binding FirstMetric}" Width="180"/>
+                <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="130"/>
+                <DataGridTextColumn Header="Opened" Binding="{Binding Opened}" Width="140"/>
+                <DataGridTextColumn Header="Agent" Binding="{Binding Agent}" Width="130"/>
+                <DataGridTextColumn Header="Lease until" Binding="{Binding LeaseUntil}" Width="140"/>
+                <DataGridTextColumn Header="Reported" Binding="{Binding Reported}" Width="140"/>
+                <DataGridTextColumn Header="Route" Binding="{Binding RouteId}" ElementStyle="{StaticResource NumericCell}" Width="60"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <TextBlock Grid.Row="4" x:Name="DetailHead" TextWrapping="Wrap" Margin="0,10,0,6" FontWeight="SemiBold"
+                   Foreground="{DynamicResource ForegroundBrush}" Text="Pick a request to see its reports and journal."/>
+
+        <ScrollViewer Grid.Row="5" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <TextBlock Text="Reports" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <TextBlock x:Name="NoReportsText" Text="No agent has reported on this request."
+                           Foreground="{DynamicResource ForegroundDimBrush}" Visibility="Collapsed" Margin="0,0,0,8"/>
+                <ItemsControl x:Name="ReportsList" Margin="0,0,0,8">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}" Padding="8" Margin="0,0,0,6">
+                                <StackPanel>
+                                    <TextBlock Foreground="{DynamicResource ForegroundDimBrush}">
+                                        <Run Text="Agent "/><Run Text="{Binding AgentId, Mode=OneWay}"/>
+                                        <Run Text=" reported "/><Run Text="{Binding Submitted, Mode=OneWay}"/>
+                                        <Run Text=" | verdict "/><Run Text="{Binding Verdict, Mode=OneWay}" FontWeight="Bold"/>
+                                        <Run Text=" | root cause found: "/><Run Text="{Binding RootCauseFound, Mode=OneWay}"/>
+                                    </TextBlock>
+                                    <TextBlock Text="Summary" FontWeight="SemiBold" Margin="0,6,0,2" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox Text="{Binding Summary, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0"
+                                             Background="Transparent" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBlock Text="Root cause" FontWeight="SemiBold" Margin="0,6,0,2" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox Text="{Binding RootCause, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0"
+                                             Background="Transparent" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBlock Text="Evidence" FontWeight="SemiBold" Margin="0,6,0,2" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox Text="{Binding Evidence, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0"
+                                             Background="Transparent" Foreground="{DynamicResource ForegroundBrush}"
+                                             MaxHeight="160" VerticalScrollBarVisibility="Auto"/>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock x:Name="BriefHead" Text="Stored brief" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"
+                           Margin="0,0,0,4" Visibility="Collapsed"/>
+                <TextBox x:Name="BriefBox" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="200" VerticalScrollBarVisibility="Auto"
+                         Visibility="Collapsed" Margin="0,0,0,8" Background="Transparent" Foreground="{DynamicResource ForegroundBrush}"/>
+
+                <TextBlock Text="Journal" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <TextBlock x:Name="JournalNote" Visibility="Collapsed" Margin="0,0,0,4" Foreground="{DynamicResource ForegroundDimBrush}"
+                           Text="Showing the newest journal rows; older ones are not listed."/>
+                <DataGrid x:Name="JournalGrid"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          CanUserAddRows="False"
+                          CanUserDeleteRows="False"
+                          CanUserSortColumns="False"
+                          HeadersVisibility="Column"
+                          GridLinesVisibility="Horizontal"
+                          MaxHeight="260">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="140"/>
+                        <DataGridTextColumn Header="Event" Binding="{Binding Event}" Width="130"/>
+                        <DataGridTextColumn Header="Actor" Binding="{Binding Actor}" Width="150"/>
+                        <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="260"/>
+                        <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>
