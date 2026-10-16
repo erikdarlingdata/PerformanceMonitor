@@ -92,6 +92,20 @@ public sealed class CustomAlertBacktestTests
         Assert.Equal(CustomAlertBacktest.FallbackCadence, CustomAlertBacktest.CadenceFor("no_such_table", 7, Array.Empty<ScheduleOverride>()));
     }
 
+    /// <summary>Two rows for one collector at one level (the unique indexes are on the raw name, the matchers compare
+    /// case-insensitively, so a case variant is storable): the last one wins, as in the scheduler's one row picker.</summary>
+    [Fact]
+    public void TheCadence_PicksDuplicateRowsTheWayTheSchedulerDoes_TheLastOneWins()
+    {
+        var first = new ScheduleOverride(null, "cpu_utilization", 10, null, null);
+        var last = new ScheduleOverride(null, "CPU_UTILIZATION", 30, null, null);
+        Assert.Equal(TimeSpan.FromMinutes(30), CustomAlertBacktest.CadenceFor("cpu_utilization_stats", 7, new[] { first, last }));
+
+        var ownFirst = new ScheduleOverride(7, "cpu_utilization", 15, null, null);
+        var ownLast = new ScheduleOverride(7, "Cpu_Utilization", 45, null, null);
+        Assert.Equal(TimeSpan.FromMinutes(45), CustomAlertBacktest.CadenceFor("cpu_utilization_stats", 7, new[] { ownFirst, first, ownLast, last }));
+    }
+
     // ---- Parity with the live engine ---------------------------------------------------------------------------
 
     /// <summary>The same samples fed to the replay and, pass by pass, to the live engine's decision half
@@ -214,6 +228,81 @@ public sealed class CustomAlertBacktestTests
         Assert.Equal("time", (string?)answer["stopped_at"]!["cap"]);
     }
 
+    /// <summary>One read that throws something other than the time cap's cancellation (a statement_timeout, a 57014, a
+    /// dropped connection) ends that server's replay only: the steps already replayed stay, the other server runs every
+    /// step, and the answer is partial with the error's reason rather than the whole call's error envelope.</summary>
+    [Fact]
+    public async Task AReadThatThrowsOnTheNthStep_KeepsTheStepsAlreadyReplayed_AndAnswersThatServerPartial()
+    {
+        var servers = new[]
+        {
+            Replay("alpha-01", 1, TimeSpan.FromHours(1), TimeSpan.FromMinutes(5)),
+            Replay("beta-02", 2, TimeSpan.FromHours(1), TimeSpan.FromMinutes(5)),
+        };
+        var alphaReads = 0;
+
+        var run = await CustomAlertBacktest.ReplayAsync(
+            servers,
+            (t, _, _) =>
+            {
+                if (t.ServerId == 1 && ++alphaReads == 4)
+                {
+                    throw new InvalidOperationException("canceling statement due to statement timeout");
+                }
+
+                return Task.FromResult<double?>(30);
+            },
+            CustomAlertBacktest.MaxQueries, TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, servers[0].StepsRun); // the three steps before the failed one stay
+        Assert.True(servers[0].Failed);
+        Assert.Equal(servers[0].Steps[3], servers[0].FailedAtUtc);
+        Assert.Equal(servers[1].Steps.Count, servers[1].StepsRun); // the other server carried on
+        Assert.Equal(CustomAlertBacktest.StopCap.None, run.StoppedBy);
+
+        var answer = Parse(DarlingMcpCustomAlertTools.FormatBacktest(Definition(), null, null, TimeSpan.FromHours(1), End, run, Array.Empty<string>()));
+        Assert.Equal("partial", (string?)answer["status"]);
+        Assert.Equal("error", (string?)answer["stopped_at"]!["cap"]);
+        var alpha = (JsonObject)answer["servers"]![0]!;
+        Assert.Equal("partial", (string?)alpha["status"]);
+        Assert.Equal(3, (int)alpha["steps_run"]!);
+        Assert.Contains("statement timeout", (string?)alpha["reason"], StringComparison.Ordinal);
+        Assert.NotNull(alpha["fire_count"]); // what was replayed is still an answer
+        Assert.Equal("ok", (string?)answer["servers"]![1]!["status"]);
+    }
+
+    [Fact]
+    public async Task AReadThatThrowsOnTheFirstStep_AnswersThatServerUnavailable_WithTheErrorAsTheReason()
+    {
+        var servers = new[] { Replay("alpha-01", 1, TimeSpan.FromHours(1), TimeSpan.FromMinutes(5)) };
+        var run = await CustomAlertBacktest.ReplayAsync(
+            servers, (_, _, _) => throw new TimeoutException("connection dropped"), CustomAlertBacktest.MaxQueries, TimeSpan.FromSeconds(60),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, run.QueriesRun); // the server stopped at its first failure, not 12 more
+        var answer = Parse(DarlingMcpCustomAlertTools.FormatBacktest(Definition(), null, null, TimeSpan.FromHours(1), End, run, Array.Empty<string>()));
+        Assert.Equal("unavailable", (string?)answer["status"]);
+        var alpha = (JsonObject)answer["servers"]![0]!;
+        Assert.Equal("unavailable", (string?)alpha["status"]);
+        Assert.Contains("connection dropped", (string?)alpha["reason"], StringComparison.Ordinal);
+        Assert.Null(alpha["fire_count"]);
+    }
+
+    [Fact]
+    public async Task ACallerCancellation_StillEndsTheCall_NotJustOneServer()
+    {
+        var servers = new[] { Replay("alpha-01", 1, TimeSpan.FromHours(1), TimeSpan.FromMinutes(5)) };
+        using var caller = new CancellationTokenSource();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CustomAlertBacktest.ReplayAsync(
+            servers,
+            (_, _, _) =>
+            {
+                caller.Cancel();
+                throw new OperationCanceledException(caller.Token);
+            },
+            CustomAlertBacktest.MaxQueries, TimeSpan.FromSeconds(60), caller.Token));
+    }
+
     [Fact]
     public void TheCapsAreTheIssuesNumbers()
     {
@@ -248,6 +337,14 @@ public sealed class CustomAlertBacktestTests
             dataSource, rule_id: null, definition: DefinitionJson, hours: 168.5, cancellationToken: TestContext.Current.CancellationToken));
         Assert.Equal("invalid", (string?)answer["status"]);
         Assert.Contains("168-hour (7-day) cap", (string?)answer["message"], StringComparison.Ordinal);
+
+        // TimeSpan.FromHours throws on NaN and past ~2.56e8; both must be refused as invalid, not escape as an error.
+        foreach (var bad in new[] { double.NaN, 1_000_000_000d, double.PositiveInfinity, -1d, 0d })
+        {
+            var refused = Parse(await DarlingMcpCustomAlertTools.BacktestCustomAlertRule(
+                dataSource, rule_id: null, definition: DefinitionJson, hours: bad, cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Equal("invalid", (string?)refused["status"]);
+        }
 
         var both = Parse(await DarlingMcpCustomAlertTools.BacktestCustomAlertRule(
             dataSource, rule_id: 1, definition: DefinitionJson, cancellationToken: TestContext.Current.CancellationToken));

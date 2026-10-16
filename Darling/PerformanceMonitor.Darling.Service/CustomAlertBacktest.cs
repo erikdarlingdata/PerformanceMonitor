@@ -84,15 +84,14 @@ public static class CustomAlertBacktest
         int? minutes = null;
         foreach (var collector in CollectorCatalog.All.Where(c => string.Equals(c.TargetTable, sourceTable, StringComparison.Ordinal)))
         {
-            if (!CollectorScheduleDefaults.All.ContainsKey(collector.Name))
+            // The one resolution every collection-health surface and the scheduler use, so duplicate override rows pick
+            // the same winner here (the last one) as they do there; null is a name the catalog does not know.
+            var resolved = CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(collector.Name, serverId, overrides);
+            if (resolved is not int frequency)
             {
                 continue;
             }
 
-            var own = overrides.FirstOrDefault(o => o.ServerId == serverId && string.Equals(o.CollectorName, collector.Name, StringComparison.OrdinalIgnoreCase));
-            var fleet = overrides.FirstOrDefault(o => o.ServerId is null && string.Equals(o.CollectorName, collector.Name, StringComparison.OrdinalIgnoreCase));
-            var frequency = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
-                CollectorScheduleDefaults.ResolveFrequencyMinutes(collector.Name, own?.FrequencyMinutes, fleet?.FrequencyMinutes));
             minutes = minutes is int m ? Math.Min(m, frequency) : frequency;
         }
 
@@ -148,8 +147,26 @@ public static class CustomAlertBacktest
         /// <summary>Whether the rule was firing after the last step run.</summary>
         public bool FiringAtEnd => _state.Firing;
 
-        /// <summary>The next step not yet run, or null when every step ran.</summary>
-        public DateTime? NextStep => StepsRun < Steps.Count ? Steps[StepsRun] : null;
+        /// <summary>The step whose read failed (anything but the time cap's own cancellation), or null. A failed server runs no
+        /// further steps; the steps it already replayed stay in its answer.</summary>
+        public DateTime? FailedAtUtc { get; private set; }
+
+        /// <summary>Why that read failed (the exception's message), or null when none did.</summary>
+        public string? FailureReason { get; private set; }
+
+        /// <summary>Whether a read on this server failed, so it stopped short of its last step.</summary>
+        public bool Failed => FailureReason is not null;
+
+        /// <summary>The next step not yet run, or null when every step ran or this server's read failed.</summary>
+        public DateTime? NextStep => !Failed && StepsRun < Steps.Count ? Steps[StepsRun] : null;
+
+        /// <summary>Records a failed read at <paramref name="atUtc"/>: no more steps run on this server, and the steps
+        /// already observed stay.</summary>
+        public void Fail(DateTime atUtc, string reason)
+        {
+            FailedAtUtc = atUtc;
+            FailureReason = string.IsNullOrWhiteSpace(reason) ? "the read failed" : reason;
+        }
 
         /// <summary>The last step run, or null when none ran.</summary>
         public DateTime? LastStepRun => StepsRun > 0 ? Steps[StepsRun - 1] : null;
@@ -203,7 +220,9 @@ public static class CustomAlertBacktest
     /// Runs the steps round-robin across the servers (every server's k-th step before any server's k+1-th), so a replay a cap
     /// stops has covered the same stretch of history on each server. <paramref name="sample"/> is one panel query: the rule's
     /// value on a server as of a step. The query cap is checked before each query, and the time cap both before each query
-    /// and as a cancellation on the query in flight; a query the time cap cancels is not counted as run.
+    /// and as a cancellation on the query in flight; a query the time cap cancels is not counted as run. A query that
+    /// throws anything else ends that server's replay (its earlier steps stay, <see cref="ServerReplay.FailureReason"/>
+    /// says why) and the other servers carry on.
     /// </summary>
     public static async Task<Run> ReplayAsync(
         IReadOnlyList<ServerReplay> servers,
@@ -223,7 +242,7 @@ public static class CustomAlertBacktest
         {
             foreach (var server in servers)
             {
-                if (k >= server.Steps.Count)
+                if (k >= server.Steps.Count || server.Failed)
                 {
                     continue;
                 }
@@ -249,6 +268,15 @@ public static class CustomAlertBacktest
                 {
                     stop = StopCap.Time;
                     break;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+                {
+                    // One failed read (a statement_timeout, a 57014, a dropped connection) is that server's end, not the
+                    // call's: the live sweep guards each (rule, server) pass the same way (CustomAlertEvaluator), and
+                    // every step already replayed is the answer this call exists to give.
+                    queries++;
+                    server.Fail(server.Steps[k], ex.Message);
+                    continue;
                 }
 
                 queries++;

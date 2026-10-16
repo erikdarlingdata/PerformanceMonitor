@@ -449,15 +449,22 @@ public sealed class DarlingMcpCustomAlertTools
         "rule's breachSamples / clearSamples from a fresh streak: a no-data step freezes the streak and is never a breach or a " +
         "clear, as on the live engine. So the fire and clear points are where the live engine would have fired and cleared on " +
         "those samples. What a replay cannot reproduce: a sample the store no longer holds (retention), a streak already open " +
-        "before the span, and the channel side (mutes, throttles, failed sends). " +
-        "ANSWER: {status, rule_id, name, span_hours, start_utc, end_utc, queries_run, elapsed_ms, servers:[{server, status, " +
+        "before the span, the channel side (mutes, throttles, failed sends), and the streak's clock: the live engine counts " +
+        "breachSamples / clearSamples once per evaluation (every evaluationIntervalSeconds, default 60) and a replay counts them " +
+        "once per step, so with breachSamples above 1 a sustained breach takes breachSamples x step_seconds here against " +
+        "breachSamples x evaluationIntervalSeconds live - read a replay of a multi-sample rule as a floor on the live fires, and " +
+        "do the arithmetic from step_seconds and breach_samples in the answer. " +
+        "ANSWER: {status, rule_id, name, span_hours, start_utc, end_utc, breach_samples, clear_samples, queries_run, elapsed_ms, servers:[{server, status, reason, " +
         "step_seconds, steps, steps_run, samples_evaluated, no_data_steps, breaching_samples, fire_count, clear_count, fires:[{at_utc, " +
         "value, severity}], clears:[{at_utc, value}], firing_at_end, covered_from_utc, covered_to_utc}]}. status is ok when every " +
-        "step of every server ran. partial when a cap stopped it: stopped_at {cap: servers|queries|time, at_utc, reason} names " +
+        "step of every server ran. partial when a cap stopped it: stopped_at {cap: servers|queries|time|error, at_utc, reason} names " +
         "the cap and the first step not run (at_utc is null for the servers cap, which replays the first 10 servers by name and " +
         "lists the rest in servers_not_covered), and each server's covered_from_utc / covered_to_utc say what it did cover. A " +
         "server whose every step returned no value is status:unavailable with a reason and no counts: the source holds no " +
-        "samples for it in the span (or the metric no longer compiles), which is not the same as zero fires. Top-level " +
+        "samples for it in the span (or the metric no longer compiles), which is not the same as zero fires. A read that FAILS " +
+        "(a statement timeout, a dropped connection) ends only that server's replay and keeps its steps already replayed: that " +
+        "server is partial (unavailable when nothing was replayed) with the error as its reason, and when no cap stopped the call " +
+        "stopped_at.cap is error. Top-level " +
         "status is unavailable when every server is; empty when no monitored server is in scope; invalid for a bad input or a " +
         "span over 168 hours.")]
     public static async Task<string> BacktestCustomAlertRule(
@@ -476,19 +483,22 @@ public sealed class DarlingMcpCustomAlertTools
                 return Outcome("invalid", "Provide exactly one of rule_id or definition.");
             }
 
-            var span = hours is double h ? TimeSpan.FromHours(h) : CustomAlertBacktest.DefaultSpan;
+            // The number is validated BEFORE TimeSpan.FromHours sees it: FromHours throws on NaN and on anything past
+            // ~2.56e8, and a throw lands in the catch below as an `error` envelope, not the documented `invalid` refusal.
             if (hours is double requested && (double.IsNaN(requested) || requested <= 0))
             {
                 return Outcome("invalid", "hours must be a positive number of hours (default 24, at most 168).");
             }
 
-            if (span > CustomAlertBacktest.MaxSpan)
+            if (hours is double overCap && overCap > CustomAlertBacktest.MaxSpan.TotalHours)
             {
                 return Outcome("invalid",
-                    $"hours {span.TotalHours:0.##} is over the 168-hour (7-day) cap on one backtest; replay a shorter span, or several spans with as_of.");
+                    $"hours {overCap:0.##} is over the 168-hour (7-day) cap on one backtest; replay a shorter span, or several spans with as_of.");
             }
 
-            var asOfError = McpHelpers.ResolveAsOf(as_of, out var endUtc);
+            var span = hours is double h ? TimeSpan.FromHours(h) : CustomAlertBacktest.DefaultSpan;
+
+            var asOfError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
             if (asOfError is not null)
             {
                 return asOfError;
@@ -586,7 +596,7 @@ public sealed class DarlingMcpCustomAlertTools
             foreach (var target in covered)
             {
                 var step = CustomAlertBacktest.StepFor(span, CustomAlertBacktest.CadenceFor(def.Plan.Measure.SourceTable, target.ServerId, overrides));
-                replays.Add(new CustomAlertBacktest.ServerReplay(def, target, step, CustomAlertBacktest.StepTimes(endUtc, span, step)));
+                replays.Add(new CustomAlertBacktest.ServerReplay(def, target, step, CustomAlertBacktest.StepTimes(windowEnd, span, step)));
                 unregisteredByServer[target.ServerId] =
                     await ComposeServerScope.FindUnregisteredAsync(postgres, new[] { target.StorageName }, cancellationToken)
                     ?? Array.Empty<string>();
@@ -601,7 +611,7 @@ public sealed class DarlingMcpCustomAlertTools
                 CustomAlertBacktest.MaxElapsed,
                 cancellationToken);
 
-            return FormatBacktest(def, resolvedId, ruleName, span, endUtc, run, notCovered);
+            return FormatBacktest(def, resolvedId, ruleName, span, windowEnd, run, notCovered);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -624,14 +634,17 @@ public sealed class DarlingMcpCustomAlertTools
 
         var servers = run.Servers.Select(s =>
         {
-            var unavailable = s.StepsRun > 0 && s.SamplesEvaluated == 0;
+            var unavailable = s.SamplesEvaluated == 0 && (s.StepsRun > 0 || s.Failed);
+            var failure = s.Failed
+                ? $"A read failed at {Utc(s.FailedAtUtc)} and this server's replay stopped there ({s.StepsRun} of {s.Steps.Count} steps ran): {s.FailureReason}"
+                : null;
             return (object)new
             {
                 server = s.Target.Label,
-                status = unavailable ? "unavailable" : s.StepsRun == s.Steps.Count ? "ok" : "partial",
+                status = unavailable ? "unavailable" : s.StepsRun == s.Steps.Count && !s.Failed ? "ok" : "partial",
                 reason = unavailable
-                    ? "Every step returned no value: the store holds no samples of this rule's source for this server in the span covered (or the metric no longer compiles). That is no answer, not zero fires."
-                    : null,
+                    ? failure ?? "Every step returned no value: the store holds no samples of this rule's source for this server in the span covered (or the metric no longer compiles). That is no answer, not zero fires."
+                    : failure,
                 step_seconds = (long)s.Step.TotalSeconds,
                 steps = s.Steps.Count,
                 steps_run = s.StepsRun,
@@ -648,8 +661,11 @@ public sealed class DarlingMcpCustomAlertTools
             };
         }).ToList();
 
-        var allUnavailable = run.Servers.Count > 0 && run.Servers.All(s => s.StepsRun > 0 && s.SamplesEvaluated == 0);
-        var status = stoppedBy != CustomAlertBacktest.StopCap.None ? "partial" : allUnavailable ? "unavailable" : "ok";
+        var firstFailed = run.Servers.Where(s => s.Failed).OrderBy(s => s.FailedAtUtc).FirstOrDefault();
+        var allUnavailable = run.Servers.Count > 0 && run.Servers.All(s => s.SamplesEvaluated == 0 && (s.StepsRun > 0 || s.Failed));
+        var status = stoppedBy != CustomAlertBacktest.StopCap.None || (firstFailed is not null && !allUnavailable)
+            ? "partial"
+            : allUnavailable ? "unavailable" : "ok";
 
         object? stoppedAt = stoppedBy switch
         {
@@ -671,13 +687,23 @@ public sealed class DarlingMcpCustomAlertTools
                 at_utc = (string?)Utc(run.StoppedAtUtc),
                 reason = $"The replay reached the {CustomAlertBacktest.MaxElapsed.TotalSeconds:0}-second cap on one backtest; replay a shorter span or fewer servers for the rest.",
             },
+            // No cap stopped it but a read did: the replay broke on a server, which is not the same as a cap and not the same
+            // as a store with nothing in it.
+            _ when firstFailed is not null => new
+            {
+                cap = "error",
+                at_utc = (string?)Utc(firstFailed.FailedAtUtc),
+                reason = $"A read failed on {run.Servers.Count(s => s.Failed)} of {run.Servers.Count} replayed servers; the steps already replayed are kept, and each failed server's own reason says why.",
+            },
             _ => null,
         };
 
         return JsonSerializer.Serialize(new
         {
             status,
-            message = status == "unavailable"
+            message = status == "unavailable" && firstFailed is not null
+                ? "No server returned a value before a read failed on it: see each server's reason. That is no answer, not zero fires."
+                : status == "unavailable"
                 ? "No server returned a value at any step: the store holds no samples of this rule's source for these servers in the span. That is no answer, not zero fires."
                 : null,
             rule_id = ruleId,
