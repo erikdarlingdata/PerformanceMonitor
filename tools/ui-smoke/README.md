@@ -57,9 +57,23 @@ you call `node smoke.mjs` yourself.
 ## Screenshot baselines
 
 Four pages have a baseline PNG in `baselines/`: `fleet`, `ui-sql-overview`, `ui-sql-queries` and `admin-servers`. After the
-smoke walk, `shots.mjs` renders each one at 1280 by 800 and compares it with its baseline. The check fails when any pixel
-differs by more than a small color threshold. The renders are the same from run to run, so there is no allowance. A page is marked by a `screenshot` key in `pages.json`.
-The key lists CSS selectors to paint over, for text that changes from run to run.
+smoke walk, `shots.mjs` renders each one at 1280 by 800 and compares it with its baseline. A pixel counts as different when
+it differs by more than a small color threshold. The renders are the same from run to run, so there is no allowance.
+A page is marked by a `screenshot` key in `pages.json`. The key lists CSS selectors to paint over, for text that changes
+from run to run.
+
+The compare is advisory (#5931). A page that differs from its baseline prints one `NOTICE screenshot <page>: <n> pixels differ`
+line and writes its baseline, actual and diff images. It does not fail the job. The last lines of the run say how many
+pages matched, how many differ and how many had problems. The workflow also writes a table of the per-page pixel counts to
+the job summary.
+
+What still fails the job:
+
+- A page that does not load, or a console or page error.
+- A panel or grid that the page's `expect` entry requires and that is missing or empty.
+- A step that fails (the stage that shoots the pages throws, the seed cannot be applied, the service does not start).
+- A screenshot problem that is not a pixel difference: no baseline for a page, a size that differs from the baseline, a
+  page that never settles, or a fleet that never turns collection stale.
 
 How the page is kept the same on every run:
 
@@ -77,22 +91,24 @@ How the page is kept the same on every run:
 - The database size in the status bar is not the same on every run. Its width changes when it gains a digit (99 MB to 100 MB).
   In one run the item was missing, because the read of the size had not finished. A mask hides the text, not the box. For the
   shots, `shots.mjs` adds a style that hides the item and the separator before it, so the bar is the same either way.
-- `report.json` is `{ pages, screenshotProblems }`. The page walk is written first, then rewritten with the screenshot
-  problems, so a failure in the screenshot step cannot lose the walk.
+- `report.json` is `{ pages, screenshotProblems, screenshots }`. `screenshots` has the name, pixel count and percentage of
+  each compared page. The page walk is written first, then rewritten with the screenshot results, so a failure in the
+  screenshot step cannot lose the walk.
 - Playwright's Chromium lives in the folder named by `PLAYWRIGHT_BROWSERS_PATH`. The workflow sets it and caches that folder.
 
 To refresh the baselines (after a change to the page that you want to keep):
 
-1. Start the workflow "Darling UI smoke" by hand on your branch, with `update_baselines` set. For example:
+1. Start the workflow "Darling UI smoke" by hand on your branch with `update_baselines=true`. For example:
    `gh workflow run darling-ui-smoke.yml --ref <branch> -f update_baselines=true`.
 2. Download the artifact `darling-ui-smoke-new-baselines` from that run.
 3. Copy the PNGs into `tools/ui-smoke/baselines/` and commit them on the pull request.
 4. Review GitHub's image diff of each PNG. Never commit a PNG that you rendered on your own machine. Fonts and the browser
    differ, so most pixels differ in CI.
 
-When a compare fails, the job uploads the artifact `darling-ui-smoke-screenshot-diffs`. For each page that differs, it holds
-`<page>.baseline.png`, `<page>.actual.png` and `<page>.diff.png` (the changed pixels). If the change is wanted, refresh the
-baselines as above. If a runner image update moved the pixels, refresh them the same way.
+Every run, pass or fail, uploads the artifact `darling-ui-smoke`. For each page that differs, its `ui-smoke/out/shot-failures` folder
+holds `<page>.baseline.png`, `<page>.actual.png` and `<page>.diff.png` (the changed pixels). If the change is wanted, refresh
+the baselines as above. If a runner image update moved the pixels, refresh them the same way. A drift that nobody refreshes
+does not fail anything, so look at the NOTICE lines on a pull request that changes a page.
 
 ## Add a page or a seeded table
 

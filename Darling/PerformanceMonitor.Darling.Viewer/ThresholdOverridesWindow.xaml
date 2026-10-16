@@ -1,0 +1,79 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.ThresholdOverridesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Threshold Overrides"
+        Height="560" Width="1100"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- #5916: a threshold held for one server (or one database on it) that differs from the global value. Mirrors
+         NotificationRoutesWindow's shape (grid + buttons, straight to Postgres via ViewerDataService); the table is on the
+         config_version beacon, so the running service re-reads it on its next reload. The logic is ThresholdOverridesViewModel. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Threshold Overrides" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="1"
+                   Text="A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only; the global value is not changed. To silence an alert, mute it: an override moves a threshold and never turns an alert off."
+                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+
+        <Grid Grid.Row="2">
+            <DataGrid x:Name="OverridesGrid"
+                      Style="{StaticResource DarkGrid}"
+                      CanUserDeleteRows="False"
+                      IsReadOnly="True"
+                      SelectionChanged="OverridesGrid_SelectionChanged">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
+                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseText}" Width="130"/>
+                    <DataGridTextColumn Header="Key" Binding="{Binding Key}" Width="*"/>
+                    <DataGridTextColumn Header="Value" Binding="{Binding ValueText}" Width="70"/>
+                    <DataGridTextColumn Header="Global value" Binding="{Binding GlobalValueText}" Width="90"/>
+                    <DataGridTextColumn Header="Set by" Binding="{Binding SetBy}" Width="120"/>
+                    <DataGridTextColumn Header="Request" Binding="{Binding RequestText}" Width="80"/>
+                    <DataGridTextColumn Header="Updated" Binding="{Binding UpdatedText}" Width="140"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="NoOverridesMessage"
+                       Text="No server holds an override: every server uses the global values."
+                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="460"
+                       Visibility="Collapsed"/>
+        </Grid>
+
+        <StackPanel x:Name="EditPanel" Grid.Row="3" Orientation="Horizontal" Margin="0,12,0,0">
+            <TextBlock Text="Server" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox x:Name="ServerCombo" Width="170" DisplayMemberPath="Name" Margin="0,0,12,0"/>
+            <TextBlock Text="Key" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox x:Name="KeyCombo" Width="260" Margin="0,0,12,0"/>
+            <TextBlock Text="Database" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="DatabaseBox" Width="120" Margin="0,0,12,0" ToolTip="Only pvs.* and file_growth.rise_mb / file_growth.volume_percent take a database. Blank is the whole server."/>
+            <TextBlock Text="Value" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="ValueBox" Width="70" Margin="0,0,12,0"/>
+            <Button Content="_Save" Width="80" Height="28" Margin="0,0,8,0" Click="Save_Click"/>
+            <Button Content="_Remove" Width="80" Height="28" Margin="0,0,8,0" Click="Remove_Click"/>
+        </StackPanel>
+
+        <TextBlock x:Name="StatusText" Grid.Row="4" HorizontalAlignment="Left" VerticalAlignment="Center"
+                   Margin="0,8,90,0" TextWrapping="Wrap"/>
+        <Button Grid.Row="4" Content="_Close" Width="80" Height="28" Margin="0,8,0,0"
+                HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
+    </Grid>
+</Window>

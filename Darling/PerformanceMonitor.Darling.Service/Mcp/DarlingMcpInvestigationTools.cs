@@ -563,20 +563,23 @@ public sealed class DarlingMcpInvestigationTools
         "missed_step, comment, author), and a window read returns family_counts: per alert family, reported, " +
         "with_feedback, marked_wrong, agent_false_positives (reports that say false_positive) and false_positives " +
         "(the same after people's corrected verdicts). " +
+        "While a practice request (practice_of on its row) is open or claimed, the case it replays is read without its report, " +
+        "feedback and journal, so the practice is not answered from them. " +
         "hours_back 1-168, default 24.")]
     public static Task<string> GetInvestigationReports(
         NpgsqlDataSource postgres,
         InvestigationBriefComposer composer,
+        InvestigationReadPolicy readPolicy,
         [Description("Server name. Omit for all.")] string? server_name = null,
         [Description("One request, with its brief. Omit for the window.")] string? request_id = null,
         [Description("1-168. Default 24. Ignored with request_id.")] int hours_back = 24,
         CancellationToken cancellationToken = default) =>
-        ReportsAsync(postgres, composer.Mode, server_name, request_id, hours_back, cancellationToken);
+        ReportsAsync(postgres, composer.Mode, server_name, request_id, hours_back, cancellationToken, readPolicy.HideLivePracticeAnswers);
 
     /// <summary>The report read at <paramref name="mode"/>. The web panel passes <see cref="McpDataDetail.Full"/>: its role
     /// can SELECT these tables itself, so the setting guards the MCP side (#5632 review round 2, M1).</summary>
     internal static async Task<string> ReportsAsync(NpgsqlDataSource postgres, McpDataDetail mode, string? server_name,
-        string? request_id, int hours_back, CancellationToken cancellationToken)
+        string? request_id, int hours_back, CancellationToken cancellationToken, bool hideLivePracticeAnswers = false)
     {
         Guid? requestId = null;
         if (!string.IsNullOrWhiteSpace(request_id))
@@ -607,9 +610,14 @@ public sealed class DarlingMcpInvestigationTools
                 serverId = resolved.ServerId;
             }
 
-            var read = await Store(postgres).ReadReportsAsync(
+            var store = Store(postgres);
+            var read = await store.ReadReportsAsync(
                 requestId, serverId, requestId is null ? DateTime.UtcNow.AddHours(-hours_back) : DateTime.UtcNow,
                 InvestigationToolCore.MaxLimit, InvestigationToolCore.JournalLimit, cancellationToken);
+            /* #5918: under the investigations arm, a case a live practice request replays has no report and no feedback to
+               read (the practice would be answered by the answer key). The request row stays. */
+            if (hideLivePracticeAnswers && read.Requests.Count > 0)
+                read = WithoutReplayedAnswers(read, await store.LivePracticeReplaysAsync(cancellationToken));
             if (read.Requests.Count == 0)
             {
                 return requestId is not null
@@ -624,4 +632,29 @@ public sealed class DarlingMcpInvestigationTools
             return McpHelpers.FormatError("get_investigation_reports", ex);
         }
     }
+
+    /// <summary>
+    /// <paramref name="read"/> without the reports, the feedback and the journal rows of the requests in
+    /// <paramref name="replayed"/> (#5918): the cases a live practice request replays. Their request rows stay, so the agent
+    /// still sees the case exists; the family counts are windows over many cases and are left as they are.
+    /// </summary>
+    internal static InvestigationReportsRead WithoutReplayedAnswers(InvestigationReportsRead read, IReadOnlySet<Guid> replayed)
+    {
+        if (replayed.Count == 0)
+            return read;
+        return read with
+        {
+            Reports = read.Reports.Where(r => !replayed.Contains(r.RequestId)).ToList(),
+            Feedback = read.Feedback?.Where(f => !replayed.Contains(f.RequestId)).ToList(),
+            Journal = read.Journal.Where(j => j.RequestId is not { } id || !replayed.Contains(id)).ToList(),
+        };
+    }
 }
+
+/// <summary>
+/// What the investigation reads may show, by the arm the host serves (#5918). <see cref="HideLivePracticeAnswers"/> is true
+/// under the investigations arm (<see cref="DarlingMcpWritePolicy.Effective.Investigations"/>): while a practice request is
+/// live, the case it replays has no report and no feedback in <c>get_investigation_reports</c>. The writes arm (operators) and
+/// a host serving neither arm see everything. Registered by <c>ConfigureMcpServices</c> from the effective policy.
+/// </summary>
+public sealed record InvestigationReadPolicy(bool HideLivePracticeAnswers);

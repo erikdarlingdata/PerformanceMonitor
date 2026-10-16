@@ -216,20 +216,26 @@ for (const spec of config.pages) {
 }
 await browser.close();
 
-/* The walk's result lands first (report.json is { pages, screenshotProblems }), so nothing the screenshot stage does can lose it. */
+/* The walk's result lands first (report.json is { pages, screenshotProblems, screenshots }), so nothing the screenshot stage does can lose it. */
 writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: [] }, null, 2));
 
 /* Screenshot baselines (#5744): the pages marked "screenshot" in pages.json, in Playwright's own pinned Chromium. A throw out of the
    stage (Chromium not installed, an unwritable folder) is a screenshot problem like any other: it fails the run, it does not crash it. */
 let shotProblems;
+let shots = [];
 try {
-  shotProblems = await runShots({ config, baseUrl, outDir, only, settle });
+  ({ problems: shotProblems, shots } = await runShots({ config, baseUrl, outDir, only, settle }));
 } catch (e) {
   shotProblems = [`screenshots: the stage threw: ${e && e.message ? e.message.split("\n")[0] : e}`];
 }
 for (const p of shotProblems) console.log(`       PROBLEM ${p}`);
+/* The compare is advisory (#5931): a differing screenshot is in `shots` and printed as a NOTICE; only shotProblems fail the run. */
+if ((process.env.UI_SMOKE_SHOTS || "compare").toLowerCase() === "compare" && (shots.length || shotProblems.length)) {
+  const differ = shots.filter((x) => x.differing > 0).length;
+  console.log(`screenshots: ${shots.length - differ} matched, ${differ} differ (advisory), ${shotProblems.length} problems`);
+}
 
-writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems }, null, 2));
+writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems, screenshots: shots }, null, 2));
 const failed = results.filter((r) => r.problems.length);
 console.log(`\nui-smoke: ${results.length - failed.length}/${results.length} pages clean, ${results.filter((r) => r.flaked).length} flaked`);
 if (results.length === 0) {

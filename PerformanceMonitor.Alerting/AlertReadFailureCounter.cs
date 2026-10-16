@@ -844,6 +844,10 @@ public sealed class AlertReadFailureCounter
     /// <para>#5654 added the external-alert delivery self-alert's count of the rows the drain gave up on, Darling-only:
     /// a failed read sends no report, so the standing alert is held rather than resolved, and a nonzero count naming
     /// it says delivery could not be checked, not that it failed.</para>
+    ///
+    /// <para>#5916 added the threshold-override reload, Darling-only (Lite has no override path): a failed reload keeps the
+    /// overrides already in force, so a nonzero count naming it says a changed override has not yet taken effect, not
+    /// that the tuned bars were lost.</para>
     /// </summary>
     public const string FleetScopedReads =
         "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
@@ -856,7 +860,8 @@ public sealed class AlertReadFailureCounter
         + "informational store self-alerts #3826 added — the plan dimension's TOAST slack read and the "
         + "store checkpointer pressure read behind the WAL levers, and the store settings self-alert's "
         + "managed-conf verdicts read (#4215), the daily collection-history audit's rollup read (#5450), and the "
-        + "external-alert delivery self-alert's count of undelivered rows (#5654)";
+        + "external-alert delivery self-alert's count of undelivered rows (#5654), and the threshold-override "
+        + "reload (#5916)";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.

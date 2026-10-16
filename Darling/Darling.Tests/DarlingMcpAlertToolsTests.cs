@@ -101,10 +101,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source")]
-    [InlineData("delete_mute_rule", "rule_id")]
-    [InlineData("set_mute_rule_enabled", "rule_id,enabled")]
-    [InlineData("update_mute_rule", "rule_id,changes_json")]
+    /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action")]
+    [InlineData("delete_mute_rule", "rule_id,agent_action")]
+    [InlineData("set_mute_rule_enabled", "rule_id,enabled,agent_action")]
+    [InlineData("update_mute_rule", "rule_id,changes_json,agent_action")]
     [InlineData("set_notification_route_enabled", "route_id,enabled")]
     [InlineData("delete_notification_route", "route_id")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
@@ -113,10 +114,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void ParamContract_AlertSettings_TakesNoInputParameters()
+    public void ParamContract_AlertSettings_TakesOnlyTheOptionalServerName()
     {
-        /* Only the injected NpgsqlDataSource, which is not [Description]-decorated — an empty input schema. */
-        Assert.Empty(McpParams("get_alert_settings"));
+        /* The injected NpgsqlDataSource is not [Description]-decorated; the one input is the optional server_name (#5916). */
+        Assert.Equal(new[] { "server_name" }, McpParams("get_alert_settings").Select(p => p.Name).ToArray());
     }
 
     [Fact]

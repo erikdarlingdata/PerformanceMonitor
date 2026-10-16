@@ -415,6 +415,13 @@
                                 <TextBlock Text="e.g. DBAtools, msdb, tempdb — applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                                <!-- #5916: a threshold held for one server (or one database) that differs from the global value above. -->
+                                <Button x:Name="ManageThresholdOverridesButton" Content="Manage Threshold _Overrides..."
+                                        Click="ManageThresholdOverridesButton_Click" HorizontalAlignment="Left"
+                                        Padding="12,4" Margin="20,12,0,4"/>
+                                <TextBlock Text="A threshold for one server, or one database on it, that differs from the global value. The global value is not changed."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>

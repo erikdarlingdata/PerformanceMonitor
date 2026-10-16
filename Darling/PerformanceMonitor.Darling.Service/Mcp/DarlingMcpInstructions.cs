@@ -86,7 +86,12 @@ internal static class DarlingMcpInstructions
         var count = served.Count;
         var total = catalog.Count;
         var shared = served.Count(LiteToolNames.Contains);
-        var writesServed = served.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
+        /* #5915: the Level 2 action tools are writes an agent may call under the investigations arm; they do not make the
+           writes arm "on". */
+        var writesServed = served.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n)
+            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n));
+        var agentActionServed = writesServed ? 0 : served.Count(n => DarlingMcpWritePolicy.IsWrite(n)
+            && DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.NeverAgentTools.Contains(n));
         var adminServed = served.Any(DarlingMcpWritePolicy.IsServerAdmin);
         var writeCount = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var adminCount = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
@@ -97,9 +102,11 @@ internal static class DarlingMcpInstructions
         var investigationCount = catalog.Count(DarlingMcpWritePolicy.IsInvestigation);
         var off = new List<string>();
         if (!writesServed)
-            off.Add($"the write tools are off, so the {writeCount + adminCount} that change monitoring configuration are not served " +
-                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
-                    $"{adminCount} more)");
+            off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
+                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
+                    $"{adminCount} more)" + (agentActionServed > 0
+                        ? $"; the {agentActionServed} mute, custom-rule and threshold override tools are served only to an agent with an `agent_action` at Level 2"
+                        : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
                     "monitored servers are not served");
@@ -135,7 +142,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 188 tools. 95 are the same names Lite exposes. The remaining 93 are unique to Darling: " +
+        "This server exposes 189 tools. 95 are the same names Lite exposes. The remaining 94 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";

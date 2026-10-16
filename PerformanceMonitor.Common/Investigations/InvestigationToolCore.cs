@@ -454,7 +454,16 @@ internal static class InvestigationToolCore
         return InvestigationFieldMasking.Mask(node, masker, ("url", link.Url), ("key", link.Key));
     }
 
-    internal static object RequestPayload(InvestigationRequestRow r) => new
+    internal static object RequestPayload(InvestigationRequestRow r)
+    {
+        var payload = JsonSerializer.SerializeToNode(RequestFields(r), McpHelpers.JsonOptions)!.AsObject();
+        /* #5918: a practice request names the case it replays; every other row keeps its shape (absent, not null). */
+        if (r.PracticeOf is { } practiceOf)
+            payload["practice_of"] = practiceOf.ToString();
+        return payload;
+    }
+
+    private static object RequestFields(InvestigationRequestRow r) => new
     {
         request_id = r.RequestId,
         route_id = r.RouteId,

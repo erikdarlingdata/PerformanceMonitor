@@ -152,9 +152,15 @@ public sealed class McpPayloadContractCensusTests
     /// in #3653's vocabulary lane, and the 30 PostgreSQL-side catches that called <c>McpHelpers.Status("error", …)</c>
     /// directly — the retired second dialect — went through it under #3653 Q11. Kept as a roster rather than a
     /// bare "zero" so a new ad-hoc return fails by name and a deliberate exception has somewhere to state its
-    /// reason.
+    /// reason. One exception since #5916: <c>set_alert_threshold_override</c> answers two store faults an operator can act on
+    /// with a status word rather than an error (<c>precondition</c> when the store role lacks the table grant, and a refusal
+    /// naming a server removed from the configuration), because a client that reads <c>status</c> must see "do this" and not
+    /// a failed call.
     /// </summary>
-    public static readonly (string File, string Tool)[] AdHocErrorReturns = [];
+    public static readonly (string File, string Tool)[] AdHocErrorReturns =
+    [
+        ("DarlingMcpThresholdOverrideTools.cs", "set_alert_threshold_override"),
+    ];
 
     /// <summary>
     /// The floor under the one-helper count. 243 catch returns route through <c>FormatError</c> at the time of

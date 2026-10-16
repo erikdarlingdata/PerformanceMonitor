@@ -194,7 +194,8 @@ public sealed record InvestigationReportsRead(
 /// </summary>
 public sealed record InvestigationOpenedRow(Guid RequestId, int RouteId, string ServerName, string Family, DateTime OpenedAtUtc);
 
-/// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.</summary>
+/// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.
+/// <see cref="PracticeOf"/> (#5918) is the request a practice request replays; null for every other request, and then absent from the answer.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,
     int RouteId,
@@ -211,7 +212,8 @@ public sealed record InvestigationRequestRow(
     string? ClaimedBy,
     DateTime? LeaseUntilUtc,
     int ClaimCount,
-    DateTime? ReportedAtUtc);
+    DateTime? ReportedAtUtc,
+    Guid? PracticeOf = null);
 
 /// <summary>What one expiry sweep did.</summary>
 public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);

@@ -39,7 +39,7 @@ public sealed class MuteRulesPageTests
     public void EveryRuleFieldThePageReads_IsOneTheToolReturns()
     {
         var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs").ReplaceLineEndings("\n");
-        var start = tools.IndexOf("private static object BuildMuteRulePayload(MuteRule r) => new", StringComparison.Ordinal);
+        var start = tools.IndexOf("static object BuildMuteRulePayload(MuteRule r) => new", StringComparison.Ordinal);
         Assert.True(start >= 0, "Darling source lost: BuildMuteRulePayload");
         var end = tools.IndexOf("\n    };", start, StringComparison.Ordinal);
         var returned = Regex.Matches(tools[start..end], @"(?m)^ {8}([a-z_]+) = ").Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);

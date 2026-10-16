@@ -543,7 +543,9 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
             .Select(m => m.Value)
             .Concat(Regex.Matches(script, @"(?s)DO \$do\$\r?\nBEGIN\r?\n.*?END \$do\$;")
                 .Select(m => m.Value)
-                .Where(block => block.Contains("config.investigation_requests", StringComparison.Ordinal)))
+                /* #5918: step 3j now also names the table (the practice INSERT grant on a V191 column); it is V191's block, not V184's. */
+                .Where(block => block.Contains("config.investigation_requests", StringComparison.Ordinal)
+                                && !block.Contains("practice_of", StringComparison.Ordinal)))
             .ToList();
 
         /* The viewer carve, the mcp carve, and step 3i, retargeted at per-run roles. */

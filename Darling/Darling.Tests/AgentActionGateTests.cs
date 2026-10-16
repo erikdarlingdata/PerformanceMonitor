@@ -32,6 +32,7 @@ public sealed class AgentActionPolicyTests
 {
     private static readonly DarlingMcpWritePolicy.Effective AgentArm = new(Writes: false, ServerAdmin: false, Investigations: true);
     private static readonly DarlingMcpWritePolicy.Effective WritesArm = new(Writes: true, ServerAdmin: false);
+    private static readonly IReadOnlySet<string> ActionToolNames = new HashSet<string>(InvestigationRules.AgentActionToolNames, StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> Actions = new HashSet<string>(StringComparer.Ordinal) { "create_mute_rule", "update_alert_settings", "edit_server" };
 
     [Theory]
@@ -62,16 +63,19 @@ public sealed class AgentActionPolicyTests
     [Theory]
     [InlineData("create_mute_rule")]
     [InlineData("update_custom_alert_rule")]
+    [InlineData("delete_mute_rule")]
     [InlineData("update_alert_settings")]
-    public void TodaysActionSet_LeavesEveryWriteOffUnderTheAgentArm(string tool) => Assert.False(AgentArm.Offers(tool));
+    [InlineData("edit_server")]
+    public void EveryWrite_IsOffUnderTheAgentArm_UnlessItIsALevel2ActionTool(string tool) =>
+        Assert.Equal(ActionToolNames.Contains(tool), AgentArm.Offers(tool));
 
     [Theory]
     [InlineData("claim_investigation_request", true, false)]
     [InlineData("submit_investigation_report", true, false)]
     [InlineData("get_alert_history", true, true)]
-    [InlineData("create_mute_rule", false, true)]
+    [InlineData("create_mute_rule", true, true)]
     [InlineData("update_alert_settings", false, true)]
-    public void BothArms_AreTodaysBehaviour(string tool, bool agentArm, bool writesArm)
+    public void BothArms_OfferALevel2ActionToolUnderTheAgentArm_AndEveryOtherWriteOnlyUnderTheWritesArm(string tool, bool agentArm, bool writesArm)
     {
         Assert.Equal(agentArm, AgentArm.Offers(tool));
         Assert.Equal(writesArm, WritesArm.Offers(tool));

@@ -1136,6 +1136,11 @@ public sealed class DarlingMcpHostService : BackgroundService
            off unless the host passes the one built from darling.json. */
         services.AddSingleton<DarlingMcpAddServersPolicy>(addServers ?? DarlingMcpAddServersPolicy.Default);
 
+        /* #5915: the Level 2 mute and custom-rule tools read the served policy through this seat, so under the investigations
+           arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
+           client cannot supply it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<DarlingAgentActionSeat>(new DarlingAgentActionSeat(writes));
+
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
            optional parameter, defaulted to a private instance, so every existing test-constructed call site
@@ -1172,10 +1177,19 @@ public sealed class DarlingMcpHostService : BackgroundService
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
             DarlingInvestigationBriefTools.Tools));
 
+        /* #5918: get_investigation_reports hides the case a live practice request replays under the investigations arm. The arm is
+           the policy the host started with, so the tool takes it as a service parameter. Typed-generic AddSingleton<T>, for the
+           seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<InvestigationReadPolicy>(new InvestigationReadPolicy(writes.Investigations));
+
         /* #5822: wait_for_investigation_requests waits on the signal the worker's dispatcher fires when a request opens, a
            service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
            host share it. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
         services.AddSingleton<InvestigationOpenSignal>(InvestigationOpenSignal.Shared);
+
+        /* #5916: set_alert_threshold_override is a Level 2 action tool offered under both arms and takes the served policy as a
+           service parameter to tell them apart. Typed-generic AddSingleton<T>, for the seat census (McpServiceParameterDiSeatCensusTests). */
+        services.AddSingleton<DarlingMcpServedPolicy>(new DarlingMcpServedPolicy(writes));
 
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
@@ -1460,6 +1474,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #5632 Phase A: the Level 1 investigation tools. The two reads are ordinary reads; claim and submit are
                served only under DarlingMcpWritePolicy's investigations arm (a token, mcp.allowWrites off). */
             .WithGeminiCompatibleTools<DarlingMcpInvestigationTools>()
+            .WithGeminiCompatibleTools<DarlingMcpThresholdOverrideTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
             .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
             /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central

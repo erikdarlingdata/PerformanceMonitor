@@ -7,13 +7,15 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Five tabs (the first three each one existing read):
+   Seven tabs (the first three each one existing read):
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
      Report Feedback     GET /api/investigation-feedback (#5913: the feedback people gave investigation reports, the false-positive
                          counts per alert family, and a form to record feedback for a sign-in that can make changes)
+     Practice Scores     GET /api/investigation-practice-scores (#5918: how each agent did on practice requests, list only)
      Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903)
+     Threshold Overrides GET /api/threshold-overrides, with Save, Edit and Remove under an admin store login (#5916)
    Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
@@ -662,7 +664,9 @@ const TABS = [
   { id: "routes", label: "Notification Routes" },
   { id: "settings", label: "Alert Settings" },
   { id: "feedback", label: "Report Feedback" },
+  { id: "practice", label: "Practice Scores" },
   { id: "pending", label: "Pending Notes" },
+  { id: "overrides", label: "Threshold Overrides" },
   { id: "agent-changes", label: "Agent changes" },
 ];
 
@@ -1384,6 +1388,58 @@ async function buildFeedback(body, generation) {
 }
 
 
+/* ─────────────────────────── practice scores (#5918) ─────────────────────────── */
+
+/* Practice Scores: how each agent did on practice requests, cases an operator already judged and replayed without their answers.
+   GET /api/investigation-practice-scores. List-only: a practice request is started in the desktop Viewer. The score is advisory and
+   turns no route on or off. */
+const PRACTICE_NOTE =
+  "A practice request replays a case somebody gave feedback on, without its answers, and scores the agent's report against that " +
+  "feedback. A corrected verdict is the answer; otherwise right makes the report's verdict the answer, partly counts half, and wrong " +
+  "with no correction has no answer. Scores are advisory and turn no route on or off. Start a practice request in the desktop Viewer.";
+
+export function practiceScoreText(a) {
+  if (a.percent === null || a.percent === undefined) return "not scored yet";
+  return Number(a.points) + " of " + Number(a.possible) + " (" + a.percent + "%)";
+}
+
+export function practiceRows(agents) {
+  return (Array.isArray(agents) ? agents : []).map((a) => ({
+    agent_id: a.agent_id,
+    cases: a.cases,
+    scored: a.scored,
+    matched: a.matched,
+    score: practiceScoreText(a),
+    unscored: a.unscored,
+    missed_step_cases: a.missed_step_cases,
+  }));
+}
+
+const PRACTICE_COLUMNS = [
+  { key: "agent_id", label: "Agent" },
+  { key: "cases", label: "Cases" },
+  { key: "scored", label: "Scored" },
+  { key: "matched", label: "Matched" },
+  { key: "score", label: "Score" },
+  { key: "unscored", label: "No answer" },
+  { key: "missed_step_cases", label: "Missed step noted" },
+];
+
+async function buildPractice(body, generation) {
+  const res = await apiGet("/api/investigation-practice-scores");
+  if (generation !== renderGeneration) return;
+  const bad = failure(res);
+  if (bad) return mount(body, bad);
+  const data = res.data || {};
+  const agents = practiceRows(data.agents);
+  const nodes = [noticeStrip(PRACTICE_NOTE)];
+  nodes.push(el("p", { class: "mute-label", "data-practice-window": "1", text: "Practice requests opened in the last " + (data.hours_back || 720) + " hours." }));
+  if (!agents.length) nodes.push(emptyStrip("No agent has reported on a practice request in this window."));
+  else nodes.push(VIZ.table({ agents }, { rowsKey: "agents", columns: PRACTICE_COLUMNS, emptyText: "No practice scores." }));
+  mount(body, nodes);
+}
+
+
 /* ─────────────────────────── pending agent notes (#5903) ─────────────────────────── */
 
 /* A Level 1 agent proposes a note with its report. It stays pending, out of every brief, until a person approves it here.
@@ -1546,6 +1602,192 @@ async function buildPending(body, generation) {
   mount(body, nodes);
 }
 
+/* ─────────────────────────── threshold overrides (#5916) ─────────────────────────── */
+
+/* A threshold held for one server (or one database on it) that differs from the global value. The list is GET
+   /api/threshold-overrides; a change is PUT /api/threshold-overrides, accepted only under a store login with the admin role.
+   A managed or compose store connects this page as the viewer role, so there the grid is a list: the form and the Remove
+   buttons are not drawn, and the note says where to change one. The service checks the key and the bounds again. */
+export const OVERRIDE_COLUMNS = [
+  { key: "server_name", label: "Server" },
+  { key: "database_text", label: "Database" },
+  { key: "key", label: "Key" },
+  { key: "value", label: "Value" },
+  { key: "global_value", label: "Global value" },
+  { key: "set_by", label: "Set by" },
+  { key: "request", label: "Request" },
+  { key: "updated_at", label: "Updated", format: "time" },
+];
+
+const OVERRIDES_NOTE_EDITING =
+  "A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only " +
+  "and applies a change within its reload interval. To silence an alert, mute it.";
+const OVERRIDES_NOTE_READ_ONLY =
+  "A threshold held for one server, or for one database on it, that differs from the global value. This sign-in lists them but cannot change them: " +
+  "a managed or compose store connects this page as the viewer role. Change an override in the desktop Viewer, or (bring-your-own store) set " +
+  "postgres.webConnectionString to an admin login.";
+const OVERRIDE_DENIED = "Changing a threshold override needs";
+
+/** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
+export function overrideRows(data) {
+  const list = data && Array.isArray(data.overrides) ? data.overrides : [];
+  return list.map((o) => ({
+    server_id: o.server_id,
+    server_name: o.server_name,
+    database: o.database || null,
+    database_text: o.database || "Whole server",
+    key: o.key,
+    value: o.value,
+    global_value: Number.isFinite(o.global_value) ? o.global_value : null,
+    set_by: o.set_by,
+    request: shortId(o.request_id),
+    updated_at: o.updated_at,
+  }));
+}
+
+/** Why a form entry is refused before anything is sent, or null: the key must be one the service lists, the value an integer
+    inside its bounds, and a database only on a key that takes one. The service applies the same rules again. */
+export function validateOverride(keys, form) {
+  const list = Array.isArray(keys) ? keys : [];
+  if (!form || !String(form.server || "").trim()) return "Choose a server.";
+  const entry = list.find((k) => k.key === String(form.key || "").trim());
+  if (!entry) return "Choose a key from the list: only a tunable threshold can be overridden.";
+  const text = String(form.value == null ? "" : form.value).trim();
+  if (!/^-?\d+$/.test(text)) return "The value must be a whole number.";
+  const n = Number(text);
+  if (!Number.isSafeInteger(n) || n < entry.min || n > entry.max) {
+    return entry.key + " must be a whole number between " + entry.min + " and " + entry.max + ", the same bounds the global setting has.";
+  }
+  if (String(form.database || "").trim() && entry.database_scope !== true) {
+    return entry.key + " is compared against a server-level figure, so it takes a server override only, not a database.";
+  }
+  return null;
+}
+
+/** What a save or remove answer says, in plain words: { message, isError, reread }. An expired session says nothing here. */
+export function overrideOutcome(verb, res) {
+  if (!res || res.expired) return { message: null, isError: true, reread: false };
+  if (res.status === 0) return { message: res.message || "Network error.", isError: true, reread: false };
+  const body = res.body && typeof res.body === "object" ? res.body : null;
+  if (res.status === 200 && body && (body.status === "ok" || body.status === "cleared")) {
+    return { message: body.status === "cleared" ? "Override removed. The global value applies again." : "Override saved.", isError: false, reread: true };
+  }
+  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf(OVERRIDE_DENIED) === 0) {
+    return { message: body.error, isError: true, reread: false };
+  }
+  if (res.status === 403) return { message: "This sign-in is read-only, so it cannot change overrides.", isError: true, reread: false };
+  const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
+  return {
+    message: "The override was not " + (verb === "clear" ? "removed" : "saved") + "." + (res.status === 400 ? "" : " The service answered " + res.status + ".") + said,
+    isError: true,
+    reread: false,
+  };
+}
+
+/* The form's entries and the last answer, in module scope so the 60 s repaint keeps what was typed. */
+const EMPTY_OVERRIDE_FORM = { server: "", key: "", database: "", value: "" };
+let overrideEntries = { ...EMPTY_OVERRIDE_FORM };
+let overrideStatus = null;
+let overrideBusy = false;
+
+const overrideStatusNode = () => (overrideStatus ? (overrideStatus.isError ? errorStrip(overrideStatus.message) : noticeStrip(overrideStatus.message)) : null);
+
+function redrawOverrides() {
+  return shownTab === "overrides" && shownBody ? startBuilder("overrides", shownBody, ++renderGeneration) : undefined;
+}
+
+async function changeOverride(verb, entry) {
+  if (overrideBusy) return;
+  overrideBusy = true;
+  let out;
+  try {
+    const payload = { server_name: entry.server, key: entry.key, database_name: entry.database || null };
+    if (verb === "clear") payload.clear = true;
+    else payload.value = Number(String(entry.value).trim());
+    out = overrideOutcome(verb, await apiWrite("PUT", "/api/threshold-overrides", payload));
+  } catch (e) {
+    out = { message: "Could not change the override: " + (e && e.message ? e.message : String(e)), isError: true, reread: false };
+  }
+  overrideBusy = false;
+  if (out.message) overrideStatus = { message: out.message, isError: out.isError };
+  if (out.isError === false && verb !== "clear") overrideEntries = { ...EMPTY_OVERRIDE_FORM };
+  await redrawOverrides();
+}
+
+function overrideFormNode(servers, keys) {
+  const field = (label, control) => el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: label }), control]);
+  const choose = (items, textOf) => [el("option", { value: "", text: "(choose)" })].concat(items.map((i) => el("option", { value: textOf(i), text: textOf(i) })));
+  const server = el("select", { class: "tag-input", "data-field": "server" }, choose(servers, (s) => s.server_name));
+  const key = el("select", { class: "tag-input", "data-field": "key" }, choose(keys, (k) => k.key));
+  const database = el("input", { type: "text", class: "tag-input", "data-field": "database", placeholder: "blank = whole server" });
+  const value = el("input", { type: "text", class: "tag-input", "data-field": "value", inputmode: "numeric" });
+  server.value = overrideEntries.server;
+  key.value = overrideEntries.key;
+  database.value = overrideEntries.database;
+  value.value = overrideEntries.value;
+  const sync = () => { overrideEntries = { server: server.value, key: key.value, database: database.value, value: value.value }; };
+  for (const c of [server, key, database, value]) c.addEventListener("input", sync);
+  const save = el("button", {
+    class: "btn primary", type: "button", text: "Save override", "data-action": "save-override",
+    onClick: async () => {
+      sync();
+      const bad = validateOverride(keys, overrideEntries);
+      if (bad) {
+        overrideStatus = { message: bad, isError: true };
+        await redrawOverrides();
+        return;
+      }
+      await changeOverride("set", overrideEntries);
+    },
+  });
+  return el("div", { class: "tag-form", "data-override-form": "1" }, [
+    field("Server:", server), field("Key:", key), field("Database:", database), field("Value:", value), save,
+  ]);
+}
+
+function overrideActions(row) {
+  const edit = el("button", {
+    class: "btn", type: "button", text: "Edit", "aria-label": "Edit " + row.key + " for " + row.server_name,
+    onClick: async () => {
+      overrideEntries = { server: row.server_name, key: row.key, database: row.database || "", value: String(row.value) };
+      await redrawOverrides();
+    },
+  });
+  const remove = el("button", {
+    class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.server_name, "data-action": "remove-override",
+    onClick: () => changeOverride("clear", { server: row.server_name, key: row.key, database: row.database }),
+  });
+  return el("span", { class: "row-actions" }, [edit, remove]);
+}
+
+/** The grid's columns: OVERRIDE_COLUMNS, plus Edit and Remove for a seat that can change overrides. */
+export function overrideColumns(canEdit) {
+  return canEdit ? OVERRIDE_COLUMNS.concat([{ key: "actions", label: "Change", csv: false, copy: false, render: overrideActions }]) : OVERRIDE_COLUMNS;
+}
+
+async function buildOverrides(body, generation) {
+  const [session, res] = await Promise.all([getSession(), apiGet("/api/threshold-overrides")]);
+  if (generation !== renderGeneration) return;
+  const nodes = [];
+  const status = overrideStatusNode();
+  if (status) nodes.push(status);
+  const bad = failure(res);
+  if (bad) return mount(body, nodes.concat([bad]));
+  /* Both must agree: the session says the seat may write at all (a read-only seat is refused every PUT), and the list says
+     the store login holds the write grant on this table. */
+  const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
+  const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
+  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : OVERRIDES_NOTE_READ_ONLY));
+  if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
+  if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys));
+  nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
+    rowsKey: "overrides",
+    columns: overrideColumns(canEdit),
+    emptyText: "No server holds an override: every server uses the global values.",
+  }));
+  mount(body, nodes);
+}
+
 /* Agent changes (#5917) lives in its own file; it gets this file's helpers and repaints through startBuilder. */
 const agentChangesContext = {
   getSession,
@@ -1558,7 +1800,7 @@ const agentChangesContext = {
 };
 const buildAgentChangesTab = (body, generation) => buildAgentChanges(body, generation, agentChangesContext);
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, pending: buildPending, "agent-changes": buildAgentChangesTab };
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */

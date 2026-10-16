@@ -63,6 +63,7 @@ public partial class InvestigationsWindow : Window
         AgentChangesView.Initialize(_dataService, readOnly, login);
         AgentChangesView.Status += ShowStatus;
         FeedbackReportsGrid.ItemsSource = _feedbackReports;
+        PracticePanel.Initialize(_dataService, login, readOnly);
         SetScopes(null);
 
         if (readOnly)
@@ -173,6 +174,7 @@ public partial class InvestigationsWindow : Window
 
         await LoadRequestsAsync();
         await LoadFeedbackAsync();
+        await PracticePanel.LoadAsync();
         await LoadNotesAsync();
         await LoadProfilesAsync();
         await AgentChangesView.LoadAsync();

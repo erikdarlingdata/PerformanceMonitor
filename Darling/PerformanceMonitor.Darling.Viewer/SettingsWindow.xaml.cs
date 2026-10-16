@@ -1282,6 +1282,18 @@ public partial class SettingsWindow : Window
         window.ShowDialog();
     }
 
+    /// <summary>#5916: the per-server threshold overrides, beside the global thresholds they replace.</summary>
+    private void ManageThresholdOverridesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        var window = new ThresholdOverridesWindow(_dataService) { Owner = this };
+        window.ShowDialog();
+    }
+
     /// <summary>#5632 Phase A: the investigations an agent route opens, beside the routes that open them.</summary>
     private void ManageInvestigationsButton_Click(object sender, RoutedEventArgs e)
     {

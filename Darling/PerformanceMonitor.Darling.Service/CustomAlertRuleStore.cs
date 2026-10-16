@@ -35,12 +35,34 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public sealed class CustomAlertRuleStore
 {
-    private readonly NpgsqlDataSource _dataSource;
+    private readonly NpgsqlDataSource? _dataSource;
+    private readonly NpgsqlConnection? _connection;
+    private readonly NpgsqlTransaction? _transaction;
 
     public CustomAlertRuleStore(NpgsqlDataSource dataSource)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
     }
+
+    /// <summary>
+    /// A store that runs every statement on the given connection and transaction and commits nothing (#5915): a Level 2
+    /// agent change writes inside the gate's transaction, so the re-check, the change and the <c>action_done</c> journal
+    /// row are one commit. A refused result (a duplicate name, a stale version) is the caller's to roll back by abandoning
+    /// the transaction; this store never rolls it back.
+    /// </summary>
+    internal CustomAlertRuleStore(NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+        _transaction = transaction ?? throw new ArgumentNullException(nameof(transaction));
+    }
+
+    /// <summary>A command on the ambient connection and transaction, or on a pooled connection of the data source.</summary>
+    private NpgsqlCommand NewCommand(string sql) => _connection is null
+        ? _dataSource!.CreateCommand(sql)
+        : new NpgsqlCommand(sql, _connection, _transaction);
+
+    private Task<PgStoreScope> OpenScopeAsync(CancellationToken cancellationToken) =>
+        PgStoreScope.OpenAsync(_dataSource, _connection, _transaction, transactional: true, cancellationToken);
 
     /// <summary>
     /// The lightweight list read: the (potentially large) <c>definition</c> body is never selected. LEFT JOINs
@@ -252,11 +274,32 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// gone. $1 id.</summary>
     public const string EnabledStateProbeSql = "SELECT version, enabled FROM custom_alert_rules WHERE id = $1";
 
+    /// <summary>
+    /// The Level 2 recheck (#5915): locks the stored rule <c>FOR UPDATE</c> on this store's transaction and returns its
+    /// definition as stored now, or <c>null</c> when the id is gone.
+    /// </summary>
+    internal async Task<string?> LockDefinitionAsync(long id, CancellationToken cancellationToken = default)
+    {
+        await using var command = NewCommand("SELECT definition::text FROM custom_alert_rules WHERE id = $1 FOR UPDATE");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = id });
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    /// <summary>The storage name of a registered server (the name a rule's scope lists), or <c>null</c> when there is none (#5915).</summary>
+    internal async Task<string?> StorageServerNameAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = NewCommand("SELECT server_name FROM servers WHERE server_id = $1");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
     /// <summary>Lists every rule as a lightweight summary (no <c>definition</c>), ordered by name.</summary>
     public async Task<IReadOnlyList<CustomAlertRuleSummary>> ListAsync(CancellationToken cancellationToken = default)
     {
         var results = new List<CustomAlertRuleSummary>();
-        await using var command = _dataSource.CreateCommand(ListSql);
+        await using var command = NewCommand(ListSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -280,7 +323,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     public async Task<IReadOnlyList<CustomAlertRule>> ListEnabledAsync(CancellationToken cancellationToken = default)
     {
         var results = new List<CustomAlertRule>();
-        await using var command = _dataSource.CreateCommand(ListEnabledSql);
+        await using var command = NewCommand(ListEnabledSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         // Read one beyond the cap: the evaluator's ceiling trims to the cap and warns if this extra row is present.
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = EnabledRuleCap + 1 });
@@ -314,7 +357,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         }
 
         var byTag = new Dictionary<int, HashSet<int>>();
-        await using var command = _dataSource.CreateCommand(ListTagMembersSql);
+        await using var command = NewCommand(ListTagMembersSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = System.Linq.Enumerable.ToArray(tagIds) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -343,7 +386,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// <summary>Reads one rule in full (with <c>definition</c>), or <see cref="CustomAlertRuleResult.NotFound"/>.</summary>
     public async Task<CustomAlertRuleResult> GetAsync(long id, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(GetSql);
+        await using var command = NewCommand(GetSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -382,8 +425,9 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         // An ENABLED create must not push the enabled count over the cap. Serialize the count-then-insert with a
         // transaction-scoped advisory lock so two concurrent enabled creates cannot both pass a stale under-cap
         // count (the conditional insert alone, under READ COMMITTED, would let that phantom race through).
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var scope = await OpenScopeAsync(cancellationToken);
+        var connection = scope.Connection;
+        var transaction = scope.Transaction!;
         await AcquireCapLockAsync(connection, transaction, cancellationToken);
 
         await using var command = new NpgsqlCommand(InsertEnabledIfUnderCapSql, connection, transaction)
@@ -410,16 +454,16 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
             if (row is null)
             {
                 // 0 rows: the cap guard failed (enabled count already at the cap). Nothing was inserted.
-                await transaction.RollbackAsync(cancellationToken);
+                await scope.RollbackAsync(cancellationToken);
                 return new CustomAlertRuleResult.Invalid(EnabledCapCreateMessage);
             }
 
-            await transaction.CommitAsync(cancellationToken);
+            await scope.CommitAsync(cancellationToken);
             return new CustomAlertRuleResult.Ok(row);
         }
         catch (PostgresException ex) when (ex.SqlState == UniqueViolation)
         {
-            await transaction.RollbackAsync(cancellationToken);
+            await scope.RollbackAsync(cancellationToken);
             return new CustomAlertRuleResult.Conflict($"An alert rule named '{name}' already exists.");
         }
     }
@@ -428,7 +472,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     private async Task<CustomAlertRuleResult> InsertDisabledAsync(
         string name, string? description, string definitionJson, string? updatedBy, CancellationToken cancellationToken)
     {
-        await using var command = _dataSource.CreateCommand(InsertSql);
+        await using var command = NewCommand(InsertSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $1
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $2
@@ -474,8 +518,9 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
             return await UpdateDisabledAsync(id, name, description, definitionJson, expectedVersion, updatedBy, cancellationToken);
         }
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var scope = await OpenScopeAsync(cancellationToken);
+        var connection = scope.Connection;
+        var transaction = scope.Transaction!;
         await AcquireCapLockAsync(connection, transaction, cancellationToken);
 
         await using var command = new NpgsqlCommand(UpdateEnableIfUnderCapSql, connection, transaction)
@@ -503,19 +548,19 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
 
             if (row is not null)
             {
-                await transaction.CommitAsync(cancellationToken);
+                await scope.CommitAsync(cancellationToken);
                 return new CustomAlertRuleResult.Ok(row);
             }
 
             // 0 rows: id gone, stale version, OR (the row was disabled AND the cap is reached). Probe under the
             // same lock to tell the cap refusal apart from a NotFound / stale-version Conflict.
             var classified = await ClassifyMissedEnableAsync(connection, transaction, id, expectedVersion, cancellationToken);
-            await transaction.RollbackAsync(cancellationToken);
+            await scope.RollbackAsync(cancellationToken);
             return classified;
         }
         catch (PostgresException ex) when (ex.SqlState == UniqueViolation)
         {
-            await transaction.RollbackAsync(cancellationToken);
+            await scope.RollbackAsync(cancellationToken);
             return new CustomAlertRuleResult.Conflict($"An alert rule named '{name}' already exists.");
         }
     }
@@ -525,7 +570,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         long id, string name, string? description, string definitionJson, int expectedVersion, string? updatedBy,
         CancellationToken cancellationToken)
     {
-        await using var command = _dataSource.CreateCommand(UpdateSql);
+        await using var command = NewCommand(UpdateSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $2
@@ -614,7 +659,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// calling this — the cascade drops the state rows, so the resolve delivery must happen first.</summary>
     public async Task<CustomAlertRuleResult> DeleteAsync(long id, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(DeleteSql);
+        await using var command = NewCommand(DeleteSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         var affected = await command.ExecuteNonQueryAsync(cancellationToken);
@@ -623,7 +668,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
 
     private async Task<CustomAlertRuleResult> ClassifyMissedUpdateAsync(long id, CancellationToken cancellationToken)
     {
-        await using var command = _dataSource.CreateCommand(VersionProbeSql);
+        await using var command = NewCommand(VersionProbeSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         var current = await command.ExecuteScalarAsync(cancellationToken);

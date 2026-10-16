@@ -825,6 +825,11 @@ public sealed class DarlingWorker : BackgroundService
 
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
+
+    /* #5916: the per-server and per-database threshold overrides the engine and the two PostgreSQL count checks resolve
+       through. Loaded at start and on every control-plane reload (the table is on the config_version beacon); empty until then,
+       which is the global threshold everywhere. */
+    private DarlingThresholdOverrides _thresholdOverrides = new();
     /* #5366: the service's password key at run time, set once at start; null before it. */
     private DarlingPasswordKeyRuntime? _passwordKeyRuntime;
 
@@ -1463,6 +1468,7 @@ LIMIT 1";
         _readAdmission = readAdmission;
         _mcpTlsCertState = mcpTlsCertState;
         _logger = logger;
+        _thresholdOverrides = new DarlingThresholdOverrides(logger);
         _loggerFactory = loggerFactory;
         _mcpState = mcpState;
         _webState = webState;
@@ -3367,6 +3373,7 @@ LIMIT 1";
         var muteRuleService = new MuteRuleService(
             new PgMuteRuleStore(postgres), _loggerFactory.CreateLogger<MuteRuleService>());
         await LoadMuteRulesAsync(muteRuleService);
+        await LoadThresholdOverridesAsync();
 
         /* #5632 Phase A: Level 1 investigations. The dispatcher opens or joins a request after an alert row is written (the
            deliverer and the finding sender below call it), and the sweep loop expires lapsed leases and old requests. Both
@@ -6693,6 +6700,7 @@ LIMIT 1";
         await DarlingObservability.SyncServerEnabledStatesAsync(_postgres!, _logger, cancellationToken);
 
         await LoadMuteRulesAsync(muteRuleService);
+        await LoadThresholdOverridesAsync();
 
         /* view.ConfigVersion rather than _lastConfigVersion: the caller has not advanced the watermark yet
            (it advances from this method's RETURN value), so the field still holds the PREVIOUS version
@@ -6773,6 +6781,33 @@ LIMIT 1";
                 + "stay in force until a read succeeds: {Message}",
                 readClock.ElapsedMilliseconds, muteRuleService.GetRules().Count, ex.Message);
             _readFailures.RecordReadFailure(null, "mute-rule reload", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// Reloads the threshold overrides (#5916). A failed read keeps the overrides already in force and is counted, as the
+    /// mute-rule reload is, so a store blip never drops a tuned threshold back to the global one.
+    /// </summary>
+    private async Task LoadThresholdOverridesAsync()
+    {
+        var postgres = _postgres;
+        if (postgres is null)
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            await _thresholdOverrides.LoadAsync(postgres);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Could not reload threshold overrides after {ElapsedMs} ms - the {Overrides} override(s) already in force "
+                + "stay in force until a read succeeds: {Message}",
+                readClock.ElapsedMilliseconds, _thresholdOverrides.Count, ex.Message);
+            _readFailures.RecordReadFailure(null, "threshold-override reload", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -7622,7 +7657,9 @@ LIMIT 1";
             escalationSeedReader: EscalationSeed.ReaderFor(historyStore),
             /* #3013: the process counter every swallowed condition read is tallied on. Passed explicitly
                rather than defaulted inside the engine so a test constructs its own and cannot pollute it. */
-            readFailures: AlertReadFailureCounter.Shared);
+            readFailures: AlertReadFailureCounter.Shared,
+            /* #5916: a threshold held for one server or database. Lite passes none. */
+            overrides: _thresholdOverrides);
     }
 
     /// <summary>
@@ -8477,7 +8514,8 @@ LIMIT 1";
             /* #3444: read ONCE, then handed to the gate and the delivered message alike, so the two cannot
                quote different numbers when a store reload swaps config.Alerts mid-evaluation. The rate tiers
                the fire is GRADED on (#3653, below) are read at the same spot for the same reason. */
-            var threshold = alertSettings.PgDeadlockCountThreshold;
+            var threshold = _thresholdOverrides.ResolveWire(
+                DarlingThresholdKeys.PgDeadlockCount, snapshot.ServerKey, null, alertSettings.PgDeadlockCountThreshold);
             var rateTiers = alertSettings.DeadlockRateThresholds;
 
             var decision = RollingCountAlertGate.Evaluate(
@@ -8686,7 +8724,8 @@ LIMIT 1";
             var cooldownElapsed = !LastFiredStamp.TryGet(_lastPgBlockingAlert, key, now, out var last) || now - last >= cooldown;
 
             /* #3444: read ONCE, for the reason EvaluatePgDeadlocksAsync gives at the same spot. */
-            var threshold = alertSettings.PgBlockingCountThreshold;
+            var threshold = _thresholdOverrides.ResolveWire(
+                DarlingThresholdKeys.PgBlockingCount, snapshot.ServerKey, null, alertSettings.PgBlockingCountThreshold);
 
             var decision = RollingCountAlertGate.Evaluate(
                 count, threshold, watermark, cooldownElapsed, suppressed: false);

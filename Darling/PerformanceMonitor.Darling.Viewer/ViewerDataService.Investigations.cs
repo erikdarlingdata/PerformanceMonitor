@@ -53,12 +53,17 @@ public sealed partial class ViewerDataService
     /// <summary>The states a person may close: a request still in play, or reported and reviewed.</summary>
     private const string ClosableStates = "('open', 'claimed', 'reported')";
 
+    /// <summary>The first store version whose requests table has <c>practice_of</c> (V191, #5918).</summary>
+    public const int PracticeStoreSchemaVersion = 191;
+
     /// <summary>The requests, newest first, with the state computed as the store's list computes it. $1 is the state
-    /// filter (NULL for every state).</summary>
-    public const string InvestigationRequestsSelectSql = @"
+    /// filter (NULL for every state). <paramref name="withPractice"/> adds the <c>practice_of</c> column, which only a store at
+    /// <see cref="PracticeStoreSchemaVersion"/> or later has: the Requests tab keeps its V184 floor and asks for it only then.</summary>
+    public static string InvestigationRequestsSelectSql(bool withPractice) => @"
 SELECT request_id, server_id, server_name, family, first_metric, opened_at, alert_count, effective_state,
        claimed_by, lease_until, claim_count, expires_at, reported_at, closed_at, closed_by, closed_reason,
-       (SELECT p.verdict FROM config.investigation_reports AS p WHERE p.request_id = s.request_id) AS verdict
+       (SELECT p.verdict FROM config.investigation_reports AS p WHERE p.request_id = s.request_id) AS verdict" +
+        (withPractice ? ", practice_of" : "") + @"
 FROM (
     SELECT r.*,
            CASE
@@ -166,8 +171,21 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
     public async Task<IReadOnlyList<InvestigationRequestViewRow>> GetInvestigationRequestsAsync(
         string? state, CancellationToken cancellationToken = default)
     {
+        /* #5918: practice_of exists from V191. An older store keeps listing as before, with no practice column; a store whose
+           probe could not answer reads the older shape too. The read at V191 or later goes through SkewAsync like the other
+           V191 reads, so a column the store lacks is the house schema-skew message. */
+        var storeVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        var withPractice = storeVersion is int version && version >= PracticeStoreSchemaVersion;
+        return withPractice
+            ? await SkewAsync(() => ReadInvestigationRequestsAsync(state, true, cancellationToken))
+            : await ReadInvestigationRequestsAsync(state, false, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<InvestigationRequestViewRow>> ReadInvestigationRequestsAsync(
+        string? state, bool withPractice, CancellationToken cancellationToken)
+    {
         var rows = new List<InvestigationRequestViewRow>();
-        await using var command = _dataSource.CreateCommand(InvestigationRequestsSelectSql);
+        await using var command = _dataSource.CreateCommand(InvestigationRequestsSelectSql(withPractice));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddNullableText(command, string.IsNullOrWhiteSpace(state) ? null : state.Trim());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -192,6 +210,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
                 ClosedBy = reader.IsDBNull(14) ? null : reader.GetString(14),
                 ClosedReason = reader.IsDBNull(15) ? null : reader.GetString(15),
                 Verdict = reader.IsDBNull(16) ? null : reader.GetString(16),
+                PracticeOf = withPractice && !reader.IsDBNull(17) ? reader.GetGuid(17) : null,
             });
         }
 
@@ -658,6 +677,12 @@ public sealed class InvestigationRequestViewRow
     public string? ClosedBy { get; init; }
     public string? ClosedReason { get; init; }
     public string? Verdict { get; init; }
+
+    /// <summary>The request a practice request replays (#5918); null for every other request.</summary>
+    public Guid? PracticeOf { get; init; }
+
+    /// <summary>"Practice" for a practice request, empty otherwise: the Requests tab's marker column.</summary>
+    public string PracticeDisplay => PracticeOf is null ? "" : "Practice";
 
     /// <summary>True when a person may still close it: open, claimed or reported.</summary>
     public bool IsClosable => State is "open" or "claimed" or "reported";
