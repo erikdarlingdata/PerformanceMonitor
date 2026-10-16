@@ -1142,7 +1142,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
+                return NoteDecisionRefusedResult();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1172,7 +1172,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
+                return NoteDecisionRefusedResult();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1188,19 +1188,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         "Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role, "
         + "which lists pending notes but cannot decide them: decide in the desktop Viewer, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
 
-    /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501), directly or as an inner exception.</summary>
-    internal static bool IsInsufficientPrivilege(Exception ex)
-    {
-        for (var e = ex; e is not null; e = e.InnerException)
-        {
-            if (e is PostgresException { SqlState: "42501" })
-            {
-                return true;
-            }
-        }
+    /// <summary>The 403 a refused note decision answers: the fixed <see cref="NoteDecisionRefusedMessage"/> sentence in the mute-rule error envelope.</summary>
+    private static IResult NoteDecisionRefusedResult() =>
+        ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
 
-        return false;
-    }
+    /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501).</summary>
+    internal static bool IsInsufficientPrivilege(Exception ex) => ex is PostgresException { SqlState: "42501" };
 
     /// <summary>The most pending notes one list answers. A fleet that proposes more than this has a backlog the screen cannot
     /// show whole; deciding the oldest shows the rest.</summary>
