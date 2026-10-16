@@ -862,6 +862,11 @@ public sealed class DarlingWebHostService : BackgroundService
             /* The VIEWER-role store pool the read endpoints query (registered for DI + passed to MapAll). */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
 
+            /* #5904: mcp.dataDetail, read once per start, so the investigation report read the viewer serves is masked at the
+               level the MCP tools serve. An unrecognized value runs as metadataOnly (the strictest), as on the MCP host. */
+            builder.Services.AddSingleton(new McpDataDetailSetting(
+                McpDataDetailModes.Resolve(config.Mcp.DataDetail)));
+
             /* #4188: Brotli/gzip for the JSON API and the static JS/CSS/HTML. A services-collection step, so it
                has to run on the BUILDER, ahead of Build() - see ConfigureResponseCompression's own doc for why
                this is a method the live-HTTP test calls too rather than a block copied into it. */

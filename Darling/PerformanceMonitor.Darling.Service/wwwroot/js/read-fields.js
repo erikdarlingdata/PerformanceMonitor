@@ -782,6 +782,37 @@ export const READ_FIELDS = {
       ],
     },
   },
+  /* #5904: the Investigations page's two reads. The page reads the requests' columns from here, so they live once. */
+  list_investigation_requests: {
+    table: {
+      rowsKey: "requests",
+      emptyText: "No investigation requests.",
+      columns: [
+        { key: "opened_at", label: "Opened", format: "time" },
+        { key: "state", label: "State" },
+        { key: "server_name", label: "Server" },
+        { key: "first_metric", label: "Metric" },
+        { key: "family", label: "Family" },
+        { key: "alert_count", label: "Alerts", format: "int" },
+        { key: "claimed_by", label: "Agent" },
+        { key: "lease_until", label: "Lease until", format: "time" },
+        { key: "reported_at", label: "Reported", format: "time" },
+        { key: "route_id", label: "Route", format: "int" },
+      ],
+    },
+  },
+  get_investigation_reports: {
+    table: {
+      rowsKey: "journal",
+      emptyText: "No journal rows for this request.",
+      columns: [
+        { key: "event_time", label: "Time", format: "time" },
+        { key: "event", label: "Event" },
+        { key: "actor", label: "Actor" },
+        { key: "reason", label: "Reason", wrap: true },
+      ],
+    },
+  },
 };
 
 /**
