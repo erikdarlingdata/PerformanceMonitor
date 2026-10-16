@@ -4451,40 +4451,47 @@ public sealed class DarlingManagedPostgresTests
         /* A stopped PostgreSQL can still map a file in the folder for a moment, and until it lets go the rename
            fails with a sharing violation or access denied: the same lock the cleanup meets (#4581). */
         var limit = patience ?? TimeSpan.FromSeconds(10);
-        var clock = Stopwatch.StartNew();
-        while (true)
+        Exception? lastFailure = null;
+        var moved = TestWait.TryWaitUntil(
+            () =>
+            {
+                try
+                {
+                    Directory.Move(source, destination);
+                    return true;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    lastFailure = ex;
+                    return false;
+                }
+            },
+            limit,
+            TimeSpan.FromMilliseconds(100));
+        if (!moved)
         {
-            try
-            {
-                Directory.Move(source, destination);
-                return;
-            }
-            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && clock.Elapsed < limit)
-            {
-                Thread.Sleep(100);
-            }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(lastFailure!).Throw();
         }
     }
 
     /// <summary>Postgres releases its files a beat after fast shutdown — retry the temp-dir delete.</summary>
     internal static void TryDeleteRecursive(string path)
     {
-        for (var attempt = 0; attempt < 5; attempt++)
-        {
-            try
+        TestWait.TryWaitUntil(
+            () =>
             {
-                Directory.Delete(path, recursive: true);
-                return;
-            }
-            catch (IOException)
-            {
-                Thread.Sleep(500);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                Thread.Sleep(500);
-            }
-        }
+                try
+                {
+                    Directory.Delete(path, recursive: true);
+                    return true;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    return false;
+                }
+            },
+            TimeSpan.FromSeconds(2.5),
+            TimeSpan.FromMilliseconds(500));
     }
 
     /// <summary>

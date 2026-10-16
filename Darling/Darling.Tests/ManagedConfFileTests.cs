@@ -785,7 +785,7 @@ public sealed class ManagedConfFileTests
             var blocker = new FileStream(destPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             var releaseThread = new Thread(() =>
             {
-                Thread.Sleep(200);
+                TestWait.Elapse(TimeSpan.FromMilliseconds(200));
                 blocker.Dispose();
             })
             { IsBackground = true };

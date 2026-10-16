@@ -317,7 +317,7 @@ jobs:
   # no class filter would run nothing or everything, and neither is a guard). Both suites run even when the
   # first fails, so one red run names everything that is broken.
   guard-build:
-    name: Guard tests build
+    name: Guard tests build (Darling)
     needs: gate
     if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}
     runs-on: windows-latest
@@ -334,6 +334,132 @@ jobs:
       # Whether the guard classes run at all (false: every changed file is documentation).
       run: ${{ steps.decide.outputs.run }}
       darling_build_artifact: ${{ steps.upload-darling-build.outcome == 'success' && 'guard-test-build-darling' || '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            # Byte copy of the build job's `docs` and `all` entries (GuardStageWorkflowTests pins the patterns
+            # equal): the documentation allowlist, and the catch-all counter that is equal to it exactly when
+            # every changed file is documentation.
+            docs:
+              - '**/*.md'
+              - 'LICENSE'
+              - 'CITATION.cff'
+              - '.gitignore'
+              - '.gitattributes'
+              - 'llms.txt'
+              - 'tools/changelog/archive-census.txt'
+              - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
+            all:
+              - '**'
+
+      - name: Decide whether the guard classes run
+        id: decide
+        shell: bash
+        env:
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          DOCS_COUNT: ${{ steps.filter.outputs.docs_count }}
+        run: |
+          set -euo pipefail
+
+          if [ "${ALL_COUNT:-0}" -gt 0 ] && [ "${ALL_COUNT:-0}" -eq "${DOCS_COUNT:-0}" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Guard tests skipped::All ${ALL_COUNT} changed files are on the documentation allowlist, so there is no code for the guard classes to catch. This job still reports success."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Guard tests running::${DOCS_COUNT:-0} of ${ALL_COUNT:-0} changed files are on the documentation allowlist."
+          fi
+
+      - name: Setup .NET 10.0
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      # Locked mode and `set -euo pipefail` for the reason the build job's restore step gives (and
+      # LockedModeRestoreCoverageTests enforces): a multi-line run block under the default shell reports only
+      # its last command's exit code, so the first restore could fail unseen.
+      - name: Restore the Darling test project
+        if: steps.decide.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build the Darling test project
+        if: steps.decide.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      # Written by the producer for the consumers' check (see the header above): where this build was made and from
+      # what. Plain key=value lines, no dot-prefix (upload-artifact skips hidden files).
+      - name: Record where this build was made
+        if: steps.decide.outputs.run == 'true'
+        shell: pwsh
+        env:
+          PRODUCER_WORKSPACE: ${{ github.workspace }}
+          PRODUCER_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path guard-build-origin.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
+
+      # Before the tests, so a guard failure still leaves the artifacts. One day of retention: they are read only by
+      # the jobs of this run. overwrite: a re-run of this job in a later attempt uploads the same names again.
+      - name: Upload the built Darling.Tests for the shards
+        id: upload-darling-build
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: guard-test-build-darling
+          path: |
+            guard-build-origin.txt
+            Darling/Darling.Tests/bin/Release
+            Darling/PerformanceMonitor.Darling.Service/bin/Release
+            Darling/Darling.Tests/obj/project.assets.json
+            Darling/Darling.Tests/obj/project.nuget.cache
+            Darling/Darling.Tests/obj/*.nuget.g.props
+            Darling/Darling.Tests/obj/*.nuget.g.targets
+            Darling/Darling.Tests/obj/*.nuget.dgspec.json
+          retention-days: 1
+          compression-level: 1
+          overwrite: true
+          if-no-files-found: error
+
+  # #5955: the Lite half of the old single guard-build job. It builds and uploads the Lite test project on a runner
+  # of its own, beside `guard-build` (the Darling one), so the Lite shards start when their project is built and the
+  # Darling shards when theirs is; neither waits for the other project's build. The docs-only decision is repeated here
+  # (same filter, pinned equal by GuardStageWorkflowTests), because a job that waited for guard-build to decide
+  # would put the two builds back in sequence. The header above `guard-build` applies to both jobs.
+  guard-build-lite:
+    name: Guard tests build (Lite)
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}
+    runs-on: windows-latest
+    # Measured locally at ~1 minute of tests per suite (Debug); a hosted runner adds setup, restore and two
+    # Release builds (~6 minutes). 20 minutes is a hang guard, as on the other Windows jobs.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    # One artifact per suite, so a Darling consumer does not download the Lite tree and the other way round. Each
+    # output holds the artifact name, set only when its upload step succeeded (empty on a docs-only change, a failed
+    # build, or a failed upload). The consumers download only when it is set; a job output is still published when
+    # a later step of this job fails, which is the case that matters (the guards failed after the upload).
+    outputs:
+      # Whether the guard classes run at all (false: every changed file is documentation).
+      run: ${{ steps.decide.outputs.run }}
       lite_build_artifact: ${{ steps.upload-lite-build.outcome == 'success' && 'guard-test-build-lite' || '' }}
 
     steps:
@@ -389,22 +515,20 @@ jobs:
       # Locked mode and `set -euo pipefail` for the reason the build job's restore step gives (and
       # LockedModeRestoreCoverageTests enforces): a multi-line run block under the default shell reports only
       # its last command's exit code, so the first restore could fail unseen.
-      - name: Restore both test projects
+      - name: Restore the Lite test project
         if: steps.decide.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
 
-      - name: Build both test projects
+      - name: Build the Lite test project
         if: steps.decide.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
       # Written by the producer for the consumers' check (see the header above): where this build was made and from
@@ -421,26 +545,6 @@ jobs:
 
       # Before the tests, so a guard failure still leaves the artifacts. One day of retention: they are read only by
       # the jobs of this run. overwrite: a re-run of this job in a later attempt uploads the same names again.
-      - name: Upload the built Darling.Tests for the shards
-        id: upload-darling-build
-        if: steps.decide.outputs.run == 'true'
-        uses: actions/upload-artifact@v6
-        with:
-          name: guard-test-build-darling
-          path: |
-            guard-build-origin.txt
-            Darling/Darling.Tests/bin/Release
-            Darling/PerformanceMonitor.Darling.Service/bin/Release
-            Darling/Darling.Tests/obj/project.assets.json
-            Darling/Darling.Tests/obj/project.nuget.cache
-            Darling/Darling.Tests/obj/*.nuget.g.props
-            Darling/Darling.Tests/obj/*.nuget.g.targets
-            Darling/Darling.Tests/obj/*.nuget.dgspec.json
-          retention-days: 1
-          compression-level: 1
-          overwrite: true
-          if-no-files-found: error
-
       - name: Upload the built Lite.Tests for the shards
         id: upload-lite-build
         if: steps.decide.outputs.run == 'true'
@@ -469,7 +573,7 @@ jobs:
   # [CallerFilePath] and a binary built at another path would read another tree.
   guard-tests:
     name: Guard tests
-    needs: [gate, guard-build]
+    needs: [gate, guard-build, guard-build-lite]
     if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}
     runs-on: windows-latest
     timeout-minutes: 20
@@ -479,6 +583,56 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      # #5947: actionlint reads the workflow files for what the text tests do not look for: YAML and expression
+      # mistakes, a `needs:` or `steps.<id>` that names nothing, and `with:` inputs a known action does not take.
+      # It runs when a pull request changes a file under .github/workflows/, and on every push to main or dev.
+      # The binary is pinned to a version and a SHA-256, so a moved release cannot change what the guard checks,
+      # and it is installed in RUNNER_TEMP, outside the checkout. No -ignore is passed: a finding is fixed in the
+      # workflow, not silenced here.
+      # Both steps wait for the producer's decision like every other step here (GuardStageWorkflowTests): a docs-only
+      # change cannot touch a workflow file.
+      #
+      # -shellcheck= and -pyflakes= are off on purpose. This job runs on Windows, and actionlint 1.7.12 hangs there
+      # as soon as it pipes a `run:` script to shellcheck.exe (measured on claude-review-guard.yml with shellcheck
+      # 0.10.0 and 0.11.0: no output and no exit). The bash-script checks need an ubuntu runner, where both tools
+      # are installed.
+      - name: Detect changed workflow files
+        id: workflow-filter
+        if: needs.guard-build.outputs.run == 'true'
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Lint the workflow files with actionlint
+        if: needs.guard-build.outputs.run == 'true' && (github.event_name == 'push' || steps.workflow-filter.outputs.workflows == 'true')
+        shell: pwsh
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          ACTIONLINT_SHA256: '6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:RUNNER_TEMP 'actionlint-tools'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+
+          $url = "https://github.com/rhysd/actionlint/releases/download/v$env:ACTIONLINT_VERSION/actionlint_${env:ACTIONLINT_VERSION}_windows_amd64.zip"
+          $zip = Join-Path $tools 'actionlint.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+          if ($actual -ne $env:ACTIONLINT_SHA256) {
+              Write-Host "::error title=actionlint download does not match its pinned checksum::$url hashed to $actual, expected $env:ACTIONLINT_SHA256."
+              exit 1
+          }
+          Expand-Archive -Path $zip -DestinationPath $tools -Force
+
+          & (Join-Path $tools 'actionlint.exe') -no-color -shellcheck= -pyflakes=
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error title=actionlint found problems::Fix them in the workflow file. The findings are listed above."
+              exit 1
+          }
 
       - name: Setup .NET 10.0
         if: needs.guard-build.outputs.run == 'true'
@@ -499,7 +653,7 @@ jobs:
         if: needs.guard-build.outputs.run == 'true'
         uses: actions/download-artifact@v6
         with:
-          name: ${{ needs.guard-build.outputs.lite_build_artifact }}
+          name: ${{ needs.guard-build-lite.outputs.lite_build_artifact }}
           path: .
 
       # A fetched build that is not for THIS workspace and commit is an error, as on the shards.
@@ -624,8 +778,8 @@ jobs:
   # warning says so and the run is still red through the aggregates.
   guard-cancel:
     name: Cancel the run after a failed guard
-    needs: [guard-build, guard-tests]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-tests.result == 'failure') }}
+    needs: [guard-build, guard-build-lite, guard-tests]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-build-lite.result == 'failure' || needs.guard-tests.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -2267,8 +2421,8 @@ jobs:
   # something other than success, and this fails loudly and says which.
   darling-pg-result:
     name: Darling PostgreSQL tests
-    needs: [gate, guard-build, guard-tests, darling-pg]
-    if: ${{ !cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-tests.result == 'failure')) }}
+    needs: [gate, guard-build, guard-build-lite, guard-tests, darling-pg]
+    if: ${{ !cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-build-lite.result == 'failure' || needs.guard-tests.result == 'failure')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -2277,7 +2431,7 @@ jobs:
         shell: bash
         env:
           RESULT: ${{ needs.darling-pg.result }}
-          GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-tests.result }}
+          GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-build-lite.result != 'success' && needs.guard-build-lite.result || needs.guard-tests.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
           EVENT_NAME: ${{ github.event_name }}
@@ -2931,8 +3085,8 @@ jobs:
     # goes for test-map-select: see there.
     # #5669: lite-scope is a need so its answer exists before the shards start; `mode == 'none'` skips all four legs
     # (nothing the Lite suite depends on changed), and an empty or unknown answer runs them as before.
-    needs: [gate, guard-build, test-map-select, lite-scope]
-    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-build.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}
+    needs: [gate, guard-build-lite, test-map-select, lite-scope]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-build-lite.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -3014,11 +3168,11 @@ jobs:
       # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
       - name: Fetch the Guard job's build of the test project
         id: guard-build
-        if: steps.scope.outputs.run == 'true' && needs.guard-build.outputs.lite_build_artifact != ''
+        if: steps.scope.outputs.run == 'true' && needs.guard-build-lite.outputs.lite_build_artifact != ''
         continue-on-error: true
         uses: actions/download-artifact@v6
         with:
-          name: ${{ needs.guard-build.outputs.lite_build_artifact }}
+          name: ${{ needs.guard-build-lite.outputs.lite_build_artifact }}
           path: .
 
       # #5459 live selection: this run's test map selection, from the test-map-select job (pull requests only). Same
@@ -3339,8 +3493,8 @@ jobs:
   # (result)" for the shards to gate merges — noted on #3887.)
   lite-tests-result:
     name: Lite tests (result)
-    needs: [gate, guard-build, guard-tests, lite-scope, lite-tests]
-    if: ${{ (!cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-tests.result == 'failure'))) && github.event_name != 'release' }}
+    needs: [gate, guard-build, guard-build-lite, guard-tests, lite-scope, lite-tests]
+    if: ${{ (!cancelled() || (github.event_name == 'pull_request' && (needs.guard-build.result == 'failure' || needs.guard-build-lite.result == 'failure' || needs.guard-tests.result == 'failure'))) && github.event_name != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -3349,7 +3503,7 @@ jobs:
         shell: bash
         env:
           RESULT: ${{ needs.lite-tests.result }}
-          GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-tests.result }}
+          GUARD_RESULT: ${{ needs.guard-build.result != 'success' && needs.guard-build.result || needs.guard-build-lite.result != 'success' && needs.guard-build-lite.result || needs.guard-tests.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
           EVENT_NAME: ${{ github.event_name }}

@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using Darling.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -190,7 +191,7 @@ public sealed class InstallIdStoreTests : IDisposable
             var held = new FileStream(IdFile(dir), FileMode.CreateNew, FileAccess.Write, FileShare.None);
             var finish = new Thread(() =>
             {
-                Thread.Sleep(75);
+                TestWait.Elapse(TimeSpan.FromMilliseconds(75));
                 held.Write(JsonSerializer.SerializeToUtf8Bytes(
                     new Dictionary<string, string?> { ["id"] = "feedface", ["machine"] = MachineA, ["userSid"] = SidA }));
                 held.Dispose();

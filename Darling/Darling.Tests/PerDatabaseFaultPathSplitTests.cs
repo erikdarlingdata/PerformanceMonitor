@@ -241,8 +241,11 @@ public sealed class PerDatabaseFaultPathSplitTests
         slice.Stop();
         var frozen = slice.ElapsedMilliseconds;
 
-        /* Stand in for the flush: real elapsed time between the capture and the fault arm's read. */
-        Thread.Sleep(60);
+        /* Stand in for the flush: real elapsed time between the capture and the fault arm's read. The control slice
+           below starts running here, and the test goes on only once it has measured 60 ms of real time. */
+        var stillRunning = RunningSlice(minimumElapsedMs: 25);
+        var firstRead = stillRunning.ElapsedMilliseconds;
+        TestWait.WaitUntil(() => stillRunning.ElapsedMilliseconds >= firstRead + 60, TimeSpan.FromSeconds(30));
 
         DarlingCollectorRunner.LogPerDatabaseFaultSplit(
             logger, LogLevel.Debug, context, slice, "alpha", "query_store", "beta", "failed");
@@ -258,9 +261,6 @@ public sealed class PerDatabaseFaultPathSplitTests
         /* The control the assertion needs: the delay really was long enough that a RUNNING slice would have
            reported a different, larger parent. Without this the equality above could hold simply because no
            measurable time passed, and the pin would guard nothing. */
-        var stillRunning = RunningSlice(minimumElapsedMs: 25);
-        var firstRead = stillRunning.ElapsedMilliseconds;
-        Thread.Sleep(60);
         Assert.True(
             stillRunning.ElapsedMilliseconds > firstRead,
             "A running stopwatch did not advance across the same delay, so this test cannot distinguish a " +

@@ -409,7 +409,7 @@ FROM investigation_requests AS r"));
             Directory.CreateDirectory(_dir);
             _db = new DuckDbInitializer(Path.Combine(_dir, "lite.duckdb"));
             _db.InitializeAsync().GetAwaiter().GetResult();
-            Store = new DuckDbInvestigationStore(_db, () => DateTime.UtcNow + Shift);
+            Store = new DuckDbInvestigationStore(_db, () => DateTime.UtcNow + Shift, DuckDbInvestigationStoreTests.TestLockBudget);
         }
 
         public DuckDbInvestigationStore Store { get; }

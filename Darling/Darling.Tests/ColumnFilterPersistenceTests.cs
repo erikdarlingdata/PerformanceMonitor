@@ -283,9 +283,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
         Assert.False(File.Exists(FilePath));
 
         Directory.Delete(FilePath + ".tmp"); // the cause goes away: the debounce timer's own tick writes the file
-        var deadline = DateTime.UtcNow.AddSeconds(15);
-        while (!File.Exists(FilePath) && DateTime.UtcNow < deadline)
-            Thread.Sleep(50);
+        TestWait.WaitUntil(() => File.Exists(FilePath), TimeSpan.FromSeconds(15), TimeSpan.FromMilliseconds(50));
 
         Assert.True(File.Exists(FilePath), "the failed save was never retried");
         Assert.Single(warnings);
