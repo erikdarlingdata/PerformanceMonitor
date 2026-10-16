@@ -1097,8 +1097,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// proposed that nobody has decided, and <c>PUT /api/investigation-notes/{id}/approve</c> and <c>.../reject</c> decide
     /// one. The write routes answer as the mute-rule writes do: <c>application/json</c> required (the same CSRF discipline),
     /// born gated by the host's write gate (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/> refuses every unsafe
-    /// method to a read-only seat), 404 when the note is gone or already decided, a fixed-sentence 500 or 503 for a store
-    /// failure. The decision is stamped <c>person:</c> plus the seat's signed-in subject, else <c>person:viewer</c>. The
+    /// method to a read-only seat), 404 when the note is gone or already decided, 403 with <see cref="NoteDecisionRefusedMessage"/>
+    /// when the store refuses the write for privilege (SQLSTATE 42501: deciding a note is an <c>admin</c> role write, and the web
+    /// host runs on whatever login it was given, the <c>viewer</c> role on a managed or compose store), a fixed-sentence 500 or 503
+    /// for any other store failure. The decision is stamped <c>person:</c> plus the seat's signed-in subject, else <c>person:viewer</c>. The
     /// list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
     /// </summary>
     private static void MapInvestigationNotes(WebApplication app, InvestigationRequestStore notes, ILogger logger)
@@ -1138,6 +1140,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return DarlingWebStatementSweep.JsonText(
                     NoteDecisionBody("approved", id, decidedBy), "/api/investigation-notes/{id}/approve", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
+            catch (Exception ex) when (IsInsufficientPrivilege(ex))
+            {
+                return ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 DarlingWebFailureLog.Report(logger, "/api/investigation-notes/{id}/approve", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
@@ -1164,12 +1170,36 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return DarlingWebStatementSweep.JsonText(
                     NoteDecisionBody("rejected", id, decidedBy), "/api/investigation-notes/{id}/reject", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
+            catch (Exception ex) when (IsInsufficientPrivilege(ex))
+            {
+                return ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 DarlingWebFailureLog.Report(logger, "/api/investigation-notes/{id}/reject", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
+    }
+
+    /// <summary>The 403 sentence a note decision answers when the store refuses the write (SQLSTATE 42501): the web host runs on
+    /// whatever login <c>postgres.webConnectionString</c> names, and deciding a note is an <c>admin</c> role write (#5903).</summary>
+    internal const string NoteDecisionRefusedMessage =
+        "Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role, "
+        + "which lists pending notes but cannot decide them: decide in the desktop Viewer, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+
+    /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501), directly or as an inner exception.</summary>
+    internal static bool IsInsufficientPrivilege(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: "42501" })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The most pending notes one list answers. A fleet that proposes more than this has a backlog the screen cannot

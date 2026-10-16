@@ -1263,6 +1263,8 @@ export function noteDecisionOutcome(verb, noteId, res) {
   const body = res.body && typeof res.body === "object" ? res.body : null;
   if (res.status === 200 && body && body.status === past) return { message: "Note " + noteId + " " + past + ".", isError: false, reread: true };
   if (res.status === 404) return { message: "Note " + noteId + " was not changed. " + ((body && body.error) || NOTE_NOT_PENDING), isError: true, reread: true };
+  /* The store refused the write for privilege: the web host's login is not the admin role. Its sentence says how to decide; the list stays. */
+  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf("Deciding a note needs") === 0) return { message: body.error, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot " + verb + " notes.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return { message: "Note " + noteId + " was not " + past + ". The service answered " + res.status + "." + said, isError: true, reread: false };

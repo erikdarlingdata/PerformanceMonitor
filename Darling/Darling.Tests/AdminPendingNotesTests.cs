@@ -55,6 +55,8 @@ public sealed class AdminPendingNotesTests
     [InlineData("reject", 200, """{"status":"rejected","note_id":7}""", "Note 7 rejected.", false, true)]
     [InlineData("approve", 404, """{"error":"That note is not pending: it was already decided, or it is gone."}""",
         "Note 7 was not changed. That note is not pending: it was already decided, or it is gone.", true, true)]
+    [InlineData("approve", 403, """{"error":"Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role."}""",
+        "Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role.", true, false)]
     [InlineData("reject", 403, null, "This sign-in is read-only, so it cannot reject notes.", true, false)]
     [InlineData("approve", 500, """{"error":"The store did not answer."}""",
         "Note 7 was not approved. The service answered 500. The store did not answer.", true, false)]
