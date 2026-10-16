@@ -46,7 +46,7 @@ import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
-import { collectorRunBar, addRunNowButton } from "./collector-run.js";
+import { collectorRunBar, runNowColumns } from "./collector-run.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
@@ -2032,14 +2032,13 @@ export const SERVER_TABS = [
           subtitle: "trailing 7 days",
           viz: "table",
           rowsKey: "collectors",
-          columns: COLLECTOR_COLUMNS,
+          columns: [...COLLECTOR_COLUMNS, ...runNowColumns(server)],
           /* Click-through 10: worst first, not A to Z. */
           orderRows: worstFirst,
           emptyText: "No collection log rows for this server yet.",
           /* #5227: a row is the way into that collector's run history (the Collection Log below). */
           onRow: (row, tr) => {
             if (!row || !row.collector) return;
-            addRunNowButton(server, row, tr);
             tr.style.cursor = "pointer";
             tr.setAttribute("title", "Show the runs of " + row.collector + " in the Collection Log below");
             /* Enter/Space as well as a click; a click that ends a text selection inside the row is the user copying, not picking. */
@@ -2196,14 +2195,10 @@ export const POSTGRES_TABS = [
           subtitle: "trailing 7 days",
           viz: "table",
           rowsKey: "collectors",
-          columns: COLLECTOR_COLUMNS,
+          columns: [...COLLECTOR_COLUMNS, ...runNowColumns(server)],
           /* Click-through 10: worst first, not A to Z. */
           orderRows: worstFirst,
           emptyText: "No collection log rows for this server yet.",
-          onRow: (row, tr) => {
-            if (!row || !row.collector) return;
-            addRunNowButton(server, row, tr);
-          },
         },
         {
           title: "Heaviest Collectors",

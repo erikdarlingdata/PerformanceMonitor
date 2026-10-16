@@ -21,11 +21,47 @@ const GIVE_UP_MS = 15 * 60 * 1000;
 
 /* One run per server at a time on this page, so every button on it can lock while it goes. */
 const running = new Map();
-const listeners = new Map();
+/* The buttons on the page for each server. The tab is drawn again on every auto-refresh and every window change, so
+   a button that left the page is dropped here the next time something changes. */
+const buttons = new Map();
 const bars = new Map();
+/* What the status line and the results table say for each server. Kept here, not in the elements, because the tab
+   is rebuilt while a run goes (auto-refresh) and the run's last words must land on the page that is showing. */
+const shown = new Map();
+/* The session, once it has answered. app.js asks for it at start, long before anyone opens a server's tab. */
+let seat = null;
+getSession().then((session) => {
+  seat = session;
+});
 
 function notify(server) {
-  for (const fn of listeners.get(server) || []) fn();
+  const set = buttons.get(server);
+  if (!set) return;
+  for (const button of [...set]) {
+    if (!button.isConnected) set.delete(button);
+    else button.disabled = !!running.get(server);
+  }
+}
+
+function track(server, button) {
+  const set = buttons.get(server) || new Set();
+  set.add(button);
+  buttons.set(server, set);
+  button.disabled = !!running.get(server);
+}
+
+/* Draw what is known for the server into the bar that is on the page now (nothing for a read-only seat's empty bar). */
+function paint(server) {
+  const slot = bars.get(server);
+  if (!slot || !slot.__status) return;
+  const state = shown.get(server) || { text: "", rows: [] };
+  slot.__status.textContent = state.text;
+  mount(slot.__output, state.rows.length ? [resultTable(state.rows)] : []);
+}
+
+function say(server, text, rows) {
+  shown.set(server, { text, rows: rows || [] });
+  paint(server);
 }
 
 function sleep(ms) {
@@ -109,18 +145,19 @@ function resultTable(rows) {
 }
 
 /** Start a run, keep the status line current, and show the newest log row of each collector that ran. */
-async function startRun(server, collectors, status, output) {
+async function startRun(server, collectors) {
   if (running.get(server)) return;
   running.set(server, true);
   notify(server);
-  status.textContent = collectors && collectors.length ? "Running " + collectors.join(", ") + " now..." : "Running every enabled collector now...";
-  mount(output, []);
+  say(server, collectors && collectors.length ? "Running " + collectors.join(", ") + " now..." : "Running every enabled collector now...");
   try {
     const outcome = await runCollectors(server, collectors);
-    status.textContent = (outcome.ok ? "" : "Not run: ") + outcome.message + (outcome.ok ? " " + describeResult(outcome.result) : "");
-    if (outcome.result) {
+    const text = (outcome.ok ? "" : "Not run: ") + outcome.message + (outcome.ok ? " " + describeResult(outcome.result) : "");
+    say(server, text);
+    /* Only a finished run has new rows to show; after a failure the newest rows would be old ones under a "Not run". */
+    if (outcome.ok && outcome.result) {
       const rows = await newestRows(server, collectors);
-      if (rows.length) mount(output, [resultTable(rows)]);
+      say(server, text, rows);
     }
   } finally {
     running.set(server, false);
@@ -145,61 +182,56 @@ export function collectorRunBar(server) {
         type: "button",
         class: "btn",
         title: "Runs every enabled collector for this server once, now. Disabled collectors are skipped. Schedules do not change.",
-        onClick: () => startRun(server, null, status, output),
+        onClick: () => startRun(server, null),
       },
       ["Run all collectors now"]
     );
     const note = el("span", { class: "muted" }, [
       " Runs every enabled collector once. This puts extra load on the monitored server; pick one collector in the table below to run just that one.",
     ]);
-    const sync = () => {
-      button.disabled = !!running.get(server);
-    };
-    const set = listeners.get(server) || new Set();
-    set.add(sync);
-    listeners.set(server, set);
-    sync();
+    track(server, button);
     mount(slot, [el("div", {}, [button, note]), status, output]);
     slot.dataset.status = "ready";
     slot.__status = status;
     slot.__output = output;
+    paint(server);
   });
   return slot;
 }
 
 /**
- * Adds a "Run now" button to one row of the Collectors table (called from the table's onRow). Does nothing for a
- * read-only seat. The click does not also pick the row.
+ * The extra "Run now" column of the Collectors table: one button per collector row, with its own header. An empty
+ * list for a read-only seat, so that seat sees no column and no header. A click runs that collector only (even when
+ * it is disabled) and does not also pick the row.
  */
-export function addRunNowButton(server, row, tr) {
-  if (!row || !row.collector) return;
-  getSession().then((session) => {
-    if (!session || !session.can_edit) return;
-    const button = el(
-      "button",
-      {
-        type: "button",
-        class: "btn btn-small",
-        title: "Runs " + row.collector + " once, now, even if it is disabled. Its schedule and enabled state do not change.",
-        onClick: (e) => {
-          e.stopPropagation();
-          const bar = bars.get(server);
-          const status = bar && bar.__status;
-          const output = bar && bar.__output;
-          if (status && output) startRun(server, [row.collector], status, output);
-        },
+export function runNowColumns(server) {
+  if (!seat || !seat.can_edit) return [];
+  return [
+    {
+      key: "collector",
+      label: "Run now",
+      sortable: false,
+      csv: false,
+      filter: false,
+      copy: false,
+      render: (row) => {
+        const button = el(
+          "button",
+          {
+            type: "button",
+            class: "btn btn-small",
+            title: "Runs " + row.collector + " once, now, even if it is disabled. Its schedule and enabled state do not change.",
+            onClick: (e) => {
+              e.stopPropagation();
+              startRun(server, [row.collector]);
+            },
+          },
+          ["Run now"]
+        );
+        button.addEventListener("keydown", (e) => e.stopPropagation());
+        track(server, button);
+        return button;
       },
-      ["Run now"]
-    );
-    const sync = () => {
-      button.disabled = !!running.get(server);
-    };
-    const set = listeners.get(server) || new Set();
-    set.add(sync);
-    listeners.set(server, set);
-    sync();
-    const td = el("td", {}, [button]);
-    td.addEventListener("click", (e) => e.stopPropagation());
-    tr.appendChild(td);
-  });
+    },
+  ];
 }
