@@ -551,8 +551,8 @@ public sealed class DarlingMcpInvestigationTools
         CancellationToken cancellationToken = default) =>
         ReportsAsync(postgres, composer.Mode, server_name, request_id, hours_back, cancellationToken);
 
-    /// <summary>The report read at <paramref name="mode"/>. The web read passes the level the web host registered from
-    /// <c>mcp.dataDetail</c> (#5904), so the viewer shows reports and briefs masked exactly as the MCP tool serves them.</summary>
+    /// <summary>The report read at <paramref name="mode"/>. The web panel passes <see cref="McpDataDetail.Full"/>: its role
+    /// can SELECT these tables itself, so the setting guards the MCP side (#5632 review round 2, M1).</summary>
     internal static async Task<string> ReportsAsync(NpgsqlDataSource postgres, McpDataDetail mode, string? server_name,
         string? request_id, int hours_back, CancellationToken cancellationToken)
     {

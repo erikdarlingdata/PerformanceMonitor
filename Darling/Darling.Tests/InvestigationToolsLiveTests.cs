@@ -13,7 +13,6 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -196,11 +195,10 @@ public sealed class InvestigationToolsLiveTests
     }
 
     /// <summary>#5904: the two reads the Investigations page makes carry the fields it draws, in the MCP order (requests
-    /// <c>opened_at DESC</c>, journal <c>event_time DESC</c>), and the report read the web serves is masked at the level the
-    /// web host registered: the same summary a full-level read returns is withheld at metadataOnly, so a masked report stays
-    /// masked in the page.</summary>
+    /// <c>opened_at DESC</c>, journal <c>event_time DESC</c>), and the report read the web serves is the full report and
+    /// brief an operator sees (the same answer the tool gives at the full level).</summary>
     [Fact]
-    public async Task TheWebReads_CarryTheFieldsThePageDraws_InTheMcpOrder_AndMaskTheReportAtTheRegisteredLevel()
+    public async Task TheWebReads_CarryTheFieldsThePageDraws_InTheMcpOrder_AndTheReportIsServedInFull()
     {
         await RunAsync(async (store, dataSource, connection, ct) =>
         {
@@ -213,17 +211,14 @@ public sealed class InvestigationToolsLiveTests
             await DarlingMcpInvestigationTools.SubmitAsync(store, id, claim.GetProperty("claim_id").GetString()!, 1,
                 "needs_person", "could not tell", Evidence, "see the table SecretOrders for the cause", null, null, ct);
 
-            async Task<JsonElement> WebRead(string tool, string query, McpDataDetail? level)
+            async Task<JsonElement> WebRead(string tool, string query)
             {
-                var services = new ServiceCollection();
-                if (level is { } l)
-                    services.AddSingleton(new McpDataDetailSetting(l));
-                var context = new DefaultHttpContext { RequestServices = services.BuildServiceProvider() };
+                var context = new DefaultHttpContext();
                 context.Request.QueryString = new QueryString(query);
                 return Root(await DarlingWebEndpoints.BuildReadDispatch()[tool](context, dataSource, null!));
             }
 
-            var list = await WebRead("list_investigation_requests", "?limit=100", null);
+            var list = await WebRead("list_investigation_requests", "?limit=100");
             var requests = list.GetProperty("requests").EnumerateArray().ToArray();
             Assert.Equal(new[] { newer, older }, requests.Select(r => r.GetProperty("request_id").GetGuid()));
             foreach (var key in new[] { "request_id", "opened_at", "state", "server_name", "first_metric", "family", "alert_count",
@@ -233,7 +228,7 @@ public sealed class InvestigationToolsLiveTests
             Assert.Equal("agent-a", requests[0].GetProperty("claimed_by").GetString());
             Assert.Equal("open", requests[1].GetProperty("state").GetString());
 
-            var full = await WebRead("get_investigation_reports", "?request_id=" + id, McpDataDetail.Full);
+            var full = await WebRead("get_investigation_reports", "?request_id=" + id);
             var report = Assert.Single(full.GetProperty("reports").EnumerateArray().ToArray());
             foreach (var key in new[] { "agent_id", "submitted_at", "verdict", "root_cause_found", "root_cause", "summary", "evidence" })
                 Assert.True(report.TryGetProperty(key, out _), "the report carries " + key);
@@ -247,15 +242,10 @@ public sealed class InvestigationToolsLiveTests
             foreach (var key in new[] { "event_time", "event", "actor", "reason", "request_id" })
                 Assert.True(journal[0].TryGetProperty(key, out _), "the journal row carries " + key);
 
-            var masked = await WebRead("get_investigation_reports", "?request_id=" + id, McpDataDetail.MetadataOnly);
-            var maskedText = masked.GetRawText();
-            Assert.DoesNotContain("SecretOrders", maskedText, StringComparison.Ordinal);
-            Assert.NotEqual(full.GetProperty("reports")[0].GetProperty("summary").GetString(),
-                masked.GetProperty("reports")[0].GetProperty("summary").GetString());
-            Assert.Equal("metadataOnly", masked.GetProperty("brief").GetProperty("data_detail").GetString());
-            /* The MCP tool at the same level answers the same report: the web read goes through the same masking. */
-            var tool = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.MetadataOnly, null, id, 24, ct));
-            Assert.Equal(tool.GetProperty("reports").GetRawText(), masked.GetProperty("reports").GetRawText());
+            /* The web read is the tool's full-level answer: an operator sees the whole report and brief. */
+            var tool = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, id, 24, ct));
+            Assert.Equal(tool.GetProperty("reports").GetRawText(), full.GetProperty("reports").GetRawText());
+            Assert.Equal(tool.GetProperty("brief").GetRawText(), full.GetProperty("brief").GetRawText());
         });
     }
 

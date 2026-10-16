@@ -6158,7 +6158,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
             ["list_investigation_requests"] = (c, pg, an) => DarlingMcpInvestigationTools.ListInvestigationRequests(pg, Str(c, "state"), Server(c), Str(c, "family"), QueryInt(c, "limit", null, 20), c.RequestAborted),
-            ["get_investigation_reports"] = (c, pg, an) => DarlingMcpInvestigationTools.ReportsAsync(pg, WebDataDetail(c), Server(c), Str(c, "request_id"), Hours(c, 24), c.RequestAborted),
+            ["get_investigation_reports"] = (c, pg, an) => DarlingMcpInvestigationTools.ReportsAsync(pg, McpDataDetail.Full, Server(c), Str(c, "request_id"), Hours(c, 24), c.RequestAborted),
 
             /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
                routes, the /api/fleet + /api/read/get_fleet_overview coexistence: the page reads its own
@@ -6718,12 +6718,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The server name from <c>?server=</c> (or the tool's own <c>?server_name=</c>); null when absent,
     /// which lets a tool auto-select a sole configured server exactly as the MCP surface does.</summary>
-    /// <summary>#5904: the <c>mcp.dataDetail</c> level the investigation report read is masked at, from the setting the web host
-    /// registers once per start (the same value the MCP host serves). A host with none registered (a test host that maps the
-    /// routes directly, whose request carries no service provider) serves <see cref="McpDataDetail.Full"/>.</summary>
-    private static McpDataDetail WebDataDetail(HttpContext context) =>
-        (context.RequestServices?.GetService(typeof(McpDataDetailSetting)) as McpDataDetailSetting)?.Mode ?? McpDataDetail.Full;
-
     private static string? Server(HttpContext context) => First(context, "server") ?? First(context, "server_name");
 
     /* ── the Locking page's index detail selector (#5311): web-only, never an MCP parameter ── */
