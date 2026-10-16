@@ -561,6 +561,138 @@ SELECT EXISTS
         $"interval '{(long)Math.Ceiling(PurgeEdgeMargin.TotalMinutes)} minutes'";
 
     /// <summary>
+    /// <see cref="PurgeEdgeMargin"/> with the interval term (<see cref="IntervalSpanMargin"/>, one day, the longest
+    /// interval Query Store allows) replaced by the longest interval the server has actually had (#5882):
+    /// <c>longestSpan + <see cref="MaxBelowFloorCadence"/> + <see cref="WatermarkPolicy.MaxCatchup"/></c>, the same
+    /// argument <see cref="PurgeEdgeMarginSql"/>'s summary makes with a shorter span. At a 60-minute interval that is
+    /// three hours instead of 26, so the read of a 24-hour window no longer takes yesterday's whole partition. Never
+    /// longer than <see cref="PurgeEdgeMargin"/>, so a span above a day (not a Query Store setting) cannot widen the read.
+    /// </summary>
+    public static TimeSpan EdgeMarginFor(TimeSpan longestSpan)
+    {
+        var margin = longestSpan + MaxBelowFloorCadence + WatermarkPolicy.MaxCatchup;
+        return margin > PurgeEdgeMargin ? PurgeEdgeMargin : margin;
+    }
+
+    /// <summary><see cref="EdgeMarginFor"/>'s answer as the interval literal <see cref="PurgeEdgeMarginSql"/> is, rounded UP
+    /// to whole minutes. Equals <see cref="PurgeEdgeMarginSql"/> when the margin is the full <see cref="PurgeEdgeMargin"/>.</summary>
+    public static string EdgeMarginSqlFor(TimeSpan margin) =>
+        $"interval '{(long)Math.Ceiling(margin.TotalMinutes)} minutes'";
+
+    /// <summary>#5882: <paramref name="sql"/> with every use of <see cref="PurgeEdgeMarginSql"/> replaced by
+    /// <paramref name="marginSql"/> (<see cref="EdgeMarginSqlFor"/>). The margin is a literal in the statement text, not a
+    /// parameter, so the planner sees the range it will scan and every caller that binds the statement by position is unchanged.</summary>
+    public static string WithEdgeMargin(string sql, string marginSql) =>
+        sql.Replace(PurgeEdgeMarginSql, marginSql, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The longest positive <c>interval_length_minutes</c> the server's databases have reported (<c>v_query_store_health</c>, one
+    /// row per database per capture) over [readStart - 2 days, end + 1 day], and how many positive-length captures that range
+    /// holds, how many NULL or non-positive lengths it holds for a database that HAS wide rows (the collector writes 0 for a
+    /// NULL length; a database with no wide rows cannot contribute to
+    /// the read, so its non-positive row is ignored and does not pin the server at 26 hours), and the oldest positive-length
+    /// capture in it. The lookback is a day of interval plus a day of
+    /// capture cadence; the day past the end covers a change the last capture before the end did not see. The fifth column is
+    /// true when a database the server has wide rows for has no capture in that range, so its interval length is unknown and the
+    /// longest of the others bounds nothing for it. The databases come from a skip scan of <c>ux_query_store_interval_wide</c>
+    /// (<c>(server_id, database_name, ...)</c>: a handful of index probes per database), not a <c>DISTINCT</c> over the read's range:
+    /// that reads every heap row of the 26 hours the narrower floor exists to avoid (measured, #5815). The trade is a fallback,
+    /// never an under-read: a database whose wide rows are all outside the read's range (dropped or taken offline within the wide
+    /// table's ten days of retention) and has no capture in the range also returns <see cref="PurgeEdgeMargin"/>.
+    /// </summary>
+    private const string LongestIntervalSpanSql = """
+        WITH RECURSIVE wide_databases AS
+        (
+            (
+                SELECT w.database_name
+                FROM query_store_interval_wide AS w
+                WHERE w.server_id = $1
+                ORDER BY w.database_name
+                LIMIT 1
+            )
+            UNION ALL
+            SELECT
+                (
+                    SELECT w.database_name
+                    FROM query_store_interval_wide AS w
+                    WHERE w.server_id = $1
+                    AND   w.database_name > p.database_name
+                    ORDER BY w.database_name
+                    LIMIT 1
+                )
+            FROM wide_databases AS p
+            WHERE p.database_name IS NOT NULL
+        )
+        SELECT
+            MAX(h.interval_length_minutes) FILTER (WHERE h.interval_length_minutes > 0),
+            COUNT(*) FILTER (WHERE h.interval_length_minutes > 0),
+            COUNT(*) FILTER
+            (
+                WHERE (h.interval_length_minutes IS NULL OR h.interval_length_minutes <= 0)
+                AND   d.database_name IS NOT NULL
+            ),
+            MIN(h.capture_time) FILTER (WHERE h.interval_length_minutes > 0),
+            EXISTS
+            (
+                SELECT 1
+                FROM wide_databases AS d2
+                WHERE d2.database_name IS NOT NULL
+                AND   NOT EXISTS
+                (
+                    SELECT 1
+                    FROM v_query_store_health AS h2
+                    WHERE h2.server_id = $1
+                    AND   h2.database_name = d2.database_name
+                    AND   h2.capture_time >= $2 - interval '2 days'
+                    AND   h2.capture_time <= $3 + interval '1 day'
+                )
+            )
+        FROM v_query_store_health AS h
+        LEFT JOIN wide_databases AS d
+          ON d.database_name = h.database_name
+        WHERE h.server_id = $1
+        AND   h.capture_time >= $2 - interval '2 days'
+        AND   h.capture_time <= $3 + interval '1 day'
+        """;
+
+    /// <summary>
+    /// The edge margin (<see cref="EdgeMarginFor"/>) for a read of <paramref name="readStart"/> through
+    /// <paramref name="end"/> on one server (#5882), or <see cref="PurgeEdgeMargin"/> whenever the server's longest interval
+    /// cannot be trusted: no positive-length capture in the range, a NULL or non-positive length for a database with wide rows, a database with wide rows and no
+    /// capture in the health range (its length is unknown and may exceed the longest the others report), or no capture as old as a day before the
+    /// read starts (an interval that began then, or one backfilled from before the monitor connected, may have run under a
+    /// setting the captures never saw). Exact otherwise: every stored row has
+    /// <c>first_execution_time &gt; collection_time - (span + MaxCatchup)</c> (<see cref="PurgeEdgeMarginSql"/>'s argument), and
+    /// the longest length any database reported over the range bounds the span of every interval written in it. Run on the
+    /// read's own connection and snapshot. A fault is the caller's, not swallowed here: inside the read's transaction a failed
+    /// statement aborts it, so the caller's existing fault path (a raw read) is the only honest answer.
+    /// </summary>
+    public static async Task<TimeSpan> ResolveEdgeMarginAsync(
+        NpgsqlConnection connection, int serverId, DateTime readStart, DateTime end, int commandTimeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(LongestIntervalSpanSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(readStart, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)
+            || reader.IsDBNull(0) || reader.IsDBNull(3)
+            || reader.GetInt64(1) == 0 || reader.GetInt64(2) != 0
+            || reader.GetBoolean(4))
+        {
+            return PurgeEdgeMargin;
+        }
+
+        if (reader.GetDateTime(3) > DateTime.SpecifyKind(readStart, DateTimeKind.Unspecified) - IntervalSpanMargin)
+        {
+            return PurgeEdgeMargin;
+        }
+
+        return EdgeMarginFor(TimeSpan.FromMinutes(reader.GetInt64(0)));
+    }
+
+    /// <summary>
     /// How far past a read's window end a row's <c>first_execution_time</c> may sit, for the upper bound the
     /// per-server reads placed by <c>collection_time</c> carry (#5523). A row is read by its <c>collection_time</c>,
     /// which the service stamps from its own clock, and <c>first_execution_time</c> is the first execution inside the

@@ -28,6 +28,10 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
+    <!-- #5943: Thread.Sleep is banned in test code (RS0030, an error in .editorconfig). A test that waits for something
+         uses TestWait.WaitUntil (Darling.Tests/TestTimeHelpers.cs); the file holds the one-line reason and the way out. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <AdditionalFiles Include="BannedSymbols.txt" />
     <!-- #4128: a live HTTP proof of the web host's gates (Host-allowlist, network-mode token/CIDR) through
          a real Kestrel TestServer pipeline, rather than the source-order pins above. -->
     <PackageReference Include="Microsoft.AspNetCore.TestHost" />

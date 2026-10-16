@@ -578,7 +578,10 @@ Object.assign(scenarios, {
     mark = fetches.length;
     await customServerPage("SRV2", { poll: true });
     const other = reads(mark);
-    modules.server.applyCustomRange("SRV3", Date.now() - 6 * 3600000, Date.now(), Date.now());
+    /* One clock read: three separate Date.now() calls straddled a millisecond tick on some runs, which made the span 6 h + 1 ms,
+       and the page rounds a span up to whole hours, so the live read asked for hours=7 and the test never saw hours=6 (#5956). */
+    const liveNow = Date.now();
+    modules.server.applyCustomRange("SRV3", liveNow - 6 * 3600000, liveNow, liveNow);
     await settleFast();
     mark = fetches.length;
     await customServerPage("SRV3", { poll: true });

@@ -520,7 +520,7 @@ VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy
             {
                 // Holds the first snapshot's transaction open until the second one is waiting on the marker.
                 firstOpening.Set();
-                Thread.Sleep(1500);
+                TestWait.Elapse(TimeSpan.FromMilliseconds(1500));
                 return stored.StartsWith("legacy-", StringComparison.Ordinal) ? true : throw new CryptographicException("not a blob");
             }
 

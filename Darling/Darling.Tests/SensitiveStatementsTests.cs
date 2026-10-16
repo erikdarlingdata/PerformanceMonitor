@@ -1133,7 +1133,7 @@ public sealed class SensitiveStatementsTests
         {
             var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromMilliseconds(limitMs), _ =>
             {
-                Thread.Sleep(250);
+                TestWait.Elapse(TimeSpan.FromMilliseconds(250));
                 return SensitiveStatements.Verdict.TimedOut;
             });
             watch.Restart();

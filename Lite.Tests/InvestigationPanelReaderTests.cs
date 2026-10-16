@@ -40,7 +40,7 @@ public sealed class InvestigationPanelReaderTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _db = new DuckDbInitializer(Path.Combine(_tempDir, "lite.duckdb"));
         _db.InitializeAsync().GetAwaiter().GetResult();
-        _store = new DuckDbInvestigationStore(_db, () => _now);
+        _store = new DuckDbInvestigationStore(_db, () => _now, DuckDbInvestigationStoreTests.TestLockBudget);
     }
 
     public void Dispose()

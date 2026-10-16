@@ -214,7 +214,7 @@ public sealed class ClipboardTextRetryBudgetTests
                 // Longer than the 2.5 s budget ClipboardText.cs documents, so attempt 1 alone already
                 // exhausts it - the real-world case of one WPF call running slower than the ~1.1 s #4624
                 // measured, not just the typical two-fast-failures case the other tests above cover.
-                Thread.Sleep(TimeSpan.FromSeconds(2.7));
+                TestWait.Elapse(TimeSpan.FromSeconds(2.7));
                 throw ClipboardBusyException();
             };
 

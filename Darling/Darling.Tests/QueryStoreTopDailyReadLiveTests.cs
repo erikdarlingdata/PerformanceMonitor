@@ -447,6 +447,51 @@ FROM generate_series(0, 9) AS i", ct);
         });
     }
 
+    /// <summary>
+    /// #5882: the daily statement's two edge reads take the narrowed first_execution_time margin (the trailing edge anchors on
+    /// <c>$9::date</c>, not on <c>$2</c>). With a built run of whole days, a server of 60-minute intervals (a 3-hour margin)
+    /// gets the rows, in the order, the 26-hour statement gets. The edges hold a straddler each (first executed under two hours
+    /// before it was collected, across the window start and across midnight). Non-vacuity: a row that breaks the 60-minute
+    /// invariant, 20 hours before its collection, is read by the 26-hour statement and dropped by the narrowed one at each edge.
+    /// </summary>
+    [Fact]
+    public async Task TheDailyArm_WithANarrowedMargin_ReturnsTheWideMarginsRows_OverABuiltRunOfDays()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var readStart = End.AddHours(-72);                                     // 2026-01-11 06:00; days 12 and 13 are built
+            var midnight = new DateTime(2026, 1, 14, 0, 0, 0);
+            await InsertRowAsync(connection, readStart.AddHours(1), 9201, ct, firstExecution: readStart.AddHours(-1));      // leading edge, begun before the window
+            await InsertRowAsync(connection, midnight.AddMinutes(30), 9202, ct, firstExecution: midnight.AddHours(-2));     // trailing edge, begun before midnight
+
+            var margin = QueryStoreIntervalWide.EdgeMarginFor(TimeSpan.FromMinutes(60));
+            Assert.Equal(TimeSpan.FromHours(3), margin);
+            Assert.NotEqual(QueryStoreIntervalWide.PurgeEdgeMargin, margin);
+            var wideDaily = DarlingDataReader.QueryStoreTopDailyTableSql;
+            var narrowDaily = QueryStoreIntervalWide.WithEdgeMargin(wideDaily, QueryStoreIntervalWide.EdgeMarginSqlFor(margin));
+            Assert.NotEqual(wideDaily, narrowDaily);
+
+            var span = (new DateOnly(2026, 1, 12), new DateOnly(2026, 1, 14));
+            var wideRows = Format((await RunSqlAsync(connection, wideDaily, readStart, End, null, null, null, span, ct)).Select(ToRow));
+            var narrowRows = Format((await RunSqlAsync(connection, narrowDaily, readStart, End, null, null, null, span, ct)).Select(ToRow));
+            Assert.Equal(Top, wideRows.Count);
+            Assert.Equal(wideRows, narrowRows);
+            var ids = (await RunSqlAsync(connection, narrowDaily, readStart, End, null, null, null, span, ct)).Select(v => (long)v[1]!).ToHashSet();
+            Assert.Contains(9201L, ids);
+            Assert.Contains(9202L, ids);
+
+            /* Rows that break the 60-minute invariant: only the 26-hour statement reads them. */
+            await InsertRowAsync(connection, readStart.AddHours(1), 9203, ct, firstExecution: readStart.AddHours(-19));
+            await InsertRowAsync(connection, midnight.AddMinutes(30), 9204, ct, firstExecution: midnight.AddHours(-19).AddMinutes(30));
+            var wideIds = (await RunSqlAsync(connection, wideDaily, readStart, End, null, null, null, span, ct)).Select(v => (long)v[1]!).ToHashSet();
+            var narrowIds = (await RunSqlAsync(connection, narrowDaily, readStart, End, null, null, null, span, ct)).Select(v => (long)v[1]!).ToHashSet();
+            Assert.Contains(9203L, wideIds);
+            Assert.Contains(9204L, wideIds);
+            Assert.DoesNotContain(9203L, narrowIds);
+            Assert.DoesNotContain(9204L, narrowIds);
+        });
+    }
+
     [Fact]
     public async Task ARowMovedFromABuiltDayIntoTheTrailingEdge_IsCountedInBothByTheRoute_AndOnceByTodaysRead()
     {

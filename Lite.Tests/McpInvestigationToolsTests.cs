@@ -40,7 +40,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _db = new DuckDbInitializer(Path.Combine(_tempDir, "lite.duckdb"));
         _db.InitializeAsync().GetAwaiter().GetResult();
-        _store = new DuckDbInvestigationStore(_db);
+        _store = new DuckDbInvestigationStore(_db, lockBudget: DuckDbInvestigationStoreTests.TestLockBudget);
         _servers = new ServerManager(_tempDir);
     }
 
