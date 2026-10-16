@@ -266,6 +266,16 @@ VALUES (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9,
         string? before, string? after, string result = "done", string? database = null, CancellationToken ct = default, int ageHours = 1)
     {
         var request = Guid.NewGuid();
+        /* The journal carries what the tools write (#5917): the shared kind names, and on the done row the tool's answer, which for a
+           mute or a custom rule is a status word with the rule (a delete answers "deleted" and no rule). */
+        var journaledKind = kind switch { "rule" => AgentChangeKinds.CustomRule, "override" => AgentChangeKinds.ThresholdOverride, _ => kind };
+        string? answer = after;
+        if (journaledKind == AgentChangeKinds.Mute)
+            answer = after is null ? "{\"status\":\"deleted\",\"rule_id\":\"" + targetId + "\"}" : new JsonObject { ["status"] = "updated", ["mute_rule"] = JsonNode.Parse(after) }.ToJsonString();
+        else if (journaledKind == AgentChangeKinds.CustomRule && after is null)
+            answer = "{\"status\":\"deleted\",\"rule_id\":" + targetId.Replace("Custom:", "") + "}";
+        after = answer;
+        kind = journaledKind;
         var detail = new JsonObject
         {
             ["tool"] = kind + "_tool", ["kind"] = kind, ["claim_no"] = 1,

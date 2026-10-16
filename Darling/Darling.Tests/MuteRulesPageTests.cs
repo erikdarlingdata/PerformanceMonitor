@@ -38,11 +38,10 @@ public sealed class MuteRulesPageTests
     [Fact]
     public void EveryRuleFieldThePageReads_IsOneTheToolReturns()
     {
-        var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs").ReplaceLineEndings("\n");
-        var start = tools.IndexOf("static object BuildMuteRulePayload(MuteRule r) => new", StringComparison.Ordinal);
-        Assert.True(start >= 0, "Darling source lost: BuildMuteRulePayload");
-        var end = tools.IndexOf("\n    };", start, StringComparison.Ordinal);
-        var returned = Regex.Matches(tools[start..end], @"(?m)^ {8}([a-z_]+) = ").Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        /* The tool's mute_rule object is the shared MuteRuleImage (#5917): its wire names are the record's JsonPropertyNames. */
+        var returned = typeof(PerformanceMonitor.Darling.Storage.MuteRuleImage).GetProperties()
+            .Select(p => System.Reflection.CustomAttributeExtensions.GetCustomAttribute<System.Text.Json.Serialization.JsonPropertyNameAttribute>(p)!.Name)
+            .ToHashSet(StringComparer.Ordinal);
         Assert.Contains("match_summary", returned);
 
         var read = Regex.Matches(Page(), @"\b(?:r|rule)\.([a-z_]+)\b").Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToList();

@@ -194,7 +194,7 @@ internal static class DarlingMcpAgentActions
             return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, ct);
 
         var target = await ServerTargetAsync(postgres, server_id ?? -1, null);
-        return await RunAsync(seat, postgres, logger, tool, "mute", agentAction, target,
+        return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
             (_, _, _, _) => Task.FromResult(metric_name is null ? NeedsMetric : MetricRefusal(metric_name)),
             NoBefore,
             async (connection, transaction, _) =>
@@ -272,7 +272,7 @@ internal static class DarlingMcpAgentActions
         }
 
         var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
-        return await RunAsync(seat, postgres, logger, tool, "mute", agentAction, target,
+        return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
             (_, _, ctx, _) => Task.FromResult(after is null ? null : MuteAfterImageRefusal(after, ctx.RequestServerId)),
             (_, _, _) => Task.FromResult(Serialize(before)),
             async (connection, transaction, token) =>
@@ -293,7 +293,7 @@ internal static class DarlingMcpAgentActions
         if (before is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return notFound!;
         var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
-        return await RunAsync(seat, postgres, logger, tool, "mute", agentAction, target, null,
+        return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target, null,
             (_, _, _) => Task.FromResult(Serialize(before)),
             async (connection, transaction, token) =>
             {
@@ -312,7 +312,7 @@ internal static class DarlingMcpAgentActions
         if (before is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return notFound!;
         var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
-        return await RunAsync(seat, postgres, logger, tool, "mute", agentAction, target,
+        return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
             /* Turning a mute ON is an after image that mutes: the same rule as a create. Turning it off is always allowed. */
             (_, _, ctx, _) => Task.FromResult(enabled && before is not null ? MuteAfterImageRefusal(before, ctx.RequestServerId) : null),
             (_, _, _) => Task.FromResult(Serialize(before)),
@@ -372,7 +372,7 @@ internal static class DarlingMcpAgentActions
         const string tool = "create_custom_alert_rule";
         InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         var target = await RequestServerTargetAsync(postgres, agentAction, null, ct);
-        return await RunAsync(seat, postgres, logger, tool, "custom_rule", agentAction, target,
+        return await RunAsync(seat, postgres, logger, tool, CustomAlertRuleImage.Kind, agentAction, target,
             (connection, transaction, ctx, token) => RuleScopeRefusalAsync(connection, transaction, definition, ctx.RequestServerId, "after", token),
             NoBefore,
             async (connection, transaction, token) =>
@@ -422,7 +422,7 @@ internal static class DarlingMcpAgentActions
         if (row is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {rule_id}.");
         var target = await RequestServerTargetAsync(postgres, agentAction, rule_id.ToString(CultureInfo.InvariantCulture), ct);
-        return await RunAsync(seat, postgres, logger, tool, "custom_rule", agentAction, target,
+        return await RunAsync(seat, postgres, logger, tool, CustomAlertRuleImage.Kind, agentAction, target,
             async (connection, transaction, ctx, token) =>
                 await RuleScopeRefusalAsync(connection, transaction, row!.DefinitionJson, ctx.RequestServerId, "before", token)
                 ?? await RuleScopeRefusalAsync(connection, transaction, definition ?? row.DefinitionJson, ctx.RequestServerId, "after", token),
@@ -453,7 +453,7 @@ internal static class DarlingMcpAgentActions
         if (row is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {rule_id}.");
         var target = await RequestServerTargetAsync(postgres, agentAction, rule_id.ToString(CultureInfo.InvariantCulture), ct);
-        return await RunAsync(seat, postgres, logger, tool, "custom_rule", agentAction, target,
+        return await RunAsync(seat, postgres, logger, tool, CustomAlertRuleImage.Kind, agentAction, target,
             (connection, transaction, ctx, token) => RuleScopeRefusalAsync(connection, transaction, row!.DefinitionJson, ctx.RequestServerId, "before", token),
             (_, _, _) => Task.FromResult<string?>(DarlingWebEndpoints.BuildFullRuleNode(row!).ToJsonString(McpHelpers.JsonOptions)),
             async (connection, transaction, token) =>

@@ -45,7 +45,7 @@ public sealed class DarlingMcpServedPolicy
 public sealed class DarlingMcpThresholdOverrideTools
 {
     internal const string ToolName = "set_alert_threshold_override";
-    internal const string Kind = "threshold_override";
+    internal const string Kind = ThresholdOverrideImage.Kind;
 
     private static readonly Regex SetByShape = new("^[A-Za-z0-9._:-]{1,64}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -134,7 +134,7 @@ public sealed class DarlingMcpThresholdOverrideTools
             async Task<string?> ReadBefore(NpgsqlConnection c, NpgsqlTransaction t, CancellationToken ct)
             {
                 applied.Previous = await ThresholdOverrideStore.ReadValueAsync(c, t, resolved.ServerId, database, wire, ct);
-                return applied.Previous is null ? null : JsonSerializer.Serialize(new { value = applied.Previous });
+                return applied.Previous is null ? null : JsonSerializer.Serialize(new ThresholdOverrideImage(applied.Previous.Value));
             }
 
             async Task<string?> Write(NpgsqlConnection c, NpgsqlTransaction t, CancellationToken ct)
@@ -149,7 +149,7 @@ public sealed class DarlingMcpThresholdOverrideTools
                     await ThresholdOverrideStore.UpsertAsync(c, t, resolved.ServerId, database, wire, value!.Value, by, requestId, ct);
                 applied.SetBy = by;
                 applied.RequestId = requestId;
-                return clear ? null : JsonSerializer.Serialize(new { value });
+                return clear ? null : JsonSerializer.Serialize(new ThresholdOverrideImage(value!.Value));
             }
 
             if (policy.Writes)

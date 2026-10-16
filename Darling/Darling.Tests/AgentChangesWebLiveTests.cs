@@ -131,7 +131,7 @@ public sealed class AgentChangesWebLiveTests
             var called = await ScalarAsync(owner, $@"INSERT INTO config.investigation_journal (request_id, server_id, event, actor, detail)
 VALUES ('{request}', 7, 'action_called', 'agent:a', '{{""tool"":""t"",""kind"":""mute"",""target"":{{""id"":""m-web"",""server_id"":7,""database"":null}},""before"":{{""reason"":""old"",""enabled"":true}}}}') RETURNING journal_id", ct);
             await ExecAsync(owner, $@"INSERT INTO config.investigation_journal (request_id, server_id, event, actor, detail)
-VALUES ('{request}', 7, 'action_done', 'agent:a', '{{""called_id"":{called},""after"":{{""reason"":""agent says"",""enabled"":true}}}}')", ct);
+VALUES ('{request}', 7, 'action_done', 'agent:a', '{{""called_id"":{called},""after"":{{""status"":""updated"",""mute_rule"":{{""reason"":""agent says"",""enabled"":true}}}}}}')", ct);
             await ExecAsync(owner, $@"INSERT INTO config.investigation_journal (request_id, server_id, event, actor, detail)
 VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""t"",""kind"":""mute"",""target"":{{""id"":""lost"",""server_id"":7,""database"":null}},""before"":null}}')", ct);
 

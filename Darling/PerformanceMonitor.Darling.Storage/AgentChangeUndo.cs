@@ -93,23 +93,14 @@ public sealed class AgentChangeUndo
     public static readonly TimeSpan Window = TimeSpan.FromDays(365);
 
     /// <summary>The kinds an undo exists for.</summary>
-    public static readonly IReadOnlySet<string> UndoableKinds = new HashSet<string>(StringComparer.Ordinal) { "mute", "rule", "override" };
+    public static readonly IReadOnlySet<string> UndoableKinds = new HashSet<string>(StringComparer.Ordinal) { AgentChangeKinds.Mute, AgentChangeKinds.CustomRule, AgentChangeKinds.ThresholdOverride };
 
-    private enum T { Text, Bool, Int, Double, Time, Json }
+    private sealed record Spec(string Table, (string Name, ImageColumnType Type)[] Fields);
 
-    private sealed record Spec(string Table, (string Name, T Type)[] Fields);
-
-    private static readonly Spec MuteSpec = new("config.config_mute_rules",
-    [
-        ("enabled", T.Bool), ("expires_at_utc", T.Time), ("reason", T.Text), ("server_name", T.Text), ("server_id", T.Int),
-        ("metric_name", T.Text), ("database_pattern", T.Text), ("query_text_pattern", T.Text), ("wait_type_pattern", T.Text),
-        ("job_name_pattern", T.Text), ("client_app_pattern", T.Text),
-    ]);
-
-    private static readonly Spec RuleSpec = new("config.custom_alert_rules",
-        [("name", T.Text), ("definition", T.Json), ("description", T.Text), ("enabled", T.Bool)]);
-
-    private static readonly Spec OverrideSpec = new("config.config_threshold_overrides", [("value", T.Double)]);
+    /* The column lists are the image records' own (AgentChangeImages.cs): the tools journal those records and the undo reads them. */
+    private static readonly Spec MuteSpec = new(MuteRuleImage.Table, ImageColumns.Of<MuteRuleImage>());
+    private static readonly Spec RuleSpec = new(CustomAlertRuleImage.Table, ImageColumns.Of<CustomAlertRuleImage>());
+    private static readonly Spec OverrideSpec = new(ThresholdOverrideImage.Table, ImageColumns.Of<ThresholdOverrideImage>());
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -176,7 +167,7 @@ LIMIT $4";
 
         for (var i = 0; i < changes.Count; i++)
         {
-            if (changes[i].Kind == "mute" && changes[i].Result == AgentChangeResult.Done)
+            if (changes[i].Kind == AgentChangeKinds.Mute && changes[i].Result == AgentChangeResult.Done)
                 changes[i] = changes[i] with { MutedAlerts = (await MutedAlertsAsync(connection, changes[i], 1000, cancellationToken)).Count };
         }
 
@@ -223,13 +214,13 @@ LIMIT $4";
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var row = (await ReadAsync(connection, calledId, cancellationToken));
-        return row is null || row.Kind != "mute" ? [] : await MutedAlertsAsync(connection, row, Math.Clamp(limit, 1, 1000), cancellationToken);
+        return row is null || row.Kind != AgentChangeKinds.Mute ? [] : await MutedAlertsAsync(connection, row, Math.Clamp(limit, 1, 1000), cancellationToken);
     }
 
     private async Task<List<MutedAlertRow>> MutedAlertsAsync(NpgsqlConnection connection, AgentChangeRow row, int limit, CancellationToken cancellationToken)
     {
         var done = row.ResultJson is null ? null : JsonNode.Parse(row.ResultJson) as JsonObject;
-        var image = done?["after"] as JsonObject ?? (JsonNode.Parse(row.DetailJson) as JsonObject)?["before"] as JsonObject;
+        var image = AfterImageNode(AgentChangeKinds.Mute, done?["after"]) as JsonObject ?? (JsonNode.Parse(row.DetailJson) as JsonObject)?["before"] as JsonObject;
         var serverId = image?["server_id"] is JsonValue sv && sv.TryGetValue(out int sid) ? (int?)sid : null;
         var metric = image?["metric_name"] is JsonValue mv && mv.TryGetValue(out string? m) ? m : null;
         var rows = new List<MutedAlertRow>();
@@ -335,14 +326,31 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             return AgentUndoResult.Refused("not_undoable", "The result of this call is unknown (no done row), so what it changed is unknown and it cannot be undone from here.");
 
         var kind = called["kind"] is JsonValue kv && kv.TryGetValue(out string? k) ? k : null;
-        var spec = kind switch { "mute" => MuteSpec, "rule" => RuleSpec, "override" => OverrideSpec, _ => null };
+        var spec = kind switch
+        {
+            AgentChangeKinds.Mute => MuteSpec,
+            AgentChangeKinds.CustomRule => RuleSpec,
+            AgentChangeKinds.ThresholdOverride => OverrideSpec,
+            _ => null,
+        };
         if (kind is null || spec is null)
             return AgentUndoResult.Refused("not_undoable", "This kind of change has no undo.");
 
-        var before = called["before"] as JsonObject;
-        var after = done["after"] as JsonObject;
+        /* What the Level 2 tools journal: the before image on the called row, and on the done row the tool's answer. The mute and
+           custom rule tools answer with a status word; the mute tools carry the rule in mute_rule, the custom rule tools answer
+           with the rule itself, and a delete answers {status: "deleted"} (no rule left: the after image is null). The override
+           tool journals its image ({value}) as is, null for a cleared override. */
+        var answer = done["after"] as JsonObject;
+        var status = answer?["status"] is JsonValue sv0 && sv0.TryGetValue(out string? st) ? st : null;
+        if (status is "unchanged" or "already_exists")
+            return AgentUndoResult.Refused("not_undoable", "That call changed nothing (the tool answered '" + status + "'), so there is nothing to undo.");
+        var afterNode = AfterImageNode(kind, done["after"]);
+        var before = ImageObject(kind, called["before"]);
+        var after = ImageObject(kind, afterNode);
         var target = called["target"] as JsonObject;
         var targetId = target?["id"] is JsonValue tv && tv.TryGetValue(out string? t) ? t : target?["id"]?.ToString();
+        if (string.IsNullOrWhiteSpace(targetId))
+            targetId = (after ?? before)?["id"]?.ToString();
         var targetServer = target?["server_id"] is JsonValue sv && sv.TryGetValue(out int s) ? (int?)s : serverId;
         var targetDb = target?["database"] is JsonValue dv && dv.TryGetValue(out string? d) ? d : null;
         if (before is null && after is null)
@@ -353,7 +361,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             return AgentUndoResult.Refused("not_undoable", "This change's target is not recorded.");
 
         var current = await ReadCurrentAsync(connection, transaction, spec, key, cancellationToken);
-        var label = kind switch { "mute" => "mute rule", "rule" => "custom alert rule", _ => "threshold override" };
+        var label = kind switch { AgentChangeKinds.Mute => "mute rule", AgentChangeKinds.CustomRule => "custom alert rule", _ => "threshold override" };
         if (!Equal(spec, current, after))
             return AgentUndoResult.Refused("changed_since", $"Not undone: the {label} changed since the agent's change, so its current settings are kept. Review it and change it by hand if you still want it back.");
 
@@ -368,7 +376,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
         else
         {
             /* Deleted by the agent: put it back. A rule keeps its Custom:<id>; a name clash refuses. */
-            if (kind == "rule")
+            if (kind == AgentChangeKinds.CustomRule)
             {
                 var name = before!["name"] is JsonValue nv && nv.TryGetValue(out string? n) ? n : null;
                 await using var clash = Command(connection, transaction, "SELECT 1 FROM config.custom_alert_rules WHERE name = $1", PText(name));
@@ -394,42 +402,62 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
 
     // ---- the per-kind row access ----
 
+    /// <summary>
+    /// The after image inside the tool's answer on the <c>action_done</c> row: a mute tool answers <c>{status, mute_rule}</c>, a custom
+    /// rule tool answers the rule itself, the override tool journals its image as is, and a delete answers <c>{status: "deleted"}</c>
+    /// (null: nothing is left).
+    /// </summary>
+    private static JsonNode? AfterImageNode(string kind, JsonNode? answer)
+    {
+        if (answer is JsonObject o && o["status"] is JsonValue s && s.TryGetValue(out string? word) && word == "deleted")
+            return null;
+        return kind == AgentChangeKinds.Mute && answer is JsonObject m ? m["mute_rule"] : answer;
+    }
+
+    /// <summary>A journaled image as the flat object of column names the undo compares and writes, through the kind's shared image record.</summary>
+    private static JsonObject? ImageObject(string kind, JsonNode? node) => kind switch
+    {
+        AgentChangeKinds.Mute => ImageColumns.ToObject<MuteRuleImage>(node),
+        AgentChangeKinds.CustomRule => ImageColumns.ToObject<CustomAlertRuleImage>(node),
+        _ => ImageColumns.ToObject<ThresholdOverrideImage>(node),
+    };
+
     private sealed record RowKey(string Kind, string? Id, long? RuleId, int ServerId, string? Database);
 
     private static RowKey? Key(string kind, string? id, int? serverId, string? database)
     {
         if (string.IsNullOrWhiteSpace(id))
             return null;
-        if (kind == "rule")
+        if (kind == AgentChangeKinds.CustomRule)
         {
             var digits = id.StartsWith("Custom:", StringComparison.OrdinalIgnoreCase) ? id[7..] : id;
             return long.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? new RowKey(kind, id, n, 0, null) : null;
         }
 
-        if (kind == "override")
+        if (kind == AgentChangeKinds.ThresholdOverride)
             return serverId is int sid ? new RowKey(kind, id, null, sid, database) : null;
         return new RowKey(kind, id, null, 0, null);
     }
 
     private static string Where(RowKey key) => key.Kind switch
     {
-        "mute" => "id = $1",
-        "rule" => "id = $1",
+        AgentChangeKinds.Mute => "id = $1",
+        AgentChangeKinds.CustomRule => "id = $1",
         _ => "server_id = $1 AND coalesce(database_name, '') = coalesce($2::text, '') AND threshold_key = $3",
     };
 
     private NpgsqlParameter[] KeyParams(RowKey key) => key.Kind switch
     {
-        "mute" => [PText(key.Id)],
-        "rule" => [P(key.RuleId!.Value)],
+        AgentChangeKinds.Mute => [PText(key.Id)],
+        AgentChangeKinds.CustomRule => [P(key.RuleId!.Value)],
         _ => [P(key.ServerId), PText(key.Database), PText(key.Id)],
     };
 
-    private static int Next(RowKey key) => key.Kind == "override" ? 4 : 2;
+    private static int Next(RowKey key) => key.Kind == AgentChangeKinds.ThresholdOverride ? 4 : 2;
 
     private async Task<JsonObject?> ReadCurrentAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Spec spec, RowKey key, CancellationToken cancellationToken)
     {
-        var columns = string.Join(", ", spec.Fields.Select(f => f.Type == T.Json ? $"{f.Name}::text" : f.Name));
+        var columns = string.Join(", ", spec.Fields.Select(f => f.Type == ImageColumnType.Json ? $"{f.Name}::text" : f.Name));
         await using var command = Command(connection, transaction, $"SELECT {columns} FROM {spec.Table} WHERE {Where(key)} FOR UPDATE", KeyParams(key));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -440,11 +468,11 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             var (name, type) = spec.Fields[i];
             row[name] = reader.IsDBNull(i) ? null : type switch
             {
-                T.Bool => JsonValue.Create(reader.GetBoolean(i)),
-                T.Int => JsonValue.Create(reader.GetInt32(i)),
-                T.Double => JsonValue.Create(reader.GetDouble(i)),
-                T.Time => JsonValue.Create(Utc(reader.GetDateTime(i)).ToString("o", CultureInfo.InvariantCulture)),
-                T.Json => JsonNode.Parse(reader.GetString(i)),
+                ImageColumnType.Bool => JsonValue.Create(reader.GetBoolean(i)),
+                ImageColumnType.Whole => JsonValue.Create(reader.GetInt32(i)),
+                ImageColumnType.Real => JsonValue.Create(reader.GetDouble(i)),
+                ImageColumnType.Time => JsonValue.Create(Utc(reader.GetDateTime(i)).ToString("o", CultureInfo.InvariantCulture)),
+                ImageColumnType.Json => JsonNode.Parse(reader.GetString(i)),
                 _ => JsonValue.Create(reader.GetString(i)),
             };
         }
@@ -472,23 +500,24 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
         return true;
     }
 
-    private static bool SameValue(T type, JsonNode? a, JsonNode? b)
+    private static bool SameValue(ImageColumnType type, JsonNode? a, JsonNode? b)
     {
         if (a is null || b is null)
             return a is null && b is null;
         switch (type)
         {
-            case T.Double:
+            case ImageColumnType.Real:
                 return a.GetValue<double>() == b.GetValue<double>();
-            case T.Time:
+            case ImageColumnType.Time:
                 return DateTime.TryParse(a.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var x)
                     && DateTime.TryParse(b.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var y)
-                    && x == y;
-            case T.Json:
+                    /* PostgreSQL keeps microseconds and a tool's .NET time carries ticks, so equal means within one microsecond. */
+                    && Math.Abs((x - y).Ticks) < TimeSpan.TicksPerMillisecond / 1000;
+            case ImageColumnType.Json:
                 return JsonNode.DeepEquals(Structured(a), Structured(b));
-            case T.Bool:
+            case ImageColumnType.Bool:
                 return a.GetValue<bool>() == b.GetValue<bool>();
-            case T.Int:
+            case ImageColumnType.Whole:
                 return a.GetValue<int>() == b.GetValue<int>();
             default:
                 return string.Equals(a.GetValue<string>(), b.GetValue<string>(), StringComparison.Ordinal);
@@ -505,18 +534,18 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private NpgsqlParameter FieldParam(T type, JsonNode? value) => type switch
+    private NpgsqlParameter FieldParam(ImageColumnType type, JsonNode? value) => type switch
     {
-        T.Bool => new NpgsqlParameter<bool?> { TypedValue = value?.GetValue<bool>(), NpgsqlDbType = NpgsqlDbType.Boolean },
-        T.Int => new NpgsqlParameter<int?> { TypedValue = value?.GetValue<int>(), NpgsqlDbType = NpgsqlDbType.Integer },
-        T.Double => new NpgsqlParameter<double?> { TypedValue = value?.GetValue<double>(), NpgsqlDbType = NpgsqlDbType.Double },
-        T.Time => new NpgsqlParameter<DateTime?>
+        ImageColumnType.Bool => new NpgsqlParameter<bool?> { TypedValue = value?.GetValue<bool>(), NpgsqlDbType = NpgsqlDbType.Boolean },
+        ImageColumnType.Whole => new NpgsqlParameter<int?> { TypedValue = value?.GetValue<int>(), NpgsqlDbType = NpgsqlDbType.Integer },
+        ImageColumnType.Real => new NpgsqlParameter<double?> { TypedValue = value?.GetValue<double>(), NpgsqlDbType = NpgsqlDbType.Double },
+        ImageColumnType.Time => new NpgsqlParameter<DateTime?>
         {
             TypedValue = value is null ? null : DateTime.SpecifyKind(DateTime.Parse(value.ToString(), CultureInfo.InvariantCulture,
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal), DateTimeKind.Unspecified),
             NpgsqlDbType = NpgsqlDbType.Timestamp,
         },
-        T.Json => new NpgsqlParameter<string?> { TypedValue = value is null ? null : (Structured(value) ?? value).ToJsonString(), NpgsqlDbType = NpgsqlDbType.Jsonb },
+        ImageColumnType.Json => new NpgsqlParameter<string?> { TypedValue = value is null ? null : (Structured(value) ?? value).ToJsonString(), NpgsqlDbType = NpgsqlDbType.Jsonb },
         _ => PText(value?.GetValue<string>()),
     };
 
@@ -527,14 +556,17 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
         var n = Next(key);
         foreach (var (name, type) in spec.Fields)
         {
+            /* A partial image restores only what it names. */
+            if (!before.ContainsKey(name))
+                continue;
             sets.Add($"{name} = ${n++}");
             parameters.Add(FieldParam(type, before[name]));
         }
 
         var extra = key.Kind switch
         {
-            "rule" => $", version = version + 1, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = ${n}",
-            "override" => $", updated_at = now(), set_by = ${n}",
+            AgentChangeKinds.CustomRule => $", version = version + 1, updated_at = (now() AT TIME ZONE 'UTC'), updated_by = ${n}",
+            AgentChangeKinds.ThresholdOverride => $", updated_at = now(), set_by = ${n}",
             _ => "",
         };
         if (extra.Length > 0)
@@ -557,11 +589,10 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
         string overriding = "";
         switch (key.Kind)
         {
-            case "mute":
+            case AgentChangeKinds.Mute:
                 Add("id", PText(key.Id));
-                Add("created_at_utc", FieldParam(T.Time, JsonValue.Create(Now().ToString("o", CultureInfo.InvariantCulture))));
                 break;
-            case "rule":
+            case AgentChangeKinds.CustomRule:
                 Add("id", P(key.RuleId!.Value));
                 overriding = " OVERRIDING SYSTEM VALUE";
                 Add("updated_by", PText(actor));
@@ -576,7 +607,13 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
         }
 
         foreach (var (name, type) in spec.Fields)
-            Add(name, FieldParam(type, image[name]));
+        {
+            if (image.ContainsKey(name))
+                Add(name, FieldParam(type, image[name]));
+        }
+
+        if (key.Kind == AgentChangeKinds.Mute && !image.ContainsKey("created_at_utc"))
+            Add("created_at_utc", FieldParam(ImageColumnType.Time, JsonValue.Create(Now().ToString("o", CultureInfo.InvariantCulture))));
         var holes = string.Join(", ", Enumerable.Range(1, columns.Count).Select(i => "$" + i.ToString(CultureInfo.InvariantCulture)));
         await using var command = Command(connection, transaction,
             $"INSERT INTO {spec.Table} ({string.Join(", ", columns)}){overriding} VALUES ({holes})", parameters.ToArray());

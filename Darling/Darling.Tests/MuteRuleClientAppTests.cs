@@ -193,7 +193,8 @@ public sealed class MuteRuleClientAppTests
            agent_action (#5915). */
         Assert.Contains("string? client_app_pattern = null,\n", mcp, StringComparison.Ordinal);
         Assert.Contains("string? external_source = null,\n", mcp, StringComparison.Ordinal);
-        Assert.Contains("client_app_pattern = r.ClientAppPattern,", mcp, StringComparison.Ordinal);
+        Assert.Contains(typeof(PerformanceMonitor.Darling.Storage.MuteRuleImage).GetProperties(),
+            p => System.Reflection.CustomAttributeExtensions.GetCustomAttribute<System.Text.Json.Serialization.JsonPropertyNameAttribute>(p)!.Name == "client_app_pattern");
         Assert.Contains("metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, \" +", mcp, StringComparison.Ordinal);
     }
 

@@ -911,24 +911,10 @@ public sealed class DarlingMcpAlertTools
     }
 
     /// <summary>The per-rule shape get_mute_rules returns AND create_mute_rule echoes back for the stored rule.</summary>
-    internal static object BuildMuteRulePayload(MuteRule r) => new
-    {
-        id = r.Id,
-        enabled = r.Enabled,
-        created_at_utc = r.CreatedAtUtc.ToString("o"),
-        expires_at_utc = r.ExpiresAtUtc?.ToString("o"),
-        reason = r.Reason,
-        server_name = r.ServerName,
-        server_id = r.ServerId,
-        metric_name = r.MetricName,
-        external_source = r.ExternalSource,
-        database_pattern = r.DatabasePattern,
-        query_text_pattern = r.QueryTextPattern,
-        wait_type_pattern = r.WaitTypePattern,
-        job_name_pattern = r.JobNamePattern,
-        client_app_pattern = r.ClientAppPattern,
-        match_summary = r.Summary
-    };
+    /// <summary>The mute rule's wire shape, and the image the Level 2 mute tools journal: <see cref="MuteRuleImage"/> (#5917), one type for both.</summary>
+    internal static MuteRuleImage BuildMuteRulePayload(MuteRule r) => new(
+        r.Id, r.Enabled, r.CreatedAtUtc.ToString("o"), r.ExpiresAtUtc?.ToString("o"), r.Reason, r.ServerName, r.ServerId, r.MetricName,
+        r.ExternalSource, r.DatabasePattern, r.QueryTextPattern, r.WaitTypePattern, r.JobNamePattern, r.ClientAppPattern, r.Summary);
 
     [McpServerTool(Name = "update_alert_settings"), Description(
         "PARTIAL update of the single global alert-settings row the service delivers on. Call " +

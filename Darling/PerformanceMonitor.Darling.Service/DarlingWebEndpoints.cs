@@ -6769,18 +6769,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="Mcp.DarlingMcpCustomAlertTools"/>'s (definition embedded as JSON, plus the <c>enabled</c>
     /// column alert rules carry), so the web GET/POST/PUT and the MCP get/create/update return the same rule
     /// shape.</summary>
-    internal static JsonObject BuildFullRuleNode(CustomAlertRule rule) => new()
-    {
-        ["id"] = rule.Id,
-        ["name"] = rule.Name,
-        ["description"] = rule.Description,
-        ["definition"] = JsonNode.Parse(rule.DefinitionJson),
-        ["enabled"] = rule.Enabled,
-        ["version"] = rule.Version,
-        ["created_at"] = rule.CreatedAt,
-        ["updated_at"] = rule.UpdatedAt,
-        ["updated_by"] = rule.UpdatedBy,
-    };
+    internal static JsonObject BuildFullRuleNode(CustomAlertRule rule) =>
+        JsonSerializer.SerializeToNode(new CustomAlertRuleImage(rule.Id, rule.Name, rule.Description, JsonNode.Parse(rule.DefinitionJson),
+            rule.Enabled, rule.Version, rule.CreatedAt, rule.UpdatedAt, rule.UpdatedBy))!.AsObject();
 
     /// <summary>The bare-array list wire shape (no definition body), carrying <c>enabled</c> so the list can
     /// badge a paused rule without fetching each full definition — plus <c>last_fired</c> (#3360), the naive-UTC

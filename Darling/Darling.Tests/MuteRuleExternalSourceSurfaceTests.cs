@@ -248,7 +248,8 @@ public sealed class MuteRuleExternalSourceSurfaceTests
 
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(tools,
             @"string\.Equals\(a\.ExternalSource, b\.ExternalSource, StringComparison\.Ordinal\)").Count);
-        Assert.Contains("external_source = r.ExternalSource,", tools, StringComparison.Ordinal);
+        Assert.Contains(typeof(PerformanceMonitor.Darling.Storage.MuteRuleImage).GetProperties(),
+            p => System.Reflection.CustomAttributeExtensions.GetCustomAttribute<System.Text.Json.Serialization.JsonPropertyNameAttribute>(p)!.Name == "external_source");
         Assert.Contains("external_source = AlertMuteContext.ExternalSourceOf(r.MetricName),", tools, StringComparison.Ordinal);
     }
 
