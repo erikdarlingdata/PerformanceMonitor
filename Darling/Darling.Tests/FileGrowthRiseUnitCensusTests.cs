@@ -90,13 +90,14 @@ public class FileGrowthRiseUnitCensusTests
         }
 
         /* The alert's threshold line: rate, unit, the window it was averaged over, and the bar in megabytes
-           that rate amounts to inside it. The old "rise ≥ N MB or" is gone. */
+           that rate amounts to inside it. The old "rise ≥ N MB or" is gone. Since #5910 the engine reads the
+           lookback through the threshold overrides, so the line names the resolved local, not the setting. */
         yield return new object[]
         {
             "PerformanceMonitor.Alerting/AlertEngine.cs",
             new[]
             {
-                "{AlertContextBuilders.FileGrowthRiseUnit} averaged over {_settings.FileGrowthLookbackMinutes} min",
+                "{AlertContextBuilders.FileGrowthRiseUnit} averaged over {fileGrowthLookback} min",
                 "MB in the window)",
             },
             new[] { "rise ≥ {_settings.FileGrowthRiseMb} MB or" },
