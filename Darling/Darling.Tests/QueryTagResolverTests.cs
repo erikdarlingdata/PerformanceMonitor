@@ -132,6 +132,17 @@ public sealed class QueryTagResolverTests
     }
 
     [Fact]
+    public void TagComment_MatchesTheTagIgnoringCase_EvenWithACaseSensitiveDictionary()
+    {
+        var caseSensitive = new Dictionary<string, long> { ["billing"] = Billing };
+
+        var r = QueryTagResolver.Resolve(Server, [Hash(text: "/* tag:BILLING */ SELECT 1")],
+            Array.Empty<QueryTagHandAssignment>(), [Rule(1, QueryTagRuleField.TextTag, null, tag: null)], caseSensitive);
+
+        Assert.Equal(Billing, r.TagId);
+    }
+
+    [Fact]
     public void TagComment_NamingAnUnknownTag_DoesNotMatch_AndTheNextRuleIsTried()
     {
         var sightings = new[] { Hash(text: "/* tag:nosuch */ SELECT 1 FROM dbo.Invoices") };

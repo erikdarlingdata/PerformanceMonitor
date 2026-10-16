@@ -58,8 +58,8 @@ public static class QueryTagResolver
     /// <param name="sightings">Every sighting of the one key on that server.</param>
     /// <param name="assignments">The hand assignments (every server's; the resolver filters).</param>
     /// <param name="rules">The rules (every server's; the resolver filters).</param>
-    /// <param name="tagIdsByName">Tag id by tag name, for <see cref="QueryTagRuleField.TextTag"/> rules. Build
-    /// it with <see cref="StringComparer.OrdinalIgnoreCase"/>; a name not in it matches no tag.</param>
+    /// <param name="tagIdsByName">Tag id by tag name, for <see cref="QueryTagRuleField.TextTag"/> rules. Names
+    /// are looked up ignoring case whatever comparer the dictionary has; a name not in it matches no tag.</param>
     public static QueryTagResolution Resolve(
         int serverId,
         IReadOnlyList<QueryTagSighting> sightings,
@@ -111,7 +111,12 @@ public static class QueryTagResolver
             }
         }
 
-        // 4: the first matching rule by (priority, id).
+        // 4: the first matching rule by (priority, id). Tag names are compared ignoring case here, not by
+        // the caller's dictionary, so an ordinary dictionary cannot silently stop "tag:Billing" matching "billing".
+        IReadOnlyDictionary<string, long> names = tagIdsByName is Dictionary<string, long> d && d.Comparer == StringComparer.OrdinalIgnoreCase
+            ? tagIdsByName
+            : new Dictionary<string, long>(tagIdsByName, StringComparer.OrdinalIgnoreCase);
+
         foreach (QueryTagRule rule in rules
                      .Where(r => r.Enabled
                                  && (r.ServerId is null || r.ServerId == serverId)
@@ -121,7 +126,7 @@ public static class QueryTagResolver
         {
             foreach (QueryTagSighting s in sightings)
             {
-                QueryTagResolution? hit = TryRule(rule, s, tagIdsByName);
+                QueryTagResolution? hit = TryRule(rule, s, names);
                 if (hit is not null)
                 {
                     return hit;
