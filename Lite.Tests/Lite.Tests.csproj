@@ -15,6 +15,10 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
+    <!-- #5943: Thread.Sleep is banned in test code (RS0030, an error in .editorconfig). A test that waits for something
+         uses TestWait.WaitUntil (Darling.Tests/TestTimeHelpers.cs); the file holds the one-line reason and the way out. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <AdditionalFiles Include="BannedSymbols.txt" />
     <!-- The MCP host's POST content-type guard is run through a real ASP.NET Core pipeline (McpJsonPostGuardTests). -->
     <PackageReference Include="Microsoft.AspNetCore.TestHost" />
   </ItemGroup>
@@ -65,6 +69,8 @@
     <Compile Include="..\Darling\Darling.Tests\StaTestThread.cs" Link="StaTestThread.cs" />
     <!-- #5602: the timing scanner, so both suites keep a clock-starting class in the one `timing` collection by one detector. -->
     <Compile Include="..\Darling\Darling.Tests\TimingTestScanner.cs" Link="TimingTestScanner.cs" />
+    <!-- #5943: TestWait (WaitUntil, Elapse) and AnchorClock, the replacements for Thread.Sleep and for reading the clock twice. Its own tests stay in Darling.Tests. -->
+    <Compile Include="..\Darling\Darling.Tests\TestTimeHelpers.cs" Link="TestTimeHelpers.cs" />
     <!-- #5596: the test that proves this process runs with the WPF exit switch on (the switch itself is declared above), so both suites check their own process. -->
     <Compile Include="..\Darling\Darling.Tests\WpfExitSwitchTests.cs" Link="WpfExitSwitchTests.cs" />
   </ItemGroup>

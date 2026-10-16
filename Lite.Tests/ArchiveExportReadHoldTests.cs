@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using Darling.Tests;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -141,12 +142,12 @@ SELECT i, TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'W' ||
        ended, and it then queued behind the next one. */
     private static void WaitUntilWriterQueued(int waitingBefore)
     {
-        /* Counted in polls, not timed: up to about 30 s, a hang guard only. */
-        for (var polls = 0; DuckDbInitializer.WaitingWriteCountForTests <= waitingBefore; polls++)
-        {
-            Assert.True(polls < 6000, "the writer never reached the lock wait");
-            Thread.Sleep(5);
-        }
+        /* Up to 30 s, a hang guard only. */
+        TestWait.WaitUntil(
+            () => DuckDbInitializer.WaitingWriteCountForTests > waitingBefore,
+            TimeSpan.FromSeconds(30),
+            TimeSpan.FromMilliseconds(5),
+            "the writer reached the lock wait");
     }
 
     private static void RecordInto(ArchiveService service, List<HoldEvent> events, Action<HoldEvent>? onEvent = null)

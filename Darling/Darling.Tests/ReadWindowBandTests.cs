@@ -176,7 +176,7 @@ public sealed class ReadScopeCapacityTests
         using var scope = ReadScope.Open(null);
         ReadConnectionWait.OnPending(1);
         ReadConnectionWait.OnCreateSeconds(5.0);
-        Thread.Sleep(60);
+        TestWait.Elapse(TimeSpan.FromMilliseconds(60));
         ReadConnectionWait.OnPending(-1);
         Assert.InRange(scope.Scope.WaitMs, 50, 4_000);
 

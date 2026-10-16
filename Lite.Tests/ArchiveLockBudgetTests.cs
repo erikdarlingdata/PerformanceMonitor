@@ -167,7 +167,7 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
                         worstReaderWait = waited.Elapsed;
                     }
 
-                    Thread.Sleep(5);
+                    stop.Token.WaitHandle.WaitOne(5);
                 }
             });
 

@@ -72,4 +72,5 @@ lite_linked_shard:
   - 'Darling/Darling.Tests/StatementScrubCanary.cs'
   - 'Darling/Darling.Tests/StaTestThread.cs'
   - 'Darling/Darling.Tests/TimingTestScanner.cs'
+  - 'Darling/Darling.Tests/TestTimeHelpers.cs'
   - 'Darling/Darling.Tests/WpfExitSwitchTests.cs'

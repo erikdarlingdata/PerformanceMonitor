@@ -32,6 +32,14 @@ public sealed class DuckDbInvestigationStoreTests : IDisposable
 {
     private static readonly DateTime T0 = new(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>The write-lock wait the investigation store tests give their store (#5940). The store's write lock is
+    /// process-wide (one static lock shared by every <c>DuckDbInitializer</c>), so while other test classes build their own
+    /// databases in parallel, one of them can hold it past the shipped 5 s budget on a loaded CI runner. A test that makes
+    /// 150 writes in a row (the journal page one) then hit <c>StoreLockTimeoutException</c> from ClaimAsync, which says
+    /// nothing about the journal page. These tests are not about the lock budget, so they wait long enough for the holder
+    /// to finish. Lock timeout behaviour has its own tests (<c>WriteLockBudgetTests</c>, <c>StoreLockHolderTests</c>).</summary>
+    internal static readonly TimeSpan TestLockBudget = TimeSpan.FromMinutes(2);
+
     private readonly string _tempDir;
     private readonly DuckDbInitializer _db;
     private readonly DuckDbInvestigationStore _store;
@@ -43,7 +51,7 @@ public sealed class DuckDbInvestigationStoreTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _db = new DuckDbInitializer(Path.Combine(_tempDir, "lite.duckdb"));
         _db.InitializeAsync().GetAwaiter().GetResult();
-        _store = new DuckDbInvestigationStore(_db, () => _now);
+        _store = new DuckDbInvestigationStore(_db, () => _now, TestLockBudget);
     }
 
     public void Dispose()

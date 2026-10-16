@@ -23,6 +23,11 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class McpInstructionsBudgetTests
 {
+    /* The rule for this ceiling (#5944). The instructions text is sent to every MCP client at the start of every session,
+       so its length is a real cost the client pays in context before it calls a tool. 8,000 is a round figure with
+       headroom, not a number set a few bytes above today's length: the tests below fail only when the text really
+       crosses it. A change that needs more room either shortens something else or raises this number on purpose, in
+       the same PR, with the reason. Never trim to land a few bytes under, and never raise it just to merge. */
     private const int InstructionsBudget = 8_000;
 
     [Fact]

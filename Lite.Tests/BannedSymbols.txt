@@ -1,0 +1,6 @@
+# Thread.Sleep is banned in test code (#5943). A fixed sleep is a guess about the runner, and timing was the top
+# cause of test-stability fixes since 2026-09-01. Use TestWait.WaitUntil(condition, timeout) from
+# Darling.Tests/TestTimeHelpers.cs when the test waits for something. Where elapsed time is the stimulus itself
+# (a fake slow call), use TestWait.Elapse. A loop that paces itself waits on its CancellationToken's WaitHandle.
+M:System.Threading.Thread.Sleep(System.Int32);Use TestWait.WaitUntil (waiting for a condition) or TestWait.Elapse (time passing is the stimulus); see TestTimeHelpers.cs
+M:System.Threading.Thread.Sleep(System.TimeSpan);Use TestWait.WaitUntil (waiting for a condition) or TestWait.Elapse (time passing is the stimulus); see TestTimeHelpers.cs

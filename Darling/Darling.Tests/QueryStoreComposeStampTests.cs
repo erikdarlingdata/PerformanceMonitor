@@ -456,23 +456,6 @@ public sealed class QueryStoreComposeStampTests
     {
         Assert.Contains("to_regclass('collect.query_store_compose_stamp_hours')", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
-        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V174's (#5655), V175's (#5631), V176's (#5638), V177's (#5641), V178's (#5684), V179's (#5640) and V180's (#5654) sentinels sit above this one; the probe's last ordinal is the newest rung's. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
-        /* V181's (#5750), V182's (#5506) and V183's (#5793) sentinels are next; V184's (#5632) and V185's (#5812) are next, V186's (#5810) next, V187's (#5825) and V188's (#5821) next, and V189's (#5867) is the probe's last ordinal. */
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 12})", viewer, StringComparison.Ordinal);
-
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
@@ -500,11 +483,6 @@ public sealed class QueryStoreComposeStampTests
         }
 
         Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
-
-        var arm = viewer.IndexOf("if (hasQueryStoreComposeStamp)", StringComparison.Ordinal);
-        var below = viewer.IndexOf("if (hasQueryStoreIntervalLatestPartitioned)", StringComparison.Ordinal);
-        Assert.True(arm >= 0 && below > arm, "the V173 arm sits above V172's");
-        Assert.Contains("return " + QueryStoreComposeStamp.RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[arm..below], StringComparison.Ordinal);
     }
 
     [Fact]

@@ -142,12 +142,20 @@ public sealed class SingleInstanceGuardTests
            means a LIVE second instance holds the lock and exiting is correct — so the retry lives here, not in
            the production code. */
         var guard = SingleInstanceGuard.TryAcquire(name);
-        for (var attempt = 0; attempt < 200 && !guard.Owns; attempt++)
-        {
-            guard.Dispose();
-            Thread.Sleep(10);
-            guard = SingleInstanceGuard.TryAcquire(name);
-        }
+        TestWait.TryWaitUntil(
+            () =>
+            {
+                if (guard.Owns)
+                {
+                    return true;
+                }
+
+                guard.Dispose();
+                guard = SingleInstanceGuard.TryAcquire(name);
+                return guard.Owns;
+            },
+            TimeSpan.FromSeconds(2),
+            TimeSpan.FromMilliseconds(10));
 
         using var acquiredGuard = guard;
         Assert.True(guard.Owns, "an abandoned mutex must become acquirable once the holder thread is fully torn down");
