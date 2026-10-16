@@ -60,6 +60,30 @@ public static class QueryHashIdentity
         return true;
     }
 
+    /// <summary>
+    /// #5980: the one text a query-tag key uses for a hash. The DMV and Query Store collectors store <c>0x</c> plus 16
+    /// hex digits; the long-query trace stores the raw XE <c>uint64</c> as decimal digits. A query seen by both must
+    /// be one key, so a decimal value becomes <c>0x</c> plus 16 upper-case hex digits, a <c>0x</c> value is returned
+    /// trimmed and otherwise as it is, and an <see cref="IsUnknown"/> value (or text that is neither) yields NULL.
+    /// </summary>
+    public static string? CanonicalKey(string? hash)
+    {
+        var known = KnownHash(hash);
+        if (known is null)
+        {
+            return null;
+        }
+
+        if (known.Length > 2 && known[0] == '0' && (known[1] == 'x' || known[1] == 'X'))
+        {
+            return known;
+        }
+
+        return ulong.TryParse(known, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
+            ? "0x" + value.ToString("X16", System.Globalization.CultureInfo.InvariantCulture)
+            : known;
+    }
+
     /// <summary>The trimmed hash, or NULL when <see cref="IsUnknown"/>.</summary>
     public static string? KnownHash(string? hash) => IsUnknown(hash) ? null : hash!.Trim();
 

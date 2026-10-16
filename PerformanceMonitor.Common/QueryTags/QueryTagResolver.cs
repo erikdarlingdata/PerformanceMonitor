@@ -233,10 +233,8 @@ public static class QueryTagResolver
             ? new QueryTagResolution(rule.TagId, QueryTagSource.Rule, rule.Id, rule.Field, value)
             : null;
 
-    private static string? Cut(string? text) =>
-        text is not null && text.Length > QueryTagLimits.TextSampleCap
-            ? text.Substring(0, QueryTagLimits.TextSampleCap)
-            : text;
+    // The one cut lives in QueryTagLimits (#5980): surrogate-safe, shared with the collectors.
+    private static string? Cut(string? text) => QueryTagLimits.CutText(text);
 
     private static string? Short(string? text) =>
         text is not null && text.Length > MatchedValueCap ? text.Substring(0, MatchedValueCap) : text;

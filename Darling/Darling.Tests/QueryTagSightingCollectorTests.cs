@@ -8,6 +8,7 @@
 
 using System.Linq;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.QueryTags;
 using Xunit;
 
@@ -117,6 +118,7 @@ public sealed class QueryTagSightingCollectorTests
             BlockedLoginName = "orders_rw",
             BlockedHostName = "WEB01",
             BlockedSqlText = "UPDATE a;",
+            BlockingDatabaseName = "Staging",
             BlockingClientApp = "NightlyBatch",
             BlockingLoginName = "batch_svc",
             BlockingHostName = "ETL02",
@@ -131,9 +133,47 @@ public sealed class QueryTagSightingCollectorTests
         var blocking = sightings[1];
         Assert.Equal(("OrderApp", "orders_rw", "WEB01", "Sales", "UPDATE a;"),
             (blocked.Application, blocked.Login, blocked.Host, blocked.Database, blocked.TextSample));
-        Assert.Equal(("NightlyBatch", "batch_svc", "ETL02", "Sales", "UPDATE b;"),
+        /* The blocker runs in Staging, the victim in Sales: each side keeps its own process's database. */
+        Assert.Equal(("NightlyBatch", "batch_svc", "ETL02", "Staging", "UPDATE b;"),
             (blocking.Application, blocking.Login, blocking.Host, blocking.Database, blocking.TextSample));
         Assert.NotEqual(blocked.Key, blocking.Key);
+    }
+
+    [Fact]
+    public void BlockedProcessReport_BlockerKeyDoesNotChangeWithTheVictimsDatabase()
+    {
+        BlockedProcessReportCollector.Row Report(string victimDb, string? blockerDb) => new()
+        {
+            DatabaseName = victimDb,
+            BlockedClientApp = "OrderApp",
+            BlockingDatabaseName = blockerDb,
+            BlockingClientApp = "NightlyBatch",
+            BlockingLoginName = "batch_svc",
+            BlockingHostName = "ETL02",
+        };
+
+        var inSales = BlockedProcessReportCollector.Instance.DescribeQueryTagSightings(Report("Sales", "Staging"))!;
+        var inBilling = BlockedProcessReportCollector.Instance.DescribeQueryTagSightings(Report("Billing", "Staging"))!;
+        var noBlockerDb = BlockedProcessReportCollector.Instance.DescribeQueryTagSightings(Report("Sales", null))!;
+
+        Assert.Equal(inSales[1].Key, inBilling[1].Key);
+        Assert.Equal("Staging", inSales[1].Database);
+        Assert.Null(noBlockerDb[1].Database);
+    }
+
+    [Fact]
+    public void BlockedProcessReportParser_ReadsTheBlockingProcessesOwnDatabase()
+    {
+        const string xml = "<blocked-process-report>"
+            + "<blocked-process><process spid=\"51\" currentdbname=\"Sales\" clientapp=\"OrderApp\"><inputbuf>UPDATE a;</inputbuf></process></blocked-process>"
+            + "<blocking-process><process spid=\"52\" currentdbname=\"Staging\" clientapp=\"NightlyBatch\"><inputbuf>UPDATE b;</inputbuf></process></blocking-process>"
+            + "</blocked-process-report>";
+
+        var row = BlockedProcessReportCollector.ParseReportXml(xml, null)!;
+        var sightings = BlockedProcessReportCollector.Instance.DescribeQueryTagSightings(row)!;
+
+        Assert.Equal("Sales", sightings[0].Database);
+        Assert.Equal("Staging", sightings[1].Database);
     }
 
     [Fact]
@@ -154,8 +194,11 @@ public sealed class QueryTagSightingCollectorTests
 
         Assert.Equal(2, sightings.Count);
         Assert.Equal("OrderApp", sightings[0].Application);
+        Assert.Equal("Sales", sightings[0].Database);
         Assert.Equal("NightlyBatch", sightings[1].Application);
         Assert.Equal("ETL02", sightings[1].Host);
+        /* The row's database is the blocked request's; the blocker's own is not on the row, so it is not guessed. */
+        Assert.Null(sightings[1].Database);
     }
 
     [Fact]
@@ -214,6 +257,8 @@ public sealed class QueryTagSightingCollectorTests
     [Theory]
     [InlineData(null)]
     [InlineData("")]
+    [InlineData("0")]
+    [InlineData("0x0000000000000000")]
     public void RowWithANullOrEmptyQueryHash_YieldsNoHashSighting(string? hash)
     {
         Assert.Null(QuerySnapshotsCollector.Instance.DescribeQueryTagSightings(
@@ -224,6 +269,84 @@ public sealed class QueryTagSightingCollectorTests
             new QueryStoreCollector.Row { QueryHash = hash, ModuleName = "dbo.p" }));
         Assert.Null(LongQueryCompletionsCollector.Instance.DescribeQueryTagSightings(
             new LongQueryCompletionsCollector.Row { QueryHash = hash, ObjectName = "p" }));
+    }
+
+    [Fact]
+    public void ADecimalHashAndItsHexForm_YieldTheSameKey()
+    {
+        /* The long-query trace stores the XE uint64 as decimal; the DMV collectors store 0x + 16 hex. */
+        var fromTrace = Assert.Single(LongQueryCompletionsCollector.Instance.DescribeQueryTagSightings(
+            new LongQueryCompletionsCollector.Row { QueryHash = "1885667171979197067", ObjectName = "p" })!);
+        var fromStats = Assert.Single(QueryStatsCollector.Instance.DescribeQueryTagSightings(
+            new QueryStatsCollector.Row { QueryHash = "0x1A2B3C4D5E6F7A8B", QueryText = "SELECT 1;" })!);
+
+        Assert.Equal("0x1A2B3C4D5E6F7A8B", fromTrace.Key);
+        Assert.Equal(fromStats.Key, fromTrace.Key);
+        Assert.Equal("0x0000000000000001", QueryHashIdentity.CanonicalKey("1"));
+        Assert.Equal("0xAABB", QueryHashIdentity.CanonicalKey(" 0xAABB "));
+        Assert.Null(QueryHashIdentity.CanonicalKey("0"));
+        Assert.Null(QueryHashIdentity.CanonicalKey("0x0000000000000000"));
+        Assert.Null(QueryHashIdentity.CanonicalKey(null));
+    }
+
+    [Fact]
+    public void TheSharedCut_DoesNotSplitASurrogatePair()
+    {
+        string text = new string('x', QueryTagLimits.TextSampleCap - 1) + "\U0001F600" + "tail";
+
+        string? cut = QueryTagLimits.CutText(text);
+
+        Assert.Equal(QueryTagLimits.TextSampleCap - 1, cut!.Length);
+        Assert.Equal(cut, QueryTagSightings.Cut(text));
+    }
+
+    [Fact]
+    public void ACallerPartThatCarriesTheSeparator_CannotForgeAnotherCallersKey()
+    {
+        /* Without the guard, app "A\u001Flogin" with no login and app "A" with login "login" would build one key. */
+        var forged = QueryTagSightings.Caller("db", "A\u001Flogin", null, "H", null);
+        var honest = QueryTagSightings.Caller("db", "A", "login", "H", null);
+
+        Assert.Null(forged);
+        Assert.NotNull(honest);
+    }
+
+    [Fact]
+    public void AttentionRow_YieldsOneCallerSighting_WithItsClientAppHostDatabaseAndText()
+    {
+        var row = new AttentionCollector.Row
+        {
+            DatabaseName = "Sales",
+            ClientAppName = "OrderApp",
+            ClientHostName = "WEB01",
+            StatementText = "SELECT 1;",
+        };
+
+        var sighting = Assert.Single(AttentionCollector.Instance.DescribeQueryTagSightings(row)!);
+
+        Assert.Equal(QueryTagKeyKind.Caller, sighting.KeyKind);
+        Assert.Equal(("OrderApp", "WEB01", "Sales", "SELECT 1;"),
+            (sighting.Application, sighting.Host, sighting.Database, sighting.TextSample));
+        Assert.Null(AttentionCollector.Instance.DescribeQueryTagSightings(new AttentionCollector.Row { DatabaseName = "Sales" }));
+    }
+
+    [Fact]
+    public void DefaultTraceRow_YieldsOneCallerSighting_WithItsLoginHostApplicationAndDatabase()
+    {
+        var row = new DefaultTraceEventsCollector.Row
+        {
+            DatabaseName = "Sales",
+            LoginName = "CORP\\jane",
+            HostName = "WEB01",
+            ApplicationName = "SSMS",
+        };
+
+        var sighting = Assert.Single(DefaultTraceEventsCollector.Instance.DescribeQueryTagSightings(row)!);
+
+        Assert.Equal(QueryTagKeyKind.Caller, sighting.KeyKind);
+        Assert.Equal(("SSMS", "CORP\\jane", "WEB01", "Sales"),
+            (sighting.Application, sighting.Login, sighting.Host, sighting.Database));
+        Assert.Null(DefaultTraceEventsCollector.Instance.DescribeQueryTagSightings(new DefaultTraceEventsCollector.Row { DatabaseName = "Sales" }));
     }
 
     [Fact]

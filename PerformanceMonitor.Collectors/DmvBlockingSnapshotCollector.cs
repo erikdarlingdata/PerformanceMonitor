@@ -300,5 +300,5 @@ OPTION(RECOMPILE);";
     public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
         => QueryTagSightings.Collect(
             QueryTagSightings.Caller(row.DatabaseName, row.BlockedClientApp, row.BlockedLoginName, row.BlockedHostName, row.BlockedSqlText),
-            QueryTagSightings.Caller(row.DatabaseName, row.BlockingClientApp, row.BlockingLoginName, row.BlockingHostName, row.BlockingSqlText));
+            QueryTagSightings.Caller(null, row.BlockingClientApp, row.BlockingLoginName, row.BlockingHostName, row.BlockingSqlText));
 }

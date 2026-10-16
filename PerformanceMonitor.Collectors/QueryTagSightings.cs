@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
@@ -15,7 +16,8 @@ namespace PerformanceMonitor.Collectors;
 /// <summary>
 /// The one way every collector describes the query keys and caller fields a row saw (#5980, part of #5971).
 /// A collector's <c>DescribeQueryTagSightings</c> builds its sightings here so the rules that must be the same
-/// everywhere are written once: a NULL or empty key yields no sighting, a text sample is cut to
+/// everywhere are written once: an unusable hash (<see cref="QueryHashIdentity.IsUnknown"/>) yields no sighting and
+/// a usable one is keyed in its one <c>0x</c> text, a text sample is cut to
 /// <see cref="QueryTagLimits.TextSampleCap"/>, and a caller key with no application, login or host yields
 /// nothing. It reads values and returns records; it opens no connection and writes nothing.
 /// </summary>
@@ -34,11 +36,11 @@ public static class QueryTagSightings
         string? login,
         string? host,
         string? textSample)
-        => string.IsNullOrEmpty(queryHash)
+        => QueryHashIdentity.IsUnknown(queryHash)
             ? null
             : new QueryTagSighting(
                 QueryTagKeyKind.Hash,
-                queryHash,
+                QueryHashIdentity.CanonicalKey(queryHash)!,
                 database,
                 objectRef,
                 application,
@@ -74,6 +76,11 @@ public static class QueryTagSightings
             return null;
         }
 
+        if (HasSeparator(application) || HasSeparator(login) || HasSeparator(host) || HasSeparator(database))
+        {
+            return null;
+        }
+
         string key = string.Join(
             CallerKeySeparator.ToString(),
             application ?? string.Empty,
@@ -98,25 +105,11 @@ public static class QueryTagSightings
         return list;
     }
 
-    /// <summary>
-    /// Cuts <paramref name="text"/> to the shared cap. A cut that would split a surrogate pair stops one
-    /// character earlier, so the sample is always valid text for the store.
-    /// </summary>
-    public static string? Cut(string? text)
-    {
-        if (text is null || text.Length <= QueryTagLimits.TextSampleCap)
-        {
-            return text;
-        }
+    /// <summary>The shared cut: <see cref="QueryTagLimits.CutText"/>, the one definition (#3684).</summary>
+    public static string? Cut(string? text) => QueryTagLimits.CutText(text);
 
-        int length = QueryTagLimits.TextSampleCap;
-        if (char.IsHighSurrogate(text[length - 1]))
-        {
-            length--;
-        }
-
-        return text.Substring(0, length);
-    }
+    private static bool HasSeparator(string? part)
+        => part is not null && part.Contains(CallerKeySeparator, StringComparison.Ordinal);
 
     /// <summary>
     /// A module (object_name) that carries no schema, as long-query completions report it: the database and the name.

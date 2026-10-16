@@ -68,6 +68,9 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
         public string? BlockingStatus { get; set; }
         public string? BlockingIsolationLevel { get; set; }
         public string? BlockingClientApp { get; set; }
+
+        /// <summary>The blocking process's own currentdbname (#5980). Read for the query-tag caller key only; not stored.</summary>
+        public string? BlockingDatabaseName { get; set; }
         public string? BlockingHostName { get; set; }
         public string? BlockingLoginName { get; set; }
         public string? BlockingSqlText { get; set; }
@@ -1121,6 +1124,7 @@ OUTER APPLY
                 BlockingStatus = blockingProcess?.Attribute("status")?.Value,
                 BlockingIsolationLevel = blockingProcess?.Attribute("isolationlevel")?.Value,
                 BlockingClientApp = blockingProcess?.Attribute("clientapp")?.Value,
+                BlockingDatabaseName = blockingProcess?.Attribute("currentdbname")?.Value,
                 BlockingHostName = blockingProcess?.Attribute("hostname")?.Value,
                 BlockingLoginName = blockingProcess?.Attribute("loginname")?.Value,
                 BlockingSqlText = blockingProcess?.Element("inputbuf")?.Value?.Trim(),
@@ -1144,5 +1148,5 @@ OUTER APPLY
     public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
         => QueryTagSightings.Collect(
             QueryTagSightings.Caller(row.DatabaseName, row.BlockedClientApp, row.BlockedLoginName, row.BlockedHostName, row.BlockedSqlText),
-            QueryTagSightings.Caller(row.DatabaseName, row.BlockingClientApp, row.BlockingLoginName, row.BlockingHostName, row.BlockingSqlText));
+            QueryTagSightings.Caller(row.BlockingDatabaseName, row.BlockingClientApp, row.BlockingLoginName, row.BlockingHostName, row.BlockingSqlText));
 }
