@@ -1040,6 +1040,8 @@ AS $fn$
 DECLARE
    v_args jsonb;
    v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
 BEGIN
    IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
@@ -1054,6 +1056,23 @@ BEGIN
                     WHERE jsonb_typeof(e.value) <> 'string' OR length(e.value #>> '{}') > 100) THEN
          RAISE EXCEPTION 'The only argument is a list of collector names.' USING ERRCODE = 'DL400';
       END IF;
+   END IF;
+   -- The same guard the service applies (#5941 review): one run at a time per server, and not within 60 seconds of the last
+   -- request for it, so a holder of the viewer or mcp login cannot queue rows without limit. One lock per server makes the
+   -- check and the insert one step.
+   PERFORM pg_advisory_xact_lock(5941, p_server_id);
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM config.config_command AS c
+   WHERE c.command_type = 'snapshot_now' AND c.target_server_id = p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'A collector run for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '60 seconds' THEN
+      RAISE EXCEPTION 'A collector run was requested for this server less than 60 seconds ago.'
+         USING ERRCODE = 'DL429',
+               HINT = to_char(v_last_at + interval '60 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '60 seconds', 'HH24:MI:SS') || 'Z';
    END IF;
    INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
    VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'snapshot_now', p_server_id, v_args, 'pending', (now() AT TIME ZONE 'UTC'))

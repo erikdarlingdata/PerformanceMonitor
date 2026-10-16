@@ -27,6 +27,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public static class SnapshotNowArgs
 {
+    private static readonly Dictionary<string, string> s_canonicalNames =
+        CollectorScheduleDefaults.All.Keys.ToDictionary(key => key, key => key, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The most names one request carries (the store function enforces the same cap).</summary>
     public const int MaxCollectors = 200;
 
@@ -96,10 +99,12 @@ public static class SnapshotNowArgs
         var seen = new List<string>();
         foreach (var raw in names)
         {
-            var name = raw.Trim();
-            if (!CollectorScheduleDefaults.All.ContainsKey(name))
+            /* The catalog's own spelling is what leaves here: the schedule table matches names without regard to case, but the
+               collector catalog's engine gate matches exactly and passes a name it does not know, so a differently cased name
+               would otherwise reach the worker as a collector the catalog cannot place and run on the wrong engine. */
+            if (!s_canonicalNames.TryGetValue(raw.Trim(), out var name))
             {
-                error = $"unknown collector '{name}'. Use a name from the collector list.";
+                error = $"unknown collector '{raw.Trim()}'. Use a name from the collector list.";
                 return false;
             }
 
@@ -173,11 +178,13 @@ public sealed class SnapshotNowRequests
     public async Task<SnapshotRequestOutcome> RequestAsync(
         int serverId, IReadOnlyList<string>? collectors, string requestedBy, CancellationToken cancellationToken)
     {
-        var argsJson = SnapshotNowArgs.Build(collectors);
-        if (!SnapshotNowArgs.TryParse(argsJson, out _, out var error))
+        /* The names stored are the catalog's spelling (TryParse canonicalises), whatever case the caller used. */
+        if (!SnapshotNowArgs.TryParse(SnapshotNowArgs.Build(collectors), out var canonical, out var error))
         {
             return new SnapshotRequestOutcome(false, SnapshotRequestOutcome.UnknownCollectorCode, error!, null, null);
         }
+
+        var argsJson = SnapshotNowArgs.Build(canonical);
 
         await s_requestLock.WaitAsync(cancellationToken);
         try
@@ -212,6 +219,25 @@ public sealed class SnapshotNowRequests
             catch (PostgresException ex) when (ex.SqlState == "DL404")
             {
                 return new SnapshotRequestOutcome(false, SnapshotRequestOutcome.UnknownServerCode, "No monitored server has that id.", null, null);
+            }
+            catch (PostgresException ex) when (ex.SqlState == "DL409")
+            {
+                /* The store function's own guard (a second service instance, or a direct caller, got there first). */
+                return new SnapshotRequestOutcome(
+                    false, SnapshotRequestOutcome.InFlightCode,
+                    "A collector run for this server is already queued or running. Wait for it to finish.", null, null);
+            }
+            catch (PostgresException ex) when (ex.SqlState == "DL429")
+            {
+                DateTime? nextAllowed = DateTime.TryParse(
+                    ex.Hint, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed)
+                    ? parsed
+                    : null;
+                return new SnapshotRequestOutcome(
+                    false, SnapshotRequestOutcome.RateLimitedCode,
+                    $"A collector run was requested for this server less than {(int)MinimumInterval.TotalSeconds} seconds ago."
+                    + (nextAllowed is { } at ? $" The next one is allowed at {at.ToString("HH:mm:ss", CultureInfo.InvariantCulture)} UTC." : string.Empty),
+                    null, nextAllowed);
             }
         }
         finally

@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
@@ -53,7 +54,7 @@ public sealed class RunCollectorsNowTests
             new BaselineCache(),
             new ReadLatencyAccumulator());
 
-    private static DarlingWorker.ServerLoopState MakeServer(int serverId)
+    private static DarlingWorker.ServerLoopState MakeServer(int serverId, CollectorTargetEngine engine = CollectorTargetEngine.SqlServer)
     {
         var host = $"run-now-test-{serverId}";
         var config = new MonitoredServer { Name = host, Host = host };
@@ -61,7 +62,7 @@ public sealed class RunCollectorsNowTests
         {
             Config = config,
             ConnectionString = $"Server=tcp:{host},1433;Initial Catalog=master;Encrypt=True",
-            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.SqlServer },
+            Target = new CollectorTargetInfo { Engine = engine },
             StorageName = host,
             ServerId = serverId,
         };
@@ -166,6 +167,77 @@ public sealed class RunCollectorsNowTests
     }
 
     [Fact]
+    public async Task AWaitingSnapshot_HoldsNoCollectionGate_SoTheScheduledPassIsNotBlocked_AndStartsNothingUntilAPermitIsFree()
+    {
+        var worker = MakeWorker();
+        var ran = Record(worker);
+        var server = MakeServer(5941_6);
+        using var gate = new SemaphoreSlim(1, 1);
+        worker.SweepGate = gate;
+        var ct = TestContext.Current.CancellationToken;
+
+        /* No fleet sweep permit is free: a scheduled pass holds the only one. */
+        await gate.WaitAsync(ct);
+        var snapshot = worker.RunSnapshotAsync([server], null!, server.Config.ServerId, ct, [SqlServerCollector]);
+        Assert.NotSame(snapshot, await Task.WhenAny(snapshot, Task.Delay(300, ct)));
+        Assert.Empty(ran);
+        Assert.Equal(1, server.CollectionGate.CurrentCount);
+
+        /* The scheduled pass holds its permit and only tries the collection gate; the request that is waiting must not be what
+           stops it. */
+        server.NextDue["latch_stats"] = DateTime.UtcNow.AddMinutes(-5);
+        var scheduled = worker.RunDueCollectorsAsync(server, null!, ct);
+        Assert.Same(scheduled, await Task.WhenAny(scheduled, Task.Delay(TimeSpan.FromSeconds(20), ct)));
+        await scheduled;
+        Assert.Equal(["latch_stats"], ran);
+        Assert.False(snapshot.IsCompleted);
+
+        gate.Release();
+        var outcome = await snapshot;
+        Assert.True(outcome.Success);
+        Assert.Equal(["latch_stats", SqlServerCollector], ran);
+        Assert.Equal(1, gate.CurrentCount);
+        Assert.Equal(1, server.CollectionGate.CurrentCount);
+    }
+
+    [Fact]
+    public async Task ADifferentlyCasedName_IsStoredAsTheCatalogSpelling_AndAnotherEnginesCollectorIsSkippedNeverRun()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = new FakeStore();
+        var accepted = await new SnapshotNowRequests(store, new ManualTime()).RequestAsync(7, ["PG_Buffer_Usage", " pg_buffer_usage "], "t", ct);
+        Assert.True(accepted.Accepted);
+        var queued = Assert.Single(store.Enqueued);
+        Assert.Equal("{\"collectors\":[\"" + PostgresCollector + "\"]}", queued.Args);
+
+        /* A row queued by hand with the wrong case reads back as the catalog spelling too. */
+        Assert.True(SnapshotNowArgs.TryParse("{\"collectors\":[\"Wait_Stats\",\"PG_Buffer_Usage\"]}", out var parsed, out _));
+        Assert.Equal([SqlServerCollector, PostgresCollector], parsed);
+
+        var worker = MakeWorker();
+        var ran = Record(worker);
+        var server = MakeServer(5941_5);
+        SnapshotNowArgs.TryParse("{\"collectors\":[\"PG_Buffer_Usage\"]}", out var names, out _);
+        var outcome = await worker.RunSnapshotAsync([server], null!, server.Config.ServerId, ct, names);
+
+        Assert.True(outcome.Success);
+        Assert.Empty(ran);
+        var skipped = Assert.Single(Json(outcome).GetProperty("skipped").EnumerateArray());
+        Assert.Equal(PostgresCollector, skipped.GetProperty("collector").GetString());
+        Assert.Contains("engine", skipped.GetProperty("reason").GetString(), StringComparison.Ordinal);
+
+        /* The reviewer's case: a SQL Server collector, wrongly cased, against a PostgreSQL target. */
+        var postgresServer = MakeServer(5941_7, CollectorTargetEngine.PostgreSql);
+        SnapshotNowArgs.TryParse("{\"collectors\":[\"Wait_Stats\"]}", out var sqlServerNames, out _);
+        var onPostgres = await worker.RunSnapshotAsync([postgresServer], null!, postgresServer.Config.ServerId, ct, sqlServerNames);
+
+        Assert.True(onPostgres.Success);
+        Assert.Empty(ran);
+        Assert.Equal(0, Json(onPostgres).GetProperty("collectorsRun").GetInt32());
+        Assert.Equal(SqlServerCollector, Assert.Single(Json(onPostgres).GetProperty("skipped").EnumerateArray()).GetProperty("collector").GetString());
+    }
+
+    [Fact]
     public void TheCommandPlan_RefusesAnUnknownCollector_NamingIt_AndAcceptsAKnownList()
     {
         var bad = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, "snapshot_now", 7, "{\"collectors\":[\"nope_nope\"]}", "t"));
@@ -262,7 +334,8 @@ public sealed class RunCollectorsNowTests
 
     // ------------------------------------------------------------------ web
 
-    private static async Task<WebApplication> StartAsync(FakeStore store, bool canEdit, ManualTime clock)
+    private static async Task<WebApplication> StartAsync(
+        FakeStore store, bool canEdit, ManualTime clock, Func<string, CancellationToken, Task<(int ServerId, string? Error)>>? resolver = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -275,7 +348,8 @@ public sealed class RunCollectorsNowTests
             return next(context);
         });
         DarlingWebEndpoints.MapCollectorRuns(
-            app, store, NullLogger.Instance, (name, _) => Task.FromResult(name == "known" ? (7, (string?)null) : (0, "No server matches.")), clock);
+            app, store, NullLogger.Instance,
+            resolver ?? ((name, _) => Task.FromResult(name == "known" ? (7, (string?)null) : (0, "No server matches."))), clock);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;
     }
@@ -324,6 +398,61 @@ public sealed class RunCollectorsNowTests
         editorStore.Latest = new SnapshotCommandRow(101, clock.GetUtcNow().UtcDateTime, "in_progress");
         var running = await PostAsync(editor, "{\"server\":\"known\"}");
         Assert.Equal(HttpStatusCode.Conflict, running.Status);
+    }
+
+    /// <summary>The route over the resolver's real answers: the registry listing through <c>ResolveOrError</c> for a miss or an
+    /// ambiguous name, and a registry read that fails through <c>ResolveOrErrorAsync</c> on a store nothing listens on.</summary>
+    [Fact]
+    public async Task TheWebRoute_AnswersEachResolverOutcome_ItsOwnStatus_WithAPlainMessage()
+    {
+        var registry = new List<DarlingServerResolver.RegisteredServer>
+        {
+            new(1, "alpha-one", null),
+            new(2, "alpha-two", null),
+        };
+        var store = new FakeStore();
+
+        await using (var app = await StartAsync(
+            store, canEdit: true, new ManualTime(),
+            (name, _) =>
+            {
+                var (resolved, error) = DarlingServerResolver.ResolveOrError(registry, name);
+                return Task.FromResult((resolved.ServerId, error));
+            }))
+        {
+            using var client = app.GetTestClient();
+
+            var miss = await PostAsync(client, "{\"server\":\"nothing-like-it\"}");
+            Assert.Equal(HttpStatusCode.NotFound, miss.Status);
+            Assert.StartsWith("{\"error\":\"Could not resolve server.", miss.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"invalid\"", miss.Body, StringComparison.Ordinal);
+
+            var ambiguous = await PostAsync(client, "{\"server\":\"alpha\"}");
+            Assert.Equal(HttpStatusCode.BadRequest, ambiguous.Status);
+            Assert.Contains("matches 2 monitored servers", ambiguous.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"invalid\"", ambiguous.Body, StringComparison.Ordinal);
+
+            Assert.Empty(store.Enqueued);
+        }
+
+        /* Nothing listens on this port, so the real resolver's registry read fails: a store fault, not an unknown server. */
+        await using var unreachable = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=3;Command Timeout=3").Build();
+        await using (var faultApp = await StartAsync(
+            store, canEdit: true, new ManualTime(),
+            async (name, token) =>
+            {
+                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(unreachable, name, token);
+                return (resolved.ServerId, error);
+            }))
+        {
+            using var client = faultApp.GetTestClient();
+
+            var fault = await PostAsync(client, "{\"server\":\"known\"}");
+            Assert.True(fault.Status is HttpStatusCode.InternalServerError or HttpStatusCode.ServiceUnavailable, fault.Status.ToString());
+            Assert.DoesNotContain("127.0.0.1", fault.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("registry", fault.Body, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(store.Enqueued);
+        }
     }
 
     [Fact]

@@ -129,6 +129,44 @@ public sealed class RequestSnapshotNowRoleLiveTests
         });
     }
 
+    [Theory]
+    [InlineData("viewer")]
+    [InlineData("mcp")]
+    public async Task TheFunction_RefusesASecondRequest_WhileOneIsPending_AndWithin60SecondsOfTheLast_NamingWhenTheNextIsAllowed(string managedRole)
+    {
+        await WithRoleAsync(managedRole, async (owner, asRole, ct) =>
+        {
+            async Task<long> RequestAsync()
+            {
+                await using var call = asRole.CreateCommand("SELECT config.request_snapshot_now($1, NULL, 'web')");
+                call.Parameters.AddWithValue(ServerId);
+                return Convert.ToInt64(await call.ExecuteScalarAsync(ct));
+            }
+
+            var first = await RequestAsync();
+
+            /* One is pending: refused. */
+            var pending = await Assert.ThrowsAsync<PostgresException>(RequestAsync);
+            Assert.Equal("DL409", pending.SqlState);
+
+            /* It has finished but is less than 60 seconds old: refused, with the time the next is allowed. */
+            await ExecAsync(owner, $"UPDATE config.config_command SET status = 'succeeded' WHERE command_id = {first}", ct);
+            var tooSoon = await Assert.ThrowsAsync<PostgresException>(RequestAsync);
+            Assert.Equal("DL429", tooSoon.SqlState);
+            Assert.True(DateTime.TryParse(tooSoon.Hint, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var nextAllowed));
+            Assert.InRange(nextAllowed, DateTime.UtcNow, DateTime.UtcNow.AddSeconds(61));
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(1L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+
+            /* A minute on, it is queued. */
+            await ExecAsync(owner, $"UPDATE config.config_command SET created_at = created_at - interval '61 seconds' WHERE command_id = {first}", ct);
+            var second = await RequestAsync();
+            Assert.NotEqual(first, second);
+        });
+    }
+
     private static async Task WithRoleAsync(
         string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, CancellationToken, Task> body)
     {

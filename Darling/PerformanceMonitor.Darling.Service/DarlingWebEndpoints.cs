@@ -2973,7 +2973,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var (resolvedId, resolveError) = await resolveServer(serverName, context.RequestAborted);
                 if (resolveError is not null)
                 {
-                    return ErrorResult(resolveError, StatusCodes.Status404NotFound);
+                    return CollectorRunResolveFailure(resolveError, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
                 }
 
                 id = resolvedId;
@@ -3049,6 +3049,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             return JsonNodeResult(node);
         });
+    }
+
+    /// <summary>
+    /// What the run route answers when the server resolver hands back an error string (#5941 review). The resolver has three
+    /// shapes and each gets its own answer: a registry read fault (a store fault, not the caller's request) is logged and answers
+    /// the fixed 500/503 body; a name that matches no server ("Could not resolve server. ...") is a 404 with the envelope's plain
+    /// message; any other refusal envelope (a name that matches several servers) is a 400 with its plain message. The raw
+    /// envelope JSON is never the body.
+    /// </summary>
+    internal static IResult CollectorRunResolveFailure(string error, ILogger logger, long elapsedMs, CancellationToken requestAborted)
+    {
+        if (ClassifyToolResponse(error) == ToolResponseKind.ServerError)
+        {
+            return ServerErrorResult(error, "/api/collectors/run", logger, elapsedMs, requestAborted);
+        }
+
+        var message = McpHelpers.ErrorMessageOf(error);
+        var noMatch = !McpHelpers.IsRefusalEnvelope(error)
+            || message.StartsWith("Could not resolve server", StringComparison.Ordinal);
+        return ErrorResult(message, noMatch ? StatusCodes.Status404NotFound : StatusCodes.Status400BadRequest);
     }
 
     internal static void MapAdminServers(WebApplication app, NpgsqlDataSource postgres)
