@@ -546,6 +546,8 @@ export const READ_FIELDS = {
         { key: "object_kind", label: "Kind" },
         { key: "object_name", label: "Object" },
         { key: "total_bytes", label: "Bytes", format: "int", hideWhenEmpty: true },
+        { key: "size_estimated", label: "Estimated", format: "bool", hideWhenEmpty: true },
+        { key: "growth_mixed_forms", label: "Growth mixes forms", format: "bool", hideWhenEmpty: true },
         { key: "growth_bytes", label: "Growth (bytes)", format: "int", hideWhenEmpty: true },
         { key: "delta_since", label: "Since", hideWhenEmpty: true },
         { key: "last_run_duration_ms", label: "Last run", format: "ms", hideWhenEmpty: true },

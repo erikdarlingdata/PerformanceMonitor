@@ -215,6 +215,13 @@ public class ArchiveService
                                           per tagging; bounded by what the user created.
          notification_routes            : user choice (#5750), PK route_id; the destinations are in Credential Manager,
                                           keyed by route id, so restoring the rows verbatim keeps them wired.
+         investigation_requests / _request_alerts / _reports / _journal / investigation_notes /
+         agent_environment_profiles : Level 1 investigations (#5820). The requests are what the route limits count
+                                          and the journal holds the once keys, so an empty pair would reopen and
+                                          re-journal; the reports, the approved notes and the profiles are answers and
+                                          a person's choices. They reference each other by request_id only, and all
+                                          six are kept together, so the verbatim restore keeps them consistent; their
+                                          max + 1 ids continue from the restored rows.
        The restore is BY NAME: ALTER-added columns (watermark_time, v31) sit last on old stores while the fresh
        schema may order them differently, and a positional restore would swap values or fail. */
     internal static readonly string[] PreservedConfigTables =
@@ -229,7 +236,13 @@ public class ArchiveService
         "analysis_muted",
         "server_tags",
         "server_tag_map",
-        "notification_routes"
+        "notification_routes",
+        "investigation_requests",
+        "investigation_request_alerts",
+        "investigation_reports",
+        "investigation_journal",
+        "investigation_notes",
+        "agent_environment_profiles"
     ];
 
     /* Tables eligible for archival with their time column. Catalog-driven: every collector table

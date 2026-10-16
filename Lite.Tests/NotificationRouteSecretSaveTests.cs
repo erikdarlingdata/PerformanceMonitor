@@ -193,37 +193,6 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
     }
 
     [Fact]
-    public async Task AnUnreadableDestinationLeftAlone_KeepsItsFlag_AndTheChannelStaysOff()
-    {
-        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams, slack: OldSlack));
-        _secrets.Lose(id, "Teams");
-        var loaded = (await _store.GetAsync(id))!;
-        Assert.True(loaded.IsOffFor(NotificationRouter.TeamsChannel));
-
-        /* What the dialog saves with the unreadable channel's mask untouched: empty value, channel still named. */
-        Assert.True(await _store.UpdateAsync(loaded with { MetricMatch = "Blocking" }));
-
-        Assert.True(await FlagAsync(id, "teams_set"));
-        var after = (await _store.GetAsync(id))!;
-        Assert.True(after.IsOffFor(NotificationRouter.TeamsChannel));
-        Assert.Equal("Blocking", after.MetricMatch);
-        Assert.Equal(OldSlack, after.SlackUrl);
-    }
-
-    [Fact]
-    public async Task AnUnreadableDestinationTheUserRemoves_ClearsItsFlag()
-    {
-        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));
-        _secrets.Lose(id, "Teams");
-        var loaded = (await _store.GetAsync(id))!;
-
-        Assert.True(await _store.UpdateAsync(loaded with { OffChannels = null }));
-
-        Assert.False(await FlagAsync(id, "teams_set"));
-        Assert.Null((await _store.GetAsync(id))!.OffChannels);
-    }
-
-    [Fact]
     public async Task ANamedOffChannelWithNoSavedFlag_IsNotInvented()
     {
         var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));

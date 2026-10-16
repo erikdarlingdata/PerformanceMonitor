@@ -660,6 +660,7 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
         }
 
         /* V185 (#5812), V184 (#5632), V183 (#5793), V182 (#5506) and V181 (#5750): the plan regression watermark column, the investigation tables, the read caller columns, the read latency capacity columns and the route scope columns are above V170 too (V185's is the probe's newest sentinel). */
+        await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
         await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);

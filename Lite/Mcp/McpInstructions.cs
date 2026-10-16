@@ -19,7 +19,7 @@ internal static class McpInstructions
     public const string Text = Head + "\n\n" + CatalogCensus + Tail;
 
     /// <summary>The census of the whole catalog, as <see cref="Text"/> carries it.</summary>
-    private const string CatalogCensus = "93 tools (89 by default; `mcp_allow_writes` adds the four write tools)";
+    private const string CatalogCensus = "97 tools (89 by default; `mcp_allow_writes` adds the four write tools, `mcp_allow_investigations` the four investigation tools)";
 
     /// <summary>
     /// #5789: the instructions THIS server sends. The census counts <paramref name="served"/> (the tools left after
@@ -47,6 +47,9 @@ internal static class McpInstructions
            pointing a client at tools tools/list lacks. */
         var head = served.Any(McpWritePolicy.IsWrite) ? Head : Head.Replace(PreambleWriteToolList, "", StringComparison.Ordinal);
         var tail = served.Contains(MuteTool) ? Tail : Tail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
+        /* #5820: the investigation paragraph names the four tools and their gate, so it goes when none is served. */
+        if (!served.Any(McpInvestigationPolicy.IsInvestigationTool))
+            tail = tail.Replace(InvestigationSection, "", StringComparison.Ordinal);
         return head + "\n\n" + census + tail;
     }
 
@@ -77,7 +80,9 @@ internal static class McpInstructions
         ## Tools
         """;
 
-    private const string Tail = """
+    private const string Tail = TailBeforeInvestigations + InvestigationSection + TailAfterInvestigations;
+
+    private const string TailBeforeInvestigations = """
         : discovery/health, waits, CPU, contention, plan cache, query performance, blocking/deadlocks, memory, I/O, tempdb, storage/index, perfmon, alerts, jobs, configuration, system-health parse-on-read + Default Trace, server info, sessions/active queries, and execution-plan + diagnostic analysis.
 
         ### Reading an empty result
@@ -97,6 +102,23 @@ internal static class McpInstructions
         - The analysis family does take it: `get_analysis_facts` and `analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
         Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).
+
+        """;
+
+    /// <summary>
+    /// #5820: the investigation tools' paragraph. <see cref="Build"/> drops it when none of the four tools is served, so a
+    /// client is never pointed at tools that <c>tools/list</c> lacks.
+    /// </summary>
+    private const string InvestigationSection = """
+
+
+        ### Investigation requests
+
+        Served only with `mcp_allow_investigations` true and `mcp_allow_writes` false in settings.json (both on: the four tools stay off). An alert on a notification route set to Investigate (`agent_level` 1) opens a request. Flow: `list_investigation_requests` -> `claim_investigation_request` (brief, `claim_id`, lease; pass the `claim_id` again to renew) -> make the calls the brief names -> `submit_investigation_report` (verdict, root cause, evidence, summary). `get_investigation_reports` reads reports back: an agent's claim, not a finding. Lite has no token: any local process that reaches the MCP port can claim and report. Level 1 proposes no action. `mcp_data_detail` masks briefs and reports like every other answer.
+        """;
+
+    private const string TailAfterInvestigations = """
+
 
         ## Workflow
 

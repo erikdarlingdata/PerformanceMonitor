@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Services;
@@ -39,16 +40,35 @@ public class EmailAlertService : IFindingAlertSender
     private readonly IAlertHistoryStore _historyStore;
     private readonly EmailSendCore _core;
     private readonly ILogger<EmailAlertService> _logger;
+    private readonly InvestigationDispatchCore? _investigations;
+    private readonly Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? _readInvestigation;
+    private readonly Func<McpDataDetail> _investigationDataDetail;
 
+    /// <param name="investigations">
+    /// #5820: the shared investigation dispatch core over Lite's investigation store. When set, an alert an agent route
+    /// covers opens or joins an investigation request: after its history row is written, or before the channels post when
+    /// the generic webhook's body template carries <c>{{investigation_json}}</c>. Null (the default) opens nothing.
+    /// </param>
+    /// <param name="readInvestigation">The store's read of one request and its brief, for the webhook token; null reads nothing.</param>
+    /// <param name="investigationDataDetail">
+    /// The <c>mcp_data_detail</c> level the webhook token's brief is masked at, read per alert; null is the setting's
+    /// default, <see cref="McpDataDetail.Full"/>.
+    /// </param>
     public EmailAlertService(
         IAlertSettings settings,
         IAlertHistoryStore historyStore,
         WebhookAlertService webhookAlertService,
-        ILogger<EmailAlertService> logger)
+        ILogger<EmailAlertService> logger,
+        InvestigationDispatchCore? investigations = null,
+        Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? readInvestigation = null,
+        Func<McpDataDetail>? investigationDataDetail = null)
     {
         _historyStore = historyStore;
         _logger = logger;
         _core = new EmailSendCore(settings, historyStore, webhookAlertService, s_branding, logger);
+        _investigations = investigations;
+        _readInvestigation = readInvestigation;
+        _investigationDataDetail = investigationDataDetail ?? (static () => McpDataDetail.Full);
     }
 
     /// <summary>
@@ -95,6 +115,10 @@ public class EmailAlertService : IFindingAlertSender
     /// row is still written. Optional, so every caller that has no token to give (the finding path, the
     /// connection-edge and availability-group alerts) compiles and behaves as before.
     /// </param>
+    /// <param name="storyPathHash">
+    /// #5820: an analysis finding's full story path hash, for the investigation request it opens (the metric name holds only
+    /// eight characters of it). Null for an engine alert.
+    /// </param>
     public async Task<AlertDelivery?> TrySendAlertEmailAsync(
         string metricName,
         string serverName,
@@ -109,15 +133,37 @@ public class EmailAlertService : IFindingAlertSender
         bool deliverProse = true,
         AlertNotificationMode? deliveryMode = null,
         bool trayShown = true,
+        string? storyPathHash = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             await NotificationRouteCache.WaitForFirstLoadAsync(s_routeFirstLoadWait);
+
+            /* #5820: the row's time is stamped once, here, so the investigation request names this exact row (Darling's
+               DarlingAlertDeliverer does the same). The context is kept as the caller gave it: the route record added
+               below belongs to the history row, not to the incident keys the request links. */
+            var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+
+            /* #5820 / #5821: the request is opened or joined BEFORE the channels post, for every alert, whether or not the
+               generic webhook's template names {{investigation_json}} (Darling's DarlingAlertDeliverer does the same), so a
+               failed post still leaves it open. The link rows carry the values the history row below will store; the core
+               returns the token's value only when the template names it, and null when no request opened (a muted alert,
+               a report, a recovery, no agent route). It never throws: a store failure or a cancel posts the token empty and
+               the delivery goes on. */
+            var investigationJson = _investigations is null
+                ? null
+                : await _investigations.OpenForWebhookAsync(
+                    serverId.ToString(), serverName, metricName, muted, alertTimeUtc, context, storyPathHash,
+                    InvestigationDispatchCore.Facts(
+                        currentValue, numericCurrentValue, thresholdValue, numericThresholdValue, muted, detailText,
+                        context is not null ? AlertContextSerializer.Serialize(context) : null),
+                    _readInvestigation, _investigationDataDetail(), cancellationToken);
+
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
                 detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode,
-                cancellationToken: cancellationToken);
+                cancellationToken: cancellationToken, investigationJson: investigationJson);
 
             /* trayChannelPresent: trayShown, true on the engine path — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a
@@ -150,12 +196,16 @@ public class EmailAlertService : IFindingAlertSender
                whatever the channels were handed — deliverProse governs delivery only, so the
                column the Alerts tab, the MCP reader and the mute pre-fill read is unaffected. */
             string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
-            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+            var record = new AlertHistoryRecord(
                 serverId.ToString(), serverName, metricName,
                 currentValue, thresholdValue,
                 numericCurrentValue, numericThresholdValue,
                 delivery,
-                muted, detailText, contextJson));
+                muted, detailText, contextJson)
+            {
+                AlertTimeUtc = alertTimeUtc,
+            };
+            await _historyStore.RecordAlertAsync(record);
 
             /* #3916: the recorded disposition, for the analysis path's hold (a hold is earned by a
                delivery). The engine callers discard it. */
@@ -226,7 +276,9 @@ public class EmailAlertService : IFindingAlertSender
             /* #3916: Lite raises NO toast for an analysis finding (MainWindow wires no tray sink into
                AnalysisNotificationService), so an unconfigured finding's row is "unconfigured", not a
                "tray" row that reads Shown. */
-            trayShown: false);
+            trayShown: false,
+            /* #5820: the request records the finding's full story path hash, not the metric name's eight characters. */
+            storyPathHash: alert.StoryPathHash);
     }
 
     /// <summary>
@@ -245,6 +297,27 @@ public class EmailAlertService : IFindingAlertSender
             named = AlertStatementFilter.Apply(named);
             var (serverName, currentValue, context) = FindingSummary.Compose(named);
             await NotificationRouteCache.WaitForFirstLoadAsync(s_routeFirstLoadWait);
+
+            /* #5820 / #5821: each held page the summary names opens or joins its request BEFORE the one message posts, with its
+               own full story path hash, at the instant its row below is stamped with; a failed post still leaves them open.
+               The message names pages, not one request, so no readback is asked for and the post carries no token. Never
+               throws. */
+            var pageTimes = new DateTime[named.Count];
+            for (var i = 0; i < named.Count; i++)
+            {
+                var page = named[i];
+                pageTimes[i] = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+                if (_investigations is not null)
+                {
+                    await _investigations.OpenForWebhookAsync(
+                        page.ServerId, page.ServerName, page.MetricName, muted: false, pageTimes[i], page.Context, page.StoryPathHash,
+                        InvestigationDispatchCore.Facts(
+                            page.CurrentValue, page.Severity, page.ThresholdValue, page.NotifyThreshold, muted: false,
+                            page.DetailText, page.Context is not null ? AlertContextSerializer.Serialize(page.Context) : null),
+                        readRequest: null, _investigationDataDetail(), CancellationToken.None);
+                }
+            }
+
             var result = await _core.TrySendAsync(
                 FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),
                 named[0].ServerId, context, attemptChannels: true);
@@ -252,15 +325,20 @@ public class EmailAlertService : IFindingAlertSender
                the one declared producer shape (trayChannelPresent: trayShown) the tray-channel pin reads. */
             const bool trayShown = false;
             var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: trayShown);
-            foreach (var alert in named)
+            for (var i = 0; i < named.Count; i++)
             {
-                await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                var alert = named[i];
+                var record = new AlertHistoryRecord(
                     alert.ServerId, alert.ServerName, alert.MetricName,
                     alert.CurrentValue, alert.ThresholdValue,
                     alert.Severity, alert.NotifyThreshold,
                     delivery,
                     false, FindingSummary.RowDetailText(alert, named.Count),
-                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null));
+                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null)
+                {
+                    AlertTimeUtc = pageTimes[i],
+                };
+                await _historyStore.RecordAlertAsync(record);
             }
             return delivery;
         }

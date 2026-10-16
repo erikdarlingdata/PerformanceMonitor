@@ -125,7 +125,8 @@ SELECT
     latest.total_runs,
     latest.total_failures,
     latest.toast_bytes,
-    latest.toast_live_bytes
+    latest.toast_live_bytes,
+    latest.size_estimated
 FROM objects
 CROSS JOIN LATERAL
 (
@@ -144,7 +145,8 @@ CROSS JOIN LATERAL
         total_runs,
         total_failures,
         toast_bytes,
-        toast_live_bytes
+        toast_live_bytes,
+        size_estimated
     FROM collect.store_metrics
     WHERE object_kind = objects.object_kind
     AND   object_name = objects.object_name
@@ -155,7 +157,11 @@ ORDER BY latest.object_kind, latest.object_name";
 
     /// <summary>The daily series — the LAST sample of each object per day (DISTINCT ON over the day
     /// bucket, newest first within it), so each day contributes one settled point per object rather than
-    /// 24 near-duplicates. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
+    /// 24 near-duplicates. The one exception is a hypertable or aggregate day (#5857): the hourly sweep writes
+    /// those sizes as a catalog estimate and one sweep a day writes them exact (<c>size_estimated</c>), so a
+    /// day's point is its newest EXACT row when it holds one (an estimate only when it holds none), and a growth
+    /// over the series never subtracts an estimate from an exact size. Every other kind's rows have no
+    /// estimate flag (NULL), so for them nothing changes. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
     /// in the bucket, so the day's largest value is discarded unless it happens to be the last one, and
     /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). The last column is
     /// that kept row's own <c>metric_time</c> (#4734), the day's last snapshot time, beside <c>day</c>, the
@@ -177,10 +183,72 @@ SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     total_failures,
     toast_bytes,
     toast_live_bytes,
+    metric_time,
+    size_estimated
+FROM collect.store_metrics
+WHERE metric_time >= $1
+ORDER BY object_kind, object_name, date_trunc('day', metric_time), (size_estimated IS TRUE), metric_time DESC";
+
+    /// <summary>
+    /// The newest ESTIMATE row of each object per day (#5857), beside <see cref="StoreMetricsDailySql"/>, which keeps
+    /// the day's exact row when it has one. A growth must subtract like from like (an estimate reads a little low), and
+    /// the window's end is the NEWEST row, so a day whose kept point is exact can still need its estimate row to be
+    /// the other end of a growth that ends on an estimate. Only hypertable and aggregate rows are ever estimates.
+    /// $1 window start (naive UTC).
+    /// </summary>
+    public const string StoreMetricsDailyEstimatesSql = @"
+SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
+    object_kind,
+    object_name,
+    date_trunc('day', metric_time) AS day,
+    total_bytes,
     metric_time
 FROM collect.store_metrics
 WHERE metric_time >= $1
+AND   size_estimated IS TRUE
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
+
+    /// <summary>
+    /// Every row of the newest sweep that was sized EXACTLY (#5857): the sweep whose store row carries a size and
+    /// whose stamp holds no estimate row. The hourly sweeps size hypertables and aggregates from the catalog (a little
+    /// low), one a day sizes them exactly, so attributing <c>pg_database_size</c> to object rows is only meaningful on
+    /// that set. A store from before the size-estimate marker has no estimate rows, so its newest sweep qualifies.
+    /// </summary>
+    public const string StoreMetricsExactSweepSql = $@"
+SELECT
+    m.object_kind,
+    m.object_name,
+    m.metric_time,
+    m.total_bytes,
+    m.compressed_before_bytes,
+    m.compressed_after_bytes,
+    m.chunk_count,
+    m.row_count,
+    m.enabled_server_count,
+    m.last_run_duration_ms,
+    m.schedule_interval_ms,
+    m.total_runs,
+    m.total_failures,
+    m.toast_bytes,
+    m.toast_live_bytes,
+    m.size_estimated
+FROM collect.store_metrics AS m
+WHERE m.metric_time =
+(
+    SELECT s.metric_time
+    FROM collect.store_metrics AS s
+    WHERE s.object_kind = '{StoreSelfMetrics.StoreObjectKind}'
+    AND   s.total_bytes IS NOT NULL
+    AND   NOT EXISTS
+          (
+              SELECT 1
+              FROM collect.store_metrics AS e
+              WHERE e.metric_time = s.metric_time
+              AND   e.size_estimated IS TRUE
+          )
+    ORDER BY s.metric_time DESC
+    LIMIT 1
+)";
 
     /// <summary>
     /// Whether <c>timescaledb_information.job_history</c> — the route this tool's description sends a
@@ -1400,7 +1468,8 @@ LIMIT $1";
         long? TotalRuns = null,
         long? TotalFailures = null,
         long? ToastBytes = null,
-        long? ToastLiveBytes = null);
+        long? ToastLiveBytes = null,
+        bool? SizeEstimated = null);
 
     /// <summary>One object's settled point for one day (the day's last sample). Job and TOAST fields as on
     /// <see cref="StoreMetricRow"/>. <c>MetricTime</c> is that last sample's own time (#4734), which <c>Day</c>,
@@ -1421,7 +1490,10 @@ LIMIT $1";
         long? TotalFailures = null,
         long? ToastBytes = null,
         long? ToastLiveBytes = null,
-        DateTime? MetricTime = null);
+        DateTime? MetricTime = null,
+        bool? SizeEstimated = null,
+        long? EstimateTotalBytes = null,
+        DateTime? EstimateMetricTime = null);
 
     /* ---------------- #3783: TOAST utilisation on the dimension rows ---------------- */
 
@@ -1926,22 +1998,29 @@ SELECT DISTINCT ON (object_kind, object_name)
     total_runs,
     total_failures,
     toast_bytes,
-    toast_live_bytes
+    toast_live_bytes,
+    size_estimated
 FROM collect.store_metrics
 ORDER BY object_kind, object_name, metric_time DESC";
 
-    public static async Task<List<StoreMetricRow>> GetLatestAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    public static Task<List<StoreMetricRow>> GetLatestAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>
+        ReadStoreMetricRowsAsync(postgres, null, cancellationToken);
+
+    private static async Task<List<StoreMetricRow>> ReadStoreMetricRowsAsync(
+        NpgsqlDataSource postgres, string? statement, CancellationToken cancellationToken)
     {
-        bool indexed;
-        await using (var probe = postgres.CreateCommand(StoreMetricsLatestIndexProbeSql))
+        /* statement: another read with the same sixteen columns (the exact-sweep read, #5857), which needs no index probe. */
+        var indexed = false;
+        if (statement is null)
         {
+            await using var probe = postgres.CreateCommand(StoreMetricsLatestIndexProbeSql);
             probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             indexed = await probe.ExecuteScalarAsync(cancellationToken) is true;
         }
 
         var rows = new List<StoreMetricRow>();
-        await using var command = postgres.CreateCommand(indexed ? StoreMetricsLatestSql : StoreMetricsLatestWithoutIndexSql);
+        await using var command = postgres.CreateCommand(statement ?? (indexed ? StoreMetricsLatestSql : StoreMetricsLatestWithoutIndexSql));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1962,10 +2041,50 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 reader.IsDBNull(11) ? null : reader.GetInt64(11),
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
-                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
+                reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                reader.IsDBNull(15) ? null : reader.GetBoolean(15)));
         }
 
         return rows;
+    }
+
+    /// <summary>The newest exactly-sized sweep's rows (<see cref="StoreMetricsExactSweepSql"/>); empty when the store
+    /// has none (#5857). Read through the latest read's row mapping.</summary>
+    public static Task<List<StoreMetricRow>> GetExactSweepAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>
+        ReadStoreMetricRowsAsync(postgres, StoreMetricsExactSweepSql, cancellationToken);
+
+    /// <summary>
+    /// The rows the inventory is reconciled from (#5857). Pure. The newest sweep sizes hypertables and aggregates from
+    /// the catalog, a little low, so attributing <c>pg_database_size</c> to it would put the estimate's shortfall in
+    /// the residual. The inventory is therefore the newest exactly-sized sweep (<paramref name="exactSweep"/>), plus the
+    /// objects that sweep did not reach and whose newest row is older than it, which are the stale and dropped rows the
+    /// inventory has always counted. Objects created after the exact sweep are left out: no exact size exists for them.
+    /// Empty when there is no exact sweep, which makes the inventory unavailable rather than a finding.
+    /// </summary>
+    public static IReadOnlyList<StoreMetricRow> InventoryRows(
+        IReadOnlyList<StoreMetricRow> latest, IReadOnlyList<StoreMetricRow> exactSweep)
+    {
+        if (latest is null)
+        {
+            throw new ArgumentNullException(nameof(latest));
+        }
+
+        if (exactSweep is null)
+        {
+            throw new ArgumentNullException(nameof(exactSweep));
+        }
+
+        var store = NewestStoreRow(exactSweep);
+        if (store is null)
+        {
+            return Array.Empty<StoreMetricRow>();
+        }
+
+        var inSweep = exactSweep.Select(r => (r.ObjectKind, r.ObjectName)).ToHashSet();
+        return exactSweep
+            .Concat(latest.Where(r => r.MetricTime < store.MetricTime && !inSweep.Contains((r.ObjectKind, r.ObjectName))))
+            .ToList();
     }
 
     public static async Task<List<StoreMetricDailyPoint>> GetDailyAsync(
@@ -1995,7 +2114,33 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 reader.IsDBNull(14) ? null : reader.GetInt64(14),
-                reader.GetDateTime(15)));
+                reader.GetDateTime(15),
+                reader.IsDBNull(16) ? null : reader.GetBoolean(16)));
+        }
+
+        /* #5857: the day's newest estimate row, attached to the points that kept an EXACT row. A point that is itself an
+           estimate (a day with no exact row) is its own newest estimate. */
+        var estimates = new Dictionary<(string Kind, string Name, DateTime Day), (long? Bytes, DateTime Time)>();
+        await using (var estimateCommand = postgres.CreateCommand(StoreMetricsDailyEstimatesSql))
+        {
+            estimateCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            estimateCommand.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+            await using var estimateReader = await estimateCommand.ExecuteReaderAsync(cancellationToken);
+            while (await estimateReader.ReadAsync(cancellationToken))
+            {
+                estimates[(estimateReader.GetString(0), estimateReader.GetString(1), estimateReader.GetDateTime(2))] =
+                    (estimateReader.IsDBNull(3) ? null : estimateReader.GetInt64(3), estimateReader.GetDateTime(4));
+            }
+        }
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var point = rows[i];
+            if (point.SizeEstimated != true
+                && estimates.TryGetValue((point.ObjectKind, point.ObjectName, point.Day), out var estimate))
+            {
+                rows[i] = point with { EstimateTotalBytes = estimate.Bytes, EstimateMetricTime = estimate.Time };
+            }
         }
 
         return rows;
@@ -2141,8 +2286,47 @@ ORDER BY object_kind, object_name, metric_time DESC";
     /// counter that went backwards. The job counters are cumulative, so a negative count of runs is a reset,
     /// not a measurement, the <see cref="CheckpointerReading"/> discipline. An object with fewer than two
     /// points has no entry at all.</para>
+    ///
+    /// <para><b>Like from like (#5857).</b> A hypertable or aggregate size is an estimate on most hourly sweeps and exact
+    /// on one a day, and an estimate reads a little low, so a growth never subtracts across the two forms. It runs from
+    /// the newest row of the window's last day to the newest row of the first day in the SAME form (a missing flag counts
+    /// as exact). When the first day has no row of that form, the growth is taken from that day's newest row of any form and
+    /// <see cref="GrowthMixedForms"/> is true so a reader can see the pair is not like for like.</para>
     /// </summary>
-    public sealed record WindowDelta(DateTime Since, long? GrowthBytes, long? RunsInWindow, long? FailuresInWindow);
+    public sealed record WindowDelta(
+        DateTime Since, long? GrowthBytes, long? RunsInWindow, long? FailuresInWindow, bool GrowthMixedForms = false);
+
+    private readonly record struct SizeEnd(long? Bytes, DateTime? Time, bool Estimated);
+
+    /// <summary>The rows a daily point stands for: the point's own row, and the day's newest estimate row when the point kept
+    /// an exact one.</summary>
+    private static IEnumerable<SizeEnd> EndsOf(StoreMetricDailyPoint point)
+    {
+        yield return new SizeEnd(point.TotalBytes, point.MetricTime, point.SizeEstimated == true);
+        if (point.EstimateMetricTime is not null)
+        {
+            yield return new SizeEnd(point.EstimateTotalBytes, point.EstimateMetricTime, true);
+        }
+    }
+
+    private static bool Newer(SizeEnd candidate, SizeEnd current) =>
+        candidate.Time is { } c && (current.Time is not { } t || c > t);
+
+    /// <summary>The growth between a window's first and last daily points, like from like where it can be (#5857).</summary>
+    private static (long? Growth, bool Mixed) SizeGrowth(StoreMetricDailyPoint first, StoreMetricDailyPoint last)
+    {
+        var end = EndsOf(last).Aggregate((a, b) => Newer(b, a) ? b : a);
+        var starts = EndsOf(first).ToList();
+        var start = starts.Where(s => s.Estimated == end.Estimated).Cast<SizeEnd?>().FirstOrDefault();
+        var mixed = false;
+        if (start is null)
+        {
+            start = starts.Aggregate((a, b) => Newer(b, a) ? b : a);
+            mixed = true;
+        }
+
+        return (end.Bytes - start.Value.Bytes, mixed && end.Bytes is not null && start.Value.Bytes is not null);
+    }
 
     /// <summary>
     /// Every object's <see cref="WindowDelta"/> from the daily series (#3903). Pure. Keyed by (kind, name)
@@ -2166,11 +2350,13 @@ ORDER BY object_kind, object_name, metric_time DESC";
 
             var first = points[0];
             var last = points[^1];
+            var (growth, mixed) = SizeGrowth(first, last);
             deltas[series.Key] = new WindowDelta(
                 first.Day,
-                last.TotalBytes - first.TotalBytes,
+                growth,
                 Counted(first.TotalRuns, last.TotalRuns),
-                Counted(first.TotalFailures, last.TotalFailures));
+                Counted(first.TotalFailures, last.TotalFailures),
+                mixed);
         }
 
         return deltas;

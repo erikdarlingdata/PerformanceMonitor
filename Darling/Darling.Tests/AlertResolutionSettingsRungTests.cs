@@ -113,6 +113,7 @@ public sealed class AlertResolutionSettingsRungTests
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct)); /* the ladder's top: V188 (#5821) and V189 (#5867) sit above this rung */
 
             /* A store one rung behind, holding a notification row, a route and an alert-history row from before the rung. */
+            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);

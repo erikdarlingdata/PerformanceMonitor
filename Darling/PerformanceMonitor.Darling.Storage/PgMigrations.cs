@@ -1368,6 +1368,22 @@ ALTER TABLE config.investigation_request_alerts
     ADD COLUMN IF NOT EXISTS context_json text;";
 
     /// <summary>
+    /// V190 (#5857): <c>collect.store_metrics.size_estimated</c>. The hourly store self-metrics sweep sizes hypertables
+    /// and continuous aggregates from the compression catalog (a compressed chunk contributes the bytes TimescaleDB
+    /// recorded when it compressed the chunk, not a file-system read), because the exact sizes make a file call per chunk and
+    /// their cost grew with the chunk count. One sweep a day (the first without an exact row in the last 23 hours) writes
+    /// the exact sizes. <c>true</c> marks a row sized by the estimate, <c>false</c> an exact one. NULL on every row
+    /// written before this rung, which were exact; no backfill, so nothing is rewritten.
+    ///
+    /// <para>One nullable column with no default, so the <c>ADD COLUMN</c> is catalog-only; IF NOT EXISTS, so a second run
+    /// does nothing. No GRANT: the table's grants are table-level. <b>No Lite twin:</b> Lite sizes its own DuckDB file,
+    /// not hypertables.</para>
+    /// </summary>
+    private const string V190Sql = @"
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS size_estimated boolean;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1668,6 +1684,7 @@ $rung$;";
         new Migration(187, "alert-resolution-delivery", V187Sql),
         new Migration(188, "investigation-alert-facts", V188Sql),
         new Migration(189, "query-store-compose-failures", V189Sql),
+        new Migration(190, "store-metrics-size-estimated", V190Sql),
     };
 
     /// <summary>

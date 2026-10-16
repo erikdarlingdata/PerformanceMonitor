@@ -91,9 +91,14 @@ public sealed class McpWritePolicyTests
         var readOnly = McpToolClassification.ReadOnlyTools;
         var writes = McpWritePolicy.WriteTools;
 
-        var unclassified = registered.Where(n => !readOnly.Contains(n) && !writes.Contains(n)).ToArray();
-        var both = readOnly.Intersect(writes).ToArray();
-        var stale = readOnly.Concat(writes).Except(registered).ToArray();
+        /* #5820: claim and submit are the third set, as on Darling: they change only investigation state, so they are neither
+           reads nor WriteTools (which mcp_allow_writes serves). McpInvestigationPolicy serves them by name and McpWritePolicy
+           stamps them neither read-only nor destructive. */
+        var stateOnly = McpInvestigationPolicy.StateChangingTools;
+
+        var unclassified = registered.Where(n => !readOnly.Contains(n) && !writes.Contains(n) && !stateOnly.Contains(n)).ToArray();
+        var both = readOnly.Intersect(writes).Concat(stateOnly.Intersect(readOnly)).Concat(stateOnly.Intersect(writes)).ToArray();
+        var stale = readOnly.Concat(writes).Concat(stateOnly).Except(registered).ToArray();
 
         Assert.True(
             unclassified.Length == 0,
@@ -113,7 +118,8 @@ public sealed class McpWritePolicyTests
         {
             var isWrite = McpWritePolicy.IsWrite(tool.ProtocolTool.Name);
             Assert.NotNull(tool.ProtocolTool.Annotations);
-            Assert.Equal(!isWrite, tool.ProtocolTool.Annotations!.ReadOnlyHint);
+            /* #5820: claim and submit change only investigation state: neither read-only nor destructive. */
+            Assert.Equal(!isWrite && !McpInvestigationPolicy.IsStateChanging(tool.ProtocolTool.Name), tool.ProtocolTool.Annotations!.ReadOnlyHint);
             Assert.Equal(isWrite, tool.ProtocolTool.Annotations.DestructiveHint);
         }
     }
@@ -226,8 +232,12 @@ public sealed class McpWritePolicyTests
         Assert.Equal(all.Count, writesServed.Count);
         Assert.Equal(McpWritePolicy.WriteTools.Count, all.Count - defaultServed.Count);
 
+        /* #5820: the four investigation tools are served only by their own setting (McpInvestigationPolicy), so the default
+           count leaves them out too. */
+        var defaultCount = defaultServed.Count - McpInvestigationPolicy.InvestigationTools.Count;
+
         var text = McpInstructions.Text;
-        Assert.Contains($"{all.Count} tools ({defaultServed.Count} by default; `{McpWritePolicy.WritesSetting}` adds ", text, StringComparison.Ordinal);
+        Assert.Contains($"{all.Count} tools ({defaultCount} by default; `{McpWritePolicy.WritesSetting}` adds ", text, StringComparison.Ordinal);
         foreach (var name in McpWritePolicy.WriteTools)
         {
             Assert.Contains($"`{name}`", text, StringComparison.Ordinal);
@@ -311,6 +321,26 @@ public sealed class McpWritePolicyTests
         Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
     }
 
+    /// <summary>#5820 L5c: the investigation paragraph appears exactly when the investigation tools are served (the setting
+    /// on and the writes off), and with them off the rendered text names none of the four tools, in the paragraph or the census.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void RenderedInstructions_CarryTheInvestigationParagraph_OnlyWhenTheInvestigationToolsAreServed(bool investigationsServed)
+    {
+        var all = RegisteredTools();
+        var catalog = McpWritePolicy.ToolNames(all).Where(n => investigationsServed || !McpInvestigationPolicy.IsInvestigationTool(n)).ToList();
+        var served = catalog.Where(n => !McpWritePolicy.IsWrite(n)).ToList();
+        var text = McpInstructions.Build(catalog, served);
+
+        Assert.Equal(investigationsServed, text.Contains("### Investigation requests", StringComparison.Ordinal));
+        Assert.Equal(investigationsServed, text.Contains("mcp_allow_investigations", StringComparison.Ordinal));
+        foreach (var name in McpInvestigationPolicy.InvestigationTools)
+        {
+            Assert.Equal(investigationsServed, text.Contains($"`{name}`", StringComparison.Ordinal));
+        }
+    }
+
     private static JsonElement ResultOf(string body)
     {
         var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
@@ -340,7 +370,7 @@ public sealed class McpWritePolicyTests
         Assert.All(narrowed, tool =>
         {
             Assert.NotNull(tool.ProtocolTool.Annotations);
-            Assert.True(tool.ProtocolTool.Annotations!.ReadOnlyHint, $"{tool.ProtocolTool.Name} should carry readOnlyHint");
+            Assert.Equal(!McpInvestigationPolicy.IsStateChanging(tool.ProtocolTool.Name), tool.ProtocolTool.Annotations!.ReadOnlyHint);
             Assert.False(tool.ProtocolTool.Annotations.DestructiveHint, $"{tool.ProtocolTool.Name} should not carry destructiveHint");
         });
 
@@ -375,12 +405,12 @@ public sealed class McpWritePolicyTests
     public void Host_RegistersThePolicyWithTheSetting_AndTheMainWindowPassesTheSetting()
     {
         var host = ParitySource.ReadFile("Lite/Mcp/McpHostService.cs");
-        Assert.Contains("RegisterMcpServer(builder.Services, _allowWrites);", host, StringComparison.Ordinal);
+        Assert.Contains("RegisterMcpServer(builder.Services, _allowWrites, _allowInvestigations, _dataDetail);", host, StringComparison.Ordinal);
         Assert.Contains("_allowWrites = allowWrites;", host, StringComparison.Ordinal);
         Assert.Contains("bool allowWrites = false", host, StringComparison.Ordinal);
 
         var main = ParitySource.ReadFile("Lite/MainWindow.xaml.cs");
-        Assert.Contains("mcpSettings.Port, _scheduleManager, mcpSettings.AllowWrites)", main, StringComparison.Ordinal);
+        Assert.Contains("mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail)", main, StringComparison.Ordinal);
     }
 
     [Fact]

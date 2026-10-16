@@ -303,6 +303,49 @@ public sealed class NotificationRouteSecretGenerationTests : IDisposable
         Assert.Equal(NewTeams, (await _store.GetAsync(id))!.TeamsUrl);
     }
 
+    /* Moved here from NotificationRouteSecretSaveTests: both lose a saved secret and reload the route, which logs the
+       "could not be read from Credential Manager" warning into the process-wide buffer. In app-alert-statics that write
+       landed inside NotificationRouteTruthfulnessTests' drain window (a third line, route 1, same channel). */
+    private async Task<bool> FlagAsync(int id, string column)
+    {
+        using var conn = new DuckDBConnection($"Data Source={_dbPath}");
+        await conn.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {column} FROM notification_routes WHERE route_id = {id}";
+        return Convert.ToBoolean(await cmd.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task AnUnreadableDestinationLeftAlone_KeepsItsFlag_AndTheChannelStaysOff()
+    {
+        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams, slack: OldSlack));
+        _secrets.Lose(id, "Teams");
+        var loaded = (await _store.GetAsync(id))!;
+        Assert.True(loaded.IsOffFor(NotificationRouter.TeamsChannel));
+
+        /* What the dialog saves with the unreadable channel's mask untouched: empty value, channel still named. */
+        Assert.True(await _store.UpdateAsync(loaded with { MetricMatch = "Blocking" }));
+
+        Assert.True(await FlagAsync(id, "teams_set"));
+        var after = (await _store.GetAsync(id))!;
+        Assert.True(after.IsOffFor(NotificationRouter.TeamsChannel));
+        Assert.Equal("Blocking", after.MetricMatch);
+        Assert.Equal(OldSlack, after.SlackUrl);
+    }
+
+    [Fact]
+    public async Task AnUnreadableDestinationTheUserRemoves_ClearsItsFlag()
+    {
+        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));
+        _secrets.Lose(id, "Teams");
+        var loaded = (await _store.GetAsync(id))!;
+
+        Assert.True(await _store.UpdateAsync(loaded with { OffChannels = null }));
+
+        Assert.False(await FlagAsync(id, "teams_set"));
+        Assert.Null((await _store.GetAsync(id))!.OffChannels);
+    }
+
     [Fact]
     public async Task AKeptUnreadableChannel_KeepsItsGeneration_AndIsNeverCopied()
     {

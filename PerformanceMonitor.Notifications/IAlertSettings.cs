@@ -65,7 +65,7 @@ public interface IAlertSettings
     /// <c>{{context_json}}</c> / <c>{{incidents_json}}</c> (raw JSON values, substituted unquoted)
     /// and <c>{{dedup_key}}</c> (the PagerDuty-shape correlation key), the #2710 tag tokens
     /// <c>{{resource_name}}</c> / <c>{{database}}</c>, and <c>{{triage_url}}</c> (the computed triage-page
-    /// link, empty when <see cref="TriageBaseUrl"/> is unset), and the #5821 <c>{{investigation_json}}</c> (Darling only: the
+    /// link, empty when <see cref="TriageBaseUrl"/> is unset), and the #5821 <c>{{investigation_json}}</c> (Darling and, since #5820, Lite: the
     /// investigation request the alert opened or joined, empty when it opened none). Empty falls back to
     /// <see cref="WebhookAlertService.DefaultGenericBodyTemplate"/>.
     /// </summary>

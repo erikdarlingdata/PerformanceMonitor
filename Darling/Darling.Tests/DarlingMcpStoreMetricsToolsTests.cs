@@ -132,10 +132,10 @@ public sealed class DarlingMcpStoreMetricsToolsTests
            grain a growth question wants. */
         Assert.Contains("SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE metric_time >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains(
-            "ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC",
-            sql,
-            StringComparison.Ordinal);
+
+        /* The ORDER BY spelling is no longer pinned (#5857): within a day a hypertable or aggregate point is its newest
+           EXACT row when it has one, so the ordering has one more key than "newest first". Which row each day keeps is
+           proved by the live StoreMetricReaders_SurfaceSizeEstimated_AndTheDailyPointPrefersTheExactRow test. */
     }
 
     [Theory]

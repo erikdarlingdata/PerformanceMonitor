@@ -1,0 +1,344 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Threading.Tasks;
+using DuckDB.NET.Data;
+using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Investigations;
+using PerformanceMonitorLite.Mcp;
+using PerformanceMonitorLite.Services;
+using Xunit;
+
+namespace PerformanceMonitorLite.Tests;
+
+/// <summary>
+/// <see cref="DuckDbInvestigationBriefSourceReader"/> on a throwaway DuckDB (#5820), the Lite twin of Darling's
+/// <c>PgInvestigationBriefSourceReaderLiveTests</c>: one server with an alert history row, a finding, a mute rule, an
+/// approved note, a server profile and an earlier report, and every source comes back. A request with nothing else on the
+/// store reads as empty sections, never a throw, and an unknown request reads as null. The brief composed from the planted
+/// store masks the earlier report's and the alert's literals under both masked levels. Also the family-call table (every
+/// name is a tool Lite serves) and the composer's registration.
+/// </summary>
+public sealed class DuckDbInvestigationBriefSourceReaderTests : IDisposable
+{
+    private const int ServerId = 7_563_201;
+    private const string ServerName = "LcBriefReaderSrv";
+    private const string LiteralCanary = "zq-lit-5820";
+    private const string NumericCanary = "86753091";
+    private const string MaskStatement = "SELECT zq_census_col FROM dbo.t WHERE c = N'" + LiteralCanary + "' AND n = " + NumericCanary;
+
+    private static readonly DateTime Now = Micros(DateTime.UtcNow);
+
+    private readonly string _tempDir;
+    private readonly DuckDbInitializer _initializer;
+
+    public DuckDbInvestigationBriefSourceReaderTests()
+    {
+        _tempDir = Path.Combine(Path.GetTempPath(), "DuckDbInvestigationBriefSourceReaderTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(_tempDir);
+        _initializer = new DuckDbInitializer(Path.Combine(_tempDir, "lite.duckdb"));
+        _initializer.InitializeAsync().GetAwaiter().GetResult();
+    }
+
+    public void Dispose()
+    {
+        _initializer.Dispose();
+        try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
+        catch (IOException) { /* best-effort cleanup */ }
+        catch (UnauthorizedAccessException) { /* best-effort cleanup */ }
+    }
+
+    private static DateTime Micros(DateTime t) => new(t.Ticks - (t.Ticks % 10), DateTimeKind.Unspecified);
+
+    private async Task ExecAsync(string sql, params object?[] parameters)
+    {
+        using var writeLock = _initializer.AcquireWriteLock();
+        using var connection = _initializer.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var parameter in parameters)
+            command.Parameters.Add(new DuckDBParameter { Value = parameter ?? DBNull.Value });
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    private Task InsertRequestAsync(Guid id, DateTime alertAt, string state = "open", string? storyPathHash = null) =>
+        ExecAsync(@"
+INSERT INTO investigation_requests
+    (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash,
+     first_alert_at, last_alert_at, window_until, state, opened_at, expires_at)
+VALUES ($1, 1, $2, $3, 'blocking', 'Blocking', $4, $5, $5, $6, $7, $5, $8)",
+            id, ServerId, ServerName, storyPathHash, Micros(alertAt), Micros(alertAt.AddMinutes(30)), state, Micros(alertAt.AddHours(4)));
+
+    private Task InsertLinkAsync(long linkId, Guid requestId, DateTime alertAt, double? value = null, double? threshold = null,
+        bool? muted = null, string? detail = null, string? contextJson = null) =>
+        ExecAsync(@"
+INSERT INTO investigation_request_alerts
+    (request_alert_id, request_id, alert_time, server_id, metric_name, dedup_key,
+     current_value, threshold_value, muted, detail_text, context_json)
+VALUES ($1, $2, $3, $4, 'Blocking', $5, $6, $7, $8, $9, $10)",
+            linkId, requestId, Micros(alertAt), ServerId, ServerId + ":Blocking", value, threshold, muted, detail, contextJson);
+
+    private static string Context() => AlertContextSerializer.Serialize(new AlertContext
+    {
+        Details =
+        {
+            new AlertDetailItem { Heading = "Blocking", Fields = { ("Blocked Query", MaskStatement) } },
+        },
+    });
+
+    [Fact]
+    public async Task EverySource_ComesBackFromAPlantedStore_AndTheComposedBriefMasksItsLiterals()
+    {
+        /* An earlier request of the same server and family, reported, its root cause naming the literals. */
+        var earlierId = Guid.NewGuid();
+        await InsertRequestAsync(earlierId, Now.AddHours(-2), state: "reported");
+        await ExecAsync(@"
+INSERT INTO investigation_reports
+    (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary,
+     evidence, server_id, metric_name)
+VALUES (1, $1, 1, 'agent-a', $2, $3, 'real', $4, true, $5, '[{""tool"":""get_blocked_process_reports""}]', $6, 'Blocking')",
+            earlierId, Guid.NewGuid(), Micros(Now.AddHours(-1)), "blocking on " + MaskStatement, "summary " + LiteralCanary, ServerId);
+
+        /* The request the brief is for, ten minutes ago, with its alert history row (and a link that carries no facts). */
+        var requestId = Guid.NewGuid();
+        var alertAt = Now.AddMinutes(-10);
+        await InsertRequestAsync(requestId, alertAt, storyPathHash: "LCHASH01");
+        await InsertLinkAsync(1, requestId, alertAt);
+        await ExecAsync(@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+     alert_sent, notification_type, send_error, muted, dismissed, detail_text, context_json)
+VALUES ($1, $2, $3, 'Blocking', 45, 30, TRUE, 'email', NULL, FALSE, FALSE, $4, $5)",
+            Micros(alertAt.AddSeconds(2)), ServerId, ServerName, "Blocked for 45 s: " + MaskStatement, Context());
+
+        await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, database_name, time_range_start, time_range_end, severity, confidence,
+     category, story_path, story_path_hash, story_text, root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value,
+     fact_count, incident_id, remediation_action_json, drill_down_json)
+VALUES (1, $1, $2, $3, 'LcDb', $4, $1, 0.8, 0.6, 'blocking', 'BLOCKING → LOCK_WAIT', 'LCHASH01', 'Lock waits behind one session.',
+        'BLOCKING', 45, 'LOCK_WAIT', 3, 2, 'LC_INCIDENT_1', NULL, NULL)",
+            Micros(Now.AddMinutes(-5)), ServerId, ServerName, Micros(Now.AddHours(-4)));
+
+        await new DuckDbMuteRuleStore(_initializer).InsertAsync(new MuteRule
+        {
+            Id = "lc-mute-1",
+            ServerName = ServerName,
+            QueryTextPattern = "%" + LiteralCanary + "%",
+            Reason = "nightly load",
+            CreatedAtUtc = Now.AddMinutes(-30),
+        });
+
+        await ExecAsync(@"
+INSERT INTO investigation_notes (note_id, server_id, note_text, author, state, created_at, expires_at)
+VALUES (1, $1, 'the nightly load blocks for a minute', 'ops', 'approved', $2, $3),
+       (2, $1, 'a pending note the brief must not carry', 'ops', 'pending', $2, $3),
+       (3, NULL, 'a fleet note every brief carries', 'ops', 'approved', $2, $3),
+       (4, $1 + 1, 'another server''s note the brief must not carry', 'ops', 'approved', $2, $3),
+       (5, $1, 'an expired note the brief must not carry', 'ops', 'approved', $2, $4)",
+            ServerId, Micros(Now.AddDays(-2)), Micros(Now.AddDays(30)), Micros(Now.AddMinutes(-1)));
+
+        await ExecAsync(@"
+INSERT INTO agent_environment_profiles (profile_id, scope_server_id, profile_text, modified_at)
+VALUES (1, $1, 'production order entry', $2)", ServerId, Micros(Now));
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var sources = await reader.ReadAsync(requestId, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(sources);
+        Assert.Equal(ServerName, sources!.Request.ServerName);
+        Assert.Equal("blocking", sources.Request.Family);
+        Assert.False(sources.Request.IsPostgres);
+
+        /* The history row two seconds off the link still answers for what the link lacks, and the stamp is the link's. */
+        var alert = Assert.Single(sources.Alerts);
+        Assert.Equal("Blocking", alert.MetricName);
+        Assert.Equal(DateTimeKind.Utc, alert.AlertTimeUtc.Kind);
+        Assert.Equal(alertAt, DateTime.SpecifyKind(alert.AlertTimeUtc, DateTimeKind.Unspecified));
+        Assert.Equal(45, alert.CurrentValue);
+        Assert.Equal(30, alert.ThresholdValue);
+        Assert.Contains(LiteralCanary, alert.DetailText, StringComparison.Ordinal);
+        Assert.Contains(alert.Context, c => c.Fields.Any(f => f.Key == "Blocked Query"));
+
+        var finding = Assert.Single(sources.Findings);
+        Assert.Equal("LCHASH01", finding.StoryPathHash);
+
+        var report = Assert.Single(sources.EarlierReports);
+        Assert.Equal(earlierId, report.RequestId);
+        Assert.Equal("agent-a", report.AgentId);
+        Assert.Contains(LiteralCanary, report.RootCause, StringComparison.Ordinal);
+
+        var mute = Assert.Single(sources.RecentChanges, c => c.Kind == "mute_rule");
+        Assert.Equal("%" + LiteralCanary + "%", mute.Pattern);
+        Assert.Contains("nightly load", mute.Text, StringComparison.Ordinal);
+        Assert.Equal(Now.AddMinutes(-30), DateTime.SpecifyKind(mute.AtUtc, DateTimeKind.Utc));
+
+        /* The server's note, then the fleet's (server_id NULL); another server's, a pending and an expired note stay out. */
+        Assert.Equal(
+            new[] { "the nightly load blocks for a minute", "a fleet note every brief carries" },
+            sources.Notes.Select(n => n.Text).ToArray());
+        var profile = Assert.Single(sources.Profiles);
+        Assert.Equal("server", profile.Scope);
+
+        /* The brief composed from this store: under full the literals are there (the control); under maskLiterals and
+           metadataOnly no section, the earlier report's included, still carries one. */
+        string? full = await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.Full), LiteInvestigationBriefTools.Tools, () => Now)
+            .ComposeAsync(requestId, TestContext.Current.CancellationToken);
+        Assert.Contains(LiteralCanary, full, StringComparison.Ordinal);
+        Assert.Contains(NumericCanary, full, StringComparison.Ordinal);
+        foreach (var mode in new[] { McpDataDetail.MaskLiterals, McpDataDetail.MetadataOnly })
+        {
+            string? brief = await new InvestigationBriefComposer(reader, new McpDataDetailSetting(mode), LiteInvestigationBriefTools.Tools, () => Now)
+                .ComposeAsync(requestId, TestContext.Current.CancellationToken);
+            Assert.NotNull(brief);
+            Assert.DoesNotContain(LiteralCanary, brief, StringComparison.Ordinal);
+            Assert.DoesNotContain(NumericCanary, brief, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task ARequestAloneReadsAsEmptySections_AndAnUnknownRequestAsNull()
+    {
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, Now.AddMinutes(-10));
+        await InsertLinkAsync(1, requestId, Now.AddMinutes(-10));
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var sources = await reader.ReadAsync(requestId, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(sources);
+        /* The request's own alert link with no history row behind it: the alert, with nothing read from the log. */
+        var alert = Assert.Single(sources!.Alerts);
+        Assert.Null(alert.DetailText);
+        Assert.Empty(alert.Context);
+        Assert.Empty(sources.Findings);
+        Assert.Empty(sources.EarlierReports);
+        Assert.Empty(sources.RecentChanges);
+        Assert.Empty(sources.Notes);
+        Assert.Empty(sources.Profiles);
+
+        Assert.Null(await reader.ReadAsync(Guid.NewGuid(), TestContext.Current.CancellationToken));
+        Assert.NotNull(await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.MetadataOnly), LiteInvestigationBriefTools.Tools, () => Now)
+            .ComposeAsync(requestId, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>#5821: an alert that opens or joins before its page is sent writes its link rows before its history row, so
+    /// a claim in that gap must read the link's own facts, and a history row that lands later must not replace them.</summary>
+    [Fact]
+    public async Task ALinksOwnFacts_AreReadBeforeAnyHistoryRowExists_AndWinOverOneThatLandsLater()
+    {
+        var requestId = Guid.NewGuid();
+        var alertAt = Now.AddMinutes(-10);
+        await InsertRequestAsync(requestId, alertAt);
+        await InsertLinkAsync(1, requestId, alertAt, value: 45, threshold: 30, muted: true, detail: "link detail", contextJson: Context());
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var alert = Assert.Single((await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Alerts);
+        Assert.Equal(45, alert.CurrentValue);
+        Assert.Equal(30, alert.ThresholdValue);
+        Assert.True(alert.Muted);
+        Assert.Equal("link detail", alert.DetailText);
+        Assert.NotEmpty(alert.Context);
+        Assert.Null(alert.SendError);
+
+        await ExecAsync(@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error,
+     muted, dismissed, detail_text, context_json)
+VALUES ($1, $2, $3, 'Blocking', 99, 98, FALSE, 'email', 'smtp refused', FALSE, FALSE, 'history detail', NULL)",
+            Micros(alertAt), ServerId, ServerName);
+
+        alert = Assert.Single((await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Alerts);
+        Assert.Equal(45, alert.CurrentValue);
+        Assert.Equal("link detail", alert.DetailText);
+        Assert.True(alert.Muted);
+        Assert.Equal("smtp refused", alert.SendError);
+    }
+
+    /// <summary>Four distinct alerts or more: the first, then the newest three, the first leading and the rest newest first.</summary>
+    [Fact]
+    public async Task ManyAlerts_ReadAsTheFirstThenTheNewestThree()
+    {
+        var requestId = Guid.NewGuid();
+        var start = Now.AddMinutes(-60);
+        await InsertRequestAsync(requestId, start);
+        for (var i = 0; i < 6; i++)
+            await InsertLinkAsync(i + 1, requestId, start.AddMinutes(i * 5), value: i);
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var alerts = (await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Alerts;
+
+        Assert.Equal(new double?[] { 0, 5, 4, 3 }, alerts.Select(a => a.CurrentValue).ToArray());
+    }
+
+    /// <summary>Every name the table can put in a brief is a tool Lite serves: a call naming a tool the surface dropped would
+    /// send an agent to an unknown-tool error. Blocking is Lite's own name, and Availability Group health is not served.</summary>
+    [Fact]
+    public void EveryNameInTheFamilyTable_IsAServedLiteTool_AndTheNameableListHoldsThemAll()
+    {
+        var served = typeof(McpAnalysisTools).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null)
+            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            .Select(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name)
+            .Where(n => n is not null)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var tools = LiteInvestigationBriefTools.Tools;
+        Assert.Empty(tools.PostgresFamilyCalls);
+        foreach (var family in InvestigationFamily.All)
+            Assert.True(tools.SqlServerFamilyCalls.ContainsKey(family), family);
+        foreach (var name in tools.SqlServerFamilyCalls.Values.SelectMany(c => c))
+        {
+            Assert.Contains(name, served);
+            Assert.Contains(name, tools.NameableTools);
+        }
+
+        foreach (var name in tools.NameableTools)
+            Assert.Contains(name, served);
+
+        Assert.Contains("get_blocked_process_reports", tools.SqlServerFamilyCalls[InvestigationFamily.Blocking]);
+        Assert.DoesNotContain("get_blocking", tools.NameableTools);
+        Assert.DoesNotContain("get_ag_health", tools.NameableTools);
+    }
+
+    /// <summary>The registration hands out a composer over the Lite reader, masking at the registered level, and at full when
+    /// the host registered no setting (so the slice runs whether or not the settings registration has landed).</summary>
+    [Fact]
+    public async Task TheRegistration_ResolvesTheComposer_WithAndWithoutADataDetailSetting()
+    {
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, Now.AddMinutes(-10));
+        await InsertLinkAsync(1, requestId, Now.AddMinutes(-10), value: 1, threshold: 2, detail: "Blocked: " + MaskStatement, contextJson: Context());
+
+        var withoutSetting = new ServiceCollection();
+        LiteInvestigationServices.AddInvestigationBrief(withoutSetting, _initializer);
+        using var providerWithout = withoutSetting.BuildServiceProvider();
+        Assert.IsType<DuckDbInvestigationBriefSourceReader>(providerWithout.GetRequiredService<IInvestigationBriefSourceReader>());
+        var composer = providerWithout.GetRequiredService<InvestigationBriefComposer>();
+        Assert.Equal(McpDataDetail.Full, composer.Mode);
+        Assert.Contains(LiteralCanary, await composer.ComposeAsync(requestId, TestContext.Current.CancellationToken), StringComparison.Ordinal);
+
+        var withSetting = new ServiceCollection();
+        withSetting.AddSingleton(new McpDataDetailSetting(McpDataDetail.MetadataOnly));
+        LiteInvestigationServices.AddInvestigationBrief(withSetting, _initializer);
+        using var providerWith = withSetting.BuildServiceProvider();
+        var masked = providerWith.GetRequiredService<InvestigationBriefComposer>();
+        Assert.Equal(McpDataDetail.MetadataOnly, masked.Mode);
+        Assert.DoesNotContain(LiteralCanary, await masked.ComposeAsync(requestId, TestContext.Current.CancellationToken), StringComparison.Ordinal);
+    }
+}

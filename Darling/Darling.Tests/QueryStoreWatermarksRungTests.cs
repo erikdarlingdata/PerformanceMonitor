@@ -120,6 +120,7 @@ public sealed class QueryStoreWatermarksRungTests
            absent too this rung is the answer; with this sentinel absent as well, one rung back. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        all[Array.FindIndex(parameters, p => p.Name == "hasStoreMetricsSizeEstimated")] = false; /* V190 (#5857) absent: the cases below are stores below it. */
         all[Array.FindIndex(parameters, p => p.Name == "hasComposeStampFailures")] = false; /* V189 (#5867) absent: the cases below are stores below it. */
         all[Array.FindIndex(parameters, p => p.Name == "hasInvestigationAlertFacts")] = false; /* V188 (#5821) absent: the cases below are stores below it. */
         all[Array.FindIndex(parameters, p => p.Name == "hasAlertResolutionDelivery")] = false; /* V187 (#5825) absent: the cases below are stores below it. */
@@ -183,6 +184,7 @@ public sealed class QueryStoreWatermarksRungTests
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
 
+            await RungRewindArtifacts.DropV190SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV189SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV188SentinelAsync(connection, ct);
             await RungRewindArtifacts.DropV187SentinelAsync(connection, ct);

@@ -82,7 +82,8 @@ public sealed class DuckDbNotificationRouteStore
 
     private const string RowColumns =
         "route_id, metric_match, scope_server_id, scope_tag_id, teams_set, slack_set, generic_set, pagerduty_set, "
-        + "smtp_recipients, enabled, teams_secret_gen, slack_secret_gen, generic_secret_gen, pagerduty_secret_gen";
+        + "smtp_recipients, enabled, teams_secret_gen, slack_secret_gen, generic_secret_gen, pagerduty_secret_gen, "
+        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes";
 
     private readonly DuckDbInitializer _dbInitializer;
     private readonly Func<IReadOnlyCollection<int>> _knownServerIds;
@@ -314,8 +315,9 @@ public sealed class DuckDbNotificationRouteStore
                 INSERT INTO {TableName}
                     (route_id, metric_match, scope_server_id, scope_tag_id,
                      teams_set, slack_set, generic_set, pagerduty_set, smtp_recipients, enabled,
-                     teams_secret_gen, slack_secret_gen, generic_secret_gen, pagerduty_secret_gen)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
+                     teams_secret_gen, slack_secret_gen, generic_secret_gen, pagerduty_secret_gen,
+                     agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)";
                 AddWriteParameters(cmd, id, normalized, plans);
                 await cmd.ExecuteNonQueryAsync();
                 AfterRowWriteForTests?.Invoke();
@@ -372,7 +374,9 @@ public sealed class DuckDbNotificationRouteStore
                     metric_match = $2, scope_server_id = $3, scope_tag_id = $4,
                     teams_set = $5, slack_set = $6, generic_set = $7, pagerduty_set = $8,
                     smtp_recipients = $9, enabled = $10,
-                    teams_secret_gen = $11, slack_secret_gen = $12, generic_secret_gen = $13, pagerduty_secret_gen = $14
+                    teams_secret_gen = $11, slack_secret_gen = $12, generic_secret_gen = $13, pagerduty_secret_gen = $14,
+                    agent_level = $15, agent_max_per_hour = $16, agent_max_per_day = $17,
+                    agent_lease_minutes = $18, agent_expiry_minutes = $19
                 WHERE route_id = $1";
                     AddWriteParameters(cmd, route.RouteId, normalized, plans);
                     await cmd.ExecuteNonQueryAsync();
@@ -472,7 +476,8 @@ public sealed class DuckDbNotificationRouteStore
     /// <summary>One row of the table. <see cref="Set"/> and <see cref="Gens"/> are in channel order (<c>s_channels</c>).</summary>
     private sealed record Row(
         int RouteId, string MetricMatch, int? ScopeServerId, int? ScopeTagId,
-        bool[] Set, string SmtpRecipients, bool Enabled, string?[] Gens);
+        bool[] Set, string SmtpRecipients, bool Enabled, string?[] Gens,
+        int? AgentLevel, int AgentMaxPerHour, int AgentMaxPerDay, int AgentLeaseMinutes, int AgentExpiryMinutes);
 
     private static Row ReadRowFrom(System.Data.Common.DbDataReader reader) =>
         new(
@@ -486,7 +491,13 @@ public sealed class DuckDbNotificationRouteStore
             [reader.IsDBNull(10) ? null : reader.GetString(10),
              reader.IsDBNull(11) ? null : reader.GetString(11),
              reader.IsDBNull(12) ? null : reader.GetString(12),
-             reader.IsDBNull(13) ? null : reader.GetString(13)]);
+             reader.IsDBNull(13) ? null : reader.GetString(13)],
+            /* #5820: a NULL level is no agent; a NULL limit (a row written before the column existed) is the default. */
+            reader.IsDBNull(14) ? null : reader.GetInt32(14),
+            reader.IsDBNull(15) ? NotificationRoute.DefaultAgentMaxPerHour : reader.GetInt32(15),
+            reader.IsDBNull(16) ? NotificationRoute.DefaultAgentMaxPerDay : reader.GetInt32(16),
+            reader.IsDBNull(17) ? NotificationRoute.DefaultAgentLeaseMinutes : reader.GetInt32(17),
+            reader.IsDBNull(18) ? NotificationRoute.DefaultAgentExpiryMinutes : reader.GetInt32(18));
 
     private static async Task<List<Row>> ReadAllRowsAsync(DuckDBConnection connection, CancellationToken cancellationToken = default)
     {
@@ -567,7 +578,12 @@ public sealed class DuckDbNotificationRouteStore
         {
             ScopeServerId = row.ScopeServerId,
             ScopeTagId = row.ScopeTagId,
-            OffChannels = off.Count == 0 ? null : off
+            OffChannels = off.Count == 0 ? null : off,
+            AgentLevel = row.AgentLevel,
+            AgentMaxPerHour = row.AgentMaxPerHour,
+            AgentMaxPerDay = row.AgentMaxPerDay,
+            AgentLeaseMinutes = row.AgentLeaseMinutes,
+            AgentExpiryMinutes = row.AgentExpiryMinutes
         };
     }
 
@@ -590,6 +606,17 @@ public sealed class DuckDbNotificationRouteStore
             throw new ArgumentException("The every-metric match ('*') needs a server or tag scope; a fleet-wide route must name a metric or family.", nameof(route));
         }
 
+        /* #5820: the bounds of Darling's V184 CHECK, said in words before the statement runs. */
+        if (route.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate))
+        {
+            throw new ArgumentException("The agent channel is Inherit, Off or Investigate.", nameof(route));
+        }
+
+        CheckAgentLimit("Requests per hour", route.AgentMaxPerHour, NotificationRoute.MinAgentMaxPerHour, NotificationRoute.MaxAgentMaxPerHour);
+        CheckAgentLimit("Requests per day", route.AgentMaxPerDay, NotificationRoute.MinAgentMaxPerDay, NotificationRoute.MaxAgentMaxPerDay);
+        CheckAgentLimit("Lease minutes", route.AgentLeaseMinutes, NotificationRoute.MinAgentLeaseMinutes, NotificationRoute.MaxAgentLeaseMinutes);
+        CheckAgentLimit("Expiry minutes", route.AgentExpiryMinutes, NotificationRoute.MinAgentExpiryMinutes, NotificationRoute.MaxAgentExpiryMinutes);
+
         return route with
         {
             MetricMatch = match,
@@ -600,6 +627,15 @@ public sealed class DuckDbNotificationRouteStore
             SmtpRecipients = (route.SmtpRecipients ?? "").Trim()
         };
     }
+
+    private static void CheckAgentLimit(string name, int value, int min, int max)
+    {
+        if (value < min || value > max)
+        {
+            throw new ArgumentException(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{name} must be from {min} to {max}."));
+        }
+    }
+
     private static readonly IReadOnlySet<string> NoChannels = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>What a save does with one channel (#5775). <see cref="Gen"/> is the generation the row will hold, null when the
@@ -718,7 +754,9 @@ public sealed class DuckDbNotificationRouteStore
     private static bool RowHolds(Row row, NotificationRoute r, List<ChannelPlan> plans)
     {
         if (row.MetricMatch != r.MetricMatch || row.ScopeServerId != r.ScopeServerId || row.ScopeTagId != r.ScopeTagId
-            || row.SmtpRecipients != r.SmtpRecipients || row.Enabled != r.Enabled)
+            || row.SmtpRecipients != r.SmtpRecipients || row.Enabled != r.Enabled
+            || row.AgentLevel != r.AgentLevel || row.AgentMaxPerHour != r.AgentMaxPerHour || row.AgentMaxPerDay != r.AgentMaxPerDay
+            || row.AgentLeaseMinutes != r.AgentLeaseMinutes || row.AgentExpiryMinutes != r.AgentExpiryMinutes)
         {
             return false;
         }
@@ -751,6 +789,12 @@ public sealed class DuckDbNotificationRouteStore
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = (object?)plan.Gen ?? DBNull.Value });
         }
+
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)r.AgentLevel ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = r.AgentMaxPerHour });
+        cmd.Parameters.Add(new DuckDBParameter { Value = r.AgentMaxPerDay });
+        cmd.Parameters.Add(new DuckDBParameter { Value = r.AgentLeaseMinutes });
+        cmd.Parameters.Add(new DuckDBParameter { Value = r.AgentExpiryMinutes });
     }
 
     /// <summary>Deletes keys one by one; a key that will not go is counted, not thrown. One warning names the channels (never a

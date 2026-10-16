@@ -437,17 +437,25 @@ public sealed class McpAlertTools
         "and are NOT reported: configured_channels lists which channels each route sets, by name; smtp_recipients is " +
         "reported because an address list is not a secret. modified_at_utc is null in Lite, which does not stamp a " +
         "route's last change. Routes are authored in Settings > Manage Notification Routes; here they can be disabled " +
-        "or deleted (set_notification_route_enabled / delete_notification_route, served when mcp_allow_writes is true).")]
+        "or deleted (set_notification_route_enabled / delete_notification_route, served when mcp_allow_writes is true). " +
+        "agent_level says whether a matching alert opens an investigation request for an agent (null inherits from a less " +
+        "specific route, 0 is off and stops the lookup, 1 investigates, within agent_max_per_hour and agent_max_per_day); it " +
+        "never changes a destination. agent_requests_last_hour and agent_requests_last_day count the requests the route " +
+        "opened, and are null (agent_use_read false) when they could not be read. A route with agent_level 1 is changed only in " +
+        "Settings: the two write tools refuse it.")]
     public static async Task<string> GetNotificationRoutes(
         LocalDataService dataService,
-        ServerManager serverManager)
+        ServerManager serverManager,
+        IInvestigationRequestStore investigationStore)
     {
+        /* #5820: the host registers the one investigation store (McpHostService), so the tool takes it directly. */
         try
         {
             return await ReadNotificationRoutesAsync(
                 CreateRouteStore(dataService, serverManager),
                 serverManager.GetAllServers(),
-                await dataService.GetServerTagsAsync());
+                await dataService.GetServerTagsAsync(),
+                investigationStore);
         }
         catch (Exception ex)
         {
@@ -465,9 +473,11 @@ public sealed class McpAlertTools
     internal static async Task<string> ReadNotificationRoutesAsync(
         DuckDbNotificationRouteStore store,
         IReadOnlyCollection<ServerConnection> servers,
-        IReadOnlyCollection<ServerTag> tags)
+        IReadOnlyCollection<ServerTag> tags,
+        IInvestigationRequestStore requests)
     {
         var routes = await store.ListAsync();
+        var agentUse = await ReadAgentUseAsync(requests);
 
         var serverNames = ServerNames(servers);
         var tagNames = tags.ToDictionary(t => t.Id, t => t.Name);
@@ -489,11 +499,30 @@ public sealed class McpAlertTools
             resolution_within_a_scope = new[] { "exact metric", "family", "* (scoped routes only)" },
             route_count = routes.Count,
             enabled_route_count = routes.Count(r => r.Enabled),
-            routes = routes.Select(r => RoutePayload(r, serverNames, tagNames)),
+            routes = routes.Select(r => RoutePayload(r, serverNames, tagNames, agentUse)),
+            /* #5820: false when the investigation request counts could not be read (the store's read failed); agent_requests_* are
+               then null. */
+            agent_use_read = agentUse is not null,
         }, McpHelpers.JsonOptions);
     }
 
-    internal static object RoutePayload(NotificationRoute r, IReadOnlyDictionary<int, string> serverNames, IReadOnlyDictionary<int, string> tagNames)
+    /// <summary>Each route's investigation requests in the last hour and day (#5820), or null when the store's read fails: the
+    /// route list is still answered, with the use unknown.</summary>
+    private static async Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>?> ReadAgentUseAsync(IInvestigationRequestStore requests)
+    {
+        try
+        {
+            return await requests.RouteUseAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    internal static object RoutePayload(
+        NotificationRoute r, IReadOnlyDictionary<int, string> serverNames, IReadOnlyDictionary<int, string> tagNames,
+        IReadOnlyDictionary<int, (int LastHour, int LastDay)>? agentUse = null)
     {
         /* Channel names, in Darling's order. A channel saved but unreadable (off) is still configured. */
         var channels = new List<string>();
@@ -528,8 +557,28 @@ public sealed class McpAlertTools
             expanded_server_count = r.IsScoped && !r.ScopeUnexpanded ? r.ExpandedServerIds?.Count ?? 0 : (int?)null,
             orphaned = r.Orphaned,
             scope_unreadable = r.ScopeUnexpanded,
+            /* #5820: the agent channel, the same five settings as Darling. agent_level null inherits, 0 is off and stops the lookup,
+               1 opens investigation requests; the limits apply only where the level is 1. */
+            agent_level = r.AgentLevel,
+            agent_max_per_hour = r.AgentMaxPerHour,
+            agent_max_per_day = r.AgentMaxPerDay,
+            agent_lease_minutes = r.AgentLeaseMinutes,
+            agent_expiry_minutes = r.AgentExpiryMinutes,
+            agent_requests_last_hour = agentUse is null ? (int?)null : agentUse.TryGetValue(r.RouteId, out var hourUse) ? hourUse.LastHour : 0,
+            agent_requests_last_day = agentUse is null ? (int?)null : agentUse.TryGetValue(r.RouteId, out var dayUse) ? dayUse.LastDay : 0,
         };
     }
+
+    /// <summary>The refusal for an agent route (#5820): a route whose agent_level is 1 or more decides which alerts open
+    /// investigation requests, and the agent tools are served over this same listener, so it is changed only by a person in Settings.
+    /// Null for any other route, including agent_level 0: that is the route's explicit Off (null inherits, 0 is off, 1 investigates),
+    /// so it opens no investigation and is an ordinary route to enable, disable or delete.</summary>
+    internal static string? AgentRouteRefusal(NotificationRoute route, string tool) =>
+        route.AgentLevel is null or < 1
+            ? null
+            : McpHelpers.Status("refused",
+                $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +
+                "Change it in Settings > Manage Notification Routes.");
 
     [McpServerTool(Name = "set_notification_route_enabled"), Description(
         "Enables or disables a notification route by route_id, WITHOUT deleting it. Changes shared alert configuration the service delivers on: a disabled route is skipped at resolution as if it did not exist, so its alerts fall to the next level (family route, then parent channels). Reversible: re-enabling restores it exactly. Returns updated (route as stored), unchanged (already that value, safe to retry), or not_found. Cannot author or re-point a route; that is Settings-window only.<<GUIDE>>" +
@@ -575,6 +624,11 @@ public sealed class McpAlertTools
             if (existing is null)
             {
                 return McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            if (AgentRouteRefusal(existing, "set_notification_route_enabled") is { } agentRefusal)
+            {
+                return agentRefusal;
             }
 
             if (existing.Enabled == enabled)
@@ -624,6 +678,11 @@ public sealed class McpAlertTools
     {
         try
         {
+            if (await store.GetAsync(route_id) is { } existing && AgentRouteRefusal(existing, "delete_notification_route") is { } agentRefusal)
+            {
+                return agentRefusal;
+            }
+
             return await store.DeleteAsync(route_id)
                 ? JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions)
                 : McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
