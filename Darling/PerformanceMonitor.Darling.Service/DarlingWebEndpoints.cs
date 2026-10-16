@@ -625,6 +625,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
         MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger);
+        MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapServerTags(app, postgres, logger);
         MapAdminServers(app, postgres);
         MapServers(app, postgres, logger);
@@ -1252,6 +1253,190 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     internal static JsonObject NoteDecisionBody(string status, long noteId, string decidedBy) =>
         new() { ["status"] = status, ["note_id"] = noteId, ["decided_by"] = decidedBy };
+
+    /* ─────────────────────── #5917 agent changes: the list, one-click undo and the switch ─────────────────────── */
+
+    /// <summary>The 403 sentence an undo or a switch answers when the store refuses the write for privilege (SQLSTATE 42501): the web host
+    /// runs on whatever login <c>postgres.webConnectionString</c> names, the <c>viewer</c> role on a managed or compose store (#5917).</summary>
+    internal const string AgentChangeRefusedMessage =
+        "This dashboard signs in to the store as the viewer role, so it cannot undo or switch off agent changes. "
+        + "Use the Viewer app, or run the web under the admin login.";
+
+    /// <summary>The 403 a refused undo or switch answers: the fixed <see cref="AgentChangeRefusedMessage"/> sentence in the error envelope.</summary>
+    private static IResult AgentChangeRefusedResult() =>
+        ErrorResult(AgentChangeRefusedMessage, StatusCodes.Status403Forbidden);
+
+    /// <summary>
+    /// The Agent changes routes (#5917): <c>GET /api/agent-changes</c> lists the calls (with their result, or "unknown"), the refusals,
+    /// the switch and <c>can_decide</c> (false under the viewer role: the page then lists only); <c>GET /api/agent-changes/{id}/muted-alerts</c>
+    /// lists the alerts muted since a mute change; <c>PUT /api/agent-changes/{id}/undo</c> undoes one change and <c>PUT /api/agent-changes/switch</c>
+    /// turns every agent change on or off. The writes need <c>application/json</c>, are gated by the host's write gate, answer 403 with
+    /// <see cref="AgentChangeRefusedMessage"/> when the store refuses for privilege, 404 when the call is not in the journal, 409 with the
+    /// refusal ("changed since", name taken, already undone, no undo) and 400 for a bad body or login. Journal text goes through
+    /// <c>InvestigationFieldMasking.JournalDetail</c> at the web's level (full, as the other web reads of the journal).
+    /// </summary>
+    private static void MapAgentChanges(WebApplication app, AgentChangeUndo changes, ILogger logger)
+    {
+        app.MapGet("/api/agent-changes", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var read = await changes.ReadAsync(AgentChangesLimit, context.RequestAborted);
+                var canDecide = await changes.CanDecideAsync(context.RequestAborted);
+                return DarlingWebStatementSweep.JsonText(
+                    AgentChangesBody(read, canDecide, DateTime.UtcNow), "/api/agent-changes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/agent-changes", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapGet("/api/agent-changes/{id:long}/muted-alerts", async (HttpContext context, long id) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var alerts = await changes.ReadMutedAlertsAsync(id, 200, context.RequestAborted);
+                var array = new JsonArray();
+                foreach (var a in alerts)
+                {
+                    array.Add(new JsonObject
+                    {
+                        ["alert_time_utc"] = a.AlertTimeUtc.ToString("o", CultureInfo.InvariantCulture), ["server_id"] = a.ServerId,
+                        ["server_name"] = a.ServerName, ["metric_name"] = a.MetricName, ["current_value"] = a.CurrentValue, ["threshold_value"] = a.ThresholdValue,
+                    });
+                }
+
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["alerts_returned"] = array.Count, ["alerts"] = array },
+                    "/api/agent-changes/{id}/muted-alerts", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/agent-changes/{id}/muted-alerts", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/agent-changes/{id:long}/undo", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var login = NoteDecider(DarlingWebSeat.FromContext(context));
+            try
+            {
+                var result = await changes.UndoAsync(id, login, context.RequestAborted);
+                if (result.Undone)
+                {
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["status"] = "undone", ["called_id"] = id, ["undone_by"] = AgentChangeUndo.PersonActor(login), ["message"] = result.Message },
+                        "/api/agent-changes/{id}/undo", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = result.Message, ["code"] = result.Code },
+                    "/api/agent-changes/{id}/undo", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted,
+                    result.Code == "not_found" ? StatusCodes.Status404NotFound : StatusCodes.Status409Conflict);
+            }
+            catch (ArgumentException)
+            {
+                return ErrorResult("The signed-in name cannot be recorded as the person who undid this change.", StatusCodes.Status400BadRequest);
+            }
+            catch (Exception ex) when (IsInsufficientPrivilege(ex))
+            {
+                return AgentChangeRefusedResult();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/agent-changes/{id}/undo", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/agent-changes/switch", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var login = NoteDecider(DarlingWebSeat.FromContext(context));
+            try
+            {
+                if (JsonNode.Parse(await ReadBodyAsync(context)) is not JsonObject body || body["enabled"] is not JsonValue flag || !flag.TryGetValue(out bool enabled))
+                {
+                    return ErrorResult("Send {\"enabled\": true} or {\"enabled\": false}.", StatusCodes.Status400BadRequest);
+                }
+
+                await changes.SetEnabledAsync(enabled, login, context.RequestAborted);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["status"] = enabled ? "on" : "off", ["enabled"] = enabled },
+                    "/api/agent-changes/switch", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is JsonException or ArgumentException)
+            {
+                return ErrorResult("The request body is not valid, or the signed-in name cannot be recorded.", StatusCodes.Status400BadRequest);
+            }
+            catch (Exception ex) when (IsInsufficientPrivilege(ex))
+            {
+                return AgentChangeRefusedResult();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/agent-changes/switch", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    /// <summary>The most calls and refusals the Agent changes list answers.</summary>
+    internal const int AgentChangesLimit = 200;
+
+    /// <summary>The list body: <c>{enabled, can_decide, changes: [{called_id, called_at_utc, request_id, server_id, actor, reason, tool, kind, detail,
+    /// result (done, failed or unknown), result_detail, undone_at_utc, undone_by, muted_alerts, can_undo}], refusals: [...]}</c>. A call with no
+    /// result row is <c>unknown</c>. <c>detail</c> goes through the journal masking helper at the web's level.</summary>
+    internal static JsonObject AgentChangesBody(AgentChangesRead read, bool canDecide, DateTime nowUtc)
+    {
+        var masker = McpDataDetailMasker.ForAnswer(McpDataDetail.Full);
+        var calls = new JsonArray();
+        foreach (var c in read.Changes)
+        {
+            calls.Add(new JsonObject
+            {
+                ["called_id"] = c.CalledId,
+                ["called_at_utc"] = c.CalledAtUtc.ToString("o", CultureInfo.InvariantCulture),
+                ["request_id"] = c.RequestId?.ToString(),
+                ["server_id"] = c.ServerId,
+                ["actor"] = c.Actor,
+                ["reason"] = c.Reason,
+                ["tool"] = c.Tool,
+                ["kind"] = c.Kind,
+                ["detail"] = InvestigationFieldMasking.JournalDetail(c.DetailJson, masker),
+                ["result"] = c.Result.ToString().ToLowerInvariant(),
+                ["result_detail"] = c.ResultJson is null ? null : InvestigationFieldMasking.JournalDetail(c.ResultJson, masker),
+                ["undone_at_utc"] = c.UndoneAtUtc?.ToString("o", CultureInfo.InvariantCulture),
+                ["undone_by"] = c.UndoneBy,
+                ["muted_alerts"] = c.MutedAlerts,
+                ["can_undo"] = c.CanTryUndo(nowUtc),
+            });
+        }
+
+        var refusals = new JsonArray();
+        foreach (var r in read.Refusals)
+        {
+            refusals.Add(new JsonObject
+            {
+                ["journal_id"] = r.JournalId, ["at_utc"] = r.AtUtc.ToString("o", CultureInfo.InvariantCulture), ["request_id"] = r.RequestId?.ToString(),
+                ["server_id"] = r.ServerId, ["actor"] = r.Actor, ["code"] = r.Code, ["tool"] = r.Tool,
+            });
+        }
+
+        return new JsonObject { ["enabled"] = read.Enabled, ["can_decide"] = canDecide, ["changes"] = calls, ["refusals"] = refusals };
+    }
 
     /// <summary>
     /// The mute-rule WRITE surface (#3450): create / update / set-enabled / delete, the web twins of the four

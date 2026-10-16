@@ -244,6 +244,16 @@ LIMIT $4";
     private async Task<AgentChangeRow?> ReadAsync(NpgsqlConnection connection, long calledId, CancellationToken cancellationToken) =>
         (await ReadChangesAsync(connection, DateTime.UnixEpoch, 1, calledId, cancellationToken)).SingleOrDefault();
 
+    /// <summary>True when this store login may undo and switch (it can write the journal and the service row: the admin role). The viewer
+    /// role on a managed or compose store cannot, so the web lists only.</summary>
+    public async Task<bool> CanDecideAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null,
+            "SELECT has_table_privilege(current_user, 'config.investigation_journal', 'INSERT') AND has_table_privilege(current_user, 'config.config_service', 'UPDATE')");
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
     /// <summary>The switch. A store with no <c>config_service</c> row reads as on, its default.</summary>
     public async Task<bool> ReadEnabledAsync(CancellationToken cancellationToken = default)
     {
@@ -280,7 +290,7 @@ ON CONFLICT (id) DO UPDATE SET agent_actions_enabled = EXCLUDED.agent_actions_en
 
     /// <summary>
     /// Undoes the change the <c>action_called</c> row <paramref name="calledId"/> made, as <paramref name="login"/>. One transaction
-    /// that locks the call's journal row (a second click waits, then sees <c>already_undone</c>), reads the target
+    /// that takes an advisory lock on the call (a second click waits, then sees <c>already_undone</c>), reads the target
     /// <c>FOR UPDATE</c>, compares and restores. Never throws for a refusal.
     /// </summary>
     public async Task<AgentUndoResult> UndoAsync(long calledId, string login, CancellationToken cancellationToken = default)
@@ -293,9 +303,16 @@ ON CONFLICT (id) DO UPDATE SET agent_actions_enabled = EXCLUDED.agent_actions_en
         Guid? requestId;
         int? serverId;
         DateTime calledAt;
+        /* The journal is append-only (the admin role may INSERT but not UPDATE it), so a second click waits on a transaction-scoped
+           advisory lock on the call's id instead of a row lock, then finds the first click's action_undone row. */
+        await using (var lockCommand = Command(connection, transaction, "SELECT pg_advisory_xact_lock($1)", P(calledId)))
+        {
+            await lockCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using (var command = Command(connection, transaction, @"
 SELECT detail::text, request_id, server_id, event_time FROM config.investigation_journal
-WHERE journal_id = $1 AND event = 'action_called' FOR UPDATE", P(calledId)))
+WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             if (!await reader.ReadAsync(cancellationToken))
