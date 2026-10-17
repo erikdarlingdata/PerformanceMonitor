@@ -176,6 +176,8 @@ public partial class ServerTab : UserControl
     public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, bool isAwsRds = false)
     {
         InitializeComponent();
+        QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
+        QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();
 
         _server = server;

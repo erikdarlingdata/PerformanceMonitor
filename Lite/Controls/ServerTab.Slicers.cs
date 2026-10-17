@@ -147,7 +147,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter));
+            var queryStats = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter, tags: tags)));
             _queryStatsFilterMgr!.UpdateData(queryStats);
             /* #4284: the comparison reads UTC collection_time directly, with no offset conversion of its own
                (same as the banner below), so it takes e.StartUtc/e.EndUtc -- the same pair the grid read above takes. */
@@ -190,7 +190,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var qsData = await Task.Run(() => _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
+            var qsData = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, SelectedDatabaseFilter, tags: tags)));
             _queryStoreFilterMgr!.UpdateData(qsData);
             /* #4284: UTC comparison and banner bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
@@ -232,7 +232,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter));
+            var procStats = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter, tags: tags)));
             _procStatsFilterMgr!.UpdateData(procStats);
             /* #4284: UTC comparison and banner bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);

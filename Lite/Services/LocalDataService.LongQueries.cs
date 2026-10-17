@@ -38,24 +38,30 @@ public partial class LocalDataService
     /// 200 and be omitted entirely, while Darling's twin — ranked by duration in SQL — kept it. Same tool
     /// name, different truth per SKU. The tool now reads <see cref="GetSlowestLongQueryCompletionsAsync"/>.</para>
     /// </summary>
-    public async Task<List<LongQueryCompletionRow>> GetRecentLongQueryCompletionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<LongQueryCompletionRow>> GetRecentLongQueryCompletionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, QueryTagReadScope? tags = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        /* #5993: the query tag filter, on the raw rows before the newest-N cap. */
+        var tagValues = new List<object>();
+        if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
 
         command.CommandText = LongQueryCompletionsSelect + @"
 FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND collection_time <= $3" + dbClause, collectedFrom: "$2") + $@" AS ev
 ORDER BY event_time DESC
 LIMIT {LongQueryGridCap}";
+        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 4 + dbValues.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         return await ReadLongQueryCompletionsAsync(command);
     }
@@ -169,6 +175,12 @@ SELECT
 /// </summary>
 public class LongQueryCompletionRow
 {
+    /// <summary>#5993: the row's query tag as a path ("Parent / Child"), or null. Set from the map after the read; the grid shows it.</summary>
+    public string? QueryTag { get; set; }
+
+    /// <summary>#5993: the row carries a key the "Assign query tag..." menu item can bind.</summary>
+    public bool CanAssignQueryTag => Helpers.QueryTagGrid.TargetOf(this) != null;
+
     public DateTime CollectionTime { get; set; }
     public DateTime? EventTime { get; set; }
     public string EventType { get; set; } = "";

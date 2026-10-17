@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -69,7 +70,7 @@ public partial class ServerTab
         try
         {
             var task = Task.Run(() => SafeQueryAsync(() =>
-                _dataService.GetRecentLongQueryCompletionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
+                QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetRecentLongQueryCompletionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
             await task;
             _longQueryFilterMgr!.UpdateData(task.Result);
 

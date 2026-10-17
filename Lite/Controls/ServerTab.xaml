@@ -61,6 +61,22 @@
                           Visibility="{Binding PlacementTarget.DataContext.CanGetActualPlan, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}">
                     <MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon>
                 </MenuItem>
+                <Separator/>
+                <MenuItem Header="Assign _query tag..." Click="AssignQueryTag_Click"
+                          Visibility="{Binding PlacementTarget.DataContext.CanAssignQueryTag, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}"/>
+            </ContextMenu>
+
+            <!-- #5993: the plain copy menu plus "Assign query tag..." for the Long Queries grid. -->
+            <ContextMenu x:Key="DataGridTagContextMenu">
+                <MenuItem Header="Copy _Cell" Click="CopyCell_Click"/>
+                <MenuItem Header="Copy _Row" Click="CopyRow_Click"/>
+                <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click"/>
+                <MenuItem Header="Copy Repro _Script" Click="CopyReproScript_Click"/>
+                <Separator/>
+                <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click"/>
+                <Separator/>
+                <MenuItem Header="Assign _query tag..." Click="AssignQueryTag_Click"
+                          Visibility="{Binding PlacementTarget.DataContext.CanAssignQueryTag, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}"/>
             </ContextMenu>
 
             <!-- Context menu for Blocked Process Reports: separate Blocked/Blocking plan
@@ -166,6 +182,14 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <!-- #5993: the query tag filter for the Queries grids and the by-tag view. -->
+                    <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="11"/>
+                    <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,0" Padding="4,2" FontSize="11"
+                             
+                              DropDownOpened="QueryTagFilterCombo_DropDownOpened" SelectionChanged="QueryTagFilterCombo_SelectionChanged"
+                              ToolTip="Show only the Queries grids' rows with this tag (a parent shows its children), or only untagged rows. Applied before each grid's top-N cut."/>
+                    <Button Content="Use by tag" Click="ResourceUseByTagButton_Click" Padding="8,4" Margin="0,0,8,0"
+                            ToolTip="Resource use rolled up by query tag, one table per source."/>
                     <!-- #1319: per-server global database filter (display-only) -->
                     <Button x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
                             Padding="8,4" Margin="0,0,8,0"
@@ -498,6 +522,7 @@
                                       Sorting="QueryStatsGrid_Sorting"
                                       MouseDoubleClick="QueryStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -800,6 +825,7 @@
                                       Sorting="ProcedureStatsGrid_Sorting"
                                       MouseDoubleClick="ProcedureStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -1007,6 +1033,7 @@
                                       Sorting="QueryStoreGrid_Sorting"
                                       MouseDoubleClick="QueryStoreGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -3251,6 +3278,7 @@
                               CanUserSortColumns="True">
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow" BasedOn="{StaticResource GridRowStyle}">
+                                <Setter Property="ContextMenu" Value="{StaticResource DataGridTagContextMenu}"/>
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding IsAborted}" Value="True">
                                         <Setter Property="Background" Value="#33FF6B6B"/>
@@ -3262,6 +3290,7 @@
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
+                            <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                             <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="150" SortMemberPath="EventTime">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>

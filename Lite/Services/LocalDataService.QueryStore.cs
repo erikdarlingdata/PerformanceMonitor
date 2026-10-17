@@ -1233,6 +1233,12 @@ ORDER BY point_time";
 
 public class QueryStoreRow
 {
+    /// <summary>#5993: the row's query tag as a path ("Parent / Child"), or null. Set from the map after the read; the grid shows it.</summary>
+    public string? QueryTag { get; set; }
+
+    /// <summary>#5993: the row carries a key the "Assign query tag..." menu item can bind.</summary>
+    public bool CanAssignQueryTag => Helpers.QueryTagGrid.TargetOf(this) != null;
+
     /// <summary>Gates "Get Actual Plan (re-run)" — see <see cref="QuerySnapshotRow.CanGetActualPlan"/>.</summary>
     public bool CanGetActualPlan => !string.IsNullOrEmpty(QueryText);
 
