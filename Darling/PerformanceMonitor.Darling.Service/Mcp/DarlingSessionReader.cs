@@ -245,6 +245,7 @@ internal static class DarlingSessionReader
               AND h.session_id = w.session_id
             WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)
             {{DatabaseFilter.All.Clause("w.database_name", 5)}}
+            /*TAG:hash:w.query_hash*/
             AND   (NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)
             AND   ($7::text IS NULL OR upper(w.wait_type) IN (upper($7), upper($7) || ' '))
         )
@@ -310,13 +311,22 @@ internal static class DarlingSessionReader
     /// The same read over a SET of databases (#5245): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is
     /// every database, otherwise only the rows of the named databases are the population.
     /// </summary>
+    internal static Task<ActiveQueriesPage> GetActiveQueriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
+        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default) =>
+        GetActiveQueriesAsync(postgres, serverId, startUtc, endUtc, cap, databases, blockingOnly, waitType, tags: null, cancellationToken);
+
+    /// <summary>
+    /// The same read narrowed to a query tag (#5984): <paramref name="tags"/> keeps only snapshot rows whose <c>query_hash</c> carries the tag
+    /// (or a tag beneath it), or none. It sits in the population, with the database filter, so the cap and the population count both see it.
+    /// </summary>
     internal static async Task<ActiveQueriesPage> GetActiveQueriesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, bool blockingOnly, string? waitType, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         var rows = new List<ActiveQueryRow>();
         long populationCount = 0;
-        await using var command = postgres.CreateCommand(ActiveQueriesSql);
+        await using var command = postgres.CreateCommand(QueryTagReadJoin.Apply(ActiveQueriesSql, serverId, tags));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);

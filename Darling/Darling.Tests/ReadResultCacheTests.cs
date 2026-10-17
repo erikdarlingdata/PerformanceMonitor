@@ -205,6 +205,21 @@ public sealed class ReadCacheKeyTests
         Assert.NotEqual(expected, Key("{\"server_name\":\"b\"}"));
     }
 
+    /// <summary>#5984: two query reads that differ only in <c>tag</c> do not share a cached answer (the key takes every argument the caller sent).</summary>
+    [Fact]
+    public void TwoQueryReads_ThatDifferOnlyInTag_MakeDifferentKeys()
+    {
+        var clock = new TimerTimeProvider();
+        using var cache = new ReadResultCache(clock);
+        var ttl = TimeSpan.FromSeconds(15);
+        string Key(string json) => ReadCacheKey.ForMcp("get_top_queries_by_cpu", Args(json), null, false, 0, cache, ttl);
+
+        var untagged = Key("{\"hours_back\":24}");
+        Assert.NotEqual(untagged, Key("{\"hours_back\":24,\"tag\":\"Prod\"}"));
+        Assert.NotEqual(Key("{\"hours_back\":24,\"tag\":\"Prod\"}"), Key("{\"hours_back\":24,\"tag\":\"Batch\"}"));
+        Assert.Equal(Key("{\"hours_back\":24,\"tag\":\"Prod\"}"), Key("{\"tag\":\"Prod\",\"hours_back\":24}"));
+    }
+
     [Fact]
     public void TheGeneration_TheBucket_TheAnchor_AndGcf_MakeDifferentKeys()
     {

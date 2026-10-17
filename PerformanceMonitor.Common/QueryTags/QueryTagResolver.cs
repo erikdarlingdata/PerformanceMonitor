@@ -21,6 +21,9 @@ public enum QueryTagSource
     Rule = 3,
 }
 
+/// <summary>One step of <see cref="QueryTagResolver.Precedence"/>. <paramref name="LimitedToOneServer"/> is null for a rule.</summary>
+public sealed record QueryTagPrecedenceStep(int Rank, QueryTagSource Source, bool? LimitedToOneServer, string Description);
+
 /// <summary>
 /// The one tag a key gets, and why. <see cref="Source"/> says which step of the precedence chose it;
 /// <see cref="RuleId"/>, <see cref="MatchedField"/> and <see cref="MatchedValue"/> say which rule matched and
@@ -53,6 +56,26 @@ public sealed record QueryTagResolution(
 public static class QueryTagResolver
 {
     private const int MatchedValueCap = 200;
+
+    /// <summary>
+    /// #6020: the order <see cref="Resolve"/> tries, as data a tool can show. A hand assignment is tried for the
+    /// sighting's own server before the every-server one (<c>ScopedFirst</c>), hash before object, and rules last.
+    /// The tools read their <c>precedence</c> list and every <c>precedence_rank</c> from here instead of re-stating
+    /// the order (#3684); a behaviour test resolves each adjacent pair through <see cref="Resolve"/> so a step
+    /// moved in one place and not the other fails.
+    /// </summary>
+    public static IReadOnlyList<QueryTagPrecedenceStep> Precedence { get; } = new[]
+    {
+        new QueryTagPrecedenceStep(1, QueryTagSource.HandHash, true, "hand assignment by hash for the server"),
+        new QueryTagPrecedenceStep(2, QueryTagSource.HandHash, false, "hand assignment by hash for every server"),
+        new QueryTagPrecedenceStep(3, QueryTagSource.HandObject, true, "hand assignment by object for the server"),
+        new QueryTagPrecedenceStep(4, QueryTagSource.HandObject, false, "hand assignment by object for every server"),
+        new QueryTagPrecedenceStep(5, QueryTagSource.Rule, null, "rule, by priority then id"),
+    };
+
+    /// <summary>The <see cref="Precedence"/> rank of a hand assignment: its source and whether it is limited to one server.</summary>
+    public static int RankOfAssignment(QueryTagSource source, bool limitedToOneServer) =>
+        Precedence.First(step => step.Source == source && step.LimitedToOneServer == limitedToOneServer).Rank;
 
     /// <param name="serverId">The server the sightings came from.</param>
     /// <param name="sightings">Every sighting of the one key on that server.</param>
