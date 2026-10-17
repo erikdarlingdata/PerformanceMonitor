@@ -169,8 +169,8 @@ public class DuckDbSchemaTests : IDisposable
            the database-state alert's database_states collector + config_database_state_expected
            control table, the fleet-tag tables server_tags + server_tag_map (#2020 2b-i), and
            config_alert_persistence_state (#3282's built-in persistence-gate state, the twin of
-           Darling's config.alert_persistence_state), and the attention_events collector table (#5640, schema v68), and notification_routes (#5750, schema v69), and the six Level 1 investigation tables (#5820, schema v69), and the six query-tag tables (#5989, schema v70). */
-        Assert.Equal(69, tableCount);
+           Darling's config.alert_persistence_state), and the attention_events collector table (#5640, schema v68), and notification_routes (#5750, schema v69), and the six Level 1 investigation tables (#5820, schema v69), and the six query-tag tables (#5989, schema v70), and investigation_evidence (#6010, schema v72). */
+        Assert.Equal(70, tableCount);
     }
 
     [Fact]
