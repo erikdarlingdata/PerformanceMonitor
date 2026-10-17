@@ -192,7 +192,7 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
         Assert.Equal("procs", root.GetProperty("tag_filter").GetString());
         var rows = root.GetProperty("procedures").EnumerateArray().ToList();
         var only = Assert.Single(rows);
-        Assert.Equal("usp_Tagged", only.GetProperty("object_name").GetString());
+        Assert.EndsWith("usp_Tagged", only.GetProperty("full_name").GetString(), StringComparison.Ordinal);
         Assert.Equal("Procs", only.GetProperty("tag").GetString());
     }
 
