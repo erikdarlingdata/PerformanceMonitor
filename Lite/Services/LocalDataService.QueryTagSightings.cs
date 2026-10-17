@@ -44,7 +44,9 @@ LIMIT $3";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            /* The caller fields are stored NOT NULL DEFAULT '' (and database_name too from schema v71, #5990): '' means
+               "none", so it reads back as null before and after that step. */
+            string? Text(int i) => reader.IsDBNull(i) || reader.GetString(i).Length == 0 ? null : reader.GetString(i);
             rows.Add(new QueryTagSightingRow(
                 reader.GetInt32(0), reader.GetString(1), reader.GetString(2),
                 Text(3), Text(4), Text(5), Text(6), Text(7), Text(8), reader.GetDateTime(9)));

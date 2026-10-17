@@ -28,9 +28,7 @@ public sealed class McpInstructionsBudgetTests
        headroom, not a number set a few bytes above today's length: the tests below fail only when the text really
        crosses it. A change that needs more room either shortens something else or raises this number on purpose, in
        the same PR, with the reason. Never trim to land a few bytes under, and never raise it just to merge. */
-    private const int InstructionsBudget = 8_200;
-    /* #5991: raised from 8,000 on purpose. The census test requires the preamble to name every write tool, and the eight
-       query-tag writes add about 200 characters of names; nothing else grew. */
+    private const int InstructionsBudget = 8_000;
 
     [Fact]
     public void Instructions_AreWithinTheD2Budget()

@@ -41,6 +41,7 @@ public sealed class McpQueryTagTools
     internal const int MaxKeyPartLength = 256;
     internal const int MaxListedAssignments = 2000;
     internal const int MaxSamples = 25;
+    internal const int MaxHeldSamples = 5;
     internal const int MaxSightingRows = QueryTagLimits.MaxKeysPerServerPerPass;
     internal const int DefaultWindowHours = 168;
     internal const int MaxWindowHours = 8760;
@@ -407,6 +408,7 @@ public sealed class McpQueryTagTools
             {
                 var node = TagNode(snapshot, tag);
                 node["rule_count"] = snapshot.Rules.Count(r => r.TagId == tag.Id);
+                node["enabled_rule_count"] = snapshot.Rules.Count(r => r.TagId == tag.Id && r.Enabled);
                 var mine = snapshot.Assignments.Where(a => a.TagId == tag.Id).ToList();
                 node["assignment_count"] = mine.Count;
                 var assignments = new JsonArray();
@@ -431,11 +433,7 @@ public sealed class McpQueryTagTools
                 ["status"] = snapshot.Tags.Count == 0 ? "empty" : "ok",
                 ["tag_count"] = snapshot.Tags.Count,
                 ["tags"] = tags,
-                ["precedence"] = new JsonArray(
-                    "hand assignment by hash for the server",
-                    "hand assignment by hash for every server",
-                    "hand assignment by object",
-                    "rule, by priority then id"),
+                ["precedence"] = new JsonArray(QueryTagResolver.Precedence.Select(step => (JsonNode?)step.Description).ToArray()),
                 ["map"] = new JsonObject
                 {
                     ["rules_version"] = snapshot.State.RulesVersion,
@@ -653,7 +651,10 @@ public sealed class McpQueryTagTools
                 return UnknownServer(sid);
             }
 
-            var rows = await data.GetQueryTagSightingsAsync(serverId, windowHours, MaxSightingRows);
+            // One row more than the bound: the extra row is how a cut is observed (a window of exactly the bound is not cut).
+            var fetched = await data.GetQueryTagSightingsAsync(serverId, windowHours, MaxSightingRows + 1);
+            var truncated = fetched.Count > MaxSightingRows;
+            var rows = truncated ? CutAtKeyBoundary(fetched) : fetched;
             var assignments = (await data.GetQueryTagAssignmentsAsync()).Select(ToHandAssignment).ToList();
             var names = new TagNames(tags);
             var tagById = tags.ToDictionary(t => t.Id);
@@ -713,28 +714,45 @@ public sealed class McpQueryTagTools
                 held.Add(sample);
             }
 
-            var all = tagged.Concat(held).ToList();
+            // Held keys answer "why will this rule not take effect", so up to MaxHeldSamples slots are theirs when any key is held.
+            var taggedShown = Math.Min(tagged.Count, MaxSamples - Math.Min(held.Count, MaxHeldSamples));
+            var heldShown = Math.Min(held.Count, MaxSamples - taggedShown);
+            var samples = tagged.Take(taggedShown).Concat(held.Take(heldShown)).ToList();
+            var cutNote = truncated
+                ? string.Create(CultureInfo.InvariantCulture, $" The newest {MaxSightingRows:N0} sighting rows were read; the counts are of those rows.")
+                : string.Empty;
             return Serialize(new JsonObject
             {
-                ["status"] = keys == 0 ? "empty" : "ok",
-                ["message"] = keys == 0
+                ["status"] = keys == 0 && !truncated ? "empty" : "ok",
+                ["message"] = keys == 0 && !truncated
                     ? "No query sightings in the window, so there is nothing to test against. Sightings are recorded by the collectors as they see queries."
-                    : "Nothing was written. Saving the rule changes the tag map on the next map pass.",
+                    : "Nothing was written. Saving the rule changes the tag map on the next map pass." + cutNote,
                 ["draft"] = draft,
                 ["rule"] = ruleNode,
                 ["server_id"] = serverId,
                 ["window_hours"] = windowHours,
                 ["keys_examined"] = keys,
                 ["sightings_read"] = rows.Count,
-                ["sightings_truncated"] = rows.Count >= MaxSightingRows,
+                ["sightings_truncated"] = truncated,
                 ["keys_matched"] = matched,
                 ["would_tag"] = wouldTag,
                 ["held_by_hand_assignment"] = heldByAssignment,
                 ["held_by_higher_rule"] = heldByRule,
-                ["samples_truncated"] = all.Count > MaxSamples,
-                ["samples"] = new JsonArray(all.Take(MaxSamples).Select(s => (JsonNode?)s).ToArray()),
+                ["samples_truncated"] = tagged.Count + held.Count > MaxSamples,
+                ["samples"] = new JsonArray(samples.Select(s => (JsonNode?)s).ToArray()),
             });
         });
+
+    /// <summary>The first <see cref="MaxSightingRows"/> rows of a read that was cut, less every row of the key the cut landed in: that
+    /// key's older sightings were not read, so resolving it would judge it on a partial set. The rows come newest first.</summary>
+    private static List<QueryTagSightingRow> CutAtKeyBoundary(List<QueryTagSightingRow> fetched)
+    {
+        var edge = fetched[MaxSightingRows];
+        return fetched
+            .Take(MaxSightingRows)
+            .Where(r => !(r.ServerId == edge.ServerId && r.KeyKind == edge.KeyKind && r.Key == edge.Key))
+            .ToList();
+    }
 
     // ------------------------------------------------------------------ checks and mapping
 
@@ -763,10 +781,10 @@ public sealed class McpQueryTagTools
 
     private static bool SameKey(QueryTagAssignmentRow a, QueryTagKey key) =>
         a.Kind == key.Kind && a.ServerId == key.ServerId
-        && string.Equals(a.QueryHash ?? "", key.Hash ?? "", StringComparison.Ordinal)
-        && string.Equals(a.DatabaseName ?? "", key.Database ?? "", StringComparison.Ordinal)
-        && string.Equals(a.SchemaName ?? "", key.Schema ?? "", StringComparison.Ordinal)
-        && string.Equals(a.ObjectName ?? "", key.Name ?? "", StringComparison.Ordinal);
+        && string.Equals(a.QueryHash ?? "", key.Hash ?? "", StringComparison.OrdinalIgnoreCase)
+        && string.Equals((a.DatabaseName ?? "").ToLowerInvariant(), (key.Database ?? "").ToLowerInvariant(), StringComparison.Ordinal)
+        && string.Equals((a.SchemaName ?? "").ToLowerInvariant(), (key.Schema ?? "").ToLowerInvariant(), StringComparison.Ordinal)
+        && string.Equals((a.ObjectName ?? "").ToLowerInvariant(), (key.Name ?? "").ToLowerInvariant(), StringComparison.Ordinal);
 
     private static QueryTagKey? BuildKey(
         string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal)
@@ -779,12 +797,7 @@ public sealed class McpQueryTagTools
             return null;
         }
 
-        if (serverId is <= 0)
-        {
-            refusal = Refusal("invalid", "bad_server", "server_id is a positive whole number; omit it to cover every server.");
-            return null;
-        }
-
+        /* No sign test on server_id: ids are FNV hashes and half of them are negative. The registry decides (UnknownServer). */
         var hash = Clean(queryHash);
         var database = Clean(databaseName);
         var schema = Clean(schemaName);
@@ -812,7 +825,9 @@ public sealed class McpQueryTagTools
                 return null;
             }
 
-            return new QueryTagKey(KindHash, serverId, hash, null, null, null);
+            /* The resolver matches a hash ignoring case, so the key stores one spelling of it. A value that is not a hash
+               at all is kept as typed. */
+            return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
         }
 
         var missing = new[] { ("database_name", database), ("schema_name", schema), ("object_name", obj) }.Where(p => p.Item2 is null).Select(p => p.Item1).ToList();
@@ -1134,7 +1149,7 @@ public sealed class McpQueryTagTools
 
     // ------------------------------------------------------------------ output
 
-    private static async Task<string> GuardAsync(string tool, Func<Task<string>> body)
+    internal static async Task<string> GuardAsync(string tool, Func<Task<string>> body)
     {
         try
         {
@@ -1148,7 +1163,7 @@ public sealed class McpQueryTagTools
         {
             return McpHelpers.Status("unavailable", ex.Message);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(tool, ex);
         }
@@ -1267,7 +1282,7 @@ public sealed class McpQueryTagTools
         if (withPrecedence)
         {
             node["source"] = a.Kind == KindHash ? "hand_hash" : "hand_object";
-            node["precedence_rank"] = a.Kind == KindHash ? (a.ServerId is null ? 2 : 1) : 3;
+            node["precedence_rank"] = QueryTagResolver.RankOfAssignment(a.Kind == KindHash ? QueryTagSource.HandHash : QueryTagSource.HandObject, a.ServerId is not null);
             node["beats_rules"] = true;
         }
 

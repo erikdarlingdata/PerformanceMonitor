@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
@@ -131,5 +132,97 @@ public sealed class McpQueryTagToolTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(3, result.GetProperty("keys_examined").GetInt32());
         Assert.Equal(2, result.GetProperty("keys_matched").GetInt32());
         Assert.Equal(2, result.GetProperty("would_tag").GetInt32());
+    }
+
+    [Fact]
+    public async Task Assign_ToANegativeServerId_IsJudgedByTheRegistry_NotBySign()
+    {
+        var tagId = await _data.CreateQueryTagAsync("Reports", null);
+
+        var known = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [-12345], tagId, "hash", "0xAB", null, null, null, -12345, null));
+        var unknown = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [7], tagId, "hash", "0xCD", null, null, null, -12345, null));
+
+        Assert.Equal("assigned", known.GetProperty("status").GetString());
+        Assert.Equal(-12345, known.GetProperty("assignment").GetProperty("server_id").GetInt32());
+        Assert.Equal("not_found", unknown.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Assign_ACaseTwinOfAnExistingKey_MovesIt_AndStoresTheCanonicalHash()
+    {
+        var first = await _data.CreateQueryTagAsync("First", null);
+        var second = await _data.CreateQueryTagAsync("Second", null);
+        await McpQueryTagTools.AssignQueryTagCore(_data, [], first, "hash", "0xabcdef", null, null, null, null, null);
+        var movedHash = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [], second, "hash", "0xABCDEF", null, null, null, null, null));
+
+        await McpQueryTagTools.AssignQueryTagCore(_data, [], first, "object", null, "Sales", "dbo", "Orders", null, null);
+        var movedObject = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [], second, "object", null, "SALES", "DBO", "orders", null, null));
+
+        Assert.Equal("moved", movedHash.GetProperty("status").GetString());
+        Assert.Equal("moved", movedObject.GetProperty("status").GetString());
+        var stored = await _data.GetQueryTagAssignmentsAsync();
+        Assert.Equal(2, stored.Count);
+        Assert.Contains(stored, a => a.QueryHash == "0xABCDEF");
+        Assert.Contains(stored, a => a.ObjectName == "Orders");
+    }
+
+    [Fact]
+    public async Task List_CarriesEnabledRuleCount_AndTheSharedPrecedenceRanks()
+    {
+        var tagId = await _data.CreateQueryTagAsync("Reports", null);
+        await McpQueryTagTools.CreateRuleCore(_data, [], "application", "Rep*", tagId, 100, true, null);
+        await McpQueryTagTools.CreateRuleCore(_data, [], "login", "bob", tagId, 100, false, null);
+        await McpQueryTagTools.AssignQueryTagCore(_data, [], tagId, "object", null, "Sales", "dbo", "Orders", null, null);
+
+        var listed = Parse(await McpQueryTagTools.ListQueryTagsCore(_data, []));
+
+        var tag = listed.GetProperty("tags")[0];
+        Assert.Equal(2, tag.GetProperty("rule_count").GetInt32());
+        Assert.Equal(1, tag.GetProperty("enabled_rule_count").GetInt32());
+        Assert.Equal(4, tag.GetProperty("assignments")[0].GetProperty("precedence_rank").GetInt32());
+        Assert.Equal(5, listed.GetProperty("precedence").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task ACancelledRequest_PropagatesInsteadOfAnErrorEnvelope()
+    {
+        using var cts = new System.Threading.CancellationTokenSource();
+        var tagId = await _data.CreateQueryTagAsync("Reports", null);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            McpQueryTagTools.GuardAsync("create_query_tag", () => Task.FromCanceled<string>(new System.Threading.CancellationToken(true))));
+        Assert.True(tagId > 0);
+    }
+
+    [Fact]
+    public async Task Sightings_ReadBackEmptyCallerFieldsAndDatabaseAsNull()
+    {
+        await ExecAsync(@"INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name) VALUES (1, 'hash', '0xA1', 'App')");
+
+        var rows = await _data.GetQueryTagSightingsAsync(null, 168, 10);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("App", row.ApplicationName);
+        Assert.Null(row.LoginName);
+        Assert.Null(row.HostName);
+        Assert.Null(row.DatabaseName);
+    }
+
+    [Fact]
+    public async Task TestRule_CutAtTheCap_SaysTruncated_ExactlyTheCapDoesNot()
+    {
+        var tagId = await _data.CreateQueryTagAsync("Reports", null);
+        var cap = McpQueryTagTools.MaxSightingRows;
+        await ExecAsync($@"INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name)
+            SELECT 1, 'hash', 'k' || i::VARCHAR, 'App' FROM range({cap}) t(i)");
+
+        var exact = Parse(await McpQueryTagTools.TestRuleCore(_data, [1], null, "application", "App", tagId, 100, null, 168));
+        await ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name) VALUES (1, 'hash', 'extra', 'App')");
+        var cut = Parse(await McpQueryTagTools.TestRuleCore(_data, [1], null, "application", "App", tagId, 100, null, 168));
+
+        Assert.False(exact.GetProperty("sightings_truncated").GetBoolean());
+        Assert.Equal(cap, exact.GetProperty("sightings_read").GetInt32());
+        Assert.True(cut.GetProperty("sightings_truncated").GetBoolean());
+        Assert.True(cut.GetProperty("sightings_read").GetInt32() <= cap);
+        Assert.Contains("counts are of those rows", cut.GetProperty("message").GetString());
     }
 }
