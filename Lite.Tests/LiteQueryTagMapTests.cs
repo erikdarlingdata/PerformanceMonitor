@@ -16,6 +16,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
