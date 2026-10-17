@@ -92,6 +92,7 @@ internal static class InvestigationToolContract
             P("links", "string?", "null", "Optional JSON array of at most 10 {kind, url, key}; https only. See the guide."),
             P("family_of", "string?", "null", "Optional. The request_id of the first report in this family; it must exist."),
             P("queries_run", "string?", "null", "Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + "."),
+            P("follow_up_at", "string?", "null", "Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + "."),
         },
     };
 

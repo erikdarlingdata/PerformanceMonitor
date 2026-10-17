@@ -307,11 +307,11 @@ public sealed class InvestigationDispatchCore
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(logger);
         var swept = await store.SweepAsync(cancellationToken);
-        if (swept.LeasesLapsed > 0 || swept.Expired > 0 || swept.Resolved > 0)
+        if (swept.LeasesLapsed > 0 || swept.Expired > 0 || swept.Resolved > 0 || swept.FollowUps > 0)
         {
             logger.LogInformation(
-                "Investigation sweep: {Lapsed} lapsed lease(s) journaled, {Expired} request(s) expired, {Resolved} request(s) resolved",
-                swept.LeasesLapsed, swept.Expired, swept.Resolved);
+                "Investigation sweep: {Lapsed} lapsed lease(s) journaled, {Expired} request(s) expired, {Resolved} request(s) resolved, {FollowUps} follow-up(s) opened",
+                swept.LeasesLapsed, swept.Expired, swept.Resolved, swept.FollowUps);
         }
 
         return swept;
