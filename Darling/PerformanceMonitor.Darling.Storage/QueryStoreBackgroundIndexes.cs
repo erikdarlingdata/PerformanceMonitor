@@ -19,7 +19,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// The Query Store read indexes that are built in the background after the service is up rather than by a
 /// migration rung (#4605's BRIN, #4952's, #5507's, #5807's and #5957's btrees), and the one piece of machinery they share: the state read,
-/// the build-or-skip decision, the invalid-leftover drop, the build and the delayed start.
+/// the build-or-skip decision, the invalid-leftover drop, the build and the delayed start. This step also builds the
+/// #6043 statement-text index: <c>collect.pg_statement_text</c> is a plain table, so a migration rung would build it
+/// with a write-blocking <c>CREATE INDEX</c>, and the same background step builds it <c>CONCURRENTLY</c> instead.
 ///
 /// <para><b>Why not a migration rung.</b> Migrations run in one transaction and block startup, and
 /// <c>CREATE INDEX CONCURRENTLY</c> cannot run inside a transaction (25001). A plain in-rung build would hold a lock
@@ -75,6 +77,9 @@ public static class QueryStoreBackgroundIndexes
 
     /// <summary>Name of the btree that lets the PLAN_REGRESSION drill-down seek its offenders on the latest table (#5957).</summary>
     public const string LatestDatabaseQueryFirstExecIndexName = "collect.ix_query_store_interval_latest_db_query_first_exec";
+
+    /// <summary>Name of the btree that lets the statement-text due check seek its server's newest row (#6043).</summary>
+    public const string StatementTextServerLastSeenIndexName = "collect.ix_pg_statement_text_server_last_seen";
 
     /// <summary>What the ensure does about one index.</summary>
     public enum IndexAction
@@ -235,6 +240,25 @@ public static class QueryStoreBackgroundIndexes
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_latest_db_query_first_exec;",
         IndexDefinition: "(server_id, database_name, query_id, first_execution_time)");
 
+    /// <summary>
+    /// A btree on <c>collect.pg_statement_text (server_id, last_seen)</c> (#6043), built <c>CONCURRENTLY</c> (a plain table).
+    ///
+    /// <para><b>Why.</b> <see cref="PgStatementText.IsDueSql"/> asks <c>max(last_seen) ... WHERE server_id = $1</c>. The only
+    /// index on <c>last_seen</c> (<c>idx_pg_statement_text_last_seen</c>) does not lead with <c>server_id</c>, so the planner
+    /// walked it backwards through every other server's newer rows: 19.7 million pages a day on a 50-server store, a 114 ms
+    /// mean and a 6.8 s worst case. With <c>server_id</c> first the max is the last entry of one server's range. The older
+    /// index stays: <c>PruneSql</c> reads by <c>last_seen</c> across all servers.</para>
+    ///
+    /// <para><b>Until it is built</b> the statement is unchanged and the planner keeps its old plan.</para>
+    /// </summary>
+    public static readonly IndexSpec StatementTextServerLastSeen = new(
+        StatementTextServerLastSeenIndexName,
+        "collect.pg_statement_text",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_pg_statement_text_server_last_seen "
+        + "ON collect.pg_statement_text (server_id, last_seen);",
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_pg_statement_text_server_last_seen;",
+        IndexDefinition: "(server_id, last_seen)");
+
     /// <summary>Every background index, in the order the one delayed task ensures them.</summary>
     public static readonly IReadOnlyList<IndexSpec> All = new[]
     {
@@ -243,6 +267,7 @@ public static class QueryStoreBackgroundIndexes
         LatestServerFirstExec,
         WideDatabaseQueryFirstExec,
         LatestDatabaseQueryFirstExec,
+        StatementTextServerLastSeen,
     };
 
     /* One read of everything the decision needs. The names are bound, never interpolated. */
