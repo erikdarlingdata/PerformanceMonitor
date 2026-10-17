@@ -1043,6 +1043,14 @@ public sealed class DarlingWorker : BackgroundService
        a best-effort errand and there is nothing in it that a later hour cannot do. */
     private Task? _oversizedPlanSweep;
 
+    /* #5985: the query-tag map step (QueryTagMapBuilder), on its own due stamp and tracked task like the oversized-plan
+       sweep above. Fleet-level: the builder iterates the listed servers itself and keeps its extend cursors in memory.
+       A pass still running when its next slot comes round makes that slot skip, so two passes never overlap. */
+    private DateTime _nextQueryTagMapPassUtc = DateTime.MinValue;
+    private Task? _queryTagMapPass;
+    private QueryTagMapBuilder? _queryTagMapBuilder;
+    private static readonly TimeSpan s_queryTagMapPassInterval = TimeSpan.FromMinutes(1);
+
     /* #5479: the in-flight per-server self-alert pass (Collection Stopped and the other store-polled self-alerts, and the
        custom-alert rules), fire-and-tracked from the sweep loop whether or not any collection body launches. One at a
        time: a pass still running at the next tick makes that tick skip, so a server is never evaluated by two threads. */
@@ -4089,6 +4097,25 @@ LIMIT 1";
 
                 _oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync(
                     postgres, backlogTargets, _logger, stoppingToken);
+            }
+
+            /* #5985: the query-tag map step. Rebuilds every listed server's map when a tag, assignment or rule changed
+               (rules_version ahead of built_version), otherwise extends it for the keys sighted since the last pass,
+               capped per server per pass. Fire-and-track like the sweep above: it only talks to the store, but a
+               rebuild over a large sighting history can run long and must not hold the launch loop. The builder is
+               failure-isolated per server and returns normally, so the task completes unobserved without a fault. */
+            if (StampIsDue(_nextQueryTagMapPassUtc, s_queryTagMapPassInterval, DateTime.UtcNow)
+                && (_queryTagMapPass is null || _queryTagMapPass.IsCompleted))
+            {
+                _nextQueryTagMapPassUtc = DateTime.UtcNow.Add(s_queryTagMapPassInterval);
+                var mapServerIds = new List<int>(sweepTargets.Length);
+                foreach (var target in sweepTargets)
+                {
+                    mapServerIds.Add(target.Config.ServerId);
+                }
+
+                _queryTagMapBuilder ??= new QueryTagMapBuilder(postgres, _logger);
+                _queryTagMapPass = _queryTagMapBuilder.RunPassAsync(mapServerIds, stoppingToken);
             }
 
             /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY
