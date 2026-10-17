@@ -16,7 +16,7 @@ namespace PerformanceMonitorLite.Mcp;
 /// the readers the Lite UI (#5993) calls too. Omit server_name for the all-servers view.
 /// </summary>
 [McpServerToolType]
-public sealed class McpQueryTagTools
+public sealed class McpQueryTagUsageTools
 {
     private const int DefaultLimit = 25;
     private const int MaxLimit = 200;
@@ -93,7 +93,7 @@ public sealed class McpQueryTagTools
 
             return JsonSerializer.Serialize(new
             {
-                scope = allServers ? "all_servers" : "server",
+                scope = allServers ? "fleet" : "server",
                 server = allServers ? null : scope[0].Name,
                 hours_back,
                 window_start = windowStart.ToString("o", CultureInfo.InvariantCulture),
