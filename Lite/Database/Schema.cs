@@ -296,7 +296,9 @@ CREATE TABLE IF NOT EXISTS query_tag_rules (
     CHECK (match_field = 'text_tag' OR tag_id IS NOT NULL)
 )";
 
-    /* The text_sample cap is the shared constant, so the table and the collectors cannot disagree. */
+    /* The text_sample cap is the shared constant, so the table and the collectors cannot disagree. One row per
+       (server_id, key_kind, key), as Darling's ux_query_tag_sightings_key: the sightings write (#5990) upserts on that key
+       (INSERT ... ON CONFLICT bumps seen_count), and DuckDB accepts ON CONFLICT only against a primary key or unique index. */
     public static readonly string CreateQueryTagSightingsTable = string.Create(System.Globalization.CultureInfo.InvariantCulture, $@"
 CREATE TABLE IF NOT EXISTS query_tag_sightings (
     server_id INTEGER NOT NULL,
@@ -311,6 +313,7 @@ CREATE TABLE IF NOT EXISTS query_tag_sightings (
     first_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
     last_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
     seen_count BIGINT NOT NULL DEFAULT 1,
+    PRIMARY KEY (server_id, key_kind, key),
     CHECK (key_kind IN ('hash', 'object', 'caller')),
     CHECK (text_sample IS NULL OR length(text_sample) <= {PerformanceMonitor.Common.QueryTags.QueryTagLimits.TextSampleCap}),
     CHECK (seen_count >= 1)

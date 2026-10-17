@@ -278,6 +278,22 @@ public sealed class LiteQueryTagStoreTests : IClassFixture<SharedDuckDbFixture>
             $"INSERT INTO query_tag_sightings (server_id, key_kind, key, text_sample) VALUES (1, 'hash', 'k2', '{new string('x', QueryTagLimits.TextSampleCap + 1)}')"));
     }
 
+    [Fact]
+    public async Task SightingsTable_KeepsOneRowPerKey_SoASecondSightingBumpsSeenCount()
+    {
+        /* The upsert the #5990 sightings write runs. Without a key on (server_id, key_kind, key) DuckDB refuses the
+           ON CONFLICT clause, and a plain insert would store the key twice. */
+        const string upsert = @"INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')
+ON CONFLICT (server_id, key_kind, key) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1";
+        await ExecAsync(upsert);
+        await ExecAsync(upsert);
+        await ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (2, 'hash', '0xAB'), (1, 'object', '0xAB')");
+
+        Assert.Equal(2L, await CountAsync("SELECT seen_count FROM query_tag_sightings WHERE server_id = 1 AND key_kind = 'hash' AND key = '0xAB'"));
+        Assert.Equal(3L, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings"));
+        await Assert.ThrowsAnyAsync<Exception>(() => ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')"));
+    }
+
     private async Task ExecAsync(string sql)
     {
         using var connection = _fixture.DuckDb.CreateConnection();
