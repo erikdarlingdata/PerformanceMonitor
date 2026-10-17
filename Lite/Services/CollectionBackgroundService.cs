@@ -845,14 +845,39 @@ public class CollectionBackgroundService : BackgroundService
             return;
         }
 
+        var data = new LocalDataService(_duckDb);
+        await RunDismissedAlertsPurgesAsync(
+            () => data.PurgeOldDismissedArchiveAlertsAsync(),
+            () => data.PurgeOldQueryTagSightingsAsync(),
+            () => _lastDismissedAlertsCleanupTime = DateTime.UtcNow,
+            _logger);
+    }
+
+    /// <summary>
+    /// The two daily purges, each in its own try so neither can skip the other or hold back the gate. The
+    /// dismissed-alerts gate advances as soon as that purge succeeds: a routine write-lock timeout in the
+    /// sightings purge (#5989) must not turn the daily sweep into a per-tick one.
+    /// </summary>
+    internal static async Task RunDismissedAlertsPurgesAsync(Func<Task> purgeDismissedAlerts, Func<Task> purgeSightings, Action advanceGate, ILogger? logger)
+    {
         try
         {
-            await new LocalDataService(_duckDb).PurgeOldDismissedArchiveAlertsAsync();
-            _lastDismissedAlertsCleanupTime = DateTime.UtcNow;
+            await purgeDismissedAlerts();
+            advanceGate();
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Dismissed-archive-alert cleanup failed");
+            logger?.LogError(ex, "Dismissed-archive-alert cleanup failed");
+        }
+
+        /* #5989: the query-tag sightings age out on the same daily tick; only they are aged, the tags, assignments and rules are configuration. */
+        try
+        {
+            await purgeSightings();
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Query-tag sightings cleanup failed");
         }
     }
 

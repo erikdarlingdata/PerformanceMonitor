@@ -166,6 +166,13 @@ public static class DarlingWebEndpoints
         "delete_server_tag",
         "assign_server_tag",
         "unassign_server_tag",
+        "create_query_tag_rule",
+        "update_query_tag_rule",
+        "delete_query_tag_rule",
+        /* #5982: the rule reads are MCP-only for now. test_query_tag_rule runs the shared resolver over up to 10,000 stored sightings,
+           which is no page read; the rules page (#5986) adds the web route it needs. */
+        "list_query_tag_rules",
+        "test_query_tag_rule",
         "run_collectors_now",
         "get_tool_guide",
         "wait_for_investigation_requests",

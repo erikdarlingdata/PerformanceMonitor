@@ -248,12 +248,34 @@ BEGIN
         ALTER TABLE config.investigation_requests ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level = 1);
     END IF;
 END $do$;"),
-        // /// V192 (#5977): the query-tag store, the probe's newest sentinel. Drops the tables, the trigger function and the cascade
+        // /// V192 (#5977): the query-tag store, the probe's newest sentinel until V193 (#5997) went on top of it. Drops the tables, the trigger function and the cascade
         // targets with them, so a re-run of V192 does everything again. Safe on a store that never had any of it.
         new(192, "hasQueryTagsStore",
             "DROP TABLE IF EXISTS config.query_tag_map, config.query_tag_state, config.query_tag_rules,"
             + " config.query_tag_assignments, config.query_tags, collect.query_tag_sightings;"
             + " DROP FUNCTION IF EXISTS config.query_tag_bump_rules_version()"),
+
+        // /// V193 (#5997): the Phase C store. Drops the evidence table (the probe's newest sentinel), the two signature tables and
+        // every column the rung added, so a re-run of V193 does everything again. Safe on a store that never had any of it.
+        new(193, "hasPhaseCStore",
+            @"
+DROP TABLE IF EXISTS config.investigation_evidence;
+DROP TABLE IF EXISTS config.investigation_signature_days;
+DROP TABLE IF EXISTS config.investigation_signature_merges;
+ALTER TABLE IF EXISTS config.investigation_journal
+    DROP COLUMN IF EXISTS event_id;
+ALTER TABLE IF EXISTS config.investigation_requests
+    DROP COLUMN IF EXISTS max_severity, DROP COLUMN IF EXISTS evidence_state, DROP COLUMN IF EXISTS follow_up_of,
+    DROP COLUMN IF EXISTS follow_up_at, DROP COLUMN IF EXISTS follow_up_condition;
+ALTER TABLE IF EXISTS config.investigation_reports
+    DROP COLUMN IF EXISTS family_of, DROP COLUMN IF EXISTS queries_run;
+ALTER TABLE IF EXISTS config.config_notification
+    DROP COLUMN IF EXISTS signing_key, DROP COLUMN IF EXISTS previous_signing_key, DROP COLUMN IF EXISTS previous_signing_key_until;
+ALTER TABLE IF EXISTS config.config_notification_routes
+    DROP COLUMN IF EXISTS signing_key, DROP COLUMN IF EXISTS previous_signing_key, DROP COLUMN IF EXISTS previous_signing_key_until,
+    DROP COLUMN IF EXISTS fallback_route_id;
+ALTER TABLE IF EXISTS collect.procedure_stats
+    DROP COLUMN IF EXISTS module_modify_date;"),
     ];
 
     /// <summary>

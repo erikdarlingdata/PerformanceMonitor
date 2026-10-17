@@ -234,6 +234,8 @@ public static class DarlingManagedRoles
                 /* V187 (#5825): whether each channel sends an alert's resolution. Behaviour, not a credential, the
                    same as pagerduty_auto_resolve above. */
                 "slack_send_resolutions", "teams_send_resolutions", "generic_send_resolutions", "email_send_resolutions",
+                /* V193 (#5997): when the previous webhook signing key stops being sent. A time, not the key. */
+                "previous_signing_key_until",
             },
             /* generic_headers carries the Authorization bearer token itself, and generic_url is a bearer
                secret like the sibling webhook URLs (#1506 / V26). pagerduty_routing_key is the Events API v2
@@ -242,6 +244,9 @@ public static class DarlingManagedRoles
             {
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
                 "generic_url", "generic_headers", "pagerduty_routing_key",
+                /* V193 (#5997): the sealed webhook signing key and the previous one kept for the 7-day overlap. Whoever holds
+                   a key can forge a signed send, so a read role never sees either. */
+                "signing_key", "previous_signing_key",
             }),
 
         /* V131 (#3598): the sparse notification-routes table mirrors the parent row's destination columns
@@ -259,8 +264,10 @@ public static class DarlingManagedRoles
                 "agent_expiry_minutes",
                 /* V187 (#5825): the route's override of the channels' "send resolutions" flags. Non-secret. */
                 "send_resolutions",
+                /* V193 (#5997): the fallback route (D8) and when the previous signing key stops being sent. Non-secret. */
+                "fallback_route_id", "previous_signing_key_until",
             },
-            SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" }),
+            SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" }),
     };
 
     /// <summary>
@@ -1767,6 +1774,22 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {mcp};
 GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
 GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
+
+-- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
+--     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
+--     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege
+--     from PUBLIC and the three roles, and SELECT goes back to all three: the web dashboard and the MCP tools read them.
+--     A later slice that lets a role write one adds that single grant here and in provision-roles.sql step 3l. The new
+--     columns on existing tables need no grant here: the investigation tables' grants are per table or name only the
+--     columns a role writes, and the notification tables' read carve is ViewerRestrictedConfigTables, which keeps the
+--     signing keys from viewer and mcp.
+--     It runs after every blanket grant above, and before 10a.
+REVOKE ALL ON {config}.investigation_evidence, {config}.investigation_signature_days, {config}.investigation_signature_merges
+   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_evidence, {config}.investigation_signature_days, {config}.investigation_signature_merges
+   TO {admin}, {viewer};
+GRANT SELECT ON {config}.investigation_evidence, {config}.investigation_signature_days, {config}.investigation_signature_merges
+   TO {mcp};
 
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
