@@ -44,7 +44,6 @@ internal sealed class QueryTagSightingBuffer
         public string Sample = sample;
         public long Count;
         public DateTime FirstSeen = now;
-        public DateTime LastSeen = now;
     }
 
     internal int Count
@@ -84,7 +83,6 @@ internal sealed class QueryTagSightingBuffer
                         }
 
                         entry.Count++;
-                        entry.LastSeen = now;
                     }
                 }
             }
@@ -103,6 +101,11 @@ internal sealed class QueryTagSightingBuffer
     internal void Flush(DuckDbInitializer duckDb, TimeSpan? lockBudget = null, CancellationToken cancellationToken = default)
     {
         if (Count == 0)
+        {
+            return;
+        }
+
+        if (SchemaHeldBack(duckDb))
         {
             return;
         }
@@ -137,12 +140,42 @@ internal sealed class QueryTagSightingBuffer
         }
     }
 
+    /// <summary>How many times the held-back-schema warning was logged by this buffer (it logs once).</summary>
+    internal int HeldBackWarningCount { get; private set; }
+
+    /// <summary>
+    /// While the v71 migration is held back (the old six-part table is still in place) the upsert cannot work. The buffered
+    /// entries are dropped and ONE warning is logged, not one per round; the next start retries the migration.
+    /// </summary>
+    internal bool SchemaHeldBack(DuckDbInitializer duckDb)
+    {
+        if (!duckDb.QueryTagSchemaHeldBack)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            _entries = new Dictionary<Identity, Entry>();
+            if (HeldBackWarningCount == 0)
+            {
+                HeldBackWarningCount++;
+                AppLogger.Warn("QueryTags", "The query-tag sightings table could not be upgraded (the schema is held back at v70); sightings are not recorded and the tag map is not built until the next start retries the upgrade");
+            }
+        }
+
+        return true;
+    }
+
     private static void WriteTaken(DuckDbInitializer duckDb, Dictionary<Identity, Entry> taken)
     {
         try
         {
             /* One order for every flush (the seven-part identity), as Darling sorts its rows; Lite's single writer under the
                write lock cannot deadlock, the sort keeps the two stores alike. */
+            /* last_seen is stamped HERE, at the write, from the C# UTC clock: the map pass captures its cursor clock from the
+               same clock (DateTime.UtcNow, plain TIMESTAMP), so a row kept by an earlier timed-out flush is never behind a cursor. */
+            var flushedAt = DateTime.UtcNow;
             var list = taken.OrderBy(e => e.Key.ServerId).ThenBy(e => e.Key.Kind)
                 .ThenBy(e => e.Key.Key, StringComparer.Ordinal).ThenBy(e => e.Key.Database, StringComparer.Ordinal)
                 .ThenBy(e => e.Key.App, StringComparer.Ordinal).ThenBy(e => e.Key.Login, StringComparer.Ordinal)
@@ -172,7 +205,7 @@ ON CONFLICT (server_id, key_kind, key, database_name, application_name, login_na
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Key.Host).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Value.Sample).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Value.FirstSeen).ToList() });
-            command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Value.LastSeen).ToList() });
+            command.Parameters.Add(new DuckDBParameter { Value = list.Select(_ => flushedAt).ToList() });
             command.Parameters.Add(new DuckDBParameter { Value = list.Select(e => e.Value.Count).ToList() });
             command.ExecuteNonQuery();
         }

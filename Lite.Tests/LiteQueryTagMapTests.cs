@@ -474,6 +474,74 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         });
     }
 
+    [Fact]
+    public async Task ARowKeptByAnEarlierFlush_IsStampedAtTheFlushThatWritesIt()
+    {
+        var buffer = new QueryTagSightingBuffer();
+        buffer.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA)], serverId: 7);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        var beforeFlush = DateTime.UtcNow;
+
+        buffer.Flush(_fixture.DuckDb);
+
+        Assert.Equal(1L, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}' AND last_seen >= TIMESTAMP '{beforeFlush:yyyy-MM-dd HH:mm:ss.ffffff}'"));
+    }
+
+    [Fact]
+    public async Task WhileTheV71MigrationIsHeldBack_TheFlushWritesNothing_AndWarnsOnce()
+    {
+        await WithV70Async(async dbPath =>
+        {
+            using var failing = new DuckDbInitializer(dbPath);
+            failing.BeforeV71SightingsDropForTests = () => throw new InvalidOperationException("drop failed");
+            await failing.InitializeAsync();
+            var buffer = new QueryTagSightingBuffer();
+
+            buffer.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA)], serverId: 7);
+            buffer.Flush(failing);
+            buffer.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashB)], serverId: 7);
+            buffer.Flush(failing);
+
+            Assert.Equal(0, buffer.Count);
+            Assert.Equal(1, buffer.HeldBackWarningCount);
+            Assert.Equal(1L, await ScalarAsync(dbPath, "SELECT COUNT(*) FROM query_tag_sightings"));
+        });
+    }
+
+    [Fact]
+    public async Task AResetAfterAHeldBackStart_StampsTheCurrentVersion()
+    {
+        await WithV70Async(async dbPath =>
+        {
+            using var failing = new DuckDbInitializer(dbPath);
+            failing.BeforeV71SightingsDropForTests = () => throw new InvalidOperationException("drop failed");
+            await failing.InitializeAsync();
+            Assert.Equal(70L, await ScalarAsync(dbPath, "SELECT MAX(version) FROM schema_version"));
+
+            await failing.ResetDatabaseAsync();
+
+            Assert.Equal((long)DuckDbInitializer.CurrentSchemaVersion, await ScalarAsync(dbPath, "SELECT MAX(version) FROM schema_version"));
+        });
+    }
+
+    [Fact]
+    public async Task AServerRemovedDuringAPass_HasNoMapRowsOnceTheNextPassRuns()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        Sight(Snapshot(HashA, "SELECT * FROM Orders"));
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors);
+
+        _service.AfterQueryTagMapReadForTests = () => _service.ClearQueryTagsForServerAsync(7).GetAwaiter().GetResult();
+        await _service.BuildQueryTagMapAsync(cursors);
+        _service.AfterQueryTagMapReadForTests = null;
+        var next = await _service.BuildQueryTagMapAsync(cursors);
+
+        Assert.True(next.Rebuilt);
+        Assert.Empty(await MapAsync());
+    }
+
     private async Task<string> ScalarTextAsync(string sql)
     {
         using var connection = _fixture.DuckDb.CreateConnection();
@@ -563,6 +631,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     {
         var servers = new ServerManager(System.IO.Path.GetTempPath());
         var service = new RemoteCollectorService(_fixture.DuckDb, servers, new ScheduleManager(System.IO.Path.GetTempPath()));
+        service.QueryTagSightingBufferForTests = new QueryTagSightingBuffer();
         service.QueryTagSightingBufferForTests.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA)], serverId: 7);
 
         service.FlushQueryTagSightingsAtShutdown(System.Threading.CancellationToken.None);

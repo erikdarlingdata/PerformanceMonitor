@@ -1366,10 +1366,10 @@ public partial class DuckDbInitializer : IDisposable
             /* On a fresh/reset database (v0), skip migrations entirely — they DROP tables
                expecting CREATE TABLE to follow, which is destructive on a blank DB.
                Just create tables with the current schema and stamp the version. */
+            _versionHeldBackAt = null;
             if (existingVersion > 0 && existingVersion < CurrentSchemaVersion)
             {
                 _logger?.LogInformation("Schema upgrade needed: v{Old} -> v{New}", existingVersion, CurrentSchemaVersion);
-                _versionHeldBackAt = null;
                 await RunMigrationsAsync(connection, existingVersion);
             }
 
@@ -3034,6 +3034,9 @@ public partial class DuckDbInitializer : IDisposable
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
        version instead of CurrentSchemaVersion. */
     private int? _versionHeldBackAt;
+
+    /// <summary>True while the v71 sightings migration is held back: the table still has the old six-part key.</summary>
+    internal bool QueryTagSchemaHeldBack => _versionHeldBackAt is not null;
 
     /* Test seams: run before the v71 DROP, and between it and the CREATE; a test throws from one to fail that statement. */
     internal Action? BeforeV71SightingsDropForTests { get; set; }

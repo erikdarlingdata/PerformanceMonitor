@@ -21,7 +21,14 @@ public partial class RemoteCollectorService
     /* Static: the definition runner is a static method, and the map pass is the only flusher. */
     private static readonly QueryTagSightingBuffer _queryTagSightings = new();
 
-    internal QueryTagSightingBuffer QueryTagSightingBufferForTests => _queryTagSightings;
+    /* Tests swap in their own buffer so a parallel class's collector run cannot flush their rows into another database. */
+    private QueryTagSightingBuffer? _queryTagSightingsOverride;
+
+    internal QueryTagSightingBuffer QueryTagSightingBufferForTests
+    {
+        get => _queryTagSightingsOverride ?? _queryTagSightings;
+        set => _queryTagSightingsOverride = value;
+    }
 
     /* The static batch writer cannot see the instance's store; the last constructed service names it for the overflow flush. */
     private static DuckDbInitializer? s_queryTagFlushDb;
@@ -37,7 +44,12 @@ public partial class RemoteCollectorService
             /* The cursors live in memory, per server, and only a pass that committed moves them (the pass updates the
                dictionary after its commit). A fresh process starts from the epoch. */
             /* The buffered sightings reach the store in one upsert, before the map reads them. */
-            _queryTagSightings.Flush(_duckDb, cancellationToken: cancellationToken);
+            var buffer = QueryTagSightingBufferForTests;
+            buffer.Flush(_duckDb, cancellationToken: cancellationToken);
+            if (buffer.SchemaHeldBack(_duckDb))
+            {
+                return;
+            }
 
             var result = await new LocalDataService(_duckDb).BuildQueryTagMapAsync(_queryTagMapCursors);
             if (result.KeysResolved > 0)
@@ -63,7 +75,12 @@ public partial class RemoteCollectorService
     {
         try
         {
-            _queryTagSightings.Flush(_duckDb, ShutdownFlushLimit, cancellationToken);
+            var buffer = QueryTagSightingBufferForTests;
+            buffer.Flush(_duckDb, ShutdownFlushLimit, cancellationToken);
+            if (buffer.Count > 0)
+            {
+                AppLogger.Warn("QueryTags", $"The shutdown query-tag sightings flush did not finish; {buffer.Count} buffered sightings are lost (derived data, re-sighted after the next start)");
+            }
         }
         catch (Exception ex)
         {
