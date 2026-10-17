@@ -24,13 +24,21 @@ public sealed class McpLongQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
+            /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
+            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            if (tagScope.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
+            }
+
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
@@ -49,7 +57,13 @@ public sealed class McpLongQueryTools
                before the duration ranking and the limit + 1 fetch, so the page is the slowest N of the chosen database. */
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1,
-                databaseNames: database == null ? null : new[] { database });
+                databaseNames: database == null ? null : new[] { database }, tags: tagScope);
+            if (rows.Count == 0 && tagScope.Active)
+            {
+                return McpHelpers.StatusForDatabase("empty",
+                    $"No long-running query completions in the specified time range carry query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the slowest-{limit} ranking.", database);
+            }
+
             if (rows.Count == 0)
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
@@ -115,7 +129,8 @@ public sealed class McpLongQueryTools
                     /* #5711: query_hash is NULL when the engine gave none (the trace's batch-level events carry 0); query_identity
                        is the key to group by: the real hash, else a fingerprint of the scrubbed statement text. */
                     query_hash = QueryHashIdentity.KnownHash(r.QueryHash),
-                    query_identity = r.McpQueryIdentity
+                    query_identity = r.McpQueryIdentity,
+                    tag = tagScope.TagOfHash(r.QueryHash)
                 });
 
             return JsonSerializer.Serialize(new

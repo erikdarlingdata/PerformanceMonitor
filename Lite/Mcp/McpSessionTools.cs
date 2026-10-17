@@ -27,7 +27,8 @@ public sealed class McpSessionTools
         [Description("Only rows waiting on this wait type at capture, e.g. PAGEIOLATCH_SH: exact name, any case. Applied in SQL. A head blocker on another wait is then off the page (blocker_not_shown = filtered).")] string? wait_type = null,
         [Description("Maximum number of rows to return. Default 25 (#4198, down from 50 — sized to fit the response budget). The page is bounded by limit, not hours_back — truncated says whether the window held more.")] int limit = DefaultLimit,
         [Description("Return each row's full query text instead of a 400-character preview. Default false.")] bool full_text = false,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -39,6 +40,13 @@ public sealed class McpSessionTools
 
         try
         {
+            /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
+            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            if (tagScope.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
+            }
+
             var filter = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
             /* #5235: the wait filter is trimmed the same way, so a blank is none and the echo below names the value that was applied. */
             var waitFilter = string.IsNullOrWhiteSpace(wait_type) ? null : wait_type.Trim();
@@ -47,7 +55,7 @@ public sealed class McpSessionTools
                the cap so truncation is OBSERVED on the filtered population; total_snapshots is that read's
                COUNT(*) OVER () of the same population. Darling's twin is DarlingSessionReader.ActiveQueriesSql. */
             var (rows, populationCount) = await dataService.GetActiveQueriesPageAsync(
-                resolved.ServerId, hours_back, limit + 1, filter, blocking_only, waitFilter, asOfUtc: windowEnd);
+                resolved.ServerId, hours_back, limit + 1, filter, blocking_only, waitFilter, asOfUtc: windowEnd, tags: tagScope);
 
             /* #4966: where this server's query_snapshots start for the window, beside the page cut below — the two
                are different facts: truncated says the window held more than limit, this says the store did not hold
@@ -64,7 +72,7 @@ public sealed class McpSessionTools
             if (rows.Count == 0)
             {
                 /* A filtered miss is not a collection miss — Darling's twin's words. */
-                if (filter != null || blocking_only || waitFilter != null)
+                if (filter != null || blocking_only || waitFilter != null || tagScope.Active)
                 {
                     return McpHelpers.Status(
                         "empty",
@@ -110,6 +118,7 @@ public sealed class McpSessionTools
                 login_name = r.LoginName,
                 host_name = r.HostName,
                 program_name = r.ProgramName,
+                tag = tagScope.TagOfHash(r.QueryHash),
                 query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, QueryTextPreviewLength),
                 query_text_truncated = !full_text && (r.QueryText?.Length ?? 0) > QueryTextPreviewLength
             }).ToList();

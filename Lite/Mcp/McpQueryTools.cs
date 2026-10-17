@@ -20,13 +20,21 @@ public sealed class McpQueryTools
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1 (a LIFETIME max_dop; can read stale after a MAXDOP change). See the tool's reading guide.")] bool parallel_only = false,
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
+            /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
+            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            if (tagScope.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
+            }
+
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
@@ -58,9 +66,14 @@ public sealed class McpQueryTools
             var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop);
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
             if (rows.Count == 0)
             {
+                if (tagScope.Active)
+                {
+                    return McpHelpers.Status("empty", $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                }
+
                 /* A filtered miss is not a collection miss — same words as Darling's twin. */
                 if (minMaxDop > 0)
                 {
@@ -105,6 +118,7 @@ public sealed class McpQueryTools
             {
                 database_name = r.DatabaseName,
                 query_hash = r.QueryHash,
+                tag = tagScope.TagOfHash(r.QueryHash),
                 query_plan_hash = r.QueryPlanHash,
                 sql_handle = r.SqlHandle,
                 plan_handle = r.PlanHandle,
@@ -190,13 +204,21 @@ public sealed class McpQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top procedures. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
+            /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
+            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            if (tagScope.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
+            }
+
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
@@ -215,11 +237,16 @@ public sealed class McpQueryTools
             var droppedDatabases = string.IsNullOrEmpty(database_name)
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases);
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases, tags: tagScope);
             /* #5633 review (finding D): the narrowing is disclosed, never silent (Darling's twin does the same, in the same words). The names
                it left out ride the envelope of an empty page and of a page with rows, and an empty page's sentence claims only the databases
                the server still has, so "the collector recorded nothing" is never said over a window with rows in a dropped database. */
             var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
+            if (rows.Count == 0 && tagScope.Active)
+            {
+                return McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
+            }
+
             if (rows.Count == 0)
             {
                 return McpHelpers.WithDatabasesLeftOut(
@@ -255,6 +282,7 @@ public sealed class McpQueryTools
             {
                 database_name = r.DatabaseName,
                 full_name = r.FullName,
+                tag = tagScope.TagOfObject(r.DatabaseName, r.SchemaName, r.ObjectName),
                 object_type = r.ObjectType,
                 sql_handle = r.SqlHandle,
                 plan_handle = r.PlanHandle,
@@ -326,13 +354,21 @@ public sealed class McpQueryTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
         [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null,
-        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false)
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
+            /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
+            var tagScope = await dataService.GetQueryTagReadScopeAsync(resolved.ServerId, tag);
+            if (tagScope.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadScope.UnknownTagMessage(tagScope.Requested!));
+            }
+
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
@@ -356,7 +392,8 @@ public sealed class McpQueryTools
                 databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name },
                 asOfUtc: windowEnd,
                 executionType: execution_type,
-                moduleName: module_name);
+                moduleName: module_name,
+                tags: tagScope);
 
             /* #4231 (Lite's twin of Darling's #2364): what the window ACTUALLY reached. rows above are the top
                N by COST, so their timestamps say nothing about how far back the read went. query_store_stats
@@ -369,6 +406,11 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
             {
+                if (tagScope.Active)
+                {
+                    return McpHelpers.Status("empty", $"No Query Store query on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                }
+
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
                    so an Aborted or Exception filter is empty far more often than not, and falling through to the
                    chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
@@ -407,6 +449,7 @@ public sealed class McpQueryTools
                 query_id = r.QueryId,
                 plan_id = r.PlanId,
                 query_hash = r.QueryHash,
+                tag = tagScope.TagOfHash(r.QueryHash),
                 query_plan_hash = r.QueryPlanHash,
                 execution_type = r.ExecutionTypeDesc,
                 module_name = r.ModuleName,
