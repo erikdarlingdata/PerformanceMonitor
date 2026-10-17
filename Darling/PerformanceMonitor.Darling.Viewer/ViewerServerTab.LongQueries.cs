@@ -78,8 +78,8 @@ public partial class ViewerServerTab
            It used to be awaited first, which put one whole store round trip in front of the grid's two reads on every load. */
         var traceTask = Timed(timer, "trace check", _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId));
         var (startUtc, endUtc) = GetWindowUtc();
-        var dataStartTask = Timed(timer, "data start", _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc));
         var tagFilter = await CurrentQueryTagFilterAsync();
+        var dataStartTask = Timed(timer, "data start", _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc));
         var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
         try
         {
