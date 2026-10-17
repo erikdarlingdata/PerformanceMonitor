@@ -95,6 +95,17 @@ internal static class InvestigationToolContract
         },
     };
 
+    /// <summary>
+    /// The shared parameter descriptions Darling words differently (#6004): Darling's <c>evidence</c> requires a <c>basis</c> on
+    /// each item, Lite's does not yet. Keyed <c>tool.parameter</c>; the text is built from the same constants the tool uses, so
+    /// the two spellings cannot drift. Darling's test passes this table to <see cref="Differences"/>; Lite's passes none.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> DarlingParameterDescriptions = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["submit_investigation_report.evidence"] =
+            "JSON array of {tool, arguments, key_numbers, basis}; basis (" + InvestigationReportFields.BasesAlternation + ") is required on each item; see the guide.",
+    };
+
     /// <summary>Every <c>[McpServerTool]</c> method on <paramref name="toolClass"/>, by tool name.</summary>
     internal static IReadOnlyDictionary<string, MethodInfo> ToolMethods(Type toolClass) =>
         toolClass.GetMethods(BindingFlags.Public | BindingFlags.Static)
@@ -144,7 +155,9 @@ internal static class InvestigationToolContract
 
     /// <summary>Compares <paramref name="toolClass"/> with <see cref="Tools"/>, each tool's parameters followed by its
     /// <paramref name="productParameters"/>; returns every difference, empty when equal.</summary>
-    internal static IReadOnlyList<string> Differences(Type toolClass, IReadOnlyDictionary<string, ToolParameter[]>? productParameters = null)
+    internal static IReadOnlyList<string> Differences(
+        Type toolClass, IReadOnlyDictionary<string, ToolParameter[]>? productParameters = null,
+        IReadOnlyDictionary<string, string>? productDescriptions = null)
     {
         var differences = new List<string>();
         var methods = ToolMethods(toolClass);
@@ -157,8 +170,10 @@ internal static class InvestigationToolContract
             }
 
             var actual = Describe(method);
+            var shared = productDescriptions is null ? shape.Parameters
+                : shape.Parameters.Select(p => productDescriptions.TryGetValue(name + "." + p.Name, out var text) ? p with { Description = text } : p).ToArray();
             var expected = productParameters is not null && productParameters.TryGetValue(name, out var extra)
-                ? shape.Parameters.Concat(extra).ToArray() : shape.Parameters;
+                ? shared.Concat(extra).ToArray() : shared;
             if (!actual.SequenceEqual(expected))
             {
                 differences.Add($"{name}: parameters are [{string.Join("; ", actual)}], the contract is [{string.Join("; ", (IEnumerable<ToolParameter>)expected)}]");

@@ -40,6 +40,10 @@ public static class InvestigationReportFields
     /// <summary>The evidence item the agent reasoned to without checking it.</summary>
     public const string BasisInferred = "inferred";
 
+    /// <summary>The bases as a tool description writes them: <c>verified|inferred</c>. A const, built from the two above, so
+    /// the tool description and the parameter description share one spelling (#3684).</summary>
+    public const string BasesAlternation = BasisVerified + "|" + BasisInferred;
+
     /// <summary>The bases an evidence item may carry.</summary>
     public static IReadOnlyList<string> Bases { get; } = new[] { BasisVerified, BasisInferred };
 

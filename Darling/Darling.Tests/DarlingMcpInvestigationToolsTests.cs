@@ -305,6 +305,62 @@ public sealed class DarlingMcpInvestigationToolsTests
             brief);
     }
 
+    /// <summary>A Darling read (it keeps feedback, so the evidence is served by basis, #6004): one verified, one inferred and
+    /// one unlabelled item, each carrying the canaries in its free text.</summary>
+    private static InvestigationReportsRead DarlingRead()
+    {
+        JsonObject Item(string tool, string? basis) => new()
+        {
+            ["tool"] = tool,
+            ["arguments"] = new JsonObject { ["server_name"] = "SQLPROD01", ["hours_back"] = 4 },
+            ["key_numbers"] = Canaries(tool),
+            ["basis"] = basis,
+        };
+
+        var stored = StoredRead();
+        var report = stored.Reports[0] with
+        {
+            EvidenceJson = new JsonArray(Item("get_blocking", "verified"), Item("get_waits", "inferred"), Item("get_deadlocks", null))
+                .ToJsonString(),
+        };
+        return stored with { Reports = [report], Feedback = [] };
+    }
+
+    [Fact]
+    public void ReportsAnswer_MaskLiterals_MasksEveryEvidenceListByBasis()
+    {
+        var answer = InvestigationToolCore.ReportsAnswer(DarlingRead(), 24, McpDataDetail.MaskLiterals);
+
+        Assert.DoesNotContain(Literal, answer, StringComparison.Ordinal);
+        var report = JsonNode.Parse(answer)!["reports"]![0]!;
+        Assert.Null(report["evidence"]);
+        foreach (var (list, tool) in new[] { ("evidence_verified", "get_blocking"), ("evidence_inferred", "get_waits"), ("evidence_unlabelled", "get_deadlocks") })
+        {
+            var item = Assert.Single(report[list]!.AsArray())!;
+            Assert.Equal(tool, (string?)item["tool"]);
+            var text = (string?)item["key_numbers"];
+            Assert.NotNull(text);
+            Assert.DoesNotContain(Literal, text, StringComparison.Ordinal);
+            Assert.Contains("WHERE name = ", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ReportsAnswer_MetadataOnly_WithholdsEveryEvidenceListByBasis()
+    {
+        var answer = InvestigationToolCore.ReportsAnswer(DarlingRead(), 24, McpDataDetail.MetadataOnly);
+
+        foreach (var canary in new[] { Literal, Login, Host })
+            Assert.DoesNotContain(canary, answer, StringComparison.Ordinal);
+        var report = JsonNode.Parse(answer)!["reports"]![0]!;
+        foreach (var (list, tool) in new[] { ("evidence_verified", "get_blocking"), ("evidence_inferred", "get_waits"), ("evidence_unlabelled", "get_deadlocks") })
+        {
+            var item = Assert.Single(report[list]!.AsArray())!;
+            Assert.Equal(tool, (string?)item["tool"]);
+            Assert.Equal(McpDataDetailMasker.WithheldText, (string?)item["key_numbers"]);
+        }
+    }
+
     /* #5834: the answer names its page count requests_returned and carries the read's two truncation flags. */
     [Theory]
     [InlineData(false, false)]

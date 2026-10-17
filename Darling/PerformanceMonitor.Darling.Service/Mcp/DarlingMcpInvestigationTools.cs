@@ -438,7 +438,7 @@ public sealed class DarlingMcpInvestigationTools
         "unsupported_format, lease_lost, already_reported or not_found. <<GUIDE>> " +
         "A report is verdict (real, false_positive, needs_person), root_cause, evidence (the calls you made and the numbers " +
         "they showed) and summary, with an optional proposed_note for a person to approve. " +
-        "evidence is a JSON array of at least one {\"tool\":\"...\",\"arguments\":{...},\"key_numbers\":\"...\",\"basis\":\"verified|inferred\"}: " +
+        "evidence is a JSON array of at least one {\"tool\":\"...\",\"arguments\":{...},\"key_numbers\":\"...\",\"basis\":\"" + InvestigationReportFields.BasesAlternation + "\"}: " +
         "basis says whether you checked the claim against data (verified) or reasoned to it (inferred), and a reader sees the two apart. invalid " +
         "lists every missing or wrong field at once. Level 1 investigates and proposes nothing: any action_proposals is " +
         "refused (invalid) and journaled. A report is accepted under the current claim_id until a newer claim supersedes " +
@@ -460,7 +460,7 @@ public sealed class DarlingMcpInvestigationTools
         [Description("1.")] int report_format,
         [Description("real, false_positive or needs_person.")] string verdict,
         [Description("What caused the alert, or that you could not tell.")] string root_cause,
-        [Description("JSON array of {tool, arguments, key_numbers}; see the guide.")] string evidence,
+        [Description("JSON array of {tool, arguments, key_numbers, basis}; basis (" + InvestigationReportFields.BasesAlternation + ") is required on each item; see the guide.")] string evidence,
         [Description("At most 4,000 characters.")] string summary,
         [Description("Optional note for a person to approve, at most 2,000 characters.")] string? proposed_note = null,
         [Description("Refused at Level 1. Omit.")] string? action_proposals = null,
