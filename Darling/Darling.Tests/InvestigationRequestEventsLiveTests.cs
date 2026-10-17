@@ -406,14 +406,24 @@ public sealed class InvestigationRequestEventsLiveTests
             var id = (await store.OpenOrJoinAsync(Alert(_now, "High CPU"), ct)).RequestId!.Value;
             var cursor = (string)JsonNode.Parse(await Wait(start, 0))!["cursor"]!;
 
-            var wait = Wait(cursor, DarlingMcpInvestigationTools.MaxWaitSeconds);
-            var until = DateTime.UtcNow.AddSeconds(10);
-            while (signal.WaiterCount < 1 && DateTime.UtcNow < until)
+            /* #6048: WaiterCount says "registered", not "parked": the call registers BEFORE its first store read, so a sweep that
+               commits in between is found by that read and the poll answers with no delivery pass at all (correct product
+               behaviour: a waiter must not miss an event). Park means the first read has returned empty; the read is observed
+               through a wrapper, and the poll then goes straight to waiting on the signal. */
+            var firstReadDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task<IReadOnlyList<InvestigationOpenedRow>> ObservedRead(
+                DateTime since, IReadOnlyCollection<int>? routes, int limit, CancellationToken token)
             {
-                await Task.Delay(10, ct);
+                var rows = await store.OpenedSinceAsync(since, routes, limit, token);
+                firstReadDone.TrySetResult();
+                return rows;
             }
 
-            Assert.True(signal.WaiterCount == 1, wait.IsCompleted ? await wait : "the long-poll did not park");
+            var wait = DarlingMcpInvestigationTools.WaitAsync(ObservedRead, signal, () => _now, [1], cursor,
+                DarlingMcpInvestigationTools.MaxWaitSeconds, ct);
+            await Task.WhenAny(firstReadDone.Task, Task.Delay(TimeSpan.FromSeconds(10), ct));
+            Assert.True(firstReadDone.Task.IsCompleted && signal.WaiterCount == 1,
+                wait.IsCompleted ? await wait : "the long-poll did not park");
             await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(3)));
             _now = T0.AddMinutes(4);
             Assert.Equal(1, (await store.SweepAsync(ct)).Resolved);
