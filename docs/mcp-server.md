@@ -27,7 +27,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 97 tools (89 by default); **Darling** exposes 188 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 98 tools (90 by default); **Darling** exposes 188 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
 
 By default Lite serves its 89 read tools only. Its four write tools, `mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled` and `delete_notification_route`, are served when `mcp_allow_writes` is `true` in `settings.json`. Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. Lite's MCP endpoint has no token or caller check, so with the setting on, any program on this computer that can reach the port can mute or unmute findings, and disable or delete notification routes. Leave it off unless you trust every program that runs on this computer.
 
@@ -52,7 +52,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
-| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_store_query_history`, `get_query_duration_trend`, `get_query_trend` |
+| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_store_query_history`, `get_query_duration_trend`, `get_query_trend`, `get_resource_use_by_tag` |
 | Active Queries | `get_active_queries` |
 | CPU | `get_cpu_utilization` |
 | Memory | `get_memory_stats`, `get_memory_trend`, `get_memory_clerks`, `get_memory_grants`, `get_resource_semaphore` |
