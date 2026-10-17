@@ -459,6 +459,66 @@ public sealed class DarlingMcpInvestigationTools
         }
     }
 
+    [McpServerTool(Name = "get_investigation_evidence"), Description(
+        "Reads the frozen evidence sections of one investigation request. Writes nothing. status ok, empty, not_found or " +
+        "already_claimed. <<GUIDE>> " +
+        "The brief is composed once, at claim time; evidence that freezes later reaches you only as an evidence_ready event " +
+        "from wait_for_investigation_requests. Call this with that event's request_id to read it. Each section carries its " +
+        "status (ready, pending, empty, unavailable or not_collected) and its content as stored, masked at mcp.dataDetail the " +
+        "way the brief masks it. A pending section comes back as pending with no content: it never waits, so read it again " +
+        "after a later evidence_ready. sections (optional) names the sections to return; omit it for all. A request that " +
+        "another agent holds a live claim on is refused (already_claimed) unless you pass its claim_id; an unclaimed or " +
+        "finished request is served to any caller.")]
+    public static Task<string> GetInvestigationEvidence(
+        NpgsqlDataSource postgres,
+        InvestigationBriefComposer composer,
+        [Description("From list_investigation_requests.")] string request_id,
+        [Description("Section names to return. Omit for all.")] string[]? sections = null,
+        [Description("Your claim_id, when you hold the claim.")] string? claim_id = null,
+        CancellationToken cancellationToken = default) =>
+        EvidenceAsync(Store(postgres), composer.Mode, request_id, sections, claim_id, cancellationToken);
+
+    /// <summary>The evidence read over a given store at <paramref name="mode"/> (#6033).</summary>
+    internal static async Task<string> EvidenceAsync(InvestigationRequestStore store, McpDataDetail mode, string request_id,
+        string[]? sections, string? claim_id, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(request_id, out var requestId))
+            return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
+
+        try
+        {
+            var request = await store.ReadRequestAsync(requestId, cancellationToken);
+            if (request is null)
+                return InvestigationToolCore.Status("not_found", "No investigation request has that id.");
+
+            if (request.Value.Row.State == "claimed")
+            {
+                var held = Guid.TryParse(claim_id, out var claim) && await store.ClaimHolderAsync(requestId, claim, cancellationToken) is not null;
+                if (!held)
+                    return InvestigationToolCore.Status("already_claimed", "Another claim holds a live lease on this request.");
+            }
+
+            var wanted = sections is { Length: > 0 } ? new HashSet<string>(sections, StringComparer.Ordinal) : null;
+            var rows = (await store.ReadEvidenceAsync(requestId, cancellationToken))
+                .Where(r => wanted is null || wanted.Contains(r.Section))
+                .Select(r => InvestigationBriefComposer.EvidenceSection(
+                    new InvestigationBriefEvidence(r.Section, r.State, r.CapturedAtUtc, r.ContentJson), mode))
+                .ToList();
+
+            return JsonSerializer.Serialize(new
+            {
+                status = rows.Count == 0 ? "empty" : "ok",
+                request_id = requestId,
+                request_state = request.Value.Row.State,
+                sections = new JsonArray(rows.Select(n => (JsonNode?)n).ToArray()),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_investigation_evidence", ex);
+        }
+    }
+
     [McpServerTool(Name = "submit_investigation_report"), Description(
         "Returns your report on a request you claimed. Writes only investigation state. status reported, invalid, " +
         "unsupported_format, lease_lost, already_reported or not_found. <<GUIDE>> " +

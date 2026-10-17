@@ -181,6 +181,8 @@ public static class DarlingWebEndpoints
         "run_collectors_now",
         "get_tool_guide",
         "wait_for_investigation_requests",
+        /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
+        "get_investigation_evidence",
     };
 
     /// <summary>

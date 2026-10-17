@@ -378,6 +378,24 @@ public sealed class InvestigationBriefComposer
         return calls;
     }
 
+    /// <summary>
+    /// One frozen evidence section as <c>get_investigation_evidence</c> serves it (#6033): the brief's own
+    /// <see cref="EvidenceNode"/> through the brief's masker and cut at <paramref name="mode"/>, with the section's state named
+    /// <c>status</c>. A <c>pending</c> section carries no content, whatever is stored.
+    /// </summary>
+    internal static JsonObject EvidenceSection(InvestigationBriefEvidence evidence, McpDataDetail mode)
+    {
+        var source = string.Equals(evidence.State, "pending", StringComparison.Ordinal) ? evidence with { ContentJson = null } : evidence;
+        var node = EvidenceNode(source, McpDataDetailMasker.ForAnswer(mode), new CutCounter());
+        return new JsonObject
+        {
+            ["section"] = node["section"]?.DeepClone(),
+            ["status"] = node["state"]?.DeepClone(),
+            ["captured_at"] = node["captured_at"]?.DeepClone(),
+            ["content"] = node["content"]?.DeepClone(),
+        };
+    }
+
     private static JsonObject EvidenceNode(InvestigationBriefEvidence evidence, McpDataDetailMasker masker, CutCounter cut)
     {
         JsonNode? content = null;
