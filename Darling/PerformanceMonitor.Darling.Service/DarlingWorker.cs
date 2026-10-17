@@ -4101,9 +4101,10 @@ LIMIT 1";
 
             /* #5985: the query-tag map step. Rebuilds every listed server's map when a tag, assignment or rule changed
                (rules_version ahead of built_version), otherwise extends it for the keys sighted since the last pass,
-               capped per server per pass. Fire-and-track like the sweep above: it only talks to the store, but a
-               rebuild over a large sighting history can run long and must not hold the launch loop. The builder is
-               failure-isolated per server and returns normally, so the task completes unobserved without a fault. */
+               capped per server per pass, and flushes the runner's in-memory sightings first. Fire-and-track like the
+               sweep above: it only talks to the store, but a rebuild over a large sighting history can run long and must not
+               hold the launch loop. The builder is failure-isolated per server; only a cancellation (shutdown) escapes it, and
+               the tracked task is never awaited, so that ends the task quietly. */
             if (StampIsDue(_nextQueryTagMapPassUtc, s_queryTagMapPassInterval, DateTime.UtcNow)
                 && (_queryTagMapPass is null || _queryTagMapPass.IsCompleted))
             {
@@ -4114,7 +4115,7 @@ LIMIT 1";
                     mapServerIds.Add(target.Config.ServerId);
                 }
 
-                _queryTagMapBuilder ??= new QueryTagMapBuilder(postgres, _logger);
+                _queryTagMapBuilder ??= new QueryTagMapBuilder(postgres, _logger, sightings: runner.QueryTagSightings);
                 _queryTagMapPass = _queryTagMapBuilder.RunMapPassAsync(mapServerIds, stoppingToken);
             }
 

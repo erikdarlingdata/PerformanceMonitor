@@ -342,6 +342,13 @@ public sealed class FetchPhaseCostAccumulator
 public sealed class DarlingCollectorRunner
 {
     private readonly NpgsqlDataSource _postgres;
+
+    /// <summary>
+    /// The query-tag sightings the collectors saw since the last map pass (#5985): the per-batch write path appends here, in
+    /// memory, and the map step flushes it (<see cref="QueryTagMapBuilder.RunMapPassAsync"/>). One per runner, which is one per
+    /// service.
+    /// </summary>
+    public QueryTagSightingBuffer QueryTagSightings { get; }
     private readonly CollectorDeltaCalculator _deltas;
     private readonly ILogger? _logger;
 
@@ -943,6 +950,7 @@ public sealed class DarlingCollectorRunner
     public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        QueryTagSightings = new QueryTagSightingBuffer(postgres, logger);
         _queryStoreWriteFence = queryStoreWriteFence;
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
@@ -4525,10 +4533,12 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// Records the query keys and callers this batch saw in <c>collect.query_tag_sightings</c>, which the tag map step
-    /// resolves (#5985, part of #5971). The definition decides what a row saw (<c>DescribeQueryTagSightings</c>); this
-    /// only gathers them. A batch with no sightings allocates nothing and opens no connection; one batch is one upsert,
-    /// and <see cref="QueryTagSightingWriter.RecordAsync"/> never throws, so a failed write cannot fail the cycle.
+    /// Buffers the query keys and callers this batch saw, which the tag map step flushes to
+    /// <c>collect.query_tag_sightings</c> and resolves (#5985, part of #5971). The definition decides what a row saw
+    /// (<c>DescribeQueryTagSightings</c>); this only gathers them into <see cref="QueryTagSightings"/>, in memory: unlike the
+    /// oversized-plan sighting beside it, this runs for nearly every batch, so it makes no store round trip. A batch with no
+    /// sightings allocates nothing. The one time the append touches the store is a buffer at its cap flushing, and that flush
+    /// never throws, so it cannot fail the cycle.
     /// </summary>
     private async Task RecordQueryTagSightingsAsync<TRow>(
         ICollectorDefinition<TRow> definition,
@@ -4551,7 +4561,7 @@ public sealed class DarlingCollectorRunner
             return;
         }
 
-        await QueryTagSightingWriter.RecordAsync(_postgres, server.ServerId, sightings, _logger, cancellationToken);
+        await QueryTagSightings.AppendAsync(server.ServerId, sightings, cancellationToken);
     }
 
     /// <summary>

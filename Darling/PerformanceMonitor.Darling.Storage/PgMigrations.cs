@@ -1682,6 +1682,22 @@ ALTER TABLE collect.procedure_stats
     ADD COLUMN IF NOT EXISTS module_modify_date timestamp;";
 
     /// <summary>
+    /// V194 (#5985, part of #5971): <c>database_name</c> joins the identity of a query-tag sighting. V192 made
+    /// <c>collect.query_tag_sightings</c> unique on (server, kind, key, application, login, host), and the writer kept the
+    /// first non-NULL <c>database_name</c>, so one hash seen in two databases by the same caller collapsed into one row and a
+    /// database rule could only ever see the first database. The new unique index adds <c>COALESCE(database_name, '')</c> as
+    /// the fourth caller part, after application, login and host (the same NULL-is-empty fold the other three use), so each database a hash was seen in has its
+    /// own row and the map builder, which resolves a key against every sighting row it has, tests a database rule against
+    /// each. The new index is created first and the old one dropped after it, both guarded, so a re-run is a no-op. Existing
+    /// rows stay: they are unique on the old, coarser key, so they are unique on the finer one. Only an index changes: no
+    /// grant, no column, no data.
+    /// </summary>
+    private const string V194Sql = @"
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_tag_sightings_key_db
+    ON collect.query_tag_sightings (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''), COALESCE(database_name, ''));
+DROP INDEX IF EXISTS collect.ux_query_tag_sightings_key;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1986,6 +2002,7 @@ $rung$;";
         new Migration(191, "agent-level-2-store", V191Sql),
         new Migration(192, "query-tags-store", V192Sql),
         new Migration(193, "phase-c-store", V193Sql),
+        new Migration(194, "query-tag-sightings-database", V194Sql),
     };
 
     /// <summary>

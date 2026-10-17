@@ -10,12 +10,15 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common.QueryTags;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -85,11 +88,11 @@ public sealed class QueryTagMapBuilderLiveTests
     private static Task AssignHashAsync(Env env, int tagId, string hash) =>
         ExecAsync(env, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({tagId}, 'hash', '{hash}', 'test')");
 
-    private static IReadOnlyList<QueryTagSighting> HashSightings(string hash, string application, string text = "SELECT 1;") =>
+    private static IReadOnlyList<QueryTagSighting> HashSightings(string hash, string application, string text = "SELECT 1;", string database = "Sales") =>
         QuerySnapshotsCollector.Instance.DescribeQueryTagSightings(new QuerySnapshotsCollector.Row
         {
             QueryHash = hash,
-            DatabaseName = "Sales",
+            DatabaseName = database,
             ProgramName = application,
             LoginName = "svc",
             HostName = "H1",
@@ -391,5 +394,216 @@ public sealed class QueryTagMapBuilderLiveTests
 
             Assert.Equal(new[] { $"object|Sales.dbo.GetOrders|{tag}|hand_object" }, await MapAsync(env));
         });
+    }
+
+    [Fact]
+    public async Task OneHashSightedInTwoDatabases_IsTwoSightingRows_AndADatabaseRuleTagsItFromTheMapBuiltOverBoth()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int archive = await NewTagAsync(env, "Archive");
+            await NewRuleAsync(env, archive, "database", "Archive*");
+
+            /* Same hash, same application, login and host; only the database differs. Sales is sighted first, so the old key
+               kept Sales for the one row and the Archive rule could never match. */
+            await SightAsync(env, HashSightings("0xAA", "App", database: "Sales"));
+            await SightAsync(env, HashSightings("0xAA", "App", database: "Archive01"));
+            await SightAsync(env, HashSightings("0xAA", "App", database: "Sales"));
+
+            Assert.Equal("2", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA' AND database_name = 'Sales'"));
+            Assert.Equal("1", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA' AND database_name = 'Archive01'"));
+
+            var builder = new QueryTagMapBuilder(env.Source);
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal(new[] { $"hash|0xAA|{archive}|rule" }, await MapAsync(env));
+            Assert.Equal("database", await ScalarAsync(env, "SELECT matched_field FROM config.query_tag_map WHERE key = '0xAA'"));
+        });
+    }
+
+    [Fact]
+    public async Task AServerWithNoCursor_HasItsWholeMapAfterOnePass_EvenWithMoreKeysThanThePerPassCap()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, tag, "application", "Report*");
+            await SightAsync(env, HashSightings("0x01", "Report"), HashSightings("0x02", "Report"), HashSightings("0x03", "Report"), HashSightings("0x04", "Report"), HashSightings("0x05", "Report"));
+
+            /* A cap of 2 would take three more passes to drain these five. A server with no cursor (a fresh process) rebuilds, which has no cap. */
+            var builder = new QueryTagMapBuilder(env.Source, keysPerServerPerPass: 2);
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal(5, (await MapAsync(env)).Count);
+        });
+    }
+
+    [Fact]
+    public async Task TheBuffer_SumsCounts_KeepsTheFirstSampleCutAt500_AndFlushesOnceThenHoldsNothing()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var buffer = new QueryTagSightingBuffer(env.Source);
+            string longText = new string('x', 600);
+            await buffer.AppendAsync(Server, HashSightings("0xAA", "App", longText), env.Ct);
+            await buffer.AppendAsync(Server, HashSightings("0xAA", "App", "second"), env.Ct);
+            await buffer.AppendAsync(Server, HashSightings("0xBB", "App"), env.Ct);
+            await buffer.AppendAsync(Server, Array.Empty<QueryTagSighting>(), env.Ct);
+
+            Assert.Equal(2, buffer.Count);
+            Assert.Equal("0", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+
+            Assert.Equal(2, await buffer.FlushAsync(env.Ct));
+
+            Assert.Equal(0, buffer.Count);
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("500", await ScalarAsync(env, "SELECT char_length(text_sample) FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal(0, await buffer.FlushAsync(env.Ct));
+        });
+    }
+
+    [Fact]
+    public async Task ABufferAtItsCap_FlushesAtTheNextAppend_RatherThanGrowing()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var buffer = new QueryTagSightingBuffer(env.Source, cap: 3);
+            await buffer.AppendAsync(Server, HashSightings("0x01", "App"), env.Ct);
+            await buffer.AppendAsync(Server, HashSightings("0x02", "App"), env.Ct);
+            await buffer.AppendAsync(Server, HashSightings("0x03", "App"), env.Ct);
+            Assert.Equal(3, buffer.Count);
+            Assert.Equal("0", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+
+            await buffer.AppendAsync(Server, HashSightings("0x04", "App"), env.Ct);
+
+            Assert.Equal("3", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+            Assert.Equal(1, buffer.Count);
+        });
+    }
+
+    [Fact]
+    public async Task AFailedFlush_DropsItsEntries_LogsOnce_AndNeverThrowsOrRetries()
+    {
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=1");
+        var log = new RecordingLogger();
+        var ct = TestContext.Current.CancellationToken;
+        var buffer = new QueryTagSightingBuffer(unreachable, log);
+        await buffer.AppendAsync(Server, HashSightings("0xAA", "App"), ct);
+        Assert.Equal(0, log.Warnings);
+
+        Assert.Equal(0, await buffer.FlushAsync(ct));
+
+        Assert.Equal(1, log.Warnings);
+        Assert.Equal(0, buffer.Count);
+        Assert.Equal(0, await buffer.FlushAsync(ct));
+        Assert.Equal(1, log.Warnings);
+    }
+
+    private static readonly MethodInfo WriteBatchMethod = typeof(DarlingCollectorRunner)
+        .GetMethod("WriteBatchAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+    private static ServerRuntime RunnerServer() => new()
+    {
+        Config = new MonitoredServer { Name = "tag-qs", Host = "tag-qs" },
+        ConnectionString = "Server=tag-qs",
+        Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+        StorageName = "tag-qs",
+        ServerId = Server,
+        EngineEdition = 3,
+    };
+
+    private static async Task WriteSnapshotBatchAsync(DarlingCollectorRunner runner, NpgsqlConnection connection, string hash, string application, CancellationToken token)
+    {
+        var server = RunnerServer();
+        var collectionTime = DateTime.UtcNow;
+        var context = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = collectionTime,
+            Deltas = new CollectorDeltaCalculator(),
+            Target = server.Target,
+        };
+        var rows = new List<QuerySnapshotsCollector.Row>
+        {
+            new() { SessionId = 55, QueryHash = hash, DatabaseName = "Sales", ProgramName = application, LoginName = "svc", HostName = "H1", QueryText = "SELECT 1;" },
+        };
+        var task = (Task)WriteBatchMethod.MakeGenericMethod(typeof(QuerySnapshotsCollector.Row)).Invoke(
+            runner, new object?[] { connection, QuerySnapshotsCollector.Instance, rows, server, collectionTime, context, token })!;
+        await task;
+    }
+
+    [Fact]
+    public async Task ACollectorBatchThroughTheRunner_OpensNoStoreConnectionForItsSightings_AndTheMapPassAfterItHasThemInTheTable()
+    {
+        await WithStoreAsync(async env =>
+        {
+            /* The runner's own data source is unreachable: a sightings write through it would log a warning. The batch's rows go in on
+               the connection the test hands WriteBatchAsync, so a clean log means the sighting never went near the runner's source. */
+            await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=1");
+            var log = new RecordingLogger();
+            var offline = new DarlingCollectorRunner(unreachable, new CollectorDeltaCalculator(), log);
+            await WriteSnapshotBatchAsync(offline, env.Store, "0xAA", "ReportServer", env.Ct);
+
+            Assert.Equal(0, log.Warnings);
+            Assert.Equal(1, offline.QueryTagSightings.Count);
+            Assert.Equal("0", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+
+            /* The map pass flushes the buffer first and tags what it holds in the same pass. */
+            int reports = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, reports, "application", "ReportServer*");
+            var runner = new DarlingCollectorRunner(env.Source, new CollectorDeltaCalculator());
+            await WriteSnapshotBatchAsync(runner, env.Store, "0xBB", "ReportServer 2", env.Ct);
+            Assert.Equal("0", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+
+            var builder = new QueryTagMapBuilder(env.Source, sightings: runner.QueryTagSightings);
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal("1", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings WHERE key = '0xBB'"));
+            Assert.Equal(new[] { $"hash|0xBB|{reports}|rule" }, await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task TheV194Rung_KeepsExistingSightingRows_SwapsTheKeyForTheDatabaseOne_AndTheViewerProbeReadsTheNewTop()
+    {
+        await WithStoreAsync(async env =>
+        {
+            Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(env));
+            Assert.Equal("ux_query_tag_sightings_key_db", await ScalarAsync(env, "SELECT indexname FROM pg_indexes WHERE tablename = 'query_tag_sightings' AND indexname LIKE 'ux_%'"));
+
+            /* A store one rung behind, holding sightings written under the six-part key. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(env.Store, 193, env.Ct);
+            await ExecAsync(env, "DELETE FROM darling_schema_version WHERE version >= 194");
+            Assert.Equal("ux_query_tag_sightings_key", await ScalarAsync(env, "SELECT indexname FROM pg_indexes WHERE tablename = 'query_tag_sightings' AND indexname LIKE 'ux_%'"));
+            Assert.Equal(193, await ProbedVersionAsync(env));
+            await ExecAsync(env,
+                $"INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, database_name, application_name) VALUES ({Server}, 'hash', '0xAA', 'Sales', 'App'), ({Server}, 'hash', '0xAA', NULL, 'Other')");
+
+            await PgMigrations.MigrateAsync(env.Store, env.Ct);
+
+            Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(env));
+            Assert.Equal("2", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+            Assert.Equal("ux_query_tag_sightings_key_db", await ScalarAsync(env, "SELECT indexname FROM pg_indexes WHERE tablename = 'query_tag_sightings' AND indexname LIKE 'ux_%'"));
+        });
+    }
+
+    private static async Task<int> ProbedVersionAsync(Env env)
+    {
+        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var arity = method.GetParameters().Length;
+
+        await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, env.Store);
+        await using var reader = await command.ExecuteReaderAsync(env.Ct);
+        Assert.True(await reader.ReadAsync(env.Ct));
+
+        var sentinels = new object[arity];
+        for (var i = 0; i < arity; i++)
+        {
+            sentinels[i] = reader.GetBoolean(i);
+        }
+
+        return (int)method.Invoke(null, sentinels)!;
     }
 }

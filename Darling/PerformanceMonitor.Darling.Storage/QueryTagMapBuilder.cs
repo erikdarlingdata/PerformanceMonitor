@@ -20,17 +20,21 @@ namespace PerformanceMonitor.Darling.Storage;
 /// The query-tag map step (#5985, part of #5971): resolves the sighted query keys to tags and keeps
 /// <c>config.query_tag_map</c>, the one table the tag reads join. Nothing evaluates a rule at read time.
 ///
-/// <para><b>A pass is a rebuild or an extend.</b> When <c>rules_version</c> is ahead of <c>built_version</c> (any
-/// write to the tags, assignments or rules bumps it) the pass rebuilds every listed server's map from all of its
-/// sightings, one transaction per server (<see cref="QueryTagMapStore.ReplaceMapAsync"/>: a read sees the old map or
-/// the new one, never half), then stamps <c>built_version</c> with the <c>rules_version</c> it read at the start, so
-/// a rule written mid-rebuild leaves the map stale and the next pass rebuilds again. Otherwise the pass extends: it
-/// resolves only the keys whose sightings changed since this server's cursor, at most
-/// <see cref="MapKeysPerServerPerPass"/> a pass, and the remainder waits for the next one. A key with no sightings
-/// left (retention removed them) leaves the map at the next rebuild; the extend path never deletes.</para>
+/// <para><b>A pass flushes, then rebuilds or extends.</b> The pass first flushes the sightings buffer
+/// (<see cref="QueryTagSightingBuffer"/>) in one upsert, so it tags what the last minute sighted. Then, when
+/// <c>rules_version</c> is ahead of <c>built_version</c> (any write to the tags, assignments or rules bumps it) it
+/// rebuilds every listed server's map from all of its sightings, one transaction per server
+/// (<see cref="QueryTagMapStore.ReplaceMapAsync"/>: a read sees the old map or the new one, never half), then stamps
+/// <c>built_version</c> with the <c>rules_version</c> it read at the start, so a rule written mid-rebuild leaves the map
+/// stale and the next pass rebuilds again. Otherwise the pass extends: it resolves only the keys whose sightings changed
+/// since this server's cursor, at most <see cref="MapKeysPerServerPerPass"/> a pass, and the remainder waits for the
+/// next one. A key with no sightings left (retention removed them) leaves the map at the next rebuild; the extend path
+/// never deletes.</para>
 ///
-/// <para><b>The cursor is in memory.</b> A server with no cursor (a fresh process, a newly listed server) extends
-/// from the start of its sightings, so a restart re-resolves history a page at a time and loses nothing.</para>
+/// <para><b>The cursor is in memory, and a server without one rebuilds.</b> A server with no cursor (a fresh process, a
+/// newly listed server) gets the same one-transaction rebuild a rule change gets, then a cursor two minutes behind the
+/// clock. It does not drain from the start of time: a restart would otherwise re-read the whole sighting history, one
+/// aggregate-and-sort statement per page, once a minute until it finished, to re-derive a map that was already right.</para>
 ///
 /// <para><b>Caller carry-forward (decision 3 of #5971).</b> A hash key is resolved against every sighting row it has,
 /// each carrying the application, login and host it was seen under, so a rule on application X tags a hash seen under
@@ -41,8 +45,9 @@ public sealed class QueryTagMapBuilder
     /// <summary>
     /// The most keys one pass resolves for one server. A pass reads the sighting rows of these keys (a few each) and
     /// runs every enabled rule over them, which at 5000 keys is tens of milliseconds to a couple of seconds and one
-    /// bounded upsert, well inside a pass interval; a backlog of a million sighted keys drains in 200 passes rather
-    /// than one long statement. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
+    /// bounded upsert, well inside a pass interval. The cap pages the extend, which reads only what changed after the
+    /// cursor (the last two minutes, or the tail of a burst), never the whole history: a server's whole history is read
+    /// by a rebuild, in one transaction. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
     /// both stores share, so neither store's pass can outgrow the other's. The value is threaded into the SQL as a
     /// parameter (#3684), never written there.
     /// </summary>
@@ -55,28 +60,36 @@ public sealed class QueryTagMapBuilder
     /// </summary>
     public static readonly TimeSpan ExtendOverlap = TimeSpan.FromMinutes(2);
 
-    private static readonly DateTime s_epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
     private readonly int _keysPerServerPerPass;
+    private readonly QueryTagSightingBuffer? _sightings;
     private readonly Dictionary<int, Cursor> _cursors = new();
 
-    public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass)
+    /// <param name="sightings">The buffer the collectors append to; each pass flushes it first. Null for a builder that only
+    /// reads sightings other code wrote.</param>
+    public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass, QueryTagSightingBuffer? sightings = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        _sightings = sightings;
         _keysPerServerPerPass = keysPerServerPerPass > 0 ? keysPerServerPerPass : MapKeysPerServerPerPass;
     }
 
     /// <summary>
-    /// Runs one pass over <paramref name="serverIds"/>. Failure-isolated per server: a server whose step fails logs,
-    /// keeps its previous map, and leaves <c>built_version</c> unstamped so the next pass tries again.
+    /// Flushes the sightings buffer, then runs one pass over <paramref name="serverIds"/>. Failure-isolated per server: a
+    /// server whose step fails logs, keeps its previous map, and leaves <c>built_version</c> unstamped so the next pass
+    /// tries again. A failed flush is logged inside the buffer and does not stop the pass.
     /// </summary>
     /// <returns>True when every server's step succeeded.</returns>
     public async Task<bool> RunMapPassAsync(IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(serverIds);
+
+        if (_sightings is not null)
+        {
+            await _sightings.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         QueryTagMapSnapshot snapshot;
         try
@@ -90,11 +103,12 @@ public sealed class QueryTagMapBuilder
             return false;
         }
 
-        bool rebuild = snapshot.RulesVersion > snapshot.BuiltVersion;
+        bool rebuildAll = snapshot.RulesVersion > snapshot.BuiltVersion;
         bool allSucceeded = true;
         foreach (int serverId in serverIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            bool rebuild = rebuildAll || !_cursors.ContainsKey(serverId);
             try
             {
                 await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -116,7 +130,7 @@ public sealed class QueryTagMapBuilder
             }
         }
 
-        if (rebuild && allSucceeded)
+        if (rebuildAll && allSucceeded)
         {
             try
             {
@@ -150,7 +164,8 @@ public sealed class QueryTagMapBuilder
 
     private async Task ExtendServerAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
     {
-        var cursor = _cursors.TryGetValue(serverId, out var known) ? known : new Cursor(s_epoch, string.Empty, string.Empty);
+        /* RunMapPassAsync rebuilds a server with no cursor, so by here it has one. */
+        var cursor = _cursors[serverId];
         DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
 
         var changed = await QueryTagMapStore.ReadChangedKeysAsync(
