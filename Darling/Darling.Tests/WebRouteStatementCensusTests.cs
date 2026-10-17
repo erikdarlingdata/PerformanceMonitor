@@ -51,6 +51,7 @@ public sealed class WebRouteStatementCensusTests
     private static readonly Dictionary<string, string> Named = new(StringComparer.Ordinal)
     {
         ["\"/api/ping\""] = "liveness, no data",
+        ["\"/api/webhook-signing\""] = "signing key presence and dates from the worker's in-process snapshot, no store read (#5998)",
         ["\"/api/session\""] = "the seat's capabilities",
         ["\"/api/catalog\""] = "the compose vocabulary (labels; no statement or plan column, pinned by the L8 catalog census)",
         ["\"/api/fleet\""] = "fleet counts and server names",

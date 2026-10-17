@@ -14,7 +14,31 @@ Signing applies to the generic webhook only. Teams, Slack and PagerDuty posts ar
 
 Darling makes the key. It shows the key one time, when it makes it. Copy the key into your receiver at that time. Darling cannot show the key again.
 
-[TODO: the viewer's key screen, which generates, rotates and removes a key, is not in this build yet.]
+Make a key in the Darling Viewer. The Viewer needs a connection that can write settings. A read-only connection cannot make or remove a key.
+
+To make a key for the generic webhook in Settings:
+
+1. Open **Settings** and go to the generic webhook section.
+2. Type the URL and save the settings. A key is tied to the saved URL, so the URL must be saved first.
+3. Select **Generate key**.
+4. Copy the key from the box that appears. The box says that the key will not be shown again.
+5. Give the key to your receiver.
+
+To make a key for a route that has its own generic URL:
+
+1. Open **Notification Routes**. If the route is new, save it first. Then edit the route.
+2. In the route window, select **Generate key**. The key is made at once. You do not need to select **OK**.
+3. Copy the key from the box that appears and give it to your receiver.
+
+After the key is saved, the block reads "Saved". The Viewer never shows the key again, and it does not copy the key for you.
+
+To rotate a key, select **Rotate key** and confirm. The Viewer shows the new key one time. The old key keeps signing next to the new one for 7 days, and the block shows the date that the old key stops. Each post carries both signatures during that time, so your receiver can switch to the new key without a gap.
+
+To remove a key, select **Remove key** and confirm. This removes the current key and the old key. Posts to that URL are then sent without a signature.
+
+A test sent with **Send Test** from the Viewer is not signed, because the service signs its posts and the Viewer cannot open the key. A receiver that checks signatures will refuse a test from the Viewer.
+
+The web dashboard shows the state of each key on the **Notification Routes** page. It shows whether a key is set and whether a rotation is in its window. It shows when the window ends and when the last rotation began. The web dashboard cannot make, rotate or remove a key, and it never shows a key. It does not show when the first key was made, because the store does not keep that time.
 
 Darling keeps the key sealed in its store, in the same way as the generic webhook headers. The key never appears in the logs, in the health text, in MCP output or in a diagnostics bundle.
 

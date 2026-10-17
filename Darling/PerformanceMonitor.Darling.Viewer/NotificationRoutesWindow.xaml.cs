@@ -148,7 +148,7 @@ public partial class NotificationRoutesWindow : Window
             return;
         }
 
-        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected) { Owner = this };
+        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected, _dataService) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;

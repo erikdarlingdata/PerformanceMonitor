@@ -1,0 +1,99 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json.Nodes;
+using System.Threading;
+using PerformanceMonitor.Notifications;
+
+namespace PerformanceMonitor.Darling.Service.Mcp;
+
+/// <summary>
+/// Whether each generic webhook destination has a signing key, for the web page (#5998). The key columns are denied to the read
+/// roles, which the web connects as on managed stores, so the page cannot ask the store. The service already reads the columns
+/// to sign with them; the worker hands this board what it read each time it applies the store's configuration. The board holds
+/// presence and dates only: <see cref="Publish"/> copies no key text, sealed or opened, so nothing it serves can carry one.
+/// </summary>
+public sealed class WebhookSigningStatusBoard
+{
+    /// <summary>One destination's signing state: whether a key is set, whether the previous key is kept, and when its window ends.</summary>
+    public sealed record Destination(int? RouteId, string? Match, bool Enabled, bool KeySet, bool PreviousKeySet, DateTime? PreviousUntilUtc);
+
+    private sealed record Snapshot(Destination Settings, IReadOnlyList<Destination> Routes, DateTime PublishedUtc);
+
+    private Snapshot? _current;
+
+    /// <summary>Takes presence and dates from the stored webhook settings and routes. Never reads or keeps a key.</summary>
+    public void Publish(WebhooksConfig? webhooks, IReadOnlyList<NotificationRoute>? routes, DateTime nowUtc)
+    {
+        var settings = Describe(null, null, true, webhooks?.GenericSigning);
+        var withKeys = (routes ?? Array.Empty<NotificationRoute>())
+            .Select(r => Describe(r.RouteId, r.MetricMatch, r.Enabled, r.GenericSigning))
+            .Where(d => d.KeySet)
+            .OrderBy(d => d.RouteId)
+            .ToList();
+        Volatile.Write(ref _current, new Snapshot(settings, withKeys, nowUtc));
+    }
+
+    private static Destination Describe(int? routeId, string? match, bool enabled, WebhookSigningKeys? keys) => new(
+        routeId, match, enabled,
+        keys is not null && !string.IsNullOrWhiteSpace(keys.Key),
+        keys is not null && !string.IsNullOrWhiteSpace(keys.PreviousKey),
+        keys?.PreviousUntilUtc);
+
+    /// <summary>The web answer at <paramref name="nowUtc"/>. Presence and dates only; a board nothing has published to says so.</summary>
+    public JsonObject Answer(DateTime nowUtc)
+    {
+        var snapshot = Volatile.Read(ref _current);
+        if (snapshot is null)
+        {
+            return new JsonObject { ["status"] = "unavailable", ["message"] = "The service has not read its notification settings yet." };
+        }
+
+        var routes = new JsonArray();
+        foreach (var route in snapshot.Routes)
+        {
+            routes.Add(Render(route, nowUtc));
+        }
+
+        return new JsonObject
+        {
+            ["status"] = "ok",
+            ["rotation_window_days"] = WebhookSigning.RotationOverlapDays,
+            ["settings"] = Render(snapshot.Settings, nowUtc),
+            ["routes"] = routes,
+            ["read_utc"] = snapshot.PublishedUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+        };
+    }
+
+    /// <summary>
+    /// One destination as the page shows it. <c>last_rotated_utc</c> is the moment the window opened (its end less the window), and
+    /// is null for a key never rotated: the store keeps no time for the first key, so there is no "generated" time to show.
+    /// </summary>
+    private static JsonObject Render(Destination d, DateTime nowUtc)
+    {
+        var rotating = d.KeySet && d.PreviousKeySet && d.PreviousUntilUtc is { } until && until > nowUtc;
+        var node = new JsonObject();
+        if (d.RouteId is { } id)
+        {
+            node["route_id"] = id;
+            node["metric_match"] = d.Match;
+            node["enabled"] = d.Enabled;
+        }
+
+        node["key_set"] = d.KeySet;
+        node["rotating"] = rotating;
+        node["rotation_ends_utc"] = rotating ? Iso(d.PreviousUntilUtc!.Value) : null;
+        node["last_rotated_utc"] = d.KeySet && d.PreviousKeySet && d.PreviousUntilUtc is { } u ? Iso(u - WebhookSigning.RotationOverlap) : null;
+        return node;
+    }
+
+    private static string Iso(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+}

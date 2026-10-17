@@ -192,6 +192,13 @@ WHERE route_id = $1";
             ViewerWebhookSealing.ResolveRoute(resolved, stored, parent, routeId, sealer, refusal);
             ValidateRoute(resolved);
 
+            /* #5998: a signing key is sealed for the route's stored URL text, so a save that changes that text would leave the key
+               unreadable to the service. A new route has no key. */
+            if (typed.RouteId != 0 && await RouteKeyWouldBreakAsync(connection, transaction, routeId, resolved.GenericUrl, cancellationToken))
+            {
+                throw new ViewerPasswordRefusedException(ViewerWebhookSigningKeys.RemoveKeyFirstText);
+            }
+
             await using var update = new NpgsqlCommand(NotificationRouteUpdateSql, connection, transaction);
             update.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             update.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });                          // $1
@@ -217,6 +224,19 @@ WHERE route_id = $1";
         {
             throw new ViewerSchemaSkewException(ex);
         }
+    }
+
+    /// <summary>Whether the route holds a signing key sealed for a stored URL text other than <paramref name="newUrlText"/> (#5998).</summary>
+    private static async Task<bool> RouteKeyWouldBreakAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string newUrlText, CancellationToken cancellationToken)
+    {
+        await using var keyRead = new NpgsqlCommand(
+            "SELECT signing_key <> '', generic_url FROM config_notification_routes WHERE route_id = $1", connection, transaction);
+        keyRead.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        keyRead.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        await using var keyReader = await keyRead.ExecuteReaderAsync(cancellationToken);
+        return await keyReader.ReadAsync(cancellationToken) && keyReader.GetBoolean(0)
+            && !string.Equals(newUrlText, keyReader.GetString(1), StringComparison.Ordinal);
     }
 
     public async Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, CancellationToken cancellationToken = default)

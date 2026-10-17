@@ -3265,6 +3265,7 @@ LIMIT 1";
         if (initialView is not null)
         {
             StoreConfigProvider.ApplyToConfig(config, initialView);
+            _collectorState.SigningStatus.Publish(config.Webhooks, config.NotificationRoutes, DateTime.UtcNow); // #5998: presence and dates for the web page, no key text
             _scheduleOverrides = initialView.ScheduleOverrides;
             _lastConfigVersion = initialView.ConfigVersion;
             /* Stage 2: honor config_service.paused from the very first sweep (a service that was paused
@@ -6647,6 +6648,7 @@ LIMIT 1";
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
+        _collectorState.SigningStatus.Publish(config.Webhooks, config.NotificationRoutes, DateTime.UtcNow); // #5998: presence and dates for the web page, no key text
         DarlingSmtpWarning.Log(config.Smtp, _logger); // the reloaded SMTP settings, same warning as at start
         /* #1560/#1562: the MCP + web host supervisors pick these up within their poll interval — the viewer's
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */

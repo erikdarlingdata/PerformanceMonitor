@@ -644,6 +644,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
         MapInvestigationPractice(app, postgres, logger);
+        MapWebhookSigningStatus(app, collector);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -2540,6 +2541,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return new JsonObject { ["hours_back"] = hoursBack, ["agents"] = agents };
+    }
+
+    /// <summary>
+    /// <c>GET /api/webhook-signing</c> (#5998): whether the settings row's generic webhook and each route that has its own key holds
+    /// a signing key, whether a rotation is in its window and when it ends. A status page only: the web has no write surface for
+    /// notifications, and the answer is served from what the service read when it applied the store's configuration, so it holds no
+    /// key text and does not depend on the web login being able to read the key columns.
+    /// </summary>
+    internal static void MapWebhookSigningStatus(WebApplication app, CollectorRuntimeState collector, Func<DateTime>? utcNow = null)
+    {
+        var clock = utcNow ?? (() => DateTime.UtcNow);
+        app.MapGet("/api/webhook-signing", () => Results.Text(collector.SigningStatus.Answer(clock()).ToJsonString(), "application/json"));
     }
 
     /// <summary>

@@ -171,6 +171,7 @@ public partial class SettingsWindow : Window
             if (sections.Notification is not null)
             {
                 SeedNotificationControlsFrom(sections.Notification);
+                await RefreshGenericSigningKeyAsync();
             }
 
             if (sections.Service is not null)
@@ -1618,6 +1619,162 @@ public partial class SettingsWindow : Window
         return row;
     }
 
+    // ── Generic webhook signing key (#5998) ──
+
+    /// <summary>The key block of the generic webhook, as last read from the store. Null for a read-only seat.</summary>
+    private ViewerSigningKeyState? _genericSigningState;
+
+    /// <summary>Reads the settings row's key columns and puts the block in line with them. The key itself is never read in the
+    /// clear: only whether a sealed key is saved and when the previous key stops being sent.</summary>
+    private async Task RefreshGenericSigningKeyAsync()
+    {
+        _genericSigningState = null;
+        var readOnly = _dataService is null || _dataService.IsReadOnly;
+        if (!readOnly)
+        {
+            try
+            {
+                _genericSigningState = await _dataService!.GetSettingsSigningKeyStateAsync();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                ViewerLogger.Warn("SettingsWindow", "The generic webhook signing key state could not be read: " + ex.Message);
+            }
+        }
+
+        GenericSigningKeyButton.Content = ViewerWebhookSigningKeys.ActionText(_genericSigningState);
+        GenericSigningKeyButton.IsEnabled = !readOnly;
+        GenericSigningKeyRemoveButton.IsEnabled = !readOnly && _genericSigningState is { HasKey: true };
+        GenericSigningKeyStatusText.Text = readOnly
+            ? "A read-only connection cannot make or remove a key."
+            : ViewerWebhookSigningKeys.StatusText(_genericSigningState, DateTime.UtcNow);
+        GenericUnsignedTestText.Text = _genericSigningState is { HasKey: true } ? ViewerWebhookSigningKeys.UnsignedTestText : "";
+    }
+
+    /// <summary>Shows a new key once, in a box to copy from. It is not logged, not copied for the person, and is gone when the window closes.</summary>
+    private void ShowNewGenericSigningKey(string key)
+    {
+        GenericSigningKeyShownBox.Text = key;
+        GenericSigningKeyShownText.Text = ViewerWebhookSigningKeys.ShownOnceText;
+        GenericSigningKeyShownPanel.Visibility = Visibility.Visible;
+        GenericSigningKeyShownBox.SelectAll();
+    }
+
+    private void HideNewGenericSigningKey()
+    {
+        GenericSigningKeyShownBox.Text = "";
+        GenericSigningKeyShownText.Text = "";
+        GenericSigningKeyShownPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private async void GenericSigningKeyButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        /* A key is tied to the saved URL, so a URL typed here and not yet saved would be the wrong one. */
+        if (!string.Equals(
+                GenericWebhookUrlBox.Text?.Trim() ?? "",
+                ViewerWebhookSealing.ShownText(_loadedNotification.GenericUrl).Trim(), StringComparison.Ordinal))
+        {
+            MessageBox.Show(ViewerWebhookSigningKeys.SaveUrlFirstText, "Signing key", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (_genericSigningState is { HasKey: true }
+            && MessageBox.Show(
+                $"Make a new key? The current key keeps signing alongside it for {WebhookSigning.RotationOverlapDays} days, so the receiver has time to switch.",
+                "Rotate signing key", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        GenericSigningKeyButton.IsEnabled = false;
+        try
+        {
+            var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
+            if (key.Notice is { } notice)
+            {
+                MessageBox.Show(notice, "Signing key", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+
+            if (key.Sealer is null)
+            {
+                MessageBox.Show(key.Refusal ?? ViewerPasswordKey.NoKeyText, "Signing key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            ShowNewGenericSigningKey(await _dataService.GenerateSettingsSigningKeyAsync(key.Sealer));
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            MessageBox.Show(ex.Message, "Signing key", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (ViewerReadOnlyException ex)
+        {
+            MessageBox.Show(ex.Message, "Read-only connection", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (ViewerSchemaSkewException ex)
+        {
+            MessageBox.Show(ex.Message, "Store out of date", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            MessageBox.Show("The signing key was not saved:\n\n" + ex.Message, "Signing key", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            await RefreshGenericSigningKeyAsync();
+        }
+    }
+
+    private async void GenericSigningKeyRemoveButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null
+            || MessageBox.Show(
+                "Remove the signing key and the previous key? Posts to this URL go out unsigned from the next alert, and a receiver that checks signatures will refuse them.",
+                "Remove signing key", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            await _dataService.RemoveSettingsSigningKeyAsync();
+            HideNewGenericSigningKey();
+        }
+        catch (ViewerReadOnlyException ex)
+        {
+            MessageBox.Show(ex.Message, "Read-only connection", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            MessageBox.Show("The signing key was not removed:\n\n" + ex.Message, "Signing key", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            await RefreshGenericSigningKeyAsync();
+        }
+    }
+
+    /// <summary>
+    /// Refuses a save that would leave a signing key unreadable (#5998): a key is sealed for the stored generic URL text and
+    /// the generic proxy, and a route's key for the settings row's proxy. Throws <see cref="ViewerPasswordRefusedException"/>.
+    /// </summary>
+    private async Task RefuseSaveThatBreaksSigningKeysAsync(NotificationRow row)
+    {
+        var stored = await _dataService!.GetSettingsSigningKeyStateAsync();
+        var refusal = ViewerWebhookSigningKeys.SaveRefusal(stored, row.GenericUrl, row.GenericProxy, checkProxy: true)
+            ?? ViewerWebhookSigningKeys.RouteKeyRefusal(
+                await _dataService.GetRouteIdsHoldingSigningKeysAsync(), row.GenericProxy, stored?.Proxy ?? _loadedNotification.GenericProxy);
+        if (refusal is not null)
+        {
+            throw new ViewerPasswordRefusedException(refusal);
+        }
+    }
+
     /// <summary>
     /// Seals the typed webhook values for the settings row (#5366): kept values stay as stored, anything typed is sealed to the
     /// service's key for its slot, proxy and (for the headers) generic URL. The key is asked for only when something was typed.
@@ -2197,6 +2354,7 @@ public partial class SettingsWindow : Window
                 }
 
                 await SealWebhookValuesAsync(notifyRow);
+                await RefuseSaveThatBreaksSigningKeysAsync(notifyRow);
                 var routeValuesNeedEnteringAgain = await RouteValuesNeedEnteringAgainAsync(notifyRow);
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);

@@ -1187,14 +1187,36 @@ const ROUTES_NOTE =
   "Read only. Destinations (webhook URLs, keys) are never reported by the service; only the names of the channels a " +
   "route sets are shown. Add, edit and test stay in the desktop Settings window.";
 
+/* #5998: the signing status of the generic webhook, in sentences. GET /api/webhook-signing answers presence and dates only (never a
+   key): whether a key is set, whether a rotation is in its window and when it ends, and when the last rotation began. The store
+   keeps no time for a first key, so none is shown for one. The key is made, rotated and removed in the desktop Viewer. */
+export function signingStatusLines(data) {
+  if (!data || data.status !== "ok") return [];
+  const one = (label, d) => {
+    if (!d || d.key_set !== true) return label + ": no signing key. Posts are not signed.";
+    let t = label + ": signing key set. Posts are signed.";
+    if (d.rotating === true && d.rotation_ends_utc) t += " A rotation is in its window: both keys sign until " + d.rotation_ends_utc + ".";
+    else if (d.last_rotated_utc) t += " The last rotation began " + d.last_rotated_utc + ".";
+    return t;
+  };
+  const lines = [one("Generic webhook (Settings)", data.settings)];
+  for (const r of Array.isArray(data.routes) ? data.routes : []) {
+    lines.push(one("Route " + r.route_id + (r.metric_match ? " (" + r.metric_match + ")" : "") + (r.enabled === false ? " (disabled)" : ""), r));
+  }
+  return lines;
+}
+
 async function buildRoutes(body, generation) {
-  const res = await readTool("get_notification_routes", {});
+  const [res, signing] = await Promise.all([readTool("get_notification_routes", {}), apiGet("/api/webhook-signing")]);
   if (generation !== renderGeneration) return;
   const bad = failure(res);
   if (bad) return mount(body, bad);
   const rows = routeRows(res.data);
+  /* A failed signing read leaves the strip out; the routes below are the page. */
+  const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
     noticeStrip(ROUTES_NOTE),
+    ...signingNodes,
     VIZ.table({ routes: rows }, {
       rowsKey: "routes",
       columns: ROUTE_COLUMNS,
