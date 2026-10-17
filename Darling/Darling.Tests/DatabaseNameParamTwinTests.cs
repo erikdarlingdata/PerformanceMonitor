@@ -48,6 +48,7 @@ public sealed class DatabaseNameParamTwinTests
         ["get_plan_xml"] = "identity: names the database of one stored plan row, not a filter",
         ["analyze_query_plan"] = "identity: names the database of one stored plan row, not a filter",
         ["assign_query_tag"] = "identity: one part of the object key being tagged (kind object takes database, schema and object name together), not a filter",
+        ["unassign_query_tag"] = "identity: one part of the object key being untagged (kind object takes database, schema and object name together), not a filter",
     };
 
     /// <summary>Tools whose <c>database_name</c> predates the "append it LAST" rule and sits mid-list (see the class comment).</summary>
