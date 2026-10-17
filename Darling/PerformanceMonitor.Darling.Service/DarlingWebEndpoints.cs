@@ -3286,9 +3286,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var name = reader.String("name");
             var parentId = reader.Int("parent_id");
             var colour = reader.String("colour");
-            if (reader.Error is not null)
+            bodyError = reader.Error;
+            if (bodyError is not null)
             {
-                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+                return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -3327,10 +3328,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return UnsupportedMediaTypeResult();
             }
 
-            var (confirm, confirmRefusal) = ParseConfirm(context.Request.Query);
-            if (confirmRefusal is not null)
+            var (confirm, bodyError) = ParseConfirm(context.Request.Query);
+            if (bodyError is not null)
             {
-                return ErrorResult(confirmRefusal, StatusCodes.Status400BadRequest);
+                return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -3360,9 +3361,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var objectName = reader.String("object_name");
             var serverId = reader.Int("server_id");
             var queryId = reader.Long("query_id");
-            if (reader.Error is not null)
+            bodyError = reader.Error;
+            if (bodyError is not null)
             {
-                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+                return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -3393,9 +3395,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var schemaName = reader.String("schema_name");
             var objectName = reader.String("object_name");
             var serverId = reader.Int("server_id");
-            if (reader.Error is not null)
+            bodyError = reader.Error;
+            if (bodyError is not null)
             {
-                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+                return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -3425,9 +3428,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var priority = reader.Int("priority");
             var enabled = reader.Bool("enabled");
             var serverId = reader.Int("server_id");
-            if (reader.Error is not null)
+            bodyError = reader.Error;
+            if (bodyError is not null)
             {
-                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+                return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -3476,9 +3480,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         app.MapGet("/api/query-tag-rules", async (HttpContext context) =>
         {
-            if (!TryReadQueryTagInt(context.Request.Query, "server_id", out var serverId, out var error))
+            if (!TryReadQueryTagInt(context.Request.Query, "server_id", out var serverId, out var bodyError))
             {
-                return ErrorResult(error!, StatusCodes.Status400BadRequest);
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -3489,15 +3493,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapGet("/api/query-tag-rules/test", async (HttpContext context) =>
         {
             var query = context.Request.Query;
-            if (!TryReadQueryTagInt(query, "rule_id", out var ruleId, out var error)
-                || !TryReadQueryTagInt(query, "tag_id", out var tagId, out error)
-                || !TryReadQueryTagInt(query, "priority", out var priority, out error)
-                || !TryReadQueryTagInt(query, "server_id", out var serverId, out error)
-                || !TryReadQueryTagInt(query, "window_hours", out var windowHours, out error)
+            if (!TryReadQueryTagInt(query, "rule_id", out var ruleId, out var bodyError)
+                || !TryReadQueryTagInt(query, "tag_id", out var tagId, out bodyError)
+                || !TryReadQueryTagInt(query, "priority", out var priority, out bodyError)
+                || !TryReadQueryTagInt(query, "server_id", out var serverId, out bodyError)
+                || !TryReadQueryTagInt(query, "window_hours", out var windowHours, out bodyError)
                 || !TrySingleQueryValue(query, "field", out var field)
                 || !TrySingleQueryValue(query, "pattern", out var pattern))
             {
-                return ErrorResult(error ?? "Each parameter may be given once.", StatusCodes.Status400BadRequest);
+                return ErrorResult(bodyError ?? "Each parameter may be given once.", StatusCodes.Status400BadRequest);
             }
 
             /* The dry run reads up to 10,000 stored sightings like any collected-data read: admitted and recorded under its MCP twin's name. */
