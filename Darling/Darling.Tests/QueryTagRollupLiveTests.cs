@@ -362,14 +362,39 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
-    /// <summary>A window too short for the Query Store interval table is not an all-clear: the answer is unavailable, naming why.</summary>
+    /// <summary>A 1-hour window is under the 24-hour minimum the Query Store interval table is read for. The other five sections were served and
+    /// held nothing, so the top-level status is empty (not unavailable), and the Query Store section says why it was not served.</summary>
     [Fact]
-    public async Task AOneHourWindowWithNoRows_AnswersUnavailable_BecauseQueryStoreCannotBeRead()
+    public async Task AOneHourAllQuietWindow_AnswersEmpty_WithTheQueryStoreSectionUnavailableAndTheFixNamed()
     {
         await WithStoreAsync(async c =>
         {
             using var doc = await ReadAsync(c, "srv-one", hours: 1);
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            Assert.Contains("query_store", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            var qs = Section(doc, "query_store");
+            Assert.Equal("unavailable", qs.GetProperty("status").GetString());
+            Assert.Contains("24-hour minimum", qs.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("empty", Section(doc, "plan_cache").GetProperty("status").GetString());
+            Assert.Equal("empty", Section(doc, "deadlocks").GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>The top-level status is unavailable only when every section is: here the five sources do not exist in this store and the
+    /// window is under the Query Store minimum, so nothing could be served.</summary>
+    [Fact]
+    public async Task WhenEverySectionIsUnavailable_TheTopLevelStatusIsUnavailable()
+    {
+        await WithStoreAsync(async c =>
+        {
+            foreach (var table in new[] { "collect.query_stats", "collect.procedure_stats", "collect.blocked_process_reports", "collect.dmv_blocking_snapshots", "collect.deadlocks" })
+            {
+                await ExecAsync(c.Store, $"DROP TABLE {table} CASCADE", c.Ct);
+            }
+
+            using var doc = await ReadAsync(c, "srv-one", hours: 1);
             Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+            Assert.Contains("query_store", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
         });
     }
 

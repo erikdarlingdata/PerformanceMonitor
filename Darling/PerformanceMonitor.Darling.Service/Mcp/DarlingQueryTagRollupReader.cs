@@ -83,8 +83,18 @@ internal static class DarlingQueryTagRollupReader
             var truncated = false;
             foreach (var serverId in serverIds)
             {
-                var floor = await RawWindowFloor.GetAsync(
-                    postgres, floorTable, serverId, windowStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                DateTime? floor;
+                try
+                {
+                    floor = await RawWindowFloor.GetAsync(
+                        postgres, floorTable, serverId, windowStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+                {
+                    /* The raw table is not in this store yet: no floor to report, and the section read says "unavailable" (#5983). */
+                    floor = null;
+                }
+
                 var effective = RawWindowFloor.EffectiveStart(floor, windowStart);
                 if (latest is null || effective > latest)
                 {
@@ -132,7 +142,7 @@ internal static class DarlingQueryTagRollupReader
         var refused = new Dictionary<int, string>();
         if (!DarlingDataReader.QueryStoreTopMayReadTable(windowStart, windowEnd))
         {
-            var why = $"the window is shorter than {DarlingDataReader.QueryStoreTopMinWindow.TotalMinutes:0} minutes, which the Query Store interval table is not read for";
+            var why = $"the window is under the {DarlingDataReader.QueryStoreTopMinWindow.TotalHours:0}-hour minimum the Query Store interval table is read for (ask for hours_back of {DarlingDataReader.QueryStoreTopMinWindow.TotalHours:0} or more)";
             foreach (var serverId in serverIds)
             {
                 refused[serverId] = why;

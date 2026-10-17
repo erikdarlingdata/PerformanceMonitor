@@ -38,7 +38,7 @@ public sealed class DarlingMcpQueryTagRollupTools
     internal const int DefaultLimit = 25;
     private const int MaxLimit = 200;
 
-    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet.")]
+    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet or, for query_store, that the window is under the 24-hour minimum its interval table is read for (ask for hours_back 24 or more). The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
     public static Task<string> GetResourceUseByTag(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit for the whole fleet.")] string? server_name = null,
@@ -105,7 +105,8 @@ public sealed class DarlingMcpQueryTagRollupTools
 
             var sections = new List<object>();
             var anyData = false;
-            var anyUnavailable = false;
+            /* Sections this call could not serve, with why. The top-level status is "unavailable" only when every section is in here (#5983). */
+            var notServed = new List<(string Section, string Reason)>();
 
             async Task AddAdditive(QueryTagRollupSection section, string sql, string source, DateTime? ceiling, Dictionary<string, object?>? disclosure)
             {
@@ -117,9 +118,9 @@ public sealed class DarlingMcpQueryTagRollupTools
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
                 {
-                    anyUnavailable = true;
-                    sections.Add(Merge(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, [], "unavailable",
-                        $"{source} does not exist in this store yet.", null), disclosure));
+                    var reason = $"{source} does not exist in this store yet.";
+                    notServed.Add((section.Name, reason));
+                    sections.Add(Merge(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, [], "unavailable", reason, null), disclosure));
                     return;
                 }
 
@@ -167,17 +168,16 @@ public sealed class DarlingMcpQueryTagRollupTools
                 anyData |= facts.Count > 0;
                 if (unavailable || allowed.Count == 0)
                 {
-                    anyUnavailable = true;
                     var reason = unavailable
                         ? "collect.query_store_interval_wide does not exist in this store yet."
                         : "Query Store is read from the composed interval table only, and it is not readable here: " + refused.Values.First() + ".";
+                    notServed.Add((QueryTagRollupSection.QueryStore.Name, reason));
                     sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
                         [], "unavailable", reason, refused), reach));
                 }
                 else
                 {
                     var refusedNote = refused.Count == 0 ? null : "Some servers are unavailable: the interval table does not hold the window for them yet.";
-                    anyUnavailable |= refused.Count > 0;
                     sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
                         facts, facts.Count == 0 ? "empty" : "ok", facts.Count == 0 ? "No rows in the window." : refusedNote, refused), reach));
                 }
@@ -191,9 +191,18 @@ public sealed class DarlingMcpQueryTagRollupTools
             await AddAdditive(QueryTagRollupSection.BlockingReports, QueryTagRollupSql.BlockingReportsSql, "collect.blocked_process_reports", null, null);
             await AddAdditive(QueryTagRollupSection.BlockingSnapshots, QueryTagRollupSql.BlockingSnapshotsSql, "collect.dmv_blocking_snapshots", null, null);
 
-            var (deadlocks, scanTruncated) = await DarlingQueryTagRollupReader.ReadDeadlocksAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
-            anyData |= deadlocks.Count > 0;
-            sections.Add(WrapDeadlocks(fleet, scope, names, tags, tagFilter, limit, deadlocks, scanTruncated));
+            try
+            {
+                var (deadlocks, scanTruncated) = await DarlingQueryTagRollupReader.ReadDeadlocksAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
+                anyData |= deadlocks.Count > 0;
+                sections.Add(WrapDeadlocks(fleet, scope, names, tags, tagFilter, limit, deadlocks, scanTruncated));
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            {
+                const string reason = "collect.deadlocks does not exist in this store yet.";
+                notServed.Add((QueryTagRollupSection.Deadlocks.Name, reason));
+                sections.Add(Wrap(QueryTagRollupSection.Deadlocks, "collect.deadlocks", fleet, scope, names, tags, tagFilter, limit, [], "unavailable", reason, null));
+            }
 
             if (!anyData)
             {
@@ -203,30 +212,53 @@ public sealed class DarlingMcpQueryTagRollupTools
                     if (unmet != null) return unmet;
                 }
 
-                return anyUnavailable
-                    ? McpHelpers.Status("unavailable", "Some sources of the roll-up could not be read (a table that does not exist in this store yet, or the Query Store interval table not readable for this window), and the rest hold no rows in the window.")
-                    : McpHelpers.Status("empty", "No resource use was collected in the window" + (fleet ? " on any server." : " on this server."));
+                /* Six independent sections answer from the ones they could serve: "unavailable" only when none could be, else "empty" because
+                   every served section held no rows. The sections that were not served are named, with why. */
+                if (notServed.Count == sections.Count)
+                {
+                    return McpHelpers.Status("unavailable", "No section of the roll-up could be read. " + NotServedText(notServed));
+                }
+
+                if (notServed.Count == 0)
+                {
+                    return McpHelpers.Status("empty", "No resource use was collected in the window" + (fleet ? " on any server." : " on this server."));
+                }
             }
 
-            return JsonSerializer.Serialize(new
+            /* Data, or the mixed empty answer: the served sections held no rows, so the status is "empty", and the sections ride along so the
+               unserved one's own status and reason are there to read. */
+            var payload = new Dictionary<string, object?>();
+            if (!anyData)
             {
-                scope = fleet ? "fleet" : "server",
-                server = fleet ? null : scope[0].ServerName,
-                hours_back,
-                window_start = windowStart.ToString("o", CultureInfo.InvariantCulture),
-                window_end = windowEnd.ToString("o", CultureInfo.InvariantCulture),
-                tag = tagFilter is int id ? tags.First(t => t.Id == id).Name : null,
-                /* The sections never add up: the plan cache and Query Store count the same executions and procedures overlap both. */
-                sections_additive = false,
-                note = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.",
-                sections,
-            }, McpHelpers.JsonOptions);
+                payload["status"] = "empty";
+            }
+
+            payload["scope"] = fleet ? "fleet" : "server";
+            payload["server"] = fleet ? null : scope[0].ServerName;
+            payload["hours_back"] = hours_back;
+            payload["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture);
+            payload["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture);
+            payload["tag"] = tagFilter is int id ? tags.First(t => t.Id == id).Name : null;
+            /* The sections never add up: the plan cache and Query Store count the same executions and procedures overlap both. */
+            payload["sections_additive"] = false;
+            if (notServed.Count > 0)
+            {
+                payload["message"] = (anyData ? string.Empty : "No resource use was collected in the window" + (fleet ? " on any server. " : " on this server. "))
+                    + "Sections not served: " + NotServedText(notServed);
+            }
+
+            payload["note"] = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.";
+            payload["sections"] = sections;
+            return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_resource_use_by_tag", ex);
         }
     }
+
+    private static string NotServedText(List<(string Section, string Reason)> notServed)
+        => string.Join(" ", notServed.Select(n => $"{n.Section} is unavailable: {n.Reason}"));
 
     private static Dictionary<string, object?> Merge(Dictionary<string, object?> section, Dictionary<string, object?>? extra)
     {
