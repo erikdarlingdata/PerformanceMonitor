@@ -271,7 +271,7 @@ WHERE a.muted
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null,
-            "SELECT has_table_privilege(current_user, 'config.investigation_journal', 'INSERT') AND has_table_privilege(current_user, 'config.config_service', 'UPDATE')");
+            "SELECT has_any_column_privilege(current_user, 'config.investigation_journal', 'INSERT') AND has_table_privilege(current_user, 'config.config_service', 'UPDATE')");
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 

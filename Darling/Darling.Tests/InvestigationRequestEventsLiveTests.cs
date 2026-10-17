@@ -406,7 +406,7 @@ public sealed class InvestigationRequestEventsLiveTests
             var id = (await store.OpenOrJoinAsync(Alert(_now, "High CPU"), ct)).RequestId!.Value;
             var cursor = (string)JsonNode.Parse(await Wait(start, 0))!["cursor"]!;
 
-            var wait = Wait(cursor, 20);
+            var wait = Wait(cursor, DarlingMcpInvestigationTools.MaxWaitSeconds);
             var until = DateTime.UtcNow.AddSeconds(10);
             while (signal.WaiterCount < 1 && DateTime.UtcNow < until)
             {
@@ -799,7 +799,7 @@ public sealed class InvestigationRequestEventsLiveTests
             var cursor = (string)first["cursor"]!;
 
             /* A call waiting on that cursor wakes for the next event and answers it alone. */
-            var wait = Wait(cursor, 20);
+            var wait = Wait(cursor, DarlingMcpInvestigationTools.MaxWaitSeconds);
             var until = DateTime.UtcNow.AddSeconds(10);
             while (signal.WaiterCount < 1 && DateTime.UtcNow < until)
             {
