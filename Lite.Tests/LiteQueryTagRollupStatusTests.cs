@@ -49,6 +49,19 @@ public sealed class LiteQueryTagRollupStatusTests : IClassFixture<SharedDuckDbFi
 
     public void Dispose()
     {
+        /* Put the renamed table back: the fixture's reset of the next test clears every data table by name. */
+        using (var connection = _fixture.DuckDb.CreateConnection())
+        {
+            connection.Open();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'deadlocks_held'";
+            if (Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) > 0)
+            {
+                cmd.CommandText = "ALTER TABLE deadlocks_held RENAME TO deadlocks";
+                cmd.ExecuteNonQuery();
+            }
+        }
+
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch (IOException) { /* best-effort cleanup */ }
         catch (UnauthorizedAccessException) { /* best-effort cleanup */ }
@@ -74,7 +87,7 @@ public sealed class LiteQueryTagRollupStatusTests : IClassFixture<SharedDuckDbFi
         await ExecAsync(
             "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes) VALUES ($1, $2, $3, 'x', 'db1', '0x00000000000000AA', 1, 5000, 5000, 10, 1)",
             1L, DateTime.UtcNow.AddMinutes(-30), _serverId);
-        await ExecAsync("DROP TABLE IF EXISTS deadlocks");
+        await ExecAsync("ALTER TABLE deadlocks RENAME TO deadlocks_held");
 
         var json = await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerName, 24);
         using var doc = JsonDocument.Parse(json);
@@ -90,7 +103,7 @@ public sealed class LiteQueryTagRollupStatusTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task OneSectionUnavailable_OthersEmpty_IsEmptyAndStillCarriesTheSections()
     {
-        await ExecAsync("DROP TABLE IF EXISTS deadlocks");
+        await ExecAsync("ALTER TABLE deadlocks RENAME TO deadlocks_held");
 
         var json = await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerName, 24);
         using var doc = JsonDocument.Parse(json);
