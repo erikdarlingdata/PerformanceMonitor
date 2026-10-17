@@ -88,6 +88,10 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>#5632 Phase A: the investigation expiry sweep's tick (ruling R4).</summary>
     private static readonly TimeSpan s_investigationSweepInterval = TimeSpan.FromSeconds(60);
 
+    /// <summary>#6001: the evidence capture's tick. Short, so a High CPU request's evidence is frozen soon after the open and a
+    /// pending section is picked up soon after its collector lands.</summary>
+    private static readonly TimeSpan s_investigationEvidenceInterval = TimeSpan.FromSeconds(20);
+
     /* The store disk-pressure self-alert's poll cadence (fleet-level, Stage 4). Disk fills slowly, and the
        check is one volume free-space read (a few file-system calls, no directory walk) plus one narrow
        store_metrics lookup, so 5 minutes is ample and cheap —
@@ -3645,6 +3649,11 @@ LIMIT 1";
            claims, to expired. It never reopens a lease; a claim's own WHERE takes a lapsed lease over. */
         var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, stoppingToken);
 
+        /* #6001: the evidence capture, on its own tick. It reads the store only and opens no connection to a monitored server. */
+        var investigationEvidenceLoop = RunInvestigationEvidenceLoopAsync(
+            new PerformanceMonitor.Darling.Service.Investigations.InvestigationEvidenceCapture(
+                investigationPostgres, investigationStore, _logger), stoppingToken);
+
         /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
            clamp-bounded outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
@@ -4415,6 +4424,16 @@ LIMIT 1";
         try
         {
             await investigationSweepLoop;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
+        /* #6001: the evidence capture observes it too. */
+        try
+        {
+            await investigationEvidenceLoop;
         }
         catch (OperationCanceledException)
         {
@@ -6558,6 +6577,43 @@ LIMIT 1";
             try
             {
                 await Task.Delay(s_investigationSweepInterval, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// #6001: every <see cref="s_investigationEvidenceInterval"/>, the evidence capture freezes the evidence of the High CPU
+    /// requests that still need it, from the store's own rows. It honors the service pause as the sweep does, and a failed
+    /// pass is logged and tried again next tick.
+    /// </summary>
+    private async Task RunInvestigationEvidenceLoopAsync(
+        PerformanceMonitor.Darling.Service.Investigations.InvestigationEvidenceCapture capture, CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (ShouldRunCollection(_paused))
+            {
+                try
+                {
+                    await capture.CaptureOnceAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Investigation evidence capture failed; it is tried again next pass");
+                }
+            }
+
+            try
+            {
+                await Task.Delay(s_investigationEvidenceInterval, stoppingToken);
             }
             catch (OperationCanceledException)
             {

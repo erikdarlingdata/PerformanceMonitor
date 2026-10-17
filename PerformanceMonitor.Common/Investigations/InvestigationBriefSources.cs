@@ -121,4 +121,12 @@ public sealed record InvestigationBriefSources(
     IReadOnlyList<InvestigationPriorLink>? PriorLinks = null,
     string? RequestUrl = null,
     bool Practice = false,
-    IReadOnlyList<InvestigationAlertRecurrence>? Recurrence = null);
+    IReadOnlyList<InvestigationAlertRecurrence>? Recurrence = null,
+    IReadOnlyList<InvestigationBriefEvidence>? Evidence = null);
+
+/// <summary>
+/// One frozen evidence section of a request (#6001, #5632 Phase C D9/D10): its name, its state (<c>pending</c>, <c>ready</c> or
+/// <c>not_collected</c>), when it was frozen, and its content as the JSON the capture stored (rows from the store's own
+/// collected data; plans by hash, never XML). Darling's: Lite supplies none, so a Lite brief carries no <c>evidence</c> key.
+/// </summary>
+public sealed record InvestigationBriefEvidence(string Section, string State, DateTime? CapturedAtUtc, string? ContentJson);
