@@ -204,7 +204,7 @@ public sealed class QueryStoreBackgroundIndexesTests
        chunk it builds. The Query Store backfill writes backdated rows into older chunks as well as the newest, under
        the collector's 10 s COPY deadline, so no chunk is safe to lock and no background index targets that table. */
     [Fact]
-    public void TheBackgroundIndexes_AreTheBrinThenTheWideBtreeThenTheLatestBtreeThenTheQueryBtreesWideThenLatest_AndNoneTargetsTheRawHypertable()
+    public void TheBackgroundIndexes_AreTheBrinThenTheWideBtreeThenTheLatestBtreeThenTheQueryBtreesWideThenLatest_ThenTheStatementTextBtree_AndNoneTargetsTheRawHypertable()
     {
         Assert.Equal(
             new[]
@@ -214,6 +214,7 @@ public sealed class QueryStoreBackgroundIndexesTests
                 QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName,
                 QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExecIndexName,
                 QueryStoreBackgroundIndexes.LatestDatabaseQueryFirstExecIndexName,
+                QueryStoreBackgroundIndexes.StatementTextServerLastSeenIndexName,
             },
             QueryStoreBackgroundIndexes.All.Select(spec => spec.IndexName).ToArray());
 
