@@ -194,7 +194,7 @@ public sealed class QueryReadsWebDispatchLiveTests
             }
 
             /* A blank name is every database: the public tool echoes null and answers with the rows. */
-            var blank = await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, serverName, 1, 30, null, "  ", null, ct);
+            var blank = await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, serverName, 1, 30, null, "  ", null, null, ct);
             Assert.Null(Echo(blank));
             Assert.Equal(6, JsonDocument.Parse(blank).RootElement.GetProperty("completions_returned").GetInt32());
             bodySucceeded = true;
