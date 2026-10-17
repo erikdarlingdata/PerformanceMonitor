@@ -338,4 +338,58 @@ public sealed class QueryTagReadsLiveTests
         var tagged = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, ServerName, 1, tag: "TagReadsProd", cancellationToken: ct)).RootElement;
         Assert.Equal("TagReadsProd", tagged.GetProperty("tag_filter").GetString());
     });
+
+    /// <summary>
+    /// #5984: the tag predicate runs inside the host-object rollup (both passes), and a rolled procedure row carries a null
+    /// query_hash, so the filter must act on each STATEMENT before the sum: a procedure with one tagged and one untagged
+    /// statement counts only the matching statement's figures under the tag and under untagged, and an ad-hoc row (host NULL)
+    /// still comes back on its own.
+    /// </summary>
+    [Fact]
+    public Task TopQueries_HostObjectRollup_CountsOnlyTheStatementsTheTagSelects() => RunAsync(async (pg, ct) =>
+    {
+        const string host = "dbo.usp_TagRollup";
+        const string tagged = "0xTAGPROCA";
+        const string plain = "0xTAGPROCB";
+        var at = DarlingMcpTestData.Naive(LiveClock.Now().AddMinutes(-10));
+        using (var c = new NpgsqlConnection(ConnectionString))
+        {
+            await c.OpenAsync(ct);
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO config.query_tag_map (server_id, key_kind, key, tag_id, source)
+                  SELECT $1, 'hash', $2, id, 'rule' FROM config.query_tags WHERE name = 'TagReadsBatch'",
+                ServerId, tagged);
+            foreach (var (hash, executions, cpu) in new[] { (tagged, 3L, 3_000_000L), (plain, 7L, 7_000_000L) })
+            {
+                var text = "SELECT " + hash;
+                var digest = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text));
+                await DarlingMcpTestData.ExecAsync(c, ct,
+                    @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                                               query_text, query_text_digest, host_object_name, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, min_dop, max_dop)
+                      VALUES ($1,$2,$3,$4,$5,$6,'0xPLAN','0xSQLH','0xPLANH',$7,$8,$9,$10,$11,$11,100,1,1)",
+                    CollectionIdGenerator.Next(), at, ServerId, ServerName, Db, hash, text, digest, host, executions, cpu);
+            }
+        }
+
+        static JsonElement ProcRow(JsonElement rows) =>
+            rows.EnumerateArray().Single(r => r.GetProperty("host_object").ValueKind == JsonValueKind.String);
+
+        var onTag = Rows(await DarlingMcpDataTools.GetTopQueriesByCpu(pg, ServerName, 1, 10, Db, tag: "TagReadsBatch", group_by: "host_object", cancellationToken: ct), "queries");
+        Assert.Equal(2, onTag.GetArrayLength());
+        var taggedProc = ProcRow(onTag);
+        Assert.Equal(host, taggedProc.GetProperty("host_object").GetString());
+        Assert.Equal(1, taggedProc.GetProperty("distinct_query_hashes").GetInt32());
+        Assert.Equal(3L, taggedProc.GetProperty("execution_count").GetInt64());
+        Assert.Equal(3000.0, taggedProc.GetProperty("total_cpu_ms").GetDouble(), 3);
+        var adHoc = onTag.EnumerateArray().Single(r => r.GetProperty("host_object").ValueKind == JsonValueKind.Null);
+        Assert.Equal(Bat, adHoc.GetProperty("query_hash").GetString());
+
+        var untagged = Rows(await DarlingMcpDataTools.GetTopQueriesByCpu(pg, ServerName, 1, 10, Db, tag: "untagged", group_by: "host_object", cancellationToken: ct), "queries");
+        var plainProc = ProcRow(untagged);
+        Assert.Equal(host, plainProc.GetProperty("host_object").GetString());
+        Assert.Equal(1, plainProc.GetProperty("distinct_query_hashes").GetInt32());
+        Assert.Equal(7L, plainProc.GetProperty("execution_count").GetInt64());
+        Assert.Equal(7000.0, plainProc.GetProperty("total_cpu_ms").GetDouble(), 3);
+        Assert.Equal(Hog, untagged.EnumerateArray().Single(r => r.GetProperty("host_object").ValueKind == JsonValueKind.Null).GetProperty("query_hash").GetString());
+    });
 }
