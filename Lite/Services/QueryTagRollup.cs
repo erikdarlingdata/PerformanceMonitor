@@ -106,8 +106,14 @@ public static class QueryTagRollup
         var subtree = new Dictionary<int, double[]>();
         var untagged = new double[2];
         var total = new double[2];
+        var unparsedGraphs = 0;
         foreach (var fact in facts)
         {
+            if (fact.Unparsed)
+            {
+                unparsedGraphs++;
+            }
+
             total[0] += 1;
             total[1] += fact.ProcessesByTag.Values.Sum() + fact.UntaggedProcesses;
             if (fact.UntaggedProcesses > 0)
@@ -140,6 +146,8 @@ public static class QueryTagRollup
         }
 
         var shaped = Shape(section, own, subtree, untagged, total, tags, tagFilter, limit);
+        /* Graphs the section counts that gave no process rows: in total, in no tag row and in no untagged figure. */
+        shaped["unparsed_graphs"] = unparsedGraphs;
         shaped["rows_add_up_to_total"] = false;
         shaped["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.";
         return shaped;
@@ -191,13 +199,13 @@ public static class QueryTagRollup
     }
 
     /// <summary>A section with no rows in the window: all figures zero, status <c>empty</c>.</summary>
-    public static Dictionary<string, object?> Empty(QueryTagRollupSection section, string message)
+    public static Dictionary<string, object?> Empty(QueryTagRollupSection section, string message, string status = "empty")
     {
         var zeros = Figures(new double[section.Measures.Count], section);
         return new Dictionary<string, object?>
         {
             ["section"] = section.Name,
-            ["status"] = "empty",
+            ["status"] = status,
             ["message"] = message,
             ["tag_rows"] = new List<object>(),
             ["tag_rows_total"] = 0,
@@ -225,15 +233,19 @@ public static class QueryTagRollup
     /// <summary>One section for one server's facts, or for the all-servers view (a block per server and a <c>fleet_total</c>).</summary>
     public static Dictionary<string, object?> Section(
         QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts, IReadOnlyList<(int Id, string Name)> scope,
-        bool allServers, IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit)
+        bool allServers, IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit, string? unavailableReason = null)
     {
-        Dictionary<string, object?> One(IReadOnlyList<QueryTagRollupFact> mine) => mine.Count == 0
-            ? Empty(section, "No rows in the window.")
-            : Assemble(section, mine, tags, tagFilter, limit);
+        Dictionary<string, object?> One(IReadOnlyList<QueryTagRollupFact> mine) => unavailableReason is not null
+            ? Empty(section, unavailableReason, "unavailable")
+            : mine.Count == 0
+                ? Empty(section, "No rows in the window.")
+                : Assemble(section, mine, tags, tagFilter, limit);
 
         if (!allServers)
         {
-            return One(facts.ToList());
+            var block = One(facts.ToList());
+            block["source"] = SourceOf(section);
+            return block;
         }
 
         var servers = scope.Select(s =>
@@ -245,24 +257,48 @@ public static class QueryTagRollup
         return new Dictionary<string, object?>
         {
             ["section"] = section.Name,
-            ["status"] = facts.Count == 0 ? "empty" : "ok",
+            ["source"] = SourceOf(section),
+            ["status"] = unavailableReason is not null ? "unavailable" : facts.Count == 0 ? "empty" : "ok",
+            ["message"] = unavailableReason,
             ["servers"] = servers,
             ["fleet_total"] = FleetTotal(section, facts),
         };
     }
 
+    /// <summary>The store table or view a section reads, named in a section's <c>source</c> and in its unavailable reason.</summary>
+    public static string SourceOf(QueryTagRollupSection section) => section.Name switch
+    {
+        "plan_cache" => "v_query_stats",
+        "query_store" => "v_query_store_stats",
+        "procedures" => "v_procedure_stats",
+        "blocking_reports" => "blocked_process_reports",
+        "blocking_snapshots" => "v_dmv_blocking_snapshots",
+        _ => "deadlocks",
+    };
+
     /// <summary>The deadlock section for one server or the all-servers view.</summary>
     public static Dictionary<string, object?> DeadlockSection(
         IReadOnlyList<QueryTagDeadlockFact> facts, IReadOnlyList<(int Id, string Name)> scope, bool allServers,
-        IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit, bool scanTruncated)
+        IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit, bool scanTruncated, string? unavailableReason = null)
     {
-        Dictionary<string, object?> One(IReadOnlyList<QueryTagDeadlockFact> mine) => mine.Count == 0
-            ? Empty(QueryTagRollupSection.Deadlocks, "No deadlock graphs in the window.")
-            : AssembleDeadlocks(mine, tags, tagFilter, limit);
+        Dictionary<string, object?> One(IReadOnlyList<QueryTagDeadlockFact> mine)
+        {
+            if (mine.Count > 0)
+            {
+                return AssembleDeadlocks(mine, tags, tagFilter, limit);
+            }
+
+            var empty = unavailableReason is not null
+                ? Empty(QueryTagRollupSection.Deadlocks, unavailableReason, "unavailable")
+                : Empty(QueryTagRollupSection.Deadlocks, "No deadlock graphs in the window.");
+            empty["unparsed_graphs"] = 0;
+            return empty;
+        }
 
         if (!allServers)
         {
             var block = One(facts.ToList());
+            block["source"] = SourceOf(QueryTagRollupSection.Deadlocks);
             block["scan_truncated"] = scanTruncated;
             return block;
         }
@@ -276,8 +312,11 @@ public static class QueryTagRollup
         return new Dictionary<string, object?>
         {
             ["section"] = QueryTagRollupSection.Deadlocks.Name,
-            ["status"] = facts.Count == 0 ? "empty" : "ok",
+            ["source"] = SourceOf(QueryTagRollupSection.Deadlocks),
+            ["status"] = unavailableReason is not null ? "unavailable" : facts.Count == 0 ? "empty" : "ok",
+            ["message"] = unavailableReason ?? (facts.Count == 0 ? "No deadlock graphs in the window." : null),
             ["scan_truncated"] = scanTruncated,
+            ["unparsed_graphs"] = facts.Count(f => f.Unparsed),
             ["rows_add_up_to_total"] = false,
             ["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.",
             ["servers"] = servers,

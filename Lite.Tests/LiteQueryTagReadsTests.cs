@@ -116,4 +116,36 @@ public sealed class LiteQueryTagReadsTests : IClassFixture<SharedDuckDbFixture>
         Assert.True((await _service.GetQueryTagReadScopeAsync(Server, "nope")).Unknown);
         Assert.False((await _service.GetQueryTagReadScopeAsync(Server, "untagged")).Unknown);
     }
+
+    [Fact]
+    public async Task TagFilter_OverManyMapKeys_ReturnsTheSameRowsAsTheTagCarries()
+    {
+        var tag = await _service.CreateQueryTagAsync("Bulk", null);
+        const int tagged = 300;
+        for (var i = 0; i < tagged; i++)
+        {
+            var hash = "0x" + (0x1000 + i).ToString("X16");
+            await PlanAsync(hash, 1_000 + i);
+            await MapAsync(hash, tag);
+        }
+
+        await PlanAsync("0x00000000000000F1", 50_000);
+        await PlanAsync("0x00000000000000F2", 40_000);
+
+        var rows = await TopAsync("Bulk", 1000);
+        Assert.Equal(tagged, rows.Length);
+        Assert.All(rows, r => Assert.Equal("Bulk", r.Tag));
+        Assert.Equal(["0x00000000000000F1", "0x00000000000000F2"], (await TopAsync("untagged", 1000)).Select(r => r.Hash).ToArray());
+    }
+
+    [Fact]
+    public async Task TagFilter_OnADecimalStoredHash_MatchesTheMapsCanonicalKey()
+    {
+        var tag = await _service.CreateQueryTagAsync("Dec", null);
+        await PlanAsync("170", 1_000);
+        await MapAsync("0x00000000000000AA", tag);
+
+        Assert.Equal(["170"], (await TopAsync("Dec", 10)).Select(r => r.Hash).ToArray());
+        Assert.Empty(await TopAsync("untagged", 10));
+    }
 }

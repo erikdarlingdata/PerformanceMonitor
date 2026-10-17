@@ -10,7 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.QueryTags;
@@ -21,7 +20,7 @@ namespace PerformanceMonitorLite.Services;
 /// <summary>
 /// What a query read's <c>tag</c> parameter resolved to, plus the server's tag map (#5992 item 3, the twin of Darling's
 /// <c>QueryTagReadJoin</c>, #5984). The map is the materialised <c>query_tag_map</c>: nothing here evaluates a rule. A row's tag is its
-/// path name (<c>Parent / Child</c>) or null. A filter is a set of keys written into the statement, so it applies before the top-N cut.
+/// path name (<c>Parent / Child</c>) or null. A filter is a semi-join on the map inside the read's own statement, so it applies before the top-N cut.
 /// </summary>
 public sealed class QueryTagReadScope
 {
@@ -33,7 +32,7 @@ public sealed class QueryTagReadScope
 
     /// <summary>The description every query read gives its optional <c>tag</c> parameter.</summary>
     public const string ParameterDescription =
-        "Keep rows whose query has this tag or one beneath it (name or Parent / Child path), applied before the row cap. 'untagged' keeps untagged rows. Each row carries its tag.";
+        "Query tag name or path ('Parent / Child'), any case. Keeps rows with that tag or any tag beneath it. 'untagged' keeps rows with no tag. Applied before the top-N cut.";
 
     private readonly Dictionary<string, int> _hash;
     private readonly Dictionary<string, int> _object;
@@ -84,51 +83,45 @@ public sealed class QueryTagReadScope
     }
 
     /// <summary>
-    /// An <c>AND ...</c> predicate over <paramref name="hashExpression"/> (a column holding the stored hash), or empty when there is no
-    /// filter. A key is listed in its stored <c>0x</c> form and in the decimal form the long-query trace stores.
+    /// An <c>AND ...</c> semi-join over <paramref name="hashExpression"/> (a column holding the stored hash, in the 0x or the decimal
+    /// form), or empty when there is no filter. The row's hash is put in the map's canonical form in SQL and compared by exact text to
+    /// <c>query_tag_map</c>; no key is written into the statement. The tag ids are parameters from <paramref name="firstParameter"/>,
+    /// appended to <paramref name="values"/> (the caller adds them after its own parameters); the server is <c>$1</c>.
     /// </summary>
-    public string HashClause(string hashExpression) => Clause(hashExpression, _hash, includeDecimal: true);
+    public string HashClause(string hashExpression, int firstParameter, List<object> values)
+    {
+        var trimmed = $"trim({hashExpression})";
+        var canonical = $"(CASE WHEN {trimmed} LIKE '0x%' THEN {trimmed} "
+            + $"WHEN TRY_CAST({trimmed} AS UBIGINT) IS NOT NULL THEN '0x' || upper(lpad(to_hex(TRY_CAST({trimmed} AS UBIGINT)), 16, '0')) "
+            + $"ELSE {trimmed} END)";
+        return Clause("hash", canonical, firstParameter, values);
+    }
 
-    /// <summary>The same over the qualified object name built from the three columns.</summary>
-    public string ObjectClause(string databaseColumn, string schemaColumn, string nameColumn) =>
-        Clause($"(COALESCE({databaseColumn}, '') || '.' || COALESCE({schemaColumn}, '') || '.' || COALESCE({nameColumn}, ''))", _object, includeDecimal: false);
+    /// <summary>The same over the qualified object name built from the three columns, exact text.</summary>
+    public string ObjectClause(string databaseColumn, string schemaColumn, string nameColumn, int firstParameter, List<object> values) =>
+        Clause("object", $"(COALESCE({databaseColumn}, '') || '.' || COALESCE({schemaColumn}, '') || '.' || COALESCE({nameColumn}, ''))", firstParameter, values);
 
-    private string Clause(string expression, Dictionary<string, int> map, bool includeDecimal)
+    private string Clause(string kind, string expression, int firstParameter, List<object> values)
     {
         if (!Active)
         {
             return string.Empty;
         }
 
-        var keys = new List<string>();
-        foreach (var (key, tag) in map)
+        var map = $"SELECT 1 FROM query_tag_map m WHERE m.server_id = $1 AND m.key_kind = '{kind}' AND m.key = {expression}";
+        if (Untagged)
         {
-            if (Untagged || _wanted.Contains(tag))
-            {
-                keys.Add(key);
-                if (includeDecimal && key.Length == 18 && key.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-                    && ulong.TryParse(key.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var value))
-                {
-                    keys.Add(value.ToString(CultureInfo.InvariantCulture));
-                }
-            }
+            return $" AND NOT EXISTS ({map})";
         }
 
-        if (keys.Count == 0)
+        var marks = new List<string>();
+        foreach (var id in _wanted.OrderBy(i => i))
         {
-            /* A tag nothing is mapped to matches nothing; with the word untagged and an empty map every row matches. */
-            return Untagged ? string.Empty : " AND 1 = 0";
+            marks.Add("$" + (firstParameter + values.Count));
+            values.Add(id);
         }
 
-        var list = new StringBuilder();
-        foreach (var key in keys)
-        {
-            list.Append(list.Length == 0 ? "" : ", ").Append('\'').Append(key.Replace("'", "''", StringComparison.Ordinal)).Append('\'');
-        }
-
-        return Untagged
-            ? $" AND ({expression} IS NULL OR {expression} NOT IN ({list}))"
-            : $" AND {expression} IN ({list})";
+        return $" AND EXISTS ({map} AND m.tag_id IN ({string.Join(", ", marks)}))";
     }
 
     /// <summary>The message a read answers with when its <c>tag</c> names no tag.</summary>

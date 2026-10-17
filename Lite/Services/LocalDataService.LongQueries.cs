@@ -80,7 +80,8 @@ LIMIT {LongQueryGridCap}";
         /* $4 is the row cap, so the optional database list starts at $5. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
         /* #5992: the query tag filter, on the raw rows before the duration ranking and the limit. */
-        dbClause += tags?.HashClause("query_hash") ?? "";
+        var tagValues = new List<object>();
+        dbClause += tags?.HashClause("query_hash", 5 + dbValues.Count, tagValues) ?? "";
 
         command.CommandText = LongQueryCompletionsSelect + @"
 FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND collection_time <= $3" + dbClause, collectedFrom: "$2") + @" AS ev
@@ -93,6 +94,8 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = limit });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         return await ReadLongQueryCompletionsAsync(command);
     }

@@ -433,6 +433,7 @@ LIMIT 1";
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
         var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
         var waitClause = waitFilter == null ? "" : $" AND upper(w.wait_type) IN (upper(${5 + dbValues.Count}), upper(${5 + dbValues.Count}) || ' ')";
+        var tagValues = new List<object>();
 
         command.CommandText = @"
 WITH window_rows AS (
@@ -487,7 +488,7 @@ population AS (
     LEFT JOIN heads h
       ON  h.collection_time = w.collection_time
       AND h.session_id = w.session_id
-    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + (tags?.HashClause("w.query_hash") ?? "") + @"
+    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + (tags?.HashClause("w.query_hash", 5 + dbValues.Count + (waitFilter == null ? 0 : 1), tagValues) ?? "") + @"
 )
 SELECT
     p.session_id,
@@ -536,6 +537,8 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = db });
         if (waitFilter != null)
             command.Parameters.Add(new DuckDBParameter { Value = waitFilter });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var items = new List<QuerySnapshotRow>();
         long populationCount = 0;

@@ -73,6 +73,7 @@ public sealed class McpQueryTagUsageTools
 
             var sections = new List<object>();
             var anyData = data.Deadlocks.Count > 0;
+            var notServed = new List<(string Section, string Reason)>();
             foreach (var section in new[]
             {
                 QueryTagRollupSection.PlanCache, QueryTagRollupSection.QueryStore, QueryTagRollupSection.Procedures,
@@ -81,34 +82,58 @@ public sealed class McpQueryTagUsageTools
             {
                 var facts = data.Sections[section.Name];
                 anyData |= facts.Count > 0;
-                sections.Add(QueryTagRollup.Section(section, facts, scope, allServers, data.Tags, tagFilter, limit));
+                data.Unavailable.TryGetValue(section.Name, out var why);
+                if (why is not null) notServed.Add((section.Name, why));
+                sections.Add(QueryTagRollup.Section(section, facts, scope, allServers, data.Tags, tagFilter, limit, why));
             }
 
-            sections.Add(QueryTagRollup.DeadlockSection(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated));
+            data.Unavailable.TryGetValue(QueryTagRollupSection.Deadlocks.Name, out var deadlockWhy);
+            if (deadlockWhy is not null) notServed.Add((QueryTagRollupSection.Deadlocks.Name, deadlockWhy));
+            sections.Add(QueryTagRollup.DeadlockSection(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated, deadlockWhy));
 
+            /* Six independent sections answer from the ones they could serve: "unavailable" only when none could be, else "empty" when the
+               served ones held no rows, else data. The sections not served are named with why. Lite has no interval tier and no
+               Query Store coverage gate, so a missing table is the one way a section is unavailable here. */
+            if (notServed.Count == sections.Count)
+            {
+                return McpHelpers.Status("unavailable", "No section of the roll-up could be read. " + NotServedText(notServed));
+            }
+
+            var payload = new Dictionary<string, object?>();
             if (!anyData)
             {
-                return McpHelpers.Status("empty", "No resource use was collected in the window" + (allServers ? " on any server." : " on this server."));
+                payload["status"] = "empty";
             }
 
-            return JsonSerializer.Serialize(new
+            payload["scope"] = allServers ? "fleet" : "server";
+            payload["server"] = allServers ? null : scope[0].Name;
+            payload["hours_back"] = hours_back;
+            payload["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture);
+            payload["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture);
+            payload["tag"] = tagFilter is int id ? data.Tags.First(t => t.Id == id).Name : null;
+            payload["sections_additive"] = false;
+            if (notServed.Count > 0)
             {
-                scope = allServers ? "fleet" : "server",
-                server = allServers ? null : scope[0].Name,
-                hours_back,
-                window_start = windowStart.ToString("o", CultureInfo.InvariantCulture),
-                window_end = windowEnd.ToString("o", CultureInfo.InvariantCulture),
-                tag = tagFilter is int id ? data.Tags.First(t => t.Id == id).Name : null,
-                sections_additive = false,
-                note = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.",
-                sections,
-            }, McpHelpers.JsonOptions);
+                payload["message"] = (anyData ? string.Empty : "No resource use was collected in the window" + (allServers ? " on any server. " : " on this server. "))
+                    + "Sections not served: " + NotServedText(notServed);
+            }
+            else if (!anyData)
+            {
+                payload["message"] = "No resource use was collected in the window" + (allServers ? " on any server." : " on this server.");
+            }
+
+            payload["note"] = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.";
+            payload["sections"] = sections;
+            return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_resource_use_by_tag", ex);
         }
     }
+
+    private static string NotServedText(List<(string Section, string Reason)> notServed)
+        => string.Join(" ", notServed.Select(n => $"{n.Section} is unavailable: {n.Reason}"));
 
     private static (int? Id, string? Problem) ResolveTag(IReadOnlyList<QueryTagRow> tags, string text)
     {

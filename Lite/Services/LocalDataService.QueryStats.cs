@@ -274,7 +274,8 @@ ORDER BY p.page_ord";
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
         /* #5992: the query tag filter rides the same place as the database filter, before the ranking and the cap. */
-        dbClause += tags?.HashClause("query_hash") ?? "";
+        var tagValues = new List<object>();
+        dbClause += tags?.HashClause("query_hash", 7 + dbValues.Count, tagValues) ?? "";
 
         /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
         async Task<(List<QueryStatsRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
@@ -293,6 +294,8 @@ ORDER BY p.page_ord";
         command.Parameters.Add(new DuckDBParameter { Value = minMaxDop });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var items = new List<QueryStatsRow>();
         var candidateCount = 0;
@@ -1015,6 +1018,7 @@ ORDER BY bucket";
 
         /* #5633 review: databases the server dropped, left out of an all-databases ranking. NULL-safe: a row with no database name stays. */
         var excludeClause = BuildDbExcludeClause(excludeDatabaseNames, "database_name", 6 + dbValues.Count, out var excludeValues);
+        var tagValues = new List<object>();
         command.CommandText = @"
 SELECT
     database_name,
@@ -1049,7 +1053,7 @@ FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + (tags?.ObjectClause("database_name", "schema_name", "object_name") ?? "") + @"
+AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + (tags?.ObjectClause("database_name", "schema_name", "object_name", 6 + dbValues.Count + excludeValues.Count, tagValues) ?? "") + @"
 GROUP BY database_name, schema_name, object_name, object_type
 HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
 ORDER BY SUM(delta_worker_time) DESC
@@ -1065,6 +1069,8 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = db });
         foreach (var db in excludeValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var items = new List<ProcedureStatsRow>();
         using var reader = await command.ExecuteReaderAsync();

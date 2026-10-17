@@ -171,7 +171,7 @@ ORDER BY bucket";
         /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         /* #5992: the query tag filter, in the population before the ranking and the cap. */
-        dbClause += tags?.HashClause("query_hash") ?? "";
+        var tagValues = new List<object>();
         var executionTypeParameterIndex = 4 + dbValues.Count;
         var executionTypeClause = string.IsNullOrWhiteSpace(executionType)
             ? ""
@@ -181,6 +181,7 @@ ORDER BY bucket";
         var moduleClause = string.IsNullOrWhiteSpace(moduleName)
             ? ""
             : $" AND module_name = ${moduleParameterIndex}";
+        dbClause += tags?.HashClause("query_hash", moduleParameterIndex + (string.IsNullOrWhiteSpace(moduleName) ? 0 : 1), tagValues) ?? "";
 
         /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
         async Task<(List<QueryStoreRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
@@ -400,6 +401,8 @@ ORDER BY p.page_ord";
             command.Parameters.Add(new DuckDBParameter { Value = executionType });
         if (!string.IsNullOrWhiteSpace(moduleName))
             command.Parameters.Add(new DuckDBParameter { Value = moduleName });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var candidateRows = new List<QueryStoreRow>();
         using (var reader = await command.ExecuteReaderAsync())

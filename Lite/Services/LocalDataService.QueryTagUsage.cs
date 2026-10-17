@@ -49,19 +49,23 @@ public sealed record QueryTagRollupSection(string Name, IReadOnlyList<QueryTagRo
 public sealed record QueryTagRollupFact(int ServerId, int? TagId, double[] Values);
 
 /// <summary>One deadlock graph reduced to the tags of its processes.</summary>
-public sealed record QueryTagDeadlockFact(int ServerId, IReadOnlyDictionary<int, int> ProcessesByTag, int UntaggedProcesses);
+public sealed record QueryTagDeadlockFact(int ServerId, IReadOnlyDictionary<int, int> ProcessesByTag, int UntaggedProcesses, bool Unparsed = false);
 
 /// <summary>What the reader found in a window: the tag tree, each additive section's facts and the deadlock facts.</summary>
 public sealed record QueryTagRollupData(
     IReadOnlyList<QueryTagRow> Tags,
     IReadOnlyDictionary<string, List<QueryTagRollupFact>> Sections,
     List<QueryTagDeadlockFact> Deadlocks,
-    bool ScanTruncated);
+    bool ScanTruncated,
+    IReadOnlyDictionary<string, string> Unavailable);
 
 public partial class LocalDataService
 {
     /// <summary>Deadlock graphs read per call; a window with more sets <c>ScanTruncated</c> and the newest are kept.</summary>
     internal const int QueryTagDeadlockScanCeiling = 2000;
+
+    /// <summary>Caller keys per statement when the caller map is read for only the keys the window carries.</summary>
+    private const int CallerMapChunk = 500;
 
     /// <summary>
     /// The facts behind <c>get_resource_use_by_tag</c> (#5992), one list per source over <paramref name="serverIds"/> in the window.
@@ -76,7 +80,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
 
         var map = new Dictionary<(int Server, string Kind, string Key), int>();
-        await ReadRowsAsync(connection, $"SELECT server_id, key_kind, key, tag_id FROM query_tag_map WHERE server_id IN ({ids})", [],
+        await ReadRowsAsync(connection, $"SELECT server_id, key_kind, key, tag_id FROM query_tag_map WHERE server_id IN ({ids}) AND key_kind IN ('hash', 'object')", [],
             r => map[(r.GetInt32(0), r.GetString(1), r.GetString(2))] = r.GetInt32(3));
 
         int? Lookup(int server, string kind, string? key) =>
@@ -84,8 +88,26 @@ public partial class LocalDataService
 
         var window = new object[] { startUtc, endUtc };
         var sections = new Dictionary<string, List<QueryTagRollupFact>>();
+        /* A section whose table is missing is unavailable with the reason, never a tool error (the twin's rule, #5983). */
+        var unavailable = new Dictionary<string, string>();
 
-        async Task<List<QueryTagRollupFact>> Additive(QueryTagRollupSection section, string sql, int keyColumns, Func<System.Data.Common.DbDataReader, int, int?> tagOf)
+        async Task<List<T>> Served<T>(QueryTagRollupSection section, string source, Func<Task<List<T>>> read)
+        {
+            try
+            {
+                return await read();
+            }
+            catch (DuckDBException ex) when (ex.Message.Contains("does not exist", StringComparison.OrdinalIgnoreCase))
+            {
+                unavailable[section.Name] = $"{source} does not exist in this store yet.";
+                return [];
+            }
+        }
+
+        Task<List<QueryTagRollupFact>> Additive(QueryTagRollupSection section, string sql, int keyColumns, Func<System.Data.Common.DbDataReader, int, int?> tagOf) =>
+            Served(section, QueryTagRollup.SourceOf(section), () => AdditiveRead(section, sql, keyColumns, tagOf));
+
+        async Task<List<QueryTagRollupFact>> AdditiveRead(QueryTagRollupSection section, string sql, int keyColumns, Func<System.Data.Common.DbDataReader, int, int?> tagOf)
         {
             var grouped = new Dictionary<(int, int?), double[]>();
             await ReadRowsAsync(connection, sql, window, r =>
@@ -154,13 +176,15 @@ FROM v_procedure_stats
 WHERE server_id IN ({ids}) AND collection_time >= $1 AND collection_time <= $2
 GROUP BY server_id, database_name, schema_name, object_name", 3, ObjectTag);
 
-        string CallerOf(System.Data.Common.DbDataReader r, int at) =>
+        static string CallerOf(System.Data.Common.DbDataReader r, int at) =>
             QueryTagRollup.CallerKey(Str(r, at), Str(r, at + 1), Str(r, at + 2), Str(r, at + 3));
 
-        /* A blocking row lands on the blocked side's tag (blocked) and on the blocking side's tag (caused). */
-        async Task<List<QueryTagRollupFact>> Blocking(QueryTagRollupSection section, Func<string, string> source, string timeColumn)
+        /* A blocking row lands on the blocked side's tag (blocked) and on the blocking side's tag (caused). The caller keys are read
+           first and the caller map is read for only those keys (and only the servers in the call), never every caller row of the file. */
+        var callerKeys = new HashSet<string>(StringComparer.Ordinal);
+        async Task<List<(int Server, string Key, bool Blocked, double Ms, double Count)>> BlockingRows(QueryTagRollupSection section, Func<string, string> source, string timeColumn)
         {
-            var grouped = new Dictionary<(int, int?), double[]>();
+            var rows = new List<(int, string, bool, double, double)>();
             foreach (var side in new[] { "blocked", "blocking" })
             {
                 var sql = $@"
@@ -170,55 +194,93 @@ FROM {source($"server_id IN ({ids}) AND {timeColumn} >= $1 AND {timeColumn} <= $
 GROUP BY server_id, {side}_client_app, {side}_login_name, {side}_host_name, database_name";
                 await ReadRowsAsync(connection, sql, window, r =>
                 {
-                    var server = r.GetInt32(0);
-                    var tag = Lookup(server, "caller", CallerOf(r, 1));
-                    var ms = Convert.ToDouble(r.GetValue(5), CultureInfo.InvariantCulture);
-                    var n = Convert.ToDouble(r.GetValue(6), CultureInfo.InvariantCulture);
-                    var values = side == "blocked" ? new[] { ms, 0, n, 0 } : new[] { 0, ms, 0, n };
-                    grouped[(server, tag)] = grouped.TryGetValue((server, tag), out var have) ? QueryTagRollup.Combine(have, values, section) : values;
+                    var key = CallerOf(r, 1);
+                    callerKeys.Add(key);
+                    rows.Add((r.GetInt32(0), key, side == "blocked",
+                        Convert.ToDouble(r.GetValue(5), CultureInfo.InvariantCulture), Convert.ToDouble(r.GetValue(6), CultureInfo.InvariantCulture)));
                 });
+            }
+
+            return rows;
+        }
+
+        var reportRows = await Served(QueryTagRollupSection.BlockingReports, QueryTagRollup.SourceOf(QueryTagRollupSection.BlockingReports),
+            () => BlockingRows(QueryTagRollupSection.BlockingReports, w => StoredEventCopies.BlockedProcessReports(w) + " AS ev", "event_time"));
+        var snapshotRows = await Served(QueryTagRollupSection.BlockingSnapshots, QueryTagRollup.SourceOf(QueryTagRollupSection.BlockingSnapshots),
+            () => BlockingRows(QueryTagRollupSection.BlockingSnapshots, w => $"(SELECT * FROM v_dmv_blocking_snapshots WHERE {w}) AS ev", "collection_time"));
+
+        var graphs = new List<(int Server, List<string> Keys, bool Unparsed)>();
+        var read = 0;
+        var truncated = false;
+        var deadlockRows = await Served(QueryTagRollupSection.Deadlocks, QueryTagRollup.SourceOf(QueryTagRollupSection.Deadlocks), async () =>
+        {
+            var found = new List<(int Server, string? Xml, DateTime? When)>();
+            await ReadRowsAsync(connection, $@"
+SELECT server_id, deadlock_graph_xml, deadlock_time
+FROM {StoredEventCopies.Deadlocks($"server_id IN ({ids}) AND deadlock_time >= $1 AND deadlock_time <= $2")} AS dl
+ORDER BY deadlock_time DESC, deadlock_id DESC
+LIMIT {QueryTagDeadlockScanCeiling + 1}", window,
+                r =>
+                {
+                    if (++read > QueryTagDeadlockScanCeiling)
+                    {
+                        truncated = true;
+                        return;
+                    }
+
+                    found.Add((r.GetInt32(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetDateTime(2)));
+                });
+            return found;
+        });
+
+        foreach (var (server, xml, when) in deadlockRows)
+        {
+            /* A graph that is NULL, will not parse or has no process still counts in the section's total, as unparsed. */
+            if (!DeadlockGraphProcessParser.TryParseGraph<DeadlockProcessInfo>(new DeadlockGraphProcessParser.DeadlockGraphInput(xml, when, null, null), out var processes) || processes.Count == 0)
+            {
+                graphs.Add((server, [], true));
+                continue;
+            }
+
+            var keys = processes.Select(p => QueryTagRollup.CallerKey(p.ClientApp, p.LoginName, p.HostName, p.DatabaseName)).ToList();
+            callerKeys.UnionWith(keys);
+            graphs.Add((server, keys, false));
+        }
+
+        /* The bounded caller map read: the servers in the call and the keys the window's rows carry, in chunks. */
+        var callerKeyList = callerKeys.ToList();
+        for (var offset = 0; offset < callerKeyList.Count; offset += CallerMapChunk)
+        {
+            var chunk = callerKeyList.Skip(offset).Take(CallerMapChunk).ToList();
+            var marks = string.Join(", ", chunk.Select((_, i) => "$" + (i + 1)));
+            await ReadRowsAsync(connection, $"SELECT server_id, key_kind, key, tag_id FROM query_tag_map WHERE server_id IN ({ids}) AND key_kind = 'caller' AND key IN ({marks})",
+                chunk.Cast<object>().ToList(), r => map[(r.GetInt32(0), r.GetString(1), r.GetString(2))] = r.GetInt32(3));
+        }
+
+        List<QueryTagRollupFact> Fold(QueryTagRollupSection section, List<(int Server, string Key, bool Blocked, double Ms, double Count)> rows)
+        {
+            var grouped = new Dictionary<(int, int?), double[]>();
+            foreach (var (server, key, blocked, ms, n) in rows)
+            {
+                var tag = Lookup(server, "caller", key);
+                var values = blocked ? new[] { ms, 0, n, 0 } : new[] { 0, ms, 0, n };
+                grouped[(server, tag)] = grouped.TryGetValue((server, tag), out var have) ? QueryTagRollup.Combine(have, values, section) : values;
             }
 
             return grouped.Select(g => new QueryTagRollupFact(g.Key.Item1, g.Key.Item2, g.Value)).ToList();
         }
 
-        sections[QueryTagRollupSection.BlockingReports.Name] = await Blocking(
-            QueryTagRollupSection.BlockingReports, w => StoredEventCopies.BlockedProcessReports(w) + " AS ev", "event_time");
-        sections[QueryTagRollupSection.BlockingSnapshots.Name] = await Blocking(
-            QueryTagRollupSection.BlockingSnapshots, w => $"(SELECT * FROM v_dmv_blocking_snapshots WHERE {w}) AS ev", "collection_time");
+        sections[QueryTagRollupSection.BlockingReports.Name] = Fold(QueryTagRollupSection.BlockingReports, reportRows);
+        sections[QueryTagRollupSection.BlockingSnapshots.Name] = Fold(QueryTagRollupSection.BlockingSnapshots, snapshotRows);
 
         var deadlocks = new List<QueryTagDeadlockFact>();
-        var read = 0;
-        var truncated = false;
-        var graphs = new List<(int Server, string? Xml, DateTime? When)>();
-        await ReadRowsAsync(connection, $@"
-SELECT server_id, deadlock_graph_xml, deadlock_time
-FROM {StoredEventCopies.Deadlocks($"server_id IN ({ids}) AND deadlock_time >= $1 AND deadlock_time <= $2")} AS dl
-ORDER BY deadlock_time DESC, deadlock_id DESC
-LIMIT {QueryTagDeadlockScanCeiling + 1}", window,
-            r =>
-            {
-                if (++read > QueryTagDeadlockScanCeiling)
-                {
-                    truncated = true;
-                    return;
-                }
-
-                graphs.Add((r.GetInt32(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetDateTime(2)));
-            });
-
-        foreach (var (server, xml, when) in graphs)
+        foreach (var (server, keys, unparsed) in graphs)
         {
-            if (!DeadlockGraphProcessParser.TryParseGraph<DeadlockProcessInfo>(new DeadlockGraphProcessParser.DeadlockGraphInput(xml, when, null, null), out var processes))
-            {
-                continue;
-            }
-
             var byTag = new Dictionary<int, int>();
             var untagged = 0;
-            foreach (var p in processes)
+            foreach (var key in keys)
             {
-                if (Lookup(server, "caller", QueryTagRollup.CallerKey(p.ClientApp, p.LoginName, p.HostName, p.DatabaseName)) is int tag)
+                if (Lookup(server, "caller", key) is int tag)
                 {
                     byTag[tag] = byTag.GetValueOrDefault(tag) + 1;
                 }
@@ -228,13 +290,10 @@ LIMIT {QueryTagDeadlockScanCeiling + 1}", window,
                 }
             }
 
-            if (byTag.Count + untagged > 0)
-            {
-                deadlocks.Add(new QueryTagDeadlockFact(server, byTag, untagged));
-            }
+            deadlocks.Add(new QueryTagDeadlockFact(server, byTag, untagged, unparsed));
         }
 
-        return new QueryTagRollupData(tags, sections, deadlocks, truncated);
+        return new QueryTagRollupData(tags, sections, deadlocks, truncated, unavailable);
     }
 
     private static string? Str(System.Data.Common.DbDataReader r, int at) => r.IsDBNull(at) ? null : r.GetString(at);
