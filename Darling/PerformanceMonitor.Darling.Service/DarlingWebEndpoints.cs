@@ -647,8 +647,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapThresholdOverrides(app, postgres, logger);
         MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapServerTags(app, postgres, logger);
-        MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapAdminServers(app, postgres);
+        MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct); return (r.ServerId, err); });
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
