@@ -137,10 +137,13 @@ ORDER BY SUM(delta_worker_time) DESC NULLS LAST, database_name, query_hash
 LIMIT {TopStatements}";
 
     /// <summary>How far two snapshots' derived request start times (snapshot time minus the request's elapsed time) may differ
-    /// before they are two requests. The two readings are taken a moment apart on the monitored server, so the same
-    /// request's derived start wobbles by well under a second; a new batch on the same session starts after the previous
-    /// snapshot, so its start moves by at least the snapshot interval (a minute or more).</summary>
-    private const int RequestStartToleranceSeconds = 5;
+    /// before they are two requests. <c>collect.query_snapshots</c> does not carry the request's own start time (only the
+    /// transaction start, which is not the request's), so the start is derived. A snapshot's <c>collection_time</c> is stamped
+    /// from the service clock BEFORE the store read, the connection open and the DMV query, so the derived start of one request
+    /// is off by that collector latency, and it differs from run to run. 30 seconds covers a slow monitored server and stays
+    /// under the one-minute snapshot interval, so a new batch on the same session still reads as a new request. The exact
+    /// identity needs the request start time collected.</summary>
+    public static readonly TimeSpan RequestStartTolerance = TimeSpan.FromSeconds(30);
 
     /* #6001 review: <cpu_time_ms> on an active-request row is that request's RUNNING total, so a request seen in ten snapshots
        would count ten times under a SUM. The snapshots of one request (same session and request id, one derived start, no CPU
@@ -157,7 +160,7 @@ WITH snaps AS (
     SELECT s.*,
            CASE WHEN LAG(s.collection_time) OVER w IS NULL THEN 1
                 WHEN s.cpu_time_ms < LAG(s.cpu_time_ms) OVER w THEN 1
-                WHEN s.started_at > LAG(s.started_at) OVER w + interval '{RequestStartToleranceSeconds} seconds' THEN 1
+                WHEN s.started_at > LAG(s.started_at) OVER w + interval '{(int)RequestStartTolerance.TotalSeconds} seconds' THEN 1
                 ELSE 0 END AS is_new
     FROM snaps AS s
     WINDOW w AS (PARTITION BY s.session_id, s.request_id ORDER BY s.collection_time)
@@ -218,12 +221,15 @@ LIMIT 10";
             StoreConfigProvider.ResolveSchedule(collectorName, serverId, []).FrequencyMinutes);
 
     /// <summary>How long after the request opened a section may wait for its collector's run before it is <c>not_collected</c>:
-    /// <see cref="PendingGrace"/>, or <see cref="SlowCollectorGraceMultiplier"/> of the collector's own interval when that is longer.</summary>
+    /// <see cref="PendingGrace"/>, or <see cref="SlowCollectorGraceMultiplier"/> of the collector's own interval when that is longer,
+    /// and never more than <see cref="CaptureHorizon"/>: a request older than that is no longer read, so a longer grace would leave
+    /// the section <c>pending</c> for good.</summary>
     public TimeSpan GraceFor(string section, int serverId)
     {
         var interval = TimeSpan.FromMinutes(_collectorIntervalMinutes(SectionCollectors[section], serverId));
         var slow = TimeSpan.FromTicks(interval.Ticks * SlowCollectorGraceMultiplier);
-        return slow > PendingGrace ? slow : PendingGrace;
+        var grace = slow > PendingGrace ? slow : PendingGrace;
+        return grace > CaptureHorizon ? CaptureHorizon : grace;
     }
 
     /// <summary>One pass: every High CPU request still needing evidence gets its sections looked at. A failed request is

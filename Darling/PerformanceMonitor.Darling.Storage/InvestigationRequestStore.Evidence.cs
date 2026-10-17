@@ -51,16 +51,20 @@ public sealed partial class InvestigationRequestStore
     /// backlog reaches them before a newer request). $1 the oldest open time that still counts (a request older than the
     /// capture window is left as it is), $2 the page size, $3 the first metric the capture serves, $4 and $5 the keyset cursor:
     /// the (opened_at, request_id) of the last request the previous page returned, so a request that stays pending is not
-    /// returned again in the same tick.</summary>
+    /// returned again in the same tick. A request is a candidate while it is open or claimed, and also in any other state
+    /// (reported, expired) while one of its sections is still <c>pending</c> (#6001 round 2): a slow section's grace can outlast
+    /// the request, and the section then flips to <c>ready</c> or <c>not_collected</c> on a later pass instead of staying
+    /// <c>pending</c> for good.</summary>
     internal const string EvidenceCandidatesSql = @"
 SELECT r.request_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.opened_at, s.engine_kind
 FROM config.investigation_requests AS r
 LEFT JOIN collect.servers AS s ON s.server_id = r.server_id
-WHERE r.state IN ('open', 'claimed')
-  AND r.practice_of IS NULL
+WHERE r.practice_of IS NULL
   AND r.opened_at >= $1
   AND r.first_metric = $3
   AND (r.evidence_state IS NULL OR r.evidence_state = 'pending')
+  AND (r.state IN ('open', 'claimed')
+       OR EXISTS (SELECT 1 FROM config.investigation_evidence AS e WHERE e.request_id = r.request_id AND e.state = 'pending'))
   AND (r.opened_at, r.request_id) > ($4, $5)
 ORDER BY r.opened_at, r.request_id
 LIMIT $2";

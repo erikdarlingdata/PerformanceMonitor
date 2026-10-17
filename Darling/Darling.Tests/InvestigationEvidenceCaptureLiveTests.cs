@@ -306,6 +306,104 @@ public sealed class InvestigationEvidenceCaptureLiveTests
     }
 
     [Fact]
+    public async Task AGraceLongerThanTheCaptureHorizon_IsCappedAtIt_SoTheSectionBecomesNotCollected_AtTheHorizon()
+    {
+        /* #6001 round 2: a daily collector (or a zero override, which resolves to 1440 minutes) would give a 48 hour grace, but a request
+           older than the horizon is no longer read, so its section would stay pending for good. */
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(HighCpu(), ct)).RequestId!.Value;
+            foreach (var collector in InvestigationEvidenceCapture.SectionCollectors.Values.Where(c => c != "query_store_health"))
+                await PlantRunAsync(setup.Connection, ct, collector, WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+            Assert.Equal("pending", Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store").State);
+
+            Assert.Equal(InvestigationEvidenceCapture.CaptureHorizon, setup.Capture.GraceFor("query_store", ServerId));
+
+            setup.Clock.Advance(InvestigationEvidenceCapture.CaptureHorizon);
+            await setup.Capture.CaptureOnceAsync(ct);
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            Assert.Equal("not_collected", Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store").State);
+            Assert.Equal("ready", await RequestEvidenceStateAsync(setup.Connection, requestId, ct));
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+        }, intervalMinutes: (collector, _) => collector == "query_store_health" ? 1440 : 5);
+    }
+
+    [Theory]
+    [InlineData("reported")]
+    [InlineData("expired")]
+    public async Task ARequestThatLeavesOpenWithASlowSectionPending_IsStillVisited_AndTheSectionFlipsToReady_WithOneJournalEntry(string requestState)
+    {
+        /* #6001 round 2: the candidate set follows the evidence rows, not the request state. */
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = await OpenWithOnlyTheHourlyCollectorMissingAsync(setup, ct);
+            setup.Clock.Advance(InvestigationEvidenceCapture.PendingGrace + TimeSpan.FromMinutes(1));
+            await setup.Capture.CaptureOnceAsync(ct);
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+
+            await LeaveOpenAsync(setup, requestId, requestState, ct);
+            setup.Clock.Advance(TimeSpan.FromMinutes(29));
+            var landed = setup.Clock.Now.AddSeconds(-30);
+            await PlantQueryStoreHealthAsync(setup.Connection, ct, ServerId, ServerName, "SalesDb", landed);
+            await PlantRunAsync(setup.Connection, ct, "query_store_health", landed);
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            Assert.Equal("ready", Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store").State);
+            Assert.Equal("ready", await RequestEvidenceStateAsync(setup.Connection, requestId, ct));
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+        }, codeDefaultSchedule: true);
+    }
+
+    [Fact]
+    public async Task AReportedRequestWithASlowSectionPending_BecomesNotCollected_AtThatSectionsGrace()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = await OpenWithOnlyTheHourlyCollectorMissingAsync(setup, ct);
+            setup.Clock.Advance(InvestigationEvidenceCapture.PendingGrace + TimeSpan.FromMinutes(1));
+            await setup.Capture.CaptureOnceAsync(ct);
+            await LeaveOpenAsync(setup, requestId, "reported", ct);
+
+            setup.Clock.Advance(TimeSpan.FromMinutes(100));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            Assert.Equal("not_collected", Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store").State);
+            Assert.Equal("ready", await RequestEvidenceStateAsync(setup.Connection, requestId, ct));
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+        }, codeDefaultSchedule: true);
+    }
+
+    private static Task LeaveOpenAsync(Setup setup, Guid requestId, string state, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(setup.Connection, ct,
+            "UPDATE config.investigation_requests SET state = $2, reported_at = CASE WHEN $2 = 'reported' THEN $3 END WHERE request_id = $1",
+            requestId, state, setup.Clock.Now);
+
+    [Fact]
+    public async Task OneRequestSeenByTwoSnapshots_WhoseDmvReadsWereSevenAndOneSecondsLate_IsCountedOnce()
+    {
+        /* #6001 round 2: collection_time is stamped before the DMV read, so one request's derived start differs from run to run by the
+           collector's latency. The real start is t0; run one stamped 60 s later read 7 s late (elapsed 67 s), run two stamped
+           120 s later read 1 s late (elapsed 121 s): derived starts t0 - 7 s and t0 - 1 s, six seconds apart. */
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(HighCpu(), ct)).RequestId!.Value;
+            var t0 = AlertAt.AddMinutes(-6);
+            await PlantSnapshotAsync(setup.Connection, ct, t0.AddSeconds(60), 61, 200, 67_000, "HOSTA", "AppA");
+            await PlantSnapshotAsync(setup.Connection, ct, t0.AddSeconds(120), 61, 300, 121_000, "HOSTA", "AppA");
+            await PlantRunAsync(setup.Connection, ct, "query_snapshots", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var section = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "active_requests");
+            var row = Assert.Single(JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray())!;
+            Assert.Equal(1, row["requests"]!.GetValue<long>());
+            Assert.Equal(300, row["total_cpu_ms"]!.GetValue<long>());
+            Assert.Equal(2, row["samples"]!.GetValue<long>());
+        });
+    }
+
+    [Fact]
     public async Task ActiveRequests_CountOneRequestOnce_WhateverHowManySnapshotsSawIt_AndRankByThatFigure()
     {
         await RunAsync(async (setup, ct) =>
