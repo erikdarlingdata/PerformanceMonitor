@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
@@ -25,8 +26,8 @@ internal sealed record QueryTagNode(int Id, string Name, int? ParentId);
 /// <summary>One source's grouped facts: a server, a tag (null = no map row) and the section's measures in statement order.</summary>
 internal sealed record QueryTagRollupFact(int ServerId, int? TagId, double[] Values);
 
-/// <summary>One deadlock graph, reduced to the tags of its processes: tag (null = untagged) to the number of processes holding it.</summary>
-internal sealed record QueryTagDeadlockFact(int ServerId, IReadOnlyDictionary<int, int> ProcessesByTag, int UntaggedProcesses);
+/// <summary>One deadlock graph, reduced to the tags of its processes: tag to the number of processes holding it, plus the untagged ones. <paramref name="Unparsed"/>: the graph was NULL or yielded no process rows, so it counts as a deadlock and as nothing else.</summary>
+internal sealed record QueryTagDeadlockFact(int ServerId, IReadOnlyDictionary<int, int> ProcessesByTag, int UntaggedProcesses, bool Unparsed = false);
 
 /// <summary>
 /// The executing half of <c>get_resource_use_by_tag</c> (#5983): runs <see cref="QueryTagRollupSql"/> and shapes the grouped facts
@@ -38,6 +39,128 @@ internal static class DarlingQueryTagRollupReader
 {
     /// <summary>Deadlock graphs read per call; a window with more sets <c>scan_truncated</c>, and the newest are kept.</summary>
     internal const int DeadlockScanCeiling = 2000;
+
+    /// <summary>
+    /// How one stats section (plan cache or procedures) is served and what it says about how far it reached. <paramref name="Hourly"/>: the
+    /// io rollup serves it, cut at <paramref name="Ceiling"/>. <paramref name="Disclosure"/> is merged into the section: on the hourly
+    /// branch <c>window_end</c> (the served end) and <c>window_edges_note</c>; on the raw branch <c>effective_start</c>, <c>window_truncated</c>
+    /// and <c>truncation_note</c>, the notice <c>get_top_queries_by_cpu</c> carries.
+    /// </summary>
+    internal sealed record StatsRoute(bool Hourly, DateTime? Ceiling, Dictionary<string, object?> Disclosure);
+
+    /// <summary>
+    /// Routes the plan-cache and procedures sections independently (their rollups, floors and tiers are independent) and builds each
+    /// one's reach disclosure (#5983). The hourly rollup serves a section only when the retention tier left raw and the io route reaches
+    /// the window's start; <c>tier Hourly</c> with <c>route Raw</c> falls to raw over a window raw may not hold, and says so. The tier is
+    /// judged against the wall clock (retention is wall-clock age), the window's own end is the anchor.
+    /// </summary>
+    internal static async Task<(StatsRoute Plan, StatsRoute Procedures)> ChooseStatsRoutesAsync(
+        NpgsqlDataSource postgres, int[] serverIds, DateTime windowStart, DateTime windowEnd, CancellationToken cancellationToken)
+    {
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+        var now = DateTime.UtcNow;
+
+        async Task<StatsRoute> RouteAsync(
+            HourlyRoute route, RetentionTier tier, string ioView, string rawSource, RawWindowFloor.Table floorTable)
+        {
+            var hourly = tier != RetentionTier.Raw && route == HourlyRoute.Io;
+            if (hourly)
+            {
+                var ceiling = coverage.HourlyEndCeiling(ioView, windowStart);
+                var (_, servedEnd) = HourlyWindowEdges.ServedSpan(windowStart, null, windowEnd, ceiling);
+                var edges = HourlyWindowEdges.Note(windowStart, null, windowEnd, ceiling);
+                return new StatsRoute(true, ceiling, new Dictionary<string, object?>
+                {
+                    ["tier"] = "hourly",
+                    ["window_end"] = servedEnd is DateTime end ? McpHelpers.FormatEffectiveStart(end) : null,
+                    ["window_edges_note"] = string.IsNullOrEmpty(edges) ? null : edges,
+                });
+            }
+
+            /* The raw tier: the reach is what raw holds per server (the probe get_top_queries_by_cpu runs), and the section carries the
+               latest floor among the servers in scope, because from there every server has coverage. */
+            DateTime? latest = null;
+            var truncated = false;
+            foreach (var serverId in serverIds)
+            {
+                var floor = await RawWindowFloor.GetAsync(
+                    postgres, floorTable, serverId, windowStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                var effective = RawWindowFloor.EffectiveStart(floor, windowStart);
+                if (latest is null || effective > latest)
+                {
+                    latest = effective;
+                }
+
+                truncated |= RawWindowFloor.IsTruncated(floor, windowStart);
+            }
+
+            var notice = ComposeStoreAvailability.BuildRetentionNotice(rawSource, ComposeRoute.Raw, windowStart, now, rollups, coverage);
+            return new StatsRoute(false, null, new Dictionary<string, object?>
+            {
+                ["tier"] = "raw",
+                ["effective_start"] = McpHelpers.FormatEffectiveStart(latest ?? windowStart),
+                ["window_truncated"] = truncated,
+                ["truncation_note"] = truncated ? notice : null,
+            });
+        }
+
+        var plan = await RouteAsync(
+            DarlingDataReader.ChooseQueriesHourlyRoute(rollups, coverage, TopRanking.Reads, windowStart),
+            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainHourly, dailyAvailable: false,
+                coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView)),
+            TimescaleSupport.QueryStatsIoHourlyView, "query_stats", RawWindowFloor.Table.QueryStats);
+        var procedures = await RouteAsync(
+            DarlingDataReader.ChooseProceduresHourlyRoute(rollups, coverage, TopRanking.Reads, windowStart),
+            RetentionTierRouter.Resolve(now, windowStart, rollups.ProcedureGrainHourly, dailyAvailable: false,
+                coverage.For(TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView)),
+            TimescaleSupport.ProcedureStatsIoHourlyView, "procedure_stats", RawWindowFloor.Table.ProcedureStats);
+        return (plan, procedures);
+    }
+
+    /// <summary>
+    /// The Query Store gate, per server: the interval table is read only where the same gate every other reader of it applies lets it be
+    /// (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>, then <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>: coverage exists,
+    /// no pending batch, the window is long enough). There is no raw fallback and that is deliberate: raw <c>query_store_stats</c> re-collects
+    /// an open interval every pass, so summing raw counts one interval many times; <c>get_query_store_top</c> dedupes raw, a roll-up that
+    /// sums cannot. A server the gate refuses is reported <c>unavailable</c> with the reason, never <c>empty</c> (#3553). Servers the gate
+    /// allows come back with the start the table provably holds for them.
+    /// </summary>
+    internal static async Task<(Dictionary<int, DateTime> ReadStart, Dictionary<int, string> Refused)> ResolveQueryStoreGateAsync(
+        NpgsqlDataSource postgres, int[] serverIds, DateTime windowStart, DateTime windowEnd, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var allowed = new Dictionary<int, DateTime>();
+        var refused = new Dictionary<int, string>();
+        if (!DarlingDataReader.QueryStoreTopMayReadTable(windowStart, windowEnd))
+        {
+            var why = $"the window is shorter than {DarlingDataReader.QueryStoreTopMinWindow.TotalMinutes:0} minutes, which the Query Store interval table is not read for";
+            foreach (var serverId in serverIds)
+            {
+                refused[serverId] = why;
+            }
+
+            return (allowed, refused);
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        foreach (var serverId in serverIds)
+        {
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                connection, serverId, windowStart, windowEnd, windowEnd, DarlingDataReader.QueryStoreTopMinWindow,
+                McpCommandDeadlines.ReadSeconds, logger, cancellationToken);
+            if (plan.UseTable)
+            {
+                allowed[serverId] = plan.ReadStart;
+            }
+            else
+            {
+                refused[serverId] = plan.DecisionFailed
+                    ? "the interval table's coverage could not be decided just now"
+                    : "the interval table does not provably hold this window for the server yet (no coverage row, a pending batch, or the window ends before the composed range)";
+            }
+        }
+
+        return (allowed, refused);
+    }
 
     private static NpgsqlCommand Command(NpgsqlDataSource postgres, string sql, int[] serverIds, DateTime startUtc, DateTime endUtc)
     {
@@ -68,7 +191,7 @@ internal static class DarlingQueryTagRollupReader
     /// a statement without <see cref="QueryTagRollupSql.CeilingPlaceholder"/> ignores it.
     /// </summary>
     internal static async Task<List<QueryTagRollupFact>> ReadFactsAsync(
-        NpgsqlDataSource postgres, string sql, int measureCount, int[] serverIds, DateTime startUtc, DateTime endUtc,
+        NpgsqlDataSource postgres, string sql, QueryTagRollupSection section, int[] serverIds, DateTime startUtc, DateTime endUtc,
         DateTime? ceiling, CancellationToken cancellationToken)
     {
         var text = sql.Replace(QueryTagRollupSql.CeilingPlaceholder, ceiling is null ? string.Empty : QueryTagRollupSql.CeilingClause, StringComparison.Ordinal);
@@ -80,29 +203,74 @@ internal static class DarlingQueryTagRollupReader
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        /* The measure columns are aliased with the section's measure names in every statement, and read by name: the statement's column
+           order and QueryTagRollupSection.Measures are no longer two copies of one ordering. */
+        var ordinals = section.Measures.Select(m => reader.GetOrdinal(m.Name)).ToArray();
         while (await reader.ReadAsync(cancellationToken))
         {
-            var values = new double[measureCount];
-            for (var i = 0; i < measureCount; i++)
+            var values = new double[ordinals.Length];
+            for (var i = 0; i < ordinals.Length; i++)
             {
-                values[i] = reader.IsDBNull(2 + i) ? 0 : Convert.ToDouble(reader.GetValue(2 + i), CultureInfo.InvariantCulture);
+                values[i] = reader.IsDBNull(ordinals[i]) ? 0 : Convert.ToDouble(reader.GetValue(ordinals[i]), CultureInfo.InvariantCulture);
             }
 
-            facts.Add(new QueryTagRollupFact(reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetInt32(1), values));
+            facts.Add(new QueryTagRollupFact(reader.GetInt32(reader.GetOrdinal("server_id")), reader.IsDBNull(reader.GetOrdinal("tag_id")) ? null : reader.GetInt32(reader.GetOrdinal("tag_id")), values));
         }
 
         return facts;
     }
 
-    /// <summary>The deadlock graphs of the window with each process looked up in the caller-key map (null tag = no map row).</summary>
+    /// <summary>
+    /// The deadlock graphs of the window with each process looked up in the caller-key map (null tag = no map row). A graph that is NULL or
+    /// yields no process rows still becomes a fact (<see cref="QueryTagDeadlockFact.Unparsed"/>), so it counts in the section's total
+    /// (#3553: a deadlock the store holds is not an absent one), and the failure is logged. The map read is bound to the servers in the
+    /// call and the caller keys the window's processes actually carry, not to every caller row of the fleet.
+    /// </summary>
     internal static async Task<(List<QueryTagDeadlockFact> Facts, bool ScanTruncated)> ReadDeadlocksAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, ILogger? logger, CancellationToken cancellationToken)
     {
-        var map = new Dictionary<(int Server, string Key), int>();
-        await using (var mapCommand = postgres.CreateCommand(QueryTagRollupSql.CallerMapSql))
+        var graphs = new List<(int ServerId, List<(string Key, DeadlockProcessInfo Process)> Processes, bool Unparsed)>();
+        var truncated = false;
+        await using (var command = Command(postgres, QueryTagRollupSql.DeadlockGraphsSql, serverIds, startUtc, endUtc))
         {
+            /* The ceiling + 1 as the fetch: the extra row is the observed truncation signal. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DeadlockScanCeiling + 1 });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var read = 0;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (++read > DeadlockScanCeiling)
+                {
+                    truncated = true;
+                    break;
+                }
+
+                var serverId = reader.GetInt32(0);
+                var xml = reader.IsDBNull(2) ? null : reader.GetString(2);
+                DateTime? when = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                var processes = DarlingDeadlockProcessRows.Parse(xml, when)
+                    .Select(p => (QueryTagRollupSql.CallerKey(p.ClientApp, p.LoginName, p.HostName, p.DatabaseName), p))
+                    .ToList();
+                var unparsed = processes.Count == 0;
+                if (unparsed)
+                {
+                    logger?.LogWarning(
+                        "get_resource_use_by_tag: deadlock {DeadlockId} on server {ServerId} has {Graph} deadlock graph, so it counts in the total with no process rows.",
+                        reader.GetValue(1), serverId, xml is null ? "a NULL" : "an unreadable or process-less");
+                }
+
+                graphs.Add((serverId, processes, unparsed));
+            }
+        }
+
+        var keys = graphs.SelectMany(g => g.Processes.Select(p => p.Key)).Distinct(StringComparer.Ordinal).ToArray();
+        var map = new Dictionary<(int Server, string Key), int>();
+        if (keys.Length > 0)
+        {
+            await using var mapCommand = postgres.CreateCommand(QueryTagRollupSql.CallerMapSql);
             mapCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             mapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds });
+            mapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = keys });
             await using var mapReader = await mapCommand.ExecuteReaderAsync(cancellationToken);
             while (await mapReader.ReadAsync(cancellationToken))
             {
@@ -111,28 +279,12 @@ internal static class DarlingQueryTagRollupReader
         }
 
         var facts = new List<QueryTagDeadlockFact>();
-        await using var command = Command(postgres, QueryTagRollupSql.DeadlockGraphsSql, serverIds, startUtc, endUtc);
-        /* The ceiling + 1 as the fetch: the extra row is the observed truncation signal. */
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DeadlockScanCeiling + 1 });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var read = 0;
-        var truncated = false;
-        while (await reader.ReadAsync(cancellationToken))
+        foreach (var (serverId, processes, unparsed) in graphs)
         {
-            if (++read > DeadlockScanCeiling)
-            {
-                truncated = true;
-                break;
-            }
-
-            var serverId = reader.GetInt32(0);
-            var xml = reader.IsDBNull(2) ? null : reader.GetString(2);
-            DateTime? when = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
             var byTag = new Dictionary<int, int>();
             var untagged = 0;
-            foreach (var p in DarlingDeadlockProcessRows.Parse(xml, when))
+            foreach (var (key, _) in processes)
             {
-                var key = QueryTagRollupSql.CallerKey(p.ClientApp, p.LoginName, p.HostName, p.DatabaseName);
                 if (map.TryGetValue((serverId, key), out var tagId))
                 {
                     byTag[tagId] = byTag.GetValueOrDefault(tagId) + 1;
@@ -143,10 +295,7 @@ internal static class DarlingQueryTagRollupReader
                 }
             }
 
-            if (byTag.Count + untagged > 0)
-            {
-                facts.Add(new QueryTagDeadlockFact(serverId, byTag, untagged));
-            }
+            facts.Add(new QueryTagDeadlockFact(serverId, byTag, untagged, unparsed));
         }
 
         return (facts, truncated);
@@ -240,8 +389,14 @@ internal static class DarlingQueryTagRollupReader
         var subtree = new Dictionary<int, double[]>();
         var untagged = new double[2];
         var total = new double[2];
+        var unparsedGraphs = 0;
         foreach (var fact in facts)
         {
+            if (fact.Unparsed)
+            {
+                unparsedGraphs++;
+            }
+
             var processes = fact.ProcessesByTag.Values.Sum() + fact.UntaggedProcesses;
             total[0] += 1;
             total[1] += processes;
@@ -275,6 +430,9 @@ internal static class DarlingQueryTagRollupReader
         }
 
         var shaped = Shape(section, own, subtree, untagged, total, tags, tagFilter, limit);
+        /* Beside total: graphs the section counts that gave no process rows (NULL, or a graph that will not parse). They sit in no tag row
+           and in no untagged figure, so a total that exceeds rows plus untagged is explained here, not hidden. */
+        shaped["unparsed_graphs"] = unparsedGraphs;
         shaped["rows_add_up_to_total"] = false;
         shaped["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.";
         return shaped;
@@ -325,21 +483,34 @@ internal static class DarlingQueryTagRollupReader
         return result;
     }
 
-    /// <summary>A section with no rows in the window: all figures zero, status <c>empty</c>.</summary>
-    internal static Dictionary<string, object?> Empty(QueryTagRollupSection section, string status, string message)
+    /// <summary>
+    /// A section with no rows in the window: all figures zero. Carries the keys <see cref="Shape"/> carries, so a quiet window and a busy one
+    /// read the same way: under a <paramref name="tagFilter"/> there is no <c>untagged</c> row and <c>total_scope</c> says the total is the subtree's.
+    /// </summary>
+    internal static Dictionary<string, object?> Empty(QueryTagRollupSection section, string status, string message, int? tagFilter = null)
     {
         var zeros = Figures(new double[section.Measures.Count], section);
-        return new Dictionary<string, object?>
+        var result = new Dictionary<string, object?>
         {
             ["section"] = section.Name,
             ["status"] = status,
             ["message"] = message,
+            ["order"] = section.OrderMeasure + "_desc",
             ["tag_rows"] = new List<object>(),
             ["tag_rows_total"] = 0,
             ["truncated"] = false,
-            ["untagged"] = zeros,
-            ["total"] = zeros,
         };
+        if (tagFilter is not null)
+        {
+            result["total_scope"] = "tag_subtree";
+        }
+        else
+        {
+            result["untagged"] = zeros;
+        }
+
+        result["total"] = zeros;
+        return result;
     }
 
     /// <summary>The totals across a fleet's facts, for the fleet line of a section.</summary>

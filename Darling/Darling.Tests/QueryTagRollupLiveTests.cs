@@ -92,8 +92,26 @@ public sealed class QueryTagRollupLiveTests
 
     private static Task QueryStoreAsync(Ctx c, int server, string hash, long queryId, long avgCpuUs, long executions) =>
         ExecAsync(c.Store,
-            "INSERT INTO query_store_interval_wide (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, max_query_max_used_memory, runtime_stats_interval_id) VALUES ($1, $2, 'db1', $3, $3, 'Regular', $4, $5, $6, $7, $7, 5, 1, 64, $3)",
+            "INSERT INTO query_store_interval_wide (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, max_query_max_used_memory, runtime_stats_interval_id, interval_start_time_utc) VALUES ($1, $2, 'db1', $3, $3, 'Regular', $4, $5, $6, $7, $7, 5, 1, 64, $3, $4)",
             c.Ct, DateTime.UtcNow.AddMinutes(-30), server, queryId, DateTime.UtcNow.AddMinutes(-40), hash, executions, avgCpuUs);
+
+    /* The Query Store gate (QueryStoreIntervalWide.ResolveReadAsync) needs a coverage row that reaches the window's start. */
+    private static async Task CoverQueryStoreAsync(Ctx c, int server)
+    {
+        /* A plain store has no raw chunk floor, so the gate also wants the table's own floor to sit a purge margin (26 h) below the window's
+           start: one interval from three days back, outside the 24-hour window and never counted in it. */
+        await ExecAsync(c.Store,
+            "INSERT INTO query_store_interval_wide (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, max_query_max_used_memory, runtime_stats_interval_id, interval_start_time_utc) VALUES ($1, $2, 'db1', 99, 99, 'Regular', $1, '0xOLD', 1, 1, 1, 1, 1, 1, 99, $1)",
+            c.Ct, DateTime.UtcNow.AddHours(-72), server);
+        await ExecAsync(c.Store,
+            "INSERT INTO query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ($1, $2, $3)",
+            c.Ct, server, DateTime.UtcNow.AddHours(-30), DateTime.UtcNow.AddMinutes(-1));
+    }
+
+    private static Task DeadlockWithoutGraphAsync(Ctx c, int server) =>
+        ExecAsync(c.Store,
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1, $2, $3, 'x', $2, NULL, 'db1')",
+            c.Ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-15), server);
 
     private static string Caller(string app, string login, string host, string db) => QueryTagRollupSql.CallerKey(app, login, host, db);
 
@@ -149,6 +167,7 @@ public sealed class QueryTagRollupLiveTests
             await MapAsync(c, ServerOne, "hash", "0xA1", a);
             await PlanCacheAsync(c, ServerOne, "0xA1", 30, 4_000_000, 7);
             await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
+            await CoverQueryStoreAsync(c, ServerOne);
 
             using var doc = await ReadAsync(c, "srv-one");
             Assert.False(doc.RootElement.GetProperty("sections_additive").GetBoolean());
@@ -225,6 +244,67 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>The interval table is read only behind the gate every other reader applies; with no coverage row the section is unavailable
+    /// (raw may hold the work), never empty, and nothing is read from the table.</summary>
+    [Fact]
+    public async Task AStoreWithNoQueryStoreCoverageRow_ReportsTheSectionUnavailable_NotEmpty()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 4_000_000, 7);
+            await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
+
+            using var doc = await ReadAsync(c, "srv-one");
+            var qs = Section(doc, "query_store");
+            Assert.Equal("unavailable", qs.GetProperty("status").GetString());
+            Assert.Contains("not readable here", qs.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal(0, Figure(qs.GetProperty("total"), "executions"));
+            Assert.Equal("ok", Section(doc, "plan_cache").GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>A deadlock whose graph is NULL still counts in the section's total, with unparsed_graphs beside it, in the fleet line too.</summary>
+    [Fact]
+    public async Task ADeadlockWithANullGraph_CountsInTheTotal_WithAnUnparsedGraphsCount()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await DeadlockWithoutGraphAsync(c, ServerOne);
+
+            using var doc = await ReadAsync(c, "srv-one");
+            var deadlocks = Section(doc, "deadlocks");
+            Assert.Equal("ok", deadlocks.GetProperty("status").GetString());
+            Assert.Equal(1, Figure(deadlocks.GetProperty("total"), "deadlocks"));
+            Assert.Equal(0, Figure(deadlocks.GetProperty("total"), "processes"));
+            Assert.Equal(1, deadlocks.GetProperty("unparsed_graphs").GetInt32());
+
+            using var fleet = await ReadAsync(c, null);
+            var fleetDeadlocks = Section(fleet, "deadlocks");
+            Assert.Equal(1, Figure(fleetDeadlocks.GetProperty("fleet_total"), "deadlocks"));
+            Assert.Equal(1, fleetDeadlocks.GetProperty("unparsed_graphs").GetInt32());
+        });
+    }
+
+    /// <summary>Under a tag filter an empty section carries the keys a section with rows carries: no untagged, and total_scope.</summary>
+    [Fact]
+    public async Task UnderATagFilter_AnEmptySection_CarriesTotalScope_AndNoUntagged()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 4_000_000, 7);
+
+            using var doc = await ReadAsync(c, "srv-one", tag: "A");
+            var blocking = Section(doc, "blocking_reports");
+            Assert.Equal("empty", blocking.GetProperty("status").GetString());
+            Assert.False(blocking.TryGetProperty("untagged", out _));
+            Assert.Equal("tag_subtree", blocking.GetProperty("total_scope").GetString());
+        });
+    }
+
     [Fact]
     public async Task ADeadlockBetweenTagsAAndB_CountsOnceForAAndOnceForB()
     {
@@ -274,10 +354,22 @@ public sealed class QueryTagRollupLiveTests
         {
             var a = await TagAsync(c, "A");
             await MapAsync(c, ServerOne, "hash", "0xA1", a);
-            await PlanCacheAsync(c, ServerOne, "0xA1", 60 * 5, 2_000_000);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 60 * 30, 2_000_000);
+            await CoverQueryStoreAsync(c, ServerOne);
 
-            using var doc = await ReadAsync(c, "srv-one", hours: 1);
+            using var doc = await ReadAsync(c, "srv-one");
             Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>A window too short for the Query Store interval table is not an all-clear: the answer is unavailable, naming why.</summary>
+    [Fact]
+    public async Task AOneHourWindowWithNoRows_AnswersUnavailable_BecauseQueryStoreCannotBeRead()
+    {
+        await WithStoreAsync(async c =>
+        {
+            using var doc = await ReadAsync(c, "srv-one", hours: 1);
+            Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
         });
     }
 

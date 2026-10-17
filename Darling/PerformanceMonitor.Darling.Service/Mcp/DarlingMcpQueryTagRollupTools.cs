@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpQueryTagRollupTools
 {
-    private const int DefaultLimit = 25;
+    internal const int DefaultLimit = 25;
     private const int MaxLimit = 200;
 
     [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet.")]
@@ -98,58 +98,100 @@ public sealed class DarlingMcpQueryTagRollupTools
             var serverIds = scope.Select(s => s.ServerId).ToArray();
             var names = scope.ToDictionary(s => s.ServerId, s => s.ServerName);
 
-            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
-            var planHourly = UseHourly(
-                DarlingDataReader.ChooseQueriesHourlyRoute(rollups, coverage, TopRanking.Reads, windowStart),
-                RetentionTierRouter.Resolve(DateTime.UtcNow, windowStart, rollups.QueryGrainHourly, dailyAvailable: false,
-                    coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView)));
-            var procHourly = UseHourly(
-                DarlingDataReader.ChooseProceduresHourlyRoute(rollups, coverage, TopRanking.Reads, windowStart),
-                RetentionTierRouter.Resolve(DateTime.UtcNow, windowStart, rollups.ProcedureGrainHourly, dailyAvailable: false,
-                    coverage.For(TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView)));
-            var planCeiling = planHourly ? coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsIoHourlyView, windowStart) : null;
-            var procCeiling = procHourly ? coverage.HourlyEndCeiling(TimescaleSupport.ProcedureStatsIoHourlyView, windowStart) : null;
+            /* Each stats section routes on its own (their rollups and floors are independent) and says how far back it reached: the raw branch
+               carries effective_start / window_truncated, the hourly branch the served window_end. The routing lives in the reader, which judges
+               the retention tier against the wall clock; this tool's only "now" is the as_of anchor (windowEnd). */
+            var (planRoute, procRoute) = await DarlingQueryTagRollupReader.ChooseStatsRoutesAsync(postgres, serverIds, windowStart, windowEnd, cancellationToken);
 
             var sections = new List<object>();
             var anyData = false;
             var anyUnavailable = false;
 
-            async Task AddAdditive(QueryTagRollupSection section, string sql, string source, DateTime? ceiling)
+            async Task AddAdditive(QueryTagRollupSection section, string sql, string source, DateTime? ceiling, Dictionary<string, object?>? disclosure)
             {
                 List<QueryTagRollupFact> facts;
                 try
                 {
                     facts = await DarlingQueryTagRollupReader.ReadFactsAsync(
-                        postgres, sql, section.Measures.Count, serverIds, windowStart, windowEnd, ceiling, cancellationToken);
+                        postgres, sql, section, serverIds, windowStart, windowEnd, ceiling, cancellationToken);
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
                 {
                     anyUnavailable = true;
-                    sections.Add(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, [], "unavailable",
-                        $"{source} does not exist in this store yet."));
+                    sections.Add(Merge(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, [], "unavailable",
+                        $"{source} does not exist in this store yet.", null), disclosure));
                     return;
                 }
 
                 anyData |= facts.Count > 0;
-                sections.Add(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, facts, facts.Count == 0 ? "empty" : "ok",
-                    facts.Count == 0 ? "No rows in the window." : null));
+                sections.Add(Merge(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, facts, facts.Count == 0 ? "empty" : "ok",
+                    facts.Count == 0 ? "No rows in the window." : null, null), disclosure));
             }
 
             await AddAdditive(
                 QueryTagRollupSection.PlanCache,
-                planHourly ? QueryTagRollupSql.PlanCacheHourlySql : QueryTagRollupSql.PlanCacheRawSql,
-                planHourly ? "collect.query_stats_io_hourly (hourly rollup)" : "collect.query_stats",
-                planCeiling);
-            await AddAdditive(QueryTagRollupSection.QueryStore, QueryTagRollupSql.QueryStoreSql, "collect.query_store_interval_wide", null);
+                planRoute.Hourly ? QueryTagRollupSql.PlanCacheHourlySql : QueryTagRollupSql.PlanCacheRawSql,
+                planRoute.Hourly ? "collect.query_stats_io_hourly (hourly rollup)" : "collect.query_stats",
+                planRoute.Ceiling, planRoute.Disclosure);
+
+            /* Query Store reads the composed interval table only, and only where the gate every other reader of it applies lets it. There is
+               no raw fallback: raw query_store_stats re-collects an open interval every pass, so summing raw counts one interval many times
+               (get_query_store_top dedupes raw; a roll-up that sums cannot). A server the gate refuses is "unavailable" with the reason, not
+               "empty" (#3553): its Query Store work may be sitting in raw. */
+            {
+                var (allowed, refused) = await DarlingQueryTagRollupReader.ResolveQueryStoreGateAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
+                var facts = new List<QueryTagRollupFact>();
+                var unavailable = false;
+                try
+                {
+                    foreach (var (serverId, readStart) in allowed)
+                    {
+                        facts.AddRange(await DarlingQueryTagRollupReader.ReadFactsAsync(
+                            postgres, QueryTagRollupSql.QueryStoreSql, QueryTagRollupSection.QueryStore, [serverId], readStart, windowEnd, null, cancellationToken));
+                    }
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+                {
+                    unavailable = true;
+                    facts.Clear();
+                }
+
+                var reach = new Dictionary<string, object?>();
+                if (allowed.Count > 0)
+                {
+                    var from = allowed.Values.Max();
+                    reach["effective_start"] = McpHelpers.FormatEffectiveStart(from);
+                    reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart);
+                }
+
+                anyData |= facts.Count > 0;
+                if (unavailable || allowed.Count == 0)
+                {
+                    anyUnavailable = true;
+                    var reason = unavailable
+                        ? "collect.query_store_interval_wide does not exist in this store yet."
+                        : "Query Store is read from the composed interval table only, and it is not readable here: " + refused.Values.First() + ".";
+                    sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
+                        [], "unavailable", reason, refused), reach));
+                }
+                else
+                {
+                    var refusedNote = refused.Count == 0 ? null : "Some servers are unavailable: the interval table does not hold the window for them yet.";
+                    anyUnavailable |= refused.Count > 0;
+                    sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
+                        facts, facts.Count == 0 ? "empty" : "ok", facts.Count == 0 ? "No rows in the window." : refusedNote, refused), reach));
+                }
+            }
+
             await AddAdditive(
                 QueryTagRollupSection.Procedures,
-                procHourly ? QueryTagRollupSql.ProceduresHourlySql : QueryTagRollupSql.ProceduresRawSql,
-                procHourly ? "collect.procedure_stats_io_hourly (hourly rollup)" : "collect.procedure_stats",
-                procCeiling);
-            await AddAdditive(QueryTagRollupSection.BlockingReports, QueryTagRollupSql.BlockingReportsSql, "collect.blocked_process_reports", null);
-            await AddAdditive(QueryTagRollupSection.BlockingSnapshots, QueryTagRollupSql.BlockingSnapshotsSql, "collect.dmv_blocking_snapshots", null);
+                procRoute.Hourly ? QueryTagRollupSql.ProceduresHourlySql : QueryTagRollupSql.ProceduresRawSql,
+                procRoute.Hourly ? "collect.procedure_stats_io_hourly (hourly rollup)" : "collect.procedure_stats",
+                procRoute.Ceiling, procRoute.Disclosure);
+            await AddAdditive(QueryTagRollupSection.BlockingReports, QueryTagRollupSql.BlockingReportsSql, "collect.blocked_process_reports", null, null);
+            await AddAdditive(QueryTagRollupSection.BlockingSnapshots, QueryTagRollupSql.BlockingSnapshotsSql, "collect.dmv_blocking_snapshots", null, null);
 
-            var (deadlocks, scanTruncated) = await DarlingQueryTagRollupReader.ReadDeadlocksAsync(postgres, serverIds, windowStart, windowEnd, cancellationToken);
+            var (deadlocks, scanTruncated) = await DarlingQueryTagRollupReader.ReadDeadlocksAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
             anyData |= deadlocks.Count > 0;
             sections.Add(WrapDeadlocks(fleet, scope, names, tags, tagFilter, limit, deadlocks, scanTruncated));
 
@@ -162,7 +204,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                 }
 
                 return anyUnavailable
-                    ? McpHelpers.Status("unavailable", "Some sources of the roll-up do not exist in this store yet, and the rest hold no rows in the window.")
+                    ? McpHelpers.Status("unavailable", "Some sources of the roll-up could not be read (a table that does not exist in this store yet, or the Query Store interval table not readable for this window), and the rest hold no rows in the window.")
                     : McpHelpers.Status("empty", "No resource use was collected in the window" + (fleet ? " on any server." : " on this server."));
             }
 
@@ -186,9 +228,18 @@ public sealed class DarlingMcpQueryTagRollupTools
         }
     }
 
-    /// <summary>The hourly rollup serves a section only when the retention tier left raw and the io route reaches the window's start.</summary>
-    private static bool UseHourly(HourlyRoute route, RetentionTier tier) =>
-        tier != RetentionTier.Raw && route == HourlyRoute.Io;
+    private static Dictionary<string, object?> Merge(Dictionary<string, object?> section, Dictionary<string, object?>? extra)
+    {
+        if (extra is not null)
+        {
+            foreach (var (key, value) in extra)
+            {
+                section[key] = value;
+            }
+        }
+
+        return section;
+    }
 
     private static (int? Id, string? Problem) ResolveTag(IReadOnlyList<QueryTagNode> tags, string text)
     {
@@ -209,13 +260,13 @@ public sealed class DarlingMcpQueryTagRollupTools
     private static Dictionary<string, object?> Wrap(
         QueryTagRollupSection section, string source, bool fleet, IReadOnlyList<DarlingServerResolver.RegisteredServer> scope,
         Dictionary<int, string> names, IReadOnlyList<QueryTagNode> tags, int? tagFilter, int limit,
-        List<QueryTagRollupFact> facts, string status, string? message)
+        List<QueryTagRollupFact> facts, string status, string? message, Dictionary<int, string>? refused)
     {
         Dictionary<string, object?> block;
         if (!fleet)
         {
             block = facts.Count == 0
-                ? DarlingQueryTagRollupReader.Empty(section, status, message ?? string.Empty)
+                ? DarlingQueryTagRollupReader.Empty(section, status, message ?? string.Empty, tagFilter)
                 : DarlingQueryTagRollupReader.Assemble(section, facts, tags, tagFilter, limit);
             block["source"] = source;
             return block;
@@ -224,9 +275,11 @@ public sealed class DarlingMcpQueryTagRollupTools
         var servers = scope.Select(s =>
         {
             var mine = facts.Where(f => f.ServerId == s.ServerId).ToList();
-            var serverBlock = mine.Count == 0
-                ? DarlingQueryTagRollupReader.Empty(section, status == "ok" ? "empty" : status, message ?? "No rows in the window for this server.")
-                : DarlingQueryTagRollupReader.Assemble(section, mine, tags, tagFilter, limit);
+            var serverBlock = refused is not null && refused.TryGetValue(s.ServerId, out var why)
+                ? DarlingQueryTagRollupReader.Empty(section, "unavailable", "Not readable for this server: " + why + ".", tagFilter)
+                : mine.Count == 0
+                    ? DarlingQueryTagRollupReader.Empty(section, status == "ok" ? "empty" : status, message ?? "No rows in the window for this server.", tagFilter)
+                    : DarlingQueryTagRollupReader.Assemble(section, mine, tags, tagFilter, limit);
             serverBlock["server"] = names[s.ServerId];
             return (object)serverBlock;
         }).ToList();
@@ -248,9 +301,17 @@ public sealed class DarlingMcpQueryTagRollupTools
         var section = QueryTagRollupSection.Deadlocks;
         var status = facts.Count == 0 ? "empty" : "ok";
         var message = facts.Count == 0 ? "No deadlock graphs in the window." : null;
-        Dictionary<string, object?> One(IReadOnlyList<QueryTagDeadlockFact> mine) => mine.Count == 0
-            ? DarlingQueryTagRollupReader.Empty(section, "empty", "No deadlock graphs in the window.")
-            : DarlingQueryTagRollupReader.AssembleDeadlocks(mine, tags, tagFilter, limit);
+        Dictionary<string, object?> One(IReadOnlyList<QueryTagDeadlockFact> mine)
+        {
+            if (mine.Count > 0)
+            {
+                return DarlingQueryTagRollupReader.AssembleDeadlocks(mine, tags, tagFilter, limit);
+            }
+
+            var empty = DarlingQueryTagRollupReader.Empty(section, "empty", "No deadlock graphs in the window.", tagFilter);
+            empty["unparsed_graphs"] = 0;
+            return empty;
+        }
 
         Dictionary<string, object?> block;
         if (!fleet)
@@ -274,6 +335,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             ["status"] = status,
             ["message"] = message,
             ["scan_truncated"] = scanTruncated,
+            ["unparsed_graphs"] = facts.Count(f => f.Unparsed),
             ["rows_add_up_to_total"] = false,
             ["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.",
             ["servers"] = servers,

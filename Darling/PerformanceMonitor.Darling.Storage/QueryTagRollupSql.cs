@@ -34,14 +34,14 @@ public static class QueryTagRollupSql
     /// <summary>Every tag: id, name, parent. The tree maths (own figure, subtree figure) runs over this in C#.</summary>
     public const string TagTreeSql = "SELECT id, name, parent_id FROM config.query_tags ORDER BY id";
 
-    /// <summary>Plan cache, raw tier: <c>collect.query_stats</c> deltas keyed by <c>query_hash</c>.</summary>
+    /// <summary>Plan cache, raw tier: <c>collect.query_stats</c> deltas keyed by <c>query_hash</c>. Every additive statement aliases its measure columns with the section's measure names (unscaled: microseconds are divided in C#), and the reader reads them by name.</summary>
     public static readonly string PlanCacheRawSql = $"""
         SELECT q.server_id, m.tag_id,
-               CAST(COALESCE(SUM(q.delta_worker_time), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_elapsed_time), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_logical_reads), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_logical_writes), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_execution_count), 0) AS double precision)
+               CAST(COALESCE(SUM(q.delta_worker_time), 0) AS double precision) AS cpu_ms,
+               CAST(COALESCE(SUM(q.delta_elapsed_time), 0) AS double precision) AS duration_ms,
+               CAST(COALESCE(SUM(q.delta_logical_reads), 0) AS double precision) AS logical_reads,
+               CAST(COALESCE(SUM(q.delta_logical_writes), 0) AS double precision) AS logical_writes,
+               CAST(COALESCE(SUM(q.delta_execution_count), 0) AS double precision) AS executions
         FROM collect.query_stats AS q
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
@@ -55,11 +55,11 @@ public static class QueryTagRollupSql
     /// <summary>Plan cache, hourly tier: <c>collect.query_stats_io_hourly</c>, the rollup that keeps logical reads and writes.</summary>
     public const string PlanCacheHourlySql = """
         SELECT f.server_id, m.tag_id,
-               CAST(COALESCE(SUM(f.worker_time_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.elapsed_time_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.logical_reads_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.logical_writes_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.execution_count_sum), 0) AS double precision)
+               CAST(COALESCE(SUM(f.worker_time_sum), 0) AS double precision) AS cpu_ms,
+               CAST(COALESCE(SUM(f.elapsed_time_sum), 0) AS double precision) AS duration_ms,
+               CAST(COALESCE(SUM(f.logical_reads_sum), 0) AS double precision) AS logical_reads,
+               CAST(COALESCE(SUM(f.logical_writes_sum), 0) AS double precision) AS logical_writes,
+               CAST(COALESCE(SUM(f.execution_count_sum), 0) AS double precision) AS executions
         FROM collect.query_stats_io_hourly AS f
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = f.server_id AND m.key_kind = 'hash' AND m.key = f.query_hash
@@ -72,12 +72,12 @@ public static class QueryTagRollupSql
     /// <summary>Query Store: <c>collect.query_store_interval_wide</c> (the latest snapshot per interval), averages weighted by executions.</summary>
     public static readonly string QueryStoreSql = $$"""
         SELECT q.server_id, m.tag_id,
-               CAST(COALESCE(SUM(q.avg_cpu_time_us * q.execution_count), 0) AS double precision),
-               CAST(COALESCE(SUM(q.avg_duration_us * q.execution_count), 0) AS double precision),
-               CAST(COALESCE(SUM(q.avg_logical_io_reads * q.execution_count), 0) AS double precision),
-               CAST(COALESCE(SUM(q.avg_logical_io_writes * q.execution_count), 0) AS double precision),
-               CAST(COALESCE(SUM(q.execution_count), 0) AS double precision),
-               CAST(COALESCE(MAX(q.max_query_max_used_memory), 0) AS double precision)
+               CAST(COALESCE(SUM(q.avg_cpu_time_us * q.execution_count), 0) AS double precision) AS cpu_ms,
+               CAST(COALESCE(SUM(q.avg_duration_us * q.execution_count), 0) AS double precision) AS duration_ms,
+               CAST(COALESCE(SUM(q.avg_logical_io_reads * q.execution_count), 0) AS double precision) AS logical_reads,
+               CAST(COALESCE(SUM(q.avg_logical_io_writes * q.execution_count), 0) AS double precision) AS logical_writes,
+               CAST(COALESCE(SUM(q.execution_count), 0) AS double precision) AS executions,
+               CAST(COALESCE(MAX(q.max_query_max_used_memory), 0) AS double precision) AS peak_memory_pages
         FROM collect.query_store_interval_wide AS q
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
@@ -92,11 +92,11 @@ public static class QueryTagRollupSql
     /// <summary>Procedures, raw tier: <c>collect.procedure_stats</c> deltas keyed by <c>database.schema.name</c>.</summary>
     public static readonly string ProceduresRawSql = $"""
         SELECT q.server_id, m.tag_id,
-               CAST(COALESCE(SUM(q.delta_worker_time), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_elapsed_time), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_logical_reads), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_logical_writes), 0) AS double precision),
-               CAST(COALESCE(SUM(q.delta_execution_count), 0) AS double precision)
+               CAST(COALESCE(SUM(q.delta_worker_time), 0) AS double precision) AS cpu_ms,
+               CAST(COALESCE(SUM(q.delta_elapsed_time), 0) AS double precision) AS duration_ms,
+               CAST(COALESCE(SUM(q.delta_logical_reads), 0) AS double precision) AS logical_reads,
+               CAST(COALESCE(SUM(q.delta_logical_writes), 0) AS double precision) AS logical_writes,
+               CAST(COALESCE(SUM(q.delta_execution_count), 0) AS double precision) AS executions
         FROM collect.procedure_stats AS q
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = q.server_id AND m.key_kind = 'object'
@@ -111,11 +111,11 @@ public static class QueryTagRollupSql
     /// <summary>Procedures, hourly tier: <c>collect.procedure_stats_io_hourly</c>.</summary>
     public const string ProceduresHourlySql = """
         SELECT f.server_id, m.tag_id,
-               CAST(COALESCE(SUM(f.worker_time_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.elapsed_time_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.logical_reads_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.logical_writes_sum), 0) AS double precision),
-               CAST(COALESCE(SUM(f.execution_count_sum), 0) AS double precision)
+               CAST(COALESCE(SUM(f.worker_time_sum), 0) AS double precision) AS cpu_ms,
+               CAST(COALESCE(SUM(f.elapsed_time_sum), 0) AS double precision) AS duration_ms,
+               CAST(COALESCE(SUM(f.logical_reads_sum), 0) AS double precision) AS logical_reads,
+               CAST(COALESCE(SUM(f.logical_writes_sum), 0) AS double precision) AS logical_writes,
+               CAST(COALESCE(SUM(f.execution_count_sum), 0) AS double precision) AS executions
         FROM collect.procedure_stats_io_hourly AS f
         LEFT JOIN config.query_tag_map AS m
                ON m.server_id = f.server_id AND m.key_kind = 'object'
@@ -132,10 +132,10 @@ public static class QueryTagRollupSql
     private const string BlockingKey =
         "COALESCE(r.blocking_client_app, '') || chr(31) || COALESCE(r.blocking_login_name, '') || chr(31) || COALESCE(r.blocking_host_name, '') || chr(31) || COALESCE(r.database_name, '')";
 
-    private static string BlockingSql(string source, string window) => $"""
+    private static string BlockingSql(string source, string window, string blockedCount, string causedCount) => $"""
         SELECT s.server_id, s.tag_id,
-               CAST(SUM(s.blocked_ms) AS double precision), CAST(SUM(s.caused_ms) AS double precision),
-               CAST(SUM(s.blocked_n) AS double precision), CAST(SUM(s.caused_n) AS double precision)
+               CAST(SUM(s.blocked_ms) AS double precision) AS blocked_ms, CAST(SUM(s.caused_ms) AS double precision) AS caused_ms,
+               CAST(SUM(s.blocked_n) AS double precision) AS {blockedCount}, CAST(SUM(s.caused_n) AS double precision) AS {causedCount}
         FROM (
             SELECT r.server_id, m.tag_id, COALESCE(r.wait_time_ms, 0) AS blocked_ms, 0 AS caused_ms, 1 AS blocked_n, 0 AS caused_n
             FROM {source} AS r
@@ -153,10 +153,10 @@ public static class QueryTagRollupSql
         """;
 
     /// <summary>Blocking, blocked-process reports: the wait lands on the blocked side's tag (blocked) and on the blocking side's tag (caused).</summary>
-    public static readonly string BlockingReportsSql = BlockingSql("collect.blocked_process_reports", "r.event_time >= $2 AND r.event_time <= $3");
+    public static readonly string BlockingReportsSql = BlockingSql("collect.blocked_process_reports", "r.event_time >= $2 AND r.event_time <= $3", "blocked_reports", "caused_reports");
 
     /// <summary>Blocking, DMV snapshots: the same two sides over the always-on DMV sample.</summary>
-    public static readonly string BlockingSnapshotsSql = BlockingSql("collect.dmv_blocking_snapshots", "r.collection_time >= $2 AND r.collection_time <= $3");
+    public static readonly string BlockingSnapshotsSql = BlockingSql("collect.dmv_blocking_snapshots", "r.collection_time >= $2 AND r.collection_time <= $3", "blocked_snapshots", "caused_snapshots");
 
     /// <summary>The deadlock graphs of the window, newest first, up to $4; the processes are parsed in C# (a graph is XML).</summary>
     public const string DeadlockGraphsSql = """
@@ -169,11 +169,11 @@ public static class QueryTagRollupSql
         LIMIT $4
         """;
 
-    /// <summary>The caller keys the map tagged on these servers, for the deadlock processes.</summary>
+    /// <summary>The map rows for the deadlock processes: only the servers in the call ($1) and only the caller keys the window's processes carry ($2), never every caller row of the fleet.</summary>
     public const string CallerMapSql = """
         SELECT server_id, key, tag_id
         FROM config.query_tag_map
-        WHERE server_id = ANY($1) AND key_kind = 'caller'
+        WHERE server_id = ANY($1) AND key_kind = 'caller' AND key = ANY($2)
         """;
 
     /// <summary>The caller key of one process, as the sighting hook builds it.</summary>
