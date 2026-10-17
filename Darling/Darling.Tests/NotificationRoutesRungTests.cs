@@ -470,6 +470,7 @@ public sealed class NotificationRoutesLivePostgresTests
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentLeaseMinutes });
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = NotificationRoute.DefaultAgentExpiryMinutes });
                 insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
+                insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer }); /* fallback_route_id (#6036) */
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 
