@@ -460,6 +460,16 @@ internal static class InvestigationToolCore
         /* #5918: a practice request names the case it replays; every other row keeps its shape (absent, not null). */
         if (r.PracticeOf is { } practiceOf)
             payload["practice_of"] = practiceOf.ToString();
+        /* #5999: the registry's names, read when served (a rename shows on the next read). Darling always has a display_name (its
+           fallback floor is the name the request was opened with) and lacks only the instance_name once the server has left the
+           registry. Lite has a servers registry table (Lite/Database/Schema.cs) but its request reads do not join it yet (#6011), so
+           both keys are absent there. The key is instance_name and NOT host_name on purpose: McpDataDetailKeys classifies host_name
+           as a client machine (every other host_name in the product is one) and numbers it to host#1 at metadataOnly on every MCP
+           answer, which would hide the very name this adds. */
+        if (r.DisplayName is { } displayName)
+            payload["display_name"] = displayName;
+        if (r.InstanceName is { } instanceName)
+            payload["instance_name"] = instanceName;
         return payload;
     }
 

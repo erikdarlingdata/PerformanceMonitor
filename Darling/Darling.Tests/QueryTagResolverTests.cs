@@ -115,6 +115,20 @@ public sealed class QueryTagResolverTests
         Assert.False(Resolve([Hash(text: straddles)], [Rule(3, QueryTagRuleField.Text, "ZZ")]).HasTag);
     }
 
+    [Fact]
+    public void Text_CutThroughASurrogatePair_KeepsNeitherHalf()
+    {
+        // #5980: the resolver's cut is the shared surrogate-safe one. A rule for the high half alone fires when the
+        // whole pair is inside the 4,000 characters and must not fire on a half left by the cut.
+        var rule = Rule(2, QueryTagRuleField.Text, "\uD83D");
+
+        string pairInside = new string('x', QueryTagLimits.TextSampleCap - 2) + "\U0001F600" + "tail";
+        string pairStraddlesTheCut = new string('x', QueryTagLimits.TextSampleCap - 1) + "\U0001F600" + "tail";
+
+        Assert.True(Resolve([Hash(text: pairInside)], [rule]).HasTag);
+        Assert.False(Resolve([Hash(text: pairStraddlesTheCut)], [rule]).HasTag);
+    }
+
     // ---------- the tag comment rule ----------
 
     [Theory]

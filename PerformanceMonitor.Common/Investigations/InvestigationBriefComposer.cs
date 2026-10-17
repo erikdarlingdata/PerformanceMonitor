@@ -50,6 +50,9 @@ public sealed class InvestigationBriefComposer
     /// <summary>The most characters <c>prior_links</c> (#5914) may take, inside what the sections left.</summary>
     public const int PriorLinksCap = 2_000;
 
+    /// <summary>The most characters <c>recurrence</c> (#6000) may take, inside what the sections left.</summary>
+    public const int RecurrenceCap = 2_000;
+
     /// <summary>The sections in fill order, with each section's cap and the tool that fetches what a cut drops.</summary>
     public static readonly IReadOnlyList<(string Section, int Cap, string? FetchTool)> Sections = new (string, int, string?)[]
     {
@@ -162,6 +165,13 @@ public sealed class InvestigationBriefComposer
                 ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "root_cause_found", "evidence"),
             },
         };
+        /* #5999: the registry's names for the server, read when the brief is composed. display_name is always present on Darling;
+           instance_name is absent once the server has left the registry. Lite has a servers table but no join yet (#6011), so
+           both are absent there. Not host_name: that key is a masked client host (see InvestigationToolCore.RequestPayload). */
+        if (request.DisplayName is { } displayName)
+            ((JsonObject)root["request"]!)["display_name"] = displayName;
+        if (request.InstanceName is { } instanceName)
+            ((JsonObject)root["request"]!)["instance_name"] = instanceName;
         /* #5914: the request's page on the web dashboard, for a ticket the agent files. Absent when there is none. */
         if (!string.IsNullOrWhiteSpace(sources.RequestUrl))
             root["request_url"] = sources.RequestUrl;
@@ -210,6 +220,45 @@ public sealed class InvestigationBriefComposer
                     ["kept"] = kept,
                     ["dropped"] = list.Count - kept,
                     ["fetch"] = fetch,
+                });
+            }
+        }
+
+        /* #6000: how often each linked metric fired at the first alert's time of day, held to its own cap inside what the
+           sections left. Placed before prior_links: it is a count the agent cannot get in one call elsewhere. Absent, never
+           [], when the source supplied none (Lite's, until #6011), so such a brief is byte for byte as before.
+           A practice request (#5918) keeps this section, unlike earlier_reports and prior_links: those hold what agents said
+           about the case, this is observed config_alert_log history around the replayed incident (a practice request's alerts are
+           copies of the case's, so its anchor is the incident's own clock time), not the case's answer, and the agent could count
+           it itself through get_alert_history. Withholding it would make practice harder than the live article.
+           No masking: the section holds a metric name, a clock time, counts and dates, no free text. The composer bypasses the
+           masker here, and InvestigationFieldMasking.StoredBrief re-masks only BriefFreeTextKeys and the alerts special case, so it
+           skips this section too and leaves it as stored: the two paths agree, and the section cannot shift between levels. A
+           free-text field added here needs a BriefFreeTextKeys row, or the two paths would disagree silently. */
+        if (sources.Recurrence is { Count: > 0 } recurrence)
+        {
+            var list = recurrence.Select(RecurrenceNode).ToList();
+            var budget = Math.Max(0, Math.Min(RecurrenceCap, remaining));
+            var used = 0;
+            var kept = 0;
+            for (; kept < list.Count; kept++)
+            {
+                var length = list[kept].ToJsonString().Length + 1;
+                if (used + length > budget) break;
+                used += length;
+            }
+
+            root["recurrence"] = new JsonArray(list.Take(kept).Select(n => (JsonNode?)n).ToArray());
+            remaining -= used;
+            if (kept < list.Count)
+            {
+                droppedChars += list.Skip(kept).Sum(n => n.ToJsonString().Length + 1);
+                cuts.Add(new JsonObject
+                {
+                    ["section"] = "recurrence",
+                    ["kept"] = kept,
+                    ["dropped"] = list.Count - kept,
+                    ["fetch"] = "get_alert_history",
                 });
             }
         }
@@ -393,6 +442,19 @@ public sealed class InvestigationBriefComposer
         node["labels"] = new JsonArray(InvestigationRules.EarlierReportLabels.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray());
         return node;
     }
+
+    /// <summary>A metric's recurrence (#6000). Structured fields only (a metric name, counts, dates): nothing to mask.</summary>
+    private static JsonObject RecurrenceNode(InvestigationAlertRecurrence r) => new()
+    {
+        ["metric"] = r.MetricName,
+        ["around_utc"] = r.AroundUtc.ToString("HH:mm", CultureInfo.InvariantCulture),
+        ["window_minutes"] = InvestigationAlertRecurrence.WindowMinutes,
+        ["days"] = InvestigationAlertRecurrence.Days,
+        ["fired"] = r.Fired,
+        ["muted"] = r.Muted,
+        ["fired_dates"] = new JsonArray(r.FiredDates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
+        ["muted_dates"] = new JsonArray(r.MutedDates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
+    };
 
     /// <summary>A prior link (#5914): the request it came from, when, its kind, and the URL and key as free text.</summary>
     private static JsonObject PriorLinkNode(InvestigationPriorLink link, McpDataDetailMasker masker, CutCounter cut)

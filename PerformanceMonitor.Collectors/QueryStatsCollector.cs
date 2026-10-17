@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -891,4 +892,9 @@ OPTION(RECOMPILE);";
             row.QueryHash,
             row.QueryPlanXmlBytes!.Value);
     }
+
+    /// <summary>#5980: one hash sighting carrying the database and the statement text. Null when the row has no query_hash.</summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(QueryTagSightings.Hash(
+            row.QueryHash, row.DatabaseName, null, null, null, null, row.QueryText));
 }
