@@ -79,7 +79,7 @@ internal static class DarlingMcpInstructions
     /// The census paragraph for a server that serves <paramref name="served"/> out of <paramref name="catalog"/>.
     /// Every figure comes from the two name sets: the total, the Lite overlap (<see cref="LiteToolNames"/>), and
     /// what each write switch adds. The family list names only families that still have a tool served: with the
-    /// writes off, the server-tag and onboarding tools (all writes) are gone.
+    /// writes off, the server-tag and onboarding tools (all writes) are gone, while the query-tag read stays.
     /// </summary>
     internal static string ToolCensus(IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
     {
@@ -125,10 +125,10 @@ internal static class DarlingMcpInstructions
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
         var families = adminServed
-            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding and investigation-wait tools"
+            ? "Custom Views, custom-alert-rule, alert-tuning, server/query-tag, onboarding and investigation-wait tools"
             : writesServed
-                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and investigation-wait tools"
-                : "the Custom Views and custom-alert-rule reads and the investigation-wait tool";
+                ? "Custom Views, custom-alert-rule, alert-tuning, server/query-tag and investigation-wait tools"
+                : "the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
@@ -143,7 +143,7 @@ internal static class DarlingMcpInstructions
     /// </summary>
     private const string CatalogCensus =
         "This server exposes 196 tools. 95 are the same names Lite exposes. The remaining 101 are unique to Darling: " +
-        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag, " +
+        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 

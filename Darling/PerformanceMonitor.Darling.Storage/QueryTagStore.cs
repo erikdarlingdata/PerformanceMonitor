@@ -39,11 +39,12 @@ public sealed record QueryTagAssignmentRow(
 /// <summary>The one-row map version state: the map is stale while <c>BuiltVersion</c> is below <c>RulesVersion</c>.</summary>
 public sealed record QueryTagState(long RulesVersion, long BuiltVersion);
 
-/// <summary>Every tag, every hand assignment, the rule count per tag, the registered server names and the map state, read for one answer.</summary>
+/// <summary>Every tag, every hand assignment, the rule count (all rules, and the enabled ones the resolver considers) per tag, the registered server names and the map state, read for one answer.</summary>
 public sealed record QueryTagSnapshot(
     IReadOnlyList<QueryTagRow> Tags,
     IReadOnlyList<QueryTagAssignmentRow> Assignments,
     IReadOnlyDictionary<int, int> RuleCountByTag,
+    IReadOnlyDictionary<int, int> EnabledRuleCountByTag,
     IReadOnlyDictionary<int, string> ServerNames,
     QueryTagState State);
 
@@ -131,7 +132,7 @@ FROM config.query_tag_assignments
 ORDER BY tag_id, kind, server_id NULLS FIRST, query_hash, database_name, schema_name, object_name, id";
 
     /// <summary>The rules per tag, for the list and for a delete's confirm counts.</summary>
-    public const string RuleCountsSql = "SELECT tag_id, count(*)::integer FROM config.query_tag_rules WHERE tag_id IS NOT NULL GROUP BY tag_id";
+    public const string RuleCountsSql = "SELECT tag_id, count(*)::integer, (count(*) FILTER (WHERE enabled))::integer FROM config.query_tag_rules WHERE tag_id IS NOT NULL GROUP BY tag_id";
 
     /// <summary>The map version state.</summary>
     public const string StateSql = "SELECT rules_version, built_version FROM config.query_tag_state WHERE id = 1";
@@ -148,6 +149,7 @@ ORDER BY tag_id, kind, server_id NULLS FIRST, query_hash, database_name, schema_
     private const string ReparentSql = "UPDATE config.query_tags SET parent_id = $2 WHERE id = $1";
     private const string DeleteTagSql = "DELETE FROM config.query_tags WHERE id = $1";
     private const string GetTagSql = "SELECT id, name, parent_id, sort_order, colour FROM config.query_tags WHERE id = $1";
+    private const string LockSubtreeSql = "SELECT id FROM config.query_tags WHERE id = ANY($1) FOR UPDATE";
     private const string CountAssignmentsSql = "SELECT count(*)::integer FROM config.query_tag_assignments WHERE tag_id = ANY($1)";
     private const string CountRulesSql = "SELECT count(*)::integer FROM config.query_tag_rules WHERE tag_id = ANY($1)";
 
@@ -156,16 +158,18 @@ ORDER BY tag_id, kind, server_id NULLS FIRST, query_hash, database_name, schema_
         "id, tag_id, kind, server_id, query_hash, database_name, schema_name, object_name, query_id, created_at, created_by";
 
     /// <summary>The one row a key addresses in a server scope, locked for the write. $1 kind, $2 server_id (NULL = every server), $3 hash,
-    /// $4 database, $5 schema, $6 object. Compares exactly the way the V192 unique indexes do (NULL parts as the empty string).</summary>
+    /// $4 database, $5 schema, $6 object. The hash and the three object parts compare ignoring case (NULL parts as the empty string), because the
+    /// resolver matches a hash with OrdinalIgnoreCase and an object through SameObjectAs (#6020); the V192 unique indexes stay exact, and this find under
+    /// <see cref="AssignLockKey"/> is what keeps a case-twin row from being written. The assignments table is small and hand-made, so no index is needed.</summary>
     private const string FindAssignmentSql = @"
 SELECT " + AssignmentColumns + @"
 FROM config.query_tag_assignments
 WHERE kind = $1
   AND server_id IS NOT DISTINCT FROM $2
-  AND COALESCE(query_hash, '') = COALESCE($3, '')
-  AND COALESCE(database_name, '') = COALESCE($4, '')
-  AND COALESCE(schema_name, '') = COALESCE($5, '')
-  AND COALESCE(object_name, '') = COALESCE($6, '')
+  AND lower(COALESCE(query_hash, '')) = lower(COALESCE($3, ''))
+  AND lower(COALESCE(database_name, '')) = lower(COALESCE($4, ''))
+  AND lower(COALESCE(schema_name, '')) = lower(COALESCE($5, ''))
+  AND lower(COALESCE(object_name, '')) = lower(COALESCE($6, ''))
 FOR UPDATE";
 
     private const string InsertAssignmentSql = @"
@@ -186,7 +190,9 @@ RETURNING " + AssignmentColumns;
     /// and the custom-alert-rule cap lock.</summary>
     public const long TreeLockKey = 0x4441524C_51544147;
 
-    /// <summary>The advisory-lock key for hand-assignment writes ("DARLQASG"): the find-then-write of one key runs under it.</summary>
+    /// <summary>The advisory-lock key for hand-assignment writes ("DARLQASG"): the find-then-write of one key runs under it. An assign or
+    /// unassign takes <see cref="TreeLockKey"/> first and this second, always in that order, so a delete's confirm counts (taken under
+    /// <see cref="TreeLockKey"/>) cannot miss an assignment written meanwhile (#6020).</summary>
     public const long AssignLockKey = 0x4441524C_51415347;
 
     private const string UniqueViolationSqlState = "23505";
@@ -223,12 +229,14 @@ RETURNING " + AssignmentColumns;
         }
 
         var ruleCounts = new Dictionary<int, int>();
+        var enabledRuleCounts = new Dictionary<int, int>();
         await using (var command = Command(RuleCountsSql, connection, null))
         await using (var reader = await command.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))
             {
                 ruleCounts[reader.GetInt32(0)] = reader.GetInt32(1);
+                enabledRuleCounts[reader.GetInt32(0)] = reader.GetInt32(2);
             }
         }
 
@@ -249,7 +257,7 @@ RETURNING " + AssignmentColumns;
             state = await reader.ReadAsync(ct) ? new QueryTagState(reader.GetInt64(0), reader.GetInt64(1)) : new QueryTagState(0, 0);
         }
 
-        return new QueryTagSnapshot(tags, assignments, ruleCounts, serverNames, state);
+        return new QueryTagSnapshot(tags, assignments, ruleCounts, enabledRuleCounts, serverNames, state);
     }
 
     /// <summary>Returns the subset of <paramref name="serverIds"/> that are registered servers.</summary>
@@ -371,6 +379,15 @@ RETURNING " + AssignmentColumns;
 
         var descendants = TagTreeRules.Descendants(nodes, tagId);
         var subtree = descendants.Append(tagId).ToArray();
+
+        // Hold the subtree's tag rows, so a rule written by a writer that does not take TreeLockKey cannot slip a row in
+        // between the counts below and the DELETE: its foreign-key check needs a share lock on the tag row (#6020).
+        await using (var hold = Command(LockSubtreeSql, connection, transaction))
+        {
+            hold.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = subtree });
+            await hold.ExecuteNonQueryAsync(ct);
+        }
+
         var impact = new QueryTagDeleteImpact(
             descendants.Count,
             await CountAsync(CountAssignmentsSql, subtree, connection, transaction, ct),
@@ -397,6 +414,7 @@ RETURNING " + AssignmentColumns;
     {
         await using var connection = await _dataSource.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
+        await AcquireLockAsync(connection, transaction, TreeLockKey, ct);
         await AcquireLockAsync(connection, transaction, AssignLockKey, ct);
         try
         {
@@ -462,6 +480,7 @@ RETURNING " + AssignmentColumns;
     {
         await using var connection = await _dataSource.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
+        await AcquireLockAsync(connection, transaction, TreeLockKey, ct);
         await AcquireLockAsync(connection, transaction, AssignLockKey, ct);
         QueryTagAssignmentRow? existing;
         await using (var find = Command(FindAssignmentSql, connection, transaction))

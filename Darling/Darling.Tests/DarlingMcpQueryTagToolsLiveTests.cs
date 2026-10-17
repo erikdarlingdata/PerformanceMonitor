@@ -254,6 +254,107 @@ public sealed class DarlingMcpQueryTagToolsLiveTests
     }
 
     [Fact]
+    public async Task ANegativeRegisteredServerId_IsAccepted_ByAssignAndUnassign_AnUnregisteredOneIsRefused()
+    {
+        /* A server id is an FNV hash cast to a signed int, so about half of all real ids are negative (#6020). */
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            const int negative = -1534220871;
+            await ExecAsync(owner, $"INSERT INTO servers (server_id, server_name) VALUES ({negative}, 'qt-negative')", ct);
+            var tag = await CreateAsync(source, "Reports", null, ct);
+
+            var assigned = Parse(await AssignHashAsync(source, tag, negative, ct));
+            var refused = Parse(await AssignHashAsync(source, tag, -42, ct));
+            var removed = Parse(await DarlingMcpQueryTagTools.UnassignQueryTag(source, "hash", Hash, server_id: negative, cancellationToken: ct));
+
+            Assert.Equal("assigned", (string?)assigned["status"]);
+            Assert.Equal(negative, (int)assigned["assignment"]!["server_id"]!);
+            Assert.Equal("not_found", (string?)refused["status"]);
+            Assert.Equal("unknown_server", (string?)refused["refusal"]);
+            Assert.Equal("unassigned", (string?)removed["status"]);
+            Assert.Equal(0, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AHashInAnotherCase_IsTheSameKey_AssignMovesIt_AndUnassignRemovesIt()
+    {
+        /* The resolver compares hashes and object names ignoring case, so "one tag per key" must too (#6020). */
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            var first = await CreateAsync(source, "Reports", null, ct);
+            var second = await CreateAsync(source, "Etl", null, ct);
+            var assigned = Parse(await AssignHashAsync(source, first, null, ct, "0xA1B2C3D4E5F60718"));
+
+            var moved = Parse(await AssignHashAsync(source, second, null, ct, "0xa1b2c3d4e5f60718"));
+
+            Assert.Equal("assigned", (string?)assigned["status"]);
+            Assert.Equal("moved", (string?)moved["status"]);
+            Assert.Equal(1, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+            Assert.Equal(1, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments WHERE query_hash = '0xA1B2C3D4E5F60718'", ct));
+
+            var removed = Parse(await DarlingMcpQueryTagTools.UnassignQueryTag(source, "hash", "0xa1b2c3d4e5f60718", cancellationToken: ct));
+
+            Assert.Equal("unassigned", (string?)removed["status"]);
+            Assert.Equal(0, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AnObjectInAnotherCase_IsTheSameKey_AssignMovesIt_AndUnassignRemovesIt()
+    {
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            var first = await CreateAsync(source, "Reports", null, ct);
+            var second = await CreateAsync(source, "Etl", null, ct);
+            await DarlingMcpQueryTagTools.AssignQueryTag(source, first, "object", null, "Sales", "dbo", "usp_Report", cancellationToken: ct);
+
+            var moved = Parse(await DarlingMcpQueryTagTools.AssignQueryTag(source, second, "object", null, "SALES", "DBO", "USP_REPORT", cancellationToken: ct));
+
+            Assert.Equal("moved", (string?)moved["status"]);
+            Assert.Equal(1, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+
+            var removed = Parse(await DarlingMcpQueryTagTools.UnassignQueryTag(source, "object", null, "sales", "dbo", "usp_report", cancellationToken: ct));
+
+            Assert.Equal("unassigned", (string?)removed["status"]);
+            Assert.Equal(0, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AnAssignAndAnUnassign_WaitForTheTreeLock_AndCompleteOnlyOnceItIsReleased()
+    {
+        /* A delete counts a subtree's assignments under TreeLockKey, so an assignment write must queue behind that lock too (#6020). */
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            var tag = await CreateAsync(source, "Reports", null, ct);
+            await AssignHashAsync(source, tag, null, ct, "0x1111111111111111");
+
+            await using var holder = await source.OpenConnectionAsync(ct);
+            await using var transaction = await holder.BeginTransactionAsync(ct);
+            await using (var hold = new NpgsqlCommand($"SELECT pg_advisory_xact_lock({QueryTagStore.TreeLockKey})", holder, transaction))
+            {
+                await hold.ExecuteNonQueryAsync(ct);
+            }
+
+            var assign = AssignHashAsync(source, tag, null, ct, "0x2222222222222222");
+            var unassign = DarlingMcpQueryTagTools.UnassignQueryTag(source, "hash", "0x1111111111111111", cancellationToken: ct);
+            await Task.Delay(1500, ct);
+
+            Assert.False(assign.IsCompleted);
+            Assert.False(unassign.IsCompleted);
+            Assert.Equal(1, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+            Assert.Equal(1, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments WHERE query_hash = '0x1111111111111111'", ct));
+
+            await transaction.CommitAsync(ct);
+
+            Assert.Equal("assigned", (string?)Parse(await assign.WaitAsync(TimeSpan.FromSeconds(15), ct))["status"]);
+            Assert.Equal("unassigned", (string?)Parse(await unassign.WaitAsync(TimeSpan.FromSeconds(15), ct))["status"]);
+            Assert.Equal(1, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments WHERE query_hash = '0x2222222222222222'", ct));
+        });
+    }
+
+    [Fact]
     public async Task DeletingATagWithAssignments_WithoutConfirm_ChangesNothing_AndAnswersConfirmRequiredWithTheCounts()
     {
         await WithStoreAsync(async (source, owner, ct) =>
@@ -351,23 +452,28 @@ public sealed class DarlingMcpQueryTagToolsLiveTests
             await AssignHashAsync(source, handTag, ServerA, ct);
             await DarlingMcpQueryTagTools.AssignQueryTag(source, handTag, "object", null, "Sales", "dbo", "usp_Report", cancellationToken: ct);
             await AssignHashAsync(source, handTag, null, ct, "0x1111111111111111");
+            await DarlingMcpQueryTagTools.AssignQueryTag(source, handTag, "object", null, "Sales", "dbo", "usp_Report", server_id: ServerA, cancellationToken: ct);
+            await ExecAsync(owner, $"INSERT INTO config.query_tag_rules (tag_id, match_field, pattern, enabled, created_by) VALUES ({ruleTag}, 'host', 'web*', false, 'test')", ct);
 
             var listed = Parse(await DarlingMcpQueryTagTools.ListQueryTags(source, ct));
 
             var tags = listed["tags"]!.AsArray();
             var hand = tags.Single(t => (int)t!["tag_id"]! == handTag)!;
             var byRule = tags.Single(t => (int)t!["tag_id"]! == ruleTag)!;
-            Assert.Equal(1, (int)byRule["rule_count"]!);
+            Assert.Equal(2, (int)byRule["rule_count"]!);
+            Assert.Equal(1, (int)byRule["enabled_rule_count"]!);
             Assert.Equal(0, (int)hand["rule_count"]!);
             var ranks = hand["assignments"]!.AsArray().ToDictionary(a => (string)a!["source"]! + (a["server_id"] is null ? "-all" : "-one"), a => (int)a!["precedence_rank"]!);
             Assert.Equal(1, ranks["hand_hash-one"]);
             Assert.Equal(2, ranks["hand_hash-all"]);
-            Assert.Equal(3, ranks["hand_object-all"]);
+            Assert.Equal(3, ranks["hand_object-one"]);
+            Assert.Equal(4, ranks["hand_object-all"]);
             Assert.All(hand["assignments"]!.AsArray(), a => Assert.True((bool)a!["beats_rules"]!));
             var order = listed["precedence"]!.AsArray().Select(p => (string)p!).ToArray();
             Assert.StartsWith("hand assignment by hash for the server", order[0], StringComparison.Ordinal);
             Assert.StartsWith("rule", order[^1], StringComparison.Ordinal);
-            Assert.Equal("qt-alpha", (string?)hand["assignments"]!.AsArray().Single(a => a!["server_id"] is not null)!["server_name"]);
+            Assert.Equal(5, order.Length);
+            Assert.Equal("qt-alpha", (string?)hand["assignments"]!.AsArray().Single(a => a!["server_id"] is not null && (string?)a["source"] == "hand_hash")!["server_name"]);
         });
     }
 

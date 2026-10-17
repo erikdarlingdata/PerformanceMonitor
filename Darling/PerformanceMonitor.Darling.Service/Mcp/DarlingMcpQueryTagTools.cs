@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Darling.Storage;
 
@@ -84,7 +85,7 @@ public sealed class DarlingMcpQueryTagTools
         DeleteQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, confirm, cancellationToken);
 
     [McpServerTool(Name = "assign_query_tag"), Description(
-        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
+        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope, with a hash and the object names compared ignoring case: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
     public static Task<string> AssignQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -112,7 +113,7 @@ public sealed class DarlingMcpQueryTagTools
         UnassignQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), kind, query_hash, database_name, schema_name, object_name, server_id, cancellationToken);
 
     [McpServerTool(Name = "list_query_tags"), Description(
-        "Lists the query tag tree: every tag (tag_id, name, parent_id, depth, path, colour, rule_count) with its hand assignments (kind hash or object, key, server_id or null for every server, query_id for display). Each assignment states its precedence: a hand assignment by hash for the server beats one for every server, which beats one by object, which beats any rule (rules go by priority then id). map shows whether the tag map has caught up with the last tag, assignment or rule write. Read-only.")]
+        "Lists the query tag tree: every tag (tag_id, name, parent_id, depth, path, colour, rule_count, and enabled_rule_count for the rules the resolver considers) with its hand assignments (kind hash or object, key, server_id or null for every server, query_id for display). Each assignment states its precedence: a hand assignment by hash for the server beats one for every server, which beats an object assignment for the server, which beats an object assignment for every server, which beats any rule (rules go by priority then id; precedence_rank is 1 to 5 in that order). map shows whether the tag map has caught up with the last tag, assignment or rule write. Read-only.")]
     public static Task<string> ListQueryTags(
         NpgsqlDataSource postgres,
         CancellationToken cancellationToken = default) =>
@@ -411,6 +412,7 @@ public sealed class DarlingMcpQueryTagTools
             {
                 var node = TagNode(snapshot, tag);
                 node["rule_count"] = snapshot.RuleCountByTag.GetValueOrDefault(tag.Id);
+                node["enabled_rule_count"] = snapshot.EnabledRuleCountByTag.GetValueOrDefault(tag.Id);
                 var mine = snapshot.Assignments.Where(a => a.TagId == tag.Id).ToList();
                 node["assignment_count"] = mine.Count;
                 var assignments = new JsonArray();
@@ -435,11 +437,7 @@ public sealed class DarlingMcpQueryTagTools
                 ["status"] = snapshot.Tags.Count == 0 ? "empty" : "ok",
                 ["tag_count"] = snapshot.Tags.Count,
                 ["tags"] = tags,
-                ["precedence"] = new JsonArray(
-                    "hand assignment by hash for the server",
-                    "hand assignment by hash for every server",
-                    "hand assignment by object",
-                    "rule, by priority then id"),
+                ["precedence"] = new JsonArray(QueryTagResolver.Precedence.Select(step => (JsonNode?)step.Description).ToArray()),
                 ["map"] = new JsonObject
                 {
                     ["rules_version"] = snapshot.State.RulesVersion,
@@ -462,8 +460,10 @@ public sealed class DarlingMcpQueryTagTools
 
             return Serialize(result);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* A cancelled request must surface as cancellation, not as an "error" envelope: the web read dispatch relies on it
+               (WebReadCancellationPinTests), the same way every other converted read does. */
             return McpHelpers.FormatError("list_query_tags", ex);
         }
     }
@@ -482,12 +482,8 @@ public sealed class DarlingMcpQueryTagTools
             return null;
         }
 
-        if (serverId is <= 0)
-        {
-            refusal = Refusal("invalid", "bad_server", "server_id is a positive whole number; omit it to cover every server.");
-            return null;
-        }
-
+        /* No sign test on serverId: it is an FNV hash cast to a signed int (ServerIdHelper), so about half of all real ids are
+           negative. The registry check in assign_query_tag is what refuses an id that is not a monitored server (#6020). */
         var hash = Clean(queryHash);
         var database = Clean(databaseName);
         var schema = Clean(schemaName);
@@ -515,7 +511,9 @@ public sealed class DarlingMcpQueryTagTools
                 return null;
             }
 
-            return new QueryTagKey(KindHash, serverId, hash, null, null, null);
+            /* The resolver matches a hash ignoring case, so the key stores one spelling of it (#6020). A hash that is not a
+               hash at all (all zeros, or neither hex nor decimal) is kept as typed. */
+            return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
         }
 
         var missing = new[] { ("database_name", database), ("schema_name", schema), ("object_name", obj) }.Where(p => p.Item2 is null).Select(p => p.Item1).ToList();
@@ -651,7 +649,7 @@ public sealed class DarlingMcpQueryTagTools
         if (withPrecedence)
         {
             node["source"] = a.Kind == KindHash ? "hand_hash" : "hand_object";
-            node["precedence_rank"] = a.Kind == KindHash ? (a.ServerId is null ? 2 : 1) : 3;
+            node["precedence_rank"] = QueryTagResolver.RankOfAssignment(a.Kind == KindHash ? QueryTagSource.HandHash : QueryTagSource.HandObject, a.ServerId is not null);
             node["beats_rules"] = true;
         }
 
