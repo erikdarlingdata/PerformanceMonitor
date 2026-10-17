@@ -249,7 +249,9 @@ CREATE TABLE IF NOT EXISTS server_tag_map (
 
     /* Query tags (#5989, schema v70): the Lite twin of Darling's config.query_tags / query_tag_assignments /
        query_tag_rules / query_tag_map / query_tag_state and collect.query_tag_sightings (QueryTagSchema). Same
-       columns and the same CHECK rules; DuckDB has no IDENTITY, no self-FK cascade and no partial or expression
+       columns, but only two of Darling's CHECKs are enforced here: ck_query_tag_assignments_key (the kind and column
+       shape) and ck_query_tag_rules_pattern (non-blank pattern). The archive restore writes these tables verbatim, so
+       the store is the one guard. DuckDB has no IDENTITY, no self-FK cascade and no partial or expression
        unique index, so ids are assigned in C# (max + 1 under the write lock), the subtree delete is walked by hand
        and "unique name per parent" and "one assignment per key" are enforced by the store (LocalDataService.QueryTags).
        The tags, assignments and rules are user choices and survive an archive reset; the sightings and the map are
@@ -297,8 +299,11 @@ CREATE TABLE IF NOT EXISTS query_tag_rules (
 )";
 
     /* The text_sample cap is the shared constant, so the table and the collectors cannot disagree. One row per
-       (server_id, key_kind, key), as Darling's ux_query_tag_sightings_key: the sightings write (#5990) upserts on that key
-       (INSERT ... ON CONFLICT bumps seen_count), and DuckDB accepts ON CONFLICT only against a primary key or unique index. */
+       (server_id, key_kind, key) AND caller triple, as Darling's ux_query_tag_sightings_key: that index COALESCEs the
+       three caller fields to '', so a sighting with no application is one row rather than many, and two callers of one
+       query_hash are two rows the resolver can match separately. DuckDB has no expression index and treats two NULLs as
+       distinct in a unique key, so the fold is in the column defaults instead: NOT NULL DEFAULT '' gives the same six-part
+       key as a plain PRIMARY KEY, which is what the sightings write (#5990) needs for its ON CONFLICT upsert. */
     public static readonly string CreateQueryTagSightingsTable = string.Create(System.Globalization.CultureInfo.InvariantCulture, $@"
 CREATE TABLE IF NOT EXISTS query_tag_sightings (
     server_id INTEGER NOT NULL,
@@ -306,14 +311,14 @@ CREATE TABLE IF NOT EXISTS query_tag_sightings (
     key VARCHAR NOT NULL,
     database_name VARCHAR,
     object_name VARCHAR,
-    application_name VARCHAR,
-    login_name VARCHAR,
-    host_name VARCHAR,
+    application_name VARCHAR NOT NULL DEFAULT '',
+    login_name VARCHAR NOT NULL DEFAULT '',
+    host_name VARCHAR NOT NULL DEFAULT '',
     text_sample VARCHAR,
     first_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
     last_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
     seen_count BIGINT NOT NULL DEFAULT 1,
-    PRIMARY KEY (server_id, key_kind, key),
+    PRIMARY KEY (server_id, key_kind, key, application_name, login_name, host_name),
     CHECK (key_kind IN ('hash', 'object', 'caller')),
     CHECK (text_sample IS NULL OR length(text_sample) <= {PerformanceMonitor.Common.QueryTags.QueryTagLimits.TextSampleCap}),
     CHECK (seen_count >= 1)

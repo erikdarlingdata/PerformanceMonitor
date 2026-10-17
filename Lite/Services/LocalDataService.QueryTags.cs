@@ -482,12 +482,12 @@ WHERE id = $1";
     /// <summary>Retention for <c>query_tag_sightings</c>: removes rows not seen since <paramref name="retentionDays"/> ago
     /// (by <c>last_seen</c>) and returns how many. Only this table is aged; tags, assignments and rules are configuration.
     /// A background sweep, so it is not refused while a restore is pending (it touches no preserved table).</summary>
-    public async Task<int> PurgeOldQueryTagSightingsAsync(int retentionDays = QueryTagSightingRetentionDays)
+    public async Task<int> PurgeOldQueryTagSightingsAsync(int retentionDays = QueryTagSightingRetentionDays, DateTime? utcNow = null)
     {
         using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM query_tag_sightings WHERE last_seen < $1";
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-retentionDays) });
+        command.Parameters.Add(new DuckDBParameter { Value = (utcNow ?? DateTime.UtcNow).AddDays(-retentionDays) });
         return await command.ExecuteNonQueryAsync();
     }
 
