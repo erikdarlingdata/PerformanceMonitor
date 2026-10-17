@@ -345,7 +345,7 @@ a:hover { text-decoration: underline; }
   gap: 0.25rem;
   margin-bottom: 0.6rem;
 }
-.server-card .tag-pill {
+.tag-pill {
   font-size: 0.7rem;
   line-height: 1.2;
   padding: 0.1rem 0.4rem;

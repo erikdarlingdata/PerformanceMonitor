@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -604,7 +604,7 @@ function topQueriesCard(server, ctx, ranking, picker) {
   (async () => {
     const res = await readToolWithinKeptHistory(
       "get_top_queries_by_cpu",
-      rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking)
+      rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "queries")
     );
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
@@ -773,8 +773,108 @@ function topRankingLabel(ranking) {
 }
 
 /** A read's params for a ranking: `order_by` only when the pick is not the default (cpu), so the default request is unchanged. */
-function rankedParams(params, ranking) {
-  return ranking === "cpu" ? params : { ...params, order_by: ranking };
+function rankedParams(params, ranking, kind) {
+  const ranked = ranking === "cpu" ? params : { ...params, order_by: ranking };
+  return withTagPick(ranked, kind);
+}
+
+/* ─────────── #5987: the query tag column and filter on the query grids ─────────── */
+
+/* The tag each grid is filtered to ("" = no filter, "untagged" = rows with no tag), one per grid at MODULE scope so the 60 s rebuild keeps it, as the
+   ranking pick does. The pick is SENT to the read (the server applies it before the top-N cut); the page never filters a list on the client. */
+const tagPicks = { queries: "", procedures: "", querystore: "", longqueries: "", active: "" };
+const UNTAGGED_TAG = "untagged";
+
+/* The query tags the filter offers, with their colours, from list_query_tags: read once and kept. A failed read leaves "All tags" and "untagged". */
+let queryTagList = null;
+let queryTagRead = null;
+function loadQueryTags() {
+  if (!queryTagRead) {
+    queryTagRead = readTool("list_query_tags", {}).then((res) => {
+      const tags = res && res.kind === "data" && res.data && Array.isArray(res.data.tags) ? res.data.tags : [];
+      queryTagList = tags.filter((t) => t && typeof t.path === "string").map((t) => ({ path: t.path, colour: t.colour || null }));
+      return queryTagList;
+    });
+    queryTagRead.catch(() => {
+      queryTagRead = null;
+    });
+  }
+  return queryTagRead;
+}
+
+/** A read's params with the grid's tag pick added; no key at all for no filter, so an unfiltered request is exactly what it was before the filter existed. */
+function withTagPick(params, kind) {
+  const pick = tagPicks[kind];
+  return pick ? { ...params, tag: pick } : params;
+}
+
+/**
+ * The tag filter beside a grid's title: All tags, untagged, then every query tag by path. A pick stores the choice and calls `onPick`, which draws
+ * the grid again with the new `tag` parameter. The option text reaches the DOM through el() as text.
+ */
+function tagFilterPicker(kind, onPick) {
+  const options = () => {
+    const paths = (queryTagList || []).map((t) => t.path);
+    const pick = tagPicks[kind];
+    if (pick && pick !== UNTAGGED_TAG && !paths.includes(pick)) paths.push(pick);
+    return [{ value: "", label: "All tags" }, { value: UNTAGGED_TAG, label: UNTAGGED_TAG }, ...paths.map((p) => ({ value: p, label: p }))];
+  };
+  const control = pickerControl(
+    "Tag",
+    options(),
+    (value) => {
+      tagPicks[kind] = value;
+      onPick();
+    },
+    tagPicks[kind]
+  );
+  if (!queryTagList) {
+    loadQueryTags()
+      .then(() => {
+        const sel = control.children[1];
+        if (!sel || !control.isConnected) return;
+        clear(sel);
+        for (const o of options()) sel.appendChild(el("option", { value: o.value, text: o.label }));
+        sel.value = tagPicks[kind];
+      })
+      .catch(() => {});
+  }
+  return control;
+}
+
+/** A grid drawn again on a tag pick: `build(picker)` draws the card with the tag filter under its title. Each draw aborts the one before it. */
+function tagFilteredCard(kind, build) {
+  const slot = el("div", {}, []);
+  slot.style.display = "contents";
+  let drawing = null;
+  const draw = () => {
+    if (drawing) drawing.abort();
+    const mine = new AbortController();
+    drawing = mine;
+    const outer = getPanelSignal();
+    if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
+    const picker = el("div", { class: "picker-row" }, [tagFilterPicker(kind, draw)]);
+    setPanelSignal(mine.signal);
+    const card = build(picker);
+    setPanelSignal(outer);
+    mount(slot, [card]);
+  };
+  draw();
+  return slot;
+}
+
+/** The tag column: a coloured pill with the row's tag path, nothing for a row with no tag, and the column dropped when no row has one. */
+function tagColumn() {
+  return {
+    key: "tag",
+    label: "Tag",
+    hideWhenEmpty: true,
+    render: (r) => {
+      if (!r || typeof r.tag !== "string" || r.tag === "") return el("span", {});
+      const known = (queryTagList || []).find((t) => t.path === r.tag);
+      return tagPill(r.tag, known ? known.colour : null);
+    },
+  };
 }
 
 /**
@@ -803,6 +903,7 @@ function rankedCard(kind, build) {
         },
         ranking
       ),
+      tagFilterPicker(kind, draw),
     ]);
     setPanelSignal(mine.signal);
     const card = build(ranking, picker);
@@ -1192,7 +1293,7 @@ export const SERVER_TABS = [
         table(
           "Top Queries by " + topRankingLabel(ranking),
           "get_top_queries_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking),
+          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "queries"),
           "queries",
           [...TOP_QUERY_COLUMNS, planColumn(server)],
           ctx.label,
@@ -1208,7 +1309,7 @@ export const SERVER_TABS = [
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking),
+          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
           "procedures",
           [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
           ctx.label,
@@ -1597,7 +1698,7 @@ export const SERVER_TABS = [
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking),
+          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
           "procedures",
           [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
           ctx.label,
@@ -1609,19 +1710,23 @@ export const SERVER_TABS = [
           picker
         )
       ),
-      table(
-        "Query Store",
-        "get_query_store_top",
-        { server, hours: ctx.hours, top: 20 },
-        "queries",
-        [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
-        ctx.label,
-        "No Query Store rows in this window.",
-        2,
-        "truncation_note",
-        /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
-           drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
-        ["approximation_note"]
+      tagFilteredCard("querystore", (picker) =>
+        table(
+          "Query Store",
+          "get_query_store_top",
+          withTagPick({ server, hours: ctx.hours, top: 20 }, "querystore"),
+          "queries",
+          [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
+          ctx.label,
+          "No Query Store rows in this window.",
+          2,
+          "truncation_note",
+          /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
+             drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
+          ["approximation_note"],
+          null,
+          picker
+        )
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
@@ -1711,18 +1816,21 @@ export const SERVER_TABS = [
         "No query executed in this window. Query stats are collected every cycle whether or not anything " +
           "ran, so the read distinguishes a server nobody collected from one that was simply idle."
       ),
-      table(
-        "Long Query Completions",
-        "get_long_query_completions",
-        { server, hours: ctx.hours, limit: 30 },
-        "completions",
-        LONG_QUERY_COLUMNS,
-        ctx.label,
-        "No long-running completions in this window. This collector is opt-in and off by default.",
-        2,
-        null,
-        null,
-        LONG_QUERY_GROUPS
+      tagFilteredCard("longqueries", (picker) =>
+        table(
+          "Long Query Completions",
+          "get_long_query_completions",
+          withTagPick({ server, hours: ctx.hours, limit: 30 }, "longqueries"),
+          "completions",
+          LONG_QUERY_COLUMNS,
+          ctx.label,
+          "No long-running completions in this window. This collector is opt-in and off by default.",
+          2,
+          null,
+          null,
+          LONG_QUERY_GROUPS,
+          picker
+        )
       ),
       /* One read, two panels. get_plan_corrections returns both arrays, and automatic_tuning comes from an
          unconditional latest-snapshot query that ignores hours/limit entirely — so the second fetch was paying
@@ -3307,15 +3415,24 @@ function waitLinkCell(server, row, timeKey) {
    grid names the wait as text and clears the filter. The heading stays "Active Queries" (the scroll finder matches it).
    Unfiltered, the read is the 50-row page it always was. */
 function activeQueriesPanel(server, ctx) {
+  return tagFilteredCard("active", (picker) => activeQueriesCard(server, ctx, picker));
+}
+
+function activeQueriesCard(server, ctx, picker) {
   const wait = queryWaitFilter(server);
   const panel = table(
     "Active Queries",
     "get_active_queries",
-    wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 },
+    withTagPick(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, "active"),
     "queries",
     [...ACTIVE_COLUMNS, ...activePlanColumns(server)],
     wait ? ctx.label + ", waiting on " + wait : ctx.label,
-    wait ? "No active queries waiting on " + wait + " were captured in this window." : "No active-query snapshots in this window."
+    wait ? "No active queries waiting on " + wait + " were captured in this window." : "No active-query snapshots in this window.",
+    2,
+    null,
+    null,
+    null,
+    picker
   );
   if (wait) {
     const strip = el("div", { class: "strip notice wait-filter-strip" }, [
@@ -3385,6 +3502,7 @@ const SPINLOCK_COLUMNS = [
    server's clock) and print in the browser's local time; every grouped field is omitted by the read on the hourly tier and prints a dash. */
 const TOP_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
+  tagColumn(),
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "host_object", label: "Module" },
   { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
@@ -3461,6 +3579,7 @@ const QUERY_TREND_COLUMNS = [
    write and read totals or Avg Reads, and prints a dash for each. */
 const TOP_PROC_COLUMNS = [
   { key: "database_name", label: "Database" },
+  tagColumn(),
   { key: "full_name", label: "Procedure" },
   { key: "object_type", label: "Type" },
   { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
@@ -3541,6 +3660,7 @@ const QUERY_HEATMAP_COLUMNS = [
 
 const QUERY_STORE_COLUMNS = [
   { key: "database_name", label: "Database" },
+  tagColumn(),
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
   { key: "plan_id", label: "Plan ID", format: "int" },
@@ -3625,6 +3745,7 @@ const LONG_QUERY_GROUPS = { groups: ["I/O and rows", "Session"], defaultGroups: 
 
 const LONG_QUERY_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
+  tagColumn(),
   { key: "statement", label: "Statement", valueList: false, render: (r) => codeDisclosure(r.statement) },
   { key: "event_type", label: "Event Type" },
   { key: "duration_ms", label: "Duration", format: "ms" },
@@ -3690,6 +3811,7 @@ const ACTIVE_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query Text", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
+  tagColumn(),
   { key: "database_name", label: "Database" },
   { key: "login_name", label: "Login" },
   { key: "host_name", label: "Host" },

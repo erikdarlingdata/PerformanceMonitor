@@ -74,6 +74,15 @@ function appendChildren(node, children) {
   node.appendChild(document.createTextNode(String(children))); // safe: text node
 }
 
+/**
+ * One coloured tag pill (#2020, #5987): the stored #RRGGBB when it is well formed, else the neutral pill. The hex is format-checked
+ * before it reaches the style attribute. Server tags on the fleet cards and query tags on the query grids both draw through this one helper.
+ */
+export function tagPill(name, colour) {
+  const safe = /^#[0-9a-fA-F]{6}$/.test(colour || "") ? colour : null;
+  return el("span", { class: "tag-pill", text: name, title: name, style: safe ? "background:" + safe : null });
+}
+
 /** Remove all children from a node. */
 export function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
