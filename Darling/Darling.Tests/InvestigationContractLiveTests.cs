@@ -83,9 +83,17 @@ public sealed class InvestigationContractLiveTests
             Assert.Contains(LiteralCanary, fullBrief, StringComparison.Ordinal);
             Assert.Contains(NumberCanary, fullBrief, StringComparison.Ordinal);
 
-            var run = await agent.InvestigateAsync(requestId);
+            /* The agent copies a statement into its inferred evidence item: it is free text the report keeps as submitted. */
+            var run = await agent.InvestigateAsync(requestId,
+                $"Head blocker ran SELECT a FROM dbo.t WHERE b = '{LiteralCanary}' AND c = {NumberCanary}");
 
             await AssertTheRunAsync(h, agent, run, requestId, ct);
+            /* #6004: the report is served through the real host at maskLiterals, so its evidence lists hold neither canary. */
+            var served = await agent.CallAsync("get_investigation_reports",
+                new System.Text.Json.Nodes.JsonObject { ["request_id"] = requestId });
+            Assert.Equal(1, served.GetProperty("reports")[0].GetProperty("evidence_inferred").GetArrayLength());
+            Assert.DoesNotContain(LiteralCanary, served.GetRawText(), StringComparison.Ordinal);
+            Assert.DoesNotContain(NumberCanary, served.GetRawText(), StringComparison.Ordinal);
             using (var brief = JsonDocument.Parse(run.BriefJson))
             {
                 Assert.Equal("maskLiterals", brief.RootElement.GetProperty("data_detail").GetString());
@@ -199,7 +207,12 @@ public sealed class InvestigationContractLiveTests
         /* The report reads back through the tool, and through the viewer partial. */
         var reports = await agent.CallAsync("get_investigation_reports",
             new System.Text.Json.Nodes.JsonObject { ["request_id"] = requestId });
-        Assert.Equal("real", reports.GetProperty("reports")[0].GetProperty("verdict").GetString());
+        var served = reports.GetProperty("reports")[0];
+        Assert.Equal("real", served.GetProperty("verdict").GetString());
+        /* #6004: Darling serves the evidence by basis, never as one `evidence` list. */
+        Assert.Equal(run.Calls.Count, served.GetProperty("evidence_verified").GetArrayLength());
+        Assert.Equal(1, served.GetProperty("evidence_inferred").GetArrayLength());
+        Assert.False(served.TryGetProperty("evidence", out _));
 
         await using var viewer = new ViewerDataService(h.StoreString);
         var detail = await viewer.GetInvestigationRequestDetailAsync(Guid.Parse(requestId), ct);

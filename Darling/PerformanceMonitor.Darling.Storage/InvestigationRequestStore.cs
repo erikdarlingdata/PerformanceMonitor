@@ -145,8 +145,12 @@ FOR UPDATE";
     internal const string ReportInsertSql = @"
 INSERT INTO config.investigation_reports
     (request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence,
-     server_id, metric_name, dedup_key, story_path_hash)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14)";
+     server_id, metric_name, dedup_key, story_path_hash, family_of, queries_run)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb)";
+
+    /* #6004: a report's family_of must name a request; the tool checks it with this before the submit. */
+    internal const string RequestExistsSql = @"
+SELECT 1 FROM config.investigation_requests WHERE request_id = $1";
 
     internal const string ReportedSql = @"
 UPDATE config.investigation_requests
@@ -314,7 +318,8 @@ WHERE s.effective_state IN ('open', 'claimed')";
         "SELECT DISTINCT lp.practice_of FROM (" + LivePracticeRequestsSql("$1") + ") AS lp";
 
     internal const string ReportsSql = @"
-SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence::text
+SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence::text,
+       family_of, queries_run::text
 FROM config.investigation_reports
 WHERE request_id = ANY($1)
 ORDER BY submitted_at DESC";
@@ -590,6 +595,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         /* #5914: the tool layer's link rule again, before any write. */
         InvestigationReportLinks.ThrowIfInvalid(report.Links, nameof(report));
+        /* #6004: and the queries_run caps, never clamped. */
+        InvestigationReportFields.ThrowIfInvalid(report.QueriesRunJson, nameof(report));
         var now = Now();
         var actor = "agent:" + report.AgentId;
 
@@ -654,7 +661,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await ExecAsync(connection, transaction, ReportInsertSql, cancellationToken,
             P(report.RequestId), P(report.ReportFormat), P(report.AgentId), P(report.ClaimId), P(now), P(report.Verdict),
             P(report.RootCause), P(report.RootCauseFound), PNullable(report.Summary), P(report.EvidenceJson), P(serverId),
-            PNullable(metric), PNullable(dedupKey), PNullable(story));
+            PNullable(metric), PNullable(dedupKey), PNullable(story), new NpgsqlParameter<Guid?> { TypedValue = report.FamilyOf, NpgsqlDbType = NpgsqlDbType.Uuid }, PNullable(report.QueriesRunJson));
         if (!string.IsNullOrWhiteSpace(report.ProposedNote))
         {
             await ExecAsync(connection, transaction, ProposedNoteSql, cancellationToken,
@@ -675,6 +682,15 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         await transaction.CommitAsync(cancellationToken);
         return InvestigationSubmitOutcome.Reported;
+    }
+
+    /// <summary>True when a request with <paramref name="requestId"/> exists (#6004: what a report's <c>family_of</c> must
+    /// name). Writes nothing.</summary>
+    public async Task<bool> RequestExistsAsync(Guid requestId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, RequestExistsSql, P(requestId));
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
     /// <summary>
@@ -838,7 +854,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             {
                 reports.Add(new InvestigationReportRow(
                     reader.GetGuid(0), reader.GetInt16(1), reader.GetString(2), reader.GetFieldValue<DateTime>(3), reader.GetString(4),
-                    reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
+                    reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8),
+                    FamilyOf: reader.IsDBNull(9) ? null : reader.GetGuid(9), QueriesRunJson: reader.IsDBNull(10) ? null : reader.GetString(10)));
             }
         }
 

@@ -255,7 +255,7 @@ END $do$;"),
             + " config.query_tag_assignments, config.query_tags, collect.query_tag_sightings;"
             + " DROP FUNCTION IF EXISTS config.query_tag_bump_rules_version()"),
 
-        // /// V193 (#5997): the Phase C store. Drops the evidence table (the probe's newest sentinel), the two signature tables and
+        // /// V193 (#5997): the Phase C store. Drops the evidence table (the probe's sentinel until V194 (#5985) went on top of it), the two signature tables and
         // every column the rung added, so a re-run of V193 does everything again. Safe on a store that never had any of it.
         new(193, "hasPhaseCStore",
             @"
@@ -276,6 +276,20 @@ ALTER TABLE IF EXISTS config.config_notification_routes
     DROP COLUMN IF EXISTS fallback_route_id;
 ALTER TABLE IF EXISTS collect.procedure_stats
     DROP COLUMN IF EXISTS module_modify_date;"),
+
+        // /// V194 (#5985): the query-tag sightings key gains the database. The new unique index is the probe's newest sentinel. The
+        // rewind drops it and puts the V192 index back (guarded on the table), so a re-run of V194 does everything again. Safe on a
+        // store that never had either.
+        new(194, "hasQueryTagSightingsDatabaseKey",
+            @"
+DROP INDEX IF EXISTS collect.ux_query_tag_sightings_key_db;
+DO $do$
+BEGIN
+    IF to_regclass('collect.query_tag_sightings') IS NOT NULL THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_query_tag_sightings_key
+            ON collect.query_tag_sightings (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''));
+    END IF;
+END $do$;"),
     ];
 
     /// <summary>

@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.TestHost;
+using PerformanceMonitor.Common;
 
 namespace Darling.Tests.AgentContract;
 
@@ -59,7 +60,7 @@ internal sealed class FakeInvestigationAgent
     /// One whole investigation: claim <paramref name="requestId"/>, call each <c>next_calls</c> entry of the brief, and
     /// submit a report built from those calls. Throws when the claim does not answer <c>claimed</c>.
     /// </summary>
-    internal async Task<InvestigationRun> InvestigateAsync(string requestId)
+    internal async Task<InvestigationRun> InvestigateAsync(string requestId, string? inferredKeyNumbers = null)
     {
         var claim = await ClaimAsync(requestId);
         if (claim.GetProperty("status").GetString() != "claimed")
@@ -86,6 +87,19 @@ internal sealed class FakeInvestigationAgent
                 ["tool"] = tool,
                 ["arguments"] = JsonNode.Parse(arguments.ToJsonString()),
                 ["key_numbers"] = "status " + status,
+                ["basis"] = InvestigationReportFields.BasisVerified,
+            });
+        }
+
+        /* The reference agent also states one conclusion it reasoned to rather than read (#6004): an inferred item. */
+        if (calls.Count > 0)
+        {
+            evidence.Add(new JsonObject
+            {
+                ["tool"] = calls[0].Tool,
+                ["arguments"] = JsonNode.Parse(calls[0].Arguments),
+                ["key_numbers"] = inferredKeyNumbers ?? "root cause reasoned from the " + calls.Count + " read(s) above",
+                ["basis"] = InvestigationReportFields.BasisInferred,
             });
         }
 

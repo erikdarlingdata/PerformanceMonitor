@@ -136,10 +136,12 @@ internal static class InvestigationToolCore
     /// <summary>
     /// Every problem with a report, as <c>field: sentence</c>, in parameter order: an empty list is a valid report. Lists
     /// them all at once, so an agent fixes the report in one round. Any action proposal is refused at Level 1.
+    /// <paramref name="requireBasis"/> (#6004) makes each evidence item carry a <c>basis</c> of verified or inferred: Darling's
+    /// submit passes true; Lite's, advise-only, keeps the older shape until its own slice (#6011).
     /// </summary>
     internal static List<string> ValidateReport(string? request_id, string? claim_id, string? verdict, string? root_cause,
         string? evidence, string? summary, string? proposed_note, string? action_proposals,
-        out Guid requestId, out Guid claimId, out string? evidenceJson)
+        out Guid requestId, out Guid claimId, out string? evidenceJson, bool requireBasis = false)
     {
         var problems = new List<string>();
         evidenceJson = null;
@@ -160,7 +162,7 @@ internal static class InvestigationToolCore
         if (!string.IsNullOrWhiteSpace(proposed_note) && proposed_note.Trim().Length > MaxNoteChars)
             problems.Add($"proposed_note: {proposed_note.Trim().Length} characters, over {MaxNoteChars}.");
 
-        var evidenceProblem = ValidateEvidence(evidence, out evidenceJson);
+        var evidenceProblem = ValidateEvidence(evidence, out evidenceJson, requireBasis);
         if (evidenceProblem is not null)
             problems.Add("evidence: " + evidenceProblem);
 
@@ -174,11 +176,13 @@ internal static class InvestigationToolCore
     /// Each size cap a report is over (#5632 review round 2, M2), with its field and cap, in parameter order:
     /// <c>root_cause</c> over <see cref="MaxRootCauseChars"/> characters; <c>evidence</c> over
     /// <see cref="MaxEvidenceItems"/> items, with a string value over <see cref="MaxEvidenceValueChars"/> characters, or
-    /// over <see cref="MaxEvidenceBytes"/> bytes as PostgreSQL prints it. Evidence that is not a JSON array is left to
+    /// over <see cref="MaxEvidenceBytes"/> bytes as PostgreSQL prints it; <c>queries_run</c> (#6004) over
+    /// <see cref="InvestigationReportFields.MaxQueriesRun"/> items or with an item over
+    /// <see cref="InvestigationReportFields.MaxQueryChars"/> characters. Evidence that is not a JSON array is left to
     /// <see cref="ValidateReport"/>. Characters are UTF-16 units, never fewer than PostgreSQL's code points, so a report
     /// these caps pass also passes V184's checks.
     /// </summary>
-    internal static List<(string Field, int Cap, string Problem)> CapProblems(string? root_cause, string? evidence)
+    internal static List<(string Field, int Cap, string Problem)> CapProblems(string? root_cause, string? evidence, string? queries_run = null)
     {
         var problems = new List<(string Field, int Cap, string Problem)>();
         var rootCause = root_cause?.Trim() ?? string.Empty;
@@ -208,6 +212,10 @@ internal static class InvestigationToolCore
             if (bytes > MaxEvidenceBytes)
                 problems.Add(("evidence", MaxEvidenceBytes, $"evidence: {bytes} bytes as stored, over {MaxEvidenceBytes}."));
         }
+
+        /* #6004: queries_run, refused over its caps and never clamped. */
+        foreach (var (cap, problem) in InvestigationReportFields.CapProblems(queries_run))
+            problems.Add(("queries_run", cap, problem));
 
         return problems;
     }
@@ -274,11 +282,12 @@ internal static class InvestigationToolCore
         return sign + whole + (scale > 0 ? 1 + scale : 0);
     }
 
-    internal static string? ValidateEvidence(string? evidence, out string? evidenceJson)
+    internal static string? ValidateEvidence(string? evidence, out string? evidenceJson, bool requireBasis = false)
     {
         evidenceJson = null;
+        var shape = requireBasis ? "{tool, arguments, key_numbers, basis}" : "{tool, arguments, key_numbers}";
         if (string.IsNullOrWhiteSpace(evidence))
-            return "missing; give a JSON array of at least one {tool, arguments, key_numbers}.";
+            return $"missing; give a JSON array of at least one {shape}.";
 
         JsonNode? root;
         try
@@ -291,7 +300,7 @@ internal static class InvestigationToolCore
         }
 
         if (root is not JsonArray items || items.Count == 0)
-            return "must be a JSON array of at least one {tool, arguments, key_numbers}.";
+            return $"must be a JSON array of at least one {shape}.";
 
         var missing = new List<string>();
         for (var i = 0; i < items.Count; i++)
@@ -308,6 +317,15 @@ internal static class InvestigationToolCore
                 missing.Add($"item {i} has no arguments");
             if (item["key_numbers"] is null)
                 missing.Add($"item {i} has no key_numbers");
+            /* #6004 (D17): a new report labels each item verified or inferred; evidence stored before has no label and is read as unlabelled. */
+            if (requireBasis)
+            {
+                if (item["basis"] is null)
+                    missing.Add($"item {i} has no basis (give {InvestigationReportFields.BasesText})");
+                else if (item["basis"] is not JsonValue basis || !basis.TryGetValue(out string? word)
+                    || !InvestigationReportFields.Bases.Contains(word, StringComparer.Ordinal))
+                    missing.Add($"item {i} basis '{item["basis"]!.ToString()}' is not {InvestigationReportFields.BasesText}");
+            }
         }
 
         if (missing.Count > 0)
@@ -331,7 +349,8 @@ internal static class InvestigationToolCore
         var reports = new JsonArray();
         foreach (var r in read.Reports)
         {
-            var evidence = InvestigationFieldMasking.Evidence(JsonNode.Parse(r.EvidenceJson), masker);
+            var storedEvidence = JsonNode.Parse(r.EvidenceJson);
+            var evidence = InvestigationFieldMasking.Evidence(storedEvidence, masker);
 
             var node = InvestigationFieldMasking.Mask(new JsonObject
             {
@@ -344,7 +363,21 @@ internal static class InvestigationToolCore
                 ["root_cause_found"] = r.RootCauseFound,
                 ["summary"] = null,
             }, masker, ("root_cause", r.RootCause), ("summary", r.Summary));
-            node["evidence"] = evidence;
+            /* #6004 (D17): a store that keeps feedback (Darling's) serves the evidence as two lists by basis, with the items written
+               before the basis existed apart as unlabelled; Lite's answer keeps its one list until its own slice (#6011). */
+            if (read.Feedback is not null)
+                AddEvidenceLists(node, storedEvidence, evidence);
+            else
+                node["evidence"] = evidence;
+            /* #6004: family_of and queries_run are absent, never null, when the report gave none. queries_run is statement text. */
+            if (!node.ContainsKey("withheld"))
+            {
+                if (r.FamilyOf is { } familyOf)
+                    node["family_of"] = familyOf.ToString();
+                if (r.QueriesRunJson is not null && JsonNode.Parse(r.QueriesRunJson) is JsonArray queries)
+                    node["queries_run"] = new JsonArray(queries.Select(q => (JsonNode?)JsonValue.Create(masker.FreeText(q?.GetValue<string>()))).ToArray());
+            }
+
             /* #5914: absent, never [], when the report carries no link. */
             if (r.Links is { Count: > 0 } links && !node.ContainsKey("withheld"))
                 node["links"] = new JsonArray(links.Select(l => (JsonNode?)LinkNode(l, masker)).ToArray());
@@ -413,6 +446,34 @@ internal static class InvestigationToolCore
         if (read.FamilyCounts is not null)
             answer["family_counts"] = FamilyCountsPayload(read.FamilyCounts);
         return answer.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>The evidence as <c>evidence_verified</c> and <c>evidence_inferred</c> (always present, possibly empty), plus
+    /// <c>evidence_unlabelled</c> only when the report holds items with no valid basis (#6004: written before the basis was
+    /// required). <paramref name="masked"/> is index-aligned with <paramref name="stored"/>, the basis read from the stored item.</summary>
+    private static void AddEvidenceLists(JsonObject node, JsonNode? stored, JsonArray masked)
+    {
+        var verified = new JsonArray();
+        var inferred = new JsonArray();
+        var unlabelled = new JsonArray();
+        for (var i = 0; i < masked.Count; i++)
+        {
+            var item = masked[i]?.DeepClone();
+            var basis = stored is JsonArray items && i < items.Count && items[i] is JsonObject o
+                && o["basis"] is JsonValue v && v.TryGetValue(out string? word) ? word : null;
+            var target = basis switch
+            {
+                InvestigationReportFields.BasisVerified => verified,
+                InvestigationReportFields.BasisInferred => inferred,
+                _ => unlabelled,
+            };
+            target.Add(item);
+        }
+
+        node["evidence_verified"] = verified;
+        node["evidence_inferred"] = inferred;
+        if (unlabelled.Count > 0)
+            node["evidence_unlabelled"] = unlabelled;
     }
 
     /// <summary>

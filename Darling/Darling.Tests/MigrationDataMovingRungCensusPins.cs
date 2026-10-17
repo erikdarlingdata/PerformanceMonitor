@@ -271,6 +271,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "CHECK validates a handful of operator-written rows. The other ADD COLUMNs are nullable with no default or "
             + "a constant default and rewrite nothing; the three new tables are created empty. It does not move the lock-wait floor."),
         new(
+            194,
+            SetsTheFloor: false,
+            "CREATE UNIQUE INDEX on collect.query_tag_sightings (#5985, created V192): the same key plus the database, built over the "
+            + "stored sightings, then the V192 index is dropped. The table holds one row per distinct key and caller a collector has "
+            + "sighted since V192 shipped, which is far smaller than a collector table and is pruned by retention, and nothing wrote "
+            + "to it before this build, so at this rung it is empty on nearly every store and a build over it is milliseconds. It does "
+            + "not move the lock-wait floor."),
+        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "

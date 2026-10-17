@@ -126,10 +126,25 @@ function reportBlock(rep) {
   if (rep.verdict != null) parts.push(el("div", {}, [el("strong", { text: "Verdict: " }), el("span", { text: valueText(rep.verdict) })]));
   if (rep.summary != null) parts.push(el("div", {}, [el("strong", { text: "Summary: " }), el("pre", { class: "jh-detail-message", text: valueText(rep.summary) })]));
   if (rep.root_cause != null) parts.push(el("div", {}, [el("strong", { text: "Root cause: " }), el("pre", { class: "jh-detail-message", text: valueText(rep.root_cause) })]));
-  const evidence = Array.isArray(rep.evidence) ? rep.evidence : [];
-  if (evidence.length) {
-    parts.push(el("div", {}, [el("strong", { text: "Evidence (" + evidence.length + "): " }), ...evidence.map((e) => el("pre", { class: "jh-detail-message", text: valueText(e) }))]));
+  /* #6004: the evidence arrives as verified and inferred lists (items stored before the basis was required are unlabelled);
+     a store that sends one list keeps the old block. */
+  const evidenceLists = [
+    ["Evidence, verified", rep.evidence_verified],
+    ["Evidence, inferred", rep.evidence_inferred],
+    ["Evidence, unlabelled", rep.evidence_unlabelled],
+    ["Evidence", rep.evidence],
+  ];
+  for (const [title, list] of evidenceLists) {
+    const items = Array.isArray(list) ? list : [];
+    if (items.length) {
+      parts.push(el("div", {}, [el("strong", { text: title + " (" + items.length + "): " }), ...items.map((e) => el("pre", { class: "jh-detail-message", text: valueText(e) }))]));
+    }
   }
+  const queries = Array.isArray(rep.queries_run) ? rep.queries_run : [];
+  if (queries.length) {
+    parts.push(el("div", {}, [el("strong", { text: "Queries run (" + queries.length + "): " }), ...queries.map((q) => el("pre", { class: "jh-detail-message", text: valueText(q) }))]));
+  }
+  if (rep.family_of != null) parts.push(el("div", {}, [el("strong", { text: "Family of: " }), el("span", { text: valueText(rep.family_of) })]));
   return el("div", { class: "inv-report" }, parts);
 }
 
