@@ -259,14 +259,18 @@ public sealed class LiteQueryTagStoreTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task SightingsRetention_RemovesOnlyRowsNotSeenWithinTheHorizon()
     {
-        await ExecAsync(@"INSERT INTO query_tag_sightings (server_id, key_kind, key, first_seen, last_seen) VALUES
-(1, 'hash', 'old', now()::TIMESTAMP - INTERVAL 4000 DAY, now()::TIMESTAMP - INTERVAL 4000 DAY),
-(1, 'hash', 'recent', now()::TIMESTAMP - INTERVAL 4000 DAY, now()::TIMESTAMP - INTERVAL 1 DAY)");
+        /* One clock anchors both the seed and the cutoff, so a cutoff wrong by hours or a day cannot hide (#3676). */
+        var now = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        var horizon = now.AddDays(-LocalDataService.QueryTagSightingRetentionDays);
+        await ExecAsync($@"INSERT INTO query_tag_sightings (server_id, key_kind, key, first_seen, last_seen) VALUES
+(1, 'hash', 'old', TIMESTAMP '{horizon.AddDays(-1):yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{horizon.AddDays(-1):yyyy-MM-dd HH:mm:ss}'),
+(1, 'hash', 'recent', TIMESTAMP '{horizon.AddDays(-1):yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{horizon.AddDays(1):yyyy-MM-dd HH:mm:ss}')");
         var tag = await _service.CreateQueryTagAsync("T", null);
 
-        Assert.Equal(1, await _service.PurgeOldQueryTagSightingsAsync());
+        Assert.Equal(1, await _service.PurgeOldQueryTagSightingsAsync(utcNow: now));
 
         Assert.Equal(1L, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings WHERE key = 'recent'"));
+        Assert.Equal(0L, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings WHERE key = 'old'"));
         Assert.Equal(1L, await CountAsync("SELECT COUNT(*) FROM query_tags WHERE id = " + tag));
     }
 
@@ -279,19 +283,49 @@ public sealed class LiteQueryTagStoreTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task SightingsTable_KeepsOneRowPerKey_SoASecondSightingBumpsSeenCount()
+    public async Task SightingsTable_KeysOnTheCallerTriple_SoADifferentApplicationIsANewRow_AndNoCallerFoldsToOneRow()
     {
-        /* The upsert the #5990 sightings write runs. Without a key on (server_id, key_kind, key) DuckDB refuses the
-           ON CONFLICT clause, and a plain insert would store the key twice. */
-        const string upsert = @"INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')
-ON CONFLICT (server_id, key_kind, key) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1";
+        /* Darling's ux_query_tag_sightings_key folds the caller fields to ''; here the fold is the column default. */
+        const string upsert = @"INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name) VALUES (1, 'hash', '0xAB', 'SSMS')
+ON CONFLICT (server_id, key_kind, key, application_name, login_name, host_name) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1";
         await ExecAsync(upsert);
         await ExecAsync(upsert);
-        await ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (2, 'hash', '0xAB'), (1, 'object', '0xAB')");
+        await ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name) VALUES (1, 'hash', '0xAB', 'ETL.exe')");
+        await ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')");
+        await ExecAsync(@"INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')
+ON CONFLICT (server_id, key_kind, key, application_name, login_name, host_name) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1");
 
-        Assert.Equal(2L, await CountAsync("SELECT seen_count FROM query_tag_sightings WHERE server_id = 1 AND key_kind = 'hash' AND key = '0xAB'"));
+        Assert.Equal(2L, await CountAsync("SELECT seen_count FROM query_tag_sightings WHERE key = '0xAB' AND application_name = 'SSMS'"));
+        Assert.Equal(1L, await CountAsync("SELECT seen_count FROM query_tag_sightings WHERE key = '0xAB' AND application_name = 'ETL.exe'"));
+        Assert.Equal(2L, await CountAsync("SELECT seen_count FROM query_tag_sightings WHERE key = '0xAB' AND application_name = '' AND login_name = '' AND host_name = ''"));
         Assert.Equal(3L, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings"));
-        await Assert.ThrowsAnyAsync<Exception>(() => ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')"));
+        await Assert.ThrowsAnyAsync<Exception>(() => ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name) VALUES (1, 'hash', '0xAB', 'SSMS')"));
+    }
+
+    [Fact]
+    public async Task ADismissedAlertsGate_AdvancesEvenWhenTheSightingsPurgeThrows()
+    {
+        var advanced = false;
+        var alertsRan = false;
+        await CollectionBackgroundService.RunDismissedAlertsPurgesAsync(
+            () => { alertsRan = true; return Task.CompletedTask; },
+            () => throw new InvalidOperationException("write lock timeout"),
+            () => advanced = true,
+            null);
+
+        Assert.True(alertsRan);
+        Assert.True(advanced);
+
+        var sightingsRan = false;
+        advanced = false;
+        await CollectionBackgroundService.RunDismissedAlertsPurgesAsync(
+            () => throw new InvalidOperationException("boom"),
+            () => { sightingsRan = true; return Task.CompletedTask; },
+            () => advanced = true,
+            null);
+
+        Assert.True(sightingsRan);
+        Assert.False(advanced);
     }
 
     private async Task ExecAsync(string sql)
