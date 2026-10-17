@@ -381,12 +381,12 @@ public sealed class DarlingManagedRolesTests
             ["config_notification"] = new[]
             {
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
-                "generic_url", "generic_headers", "pagerduty_routing_key",
+                "generic_url", "generic_headers", "pagerduty_routing_key", "signing_key", "previous_signing_key",
             },
             /* V131 (#3598): the sparse routes table mirrors the parent's destination columns under the same
                names, so the four webhook-class destinations are the same bearer secrets they are one table
                up; smtp_recipients and the GENERATED configured_channels presence column are not. */
-            ["config_notification_routes"] = new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" },
+            ["config_notification_routes"] = new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" },
         };
 
         /* Exactly the four known secret-bearing tables, with the expected secret columns. */
