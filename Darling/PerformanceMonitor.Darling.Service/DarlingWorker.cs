@@ -3411,13 +3411,17 @@ LIMIT 1";
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
            unrecognized value runs at the strictest level, as the MCP host does (it logs that once, so this does not). */
+        /* #6005: the deadlock rollup (written by the alert pass), the agent gate it feeds and the 4-hour digest. */
+        var deadlockRollup = new PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup(
+            new DeadlockSignatureStore(investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds));
         var investigationDispatcher = new InvestigationDispatcher(
             investigationStore, alertSettings, _logger,
             McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail dataDetail)
                 ? dataDetail
                 : McpDataDetail.MetadataOnly,
             /* #5822: the long-poll's wake-up, fired when a request opens. */
-            openSignal: PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared);
+            openSignal: PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared,
+            agentGate: deadlockRollup.AllowsAgentRequestAsync);
 
         /* The shared record-and-send deliverer — hoisted so BOTH the shared alert engine and the Stage 4
            service self-alerts (DarlingSelfAlertEvaluator) fire through the SAME instance: identical
@@ -3444,7 +3448,7 @@ LIMIT 1";
             investigationDispatcher: investigationDispatcher,
             /* #5825: the same mute rules the fires obey stop an alert's clear. */
             isAlertMuted: muteRuleService.IsAlertMuted);
-        var engine = BuildAlertEngine(config, servers, alertSettings, historyStore, muteRuleService, deliverer);
+        var engine = BuildAlertEngine(config, servers, alertSettings, historyStore, muteRuleService, deliverer, deadlockRollup);
 
         /* Held for the PostgreSQL predictors, which deliver alongside the shared engine rather than
            through it (see EvaluatePostgresAlertsAsync). Same deliverer instance, so a PostgreSQL alert
@@ -3663,7 +3667,7 @@ LIMIT 1";
             new PerformanceMonitor.Darling.Service.Investigations.ServiceInvestigationEventSends(
                 webhookAlertService, deliverer, () => _selfAlerts),
             PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared, _logger);
-        var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, investigationEvents, stoppingToken);
+        var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, investigationEvents, deadlockRollup, stoppingToken);
 
         /* #6001: the evidence capture, on its own tick. It reads the store only and opens no connection to a monitored server. */
         var investigationEvidenceLoop = RunInvestigationEvidenceLoopAsync(
@@ -6612,12 +6616,27 @@ LIMIT 1";
     /// pass is logged and tried again next tick.
     /// </summary>
     private async Task RunInvestigationSweepLoopAsync(InvestigationRequestStore store,
-        PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery events, CancellationToken stoppingToken)
+        PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery events,
+        PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup deadlockRollup, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
             if (ShouldRunCollection(_paused))
             {
+                /* #6005: the deadlock digest, once per 4-hour bucket; its own try, like the two below. */
+                try
+                {
+                    await deadlockRollup.RunDigestAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Deadlock digest failed; it is tried again next pass");
+                }
+
                 try
                 {
                     await InvestigationDispatchCore.SweepOnceAsync(store, _logger, stoppingToken);
@@ -7735,7 +7754,8 @@ LIMIT 1";
     private AlertEngine BuildAlertEngine(
         DarlingConfig config, List<ServerLoopState> servers,
         DarlingAlertSettings alertSettings, PgAlertHistoryStore historyStore,
-        MuteRuleService muteRuleService, DarlingAlertDeliverer deliverer)
+        MuteRuleService muteRuleService, DarlingAlertDeliverer deliverer,
+        PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup? deadlockRollup = null)
     {
         var postgres = _postgres!;
         var stateStore = new PgAlertStateStore(postgres, _logger);
@@ -7799,7 +7819,8 @@ LIMIT 1";
                rather than defaulted inside the engine so a test constructs its own and cannot pollute it. */
             readFailures: AlertReadFailureCounter.Shared,
             /* #5916: a threshold held for one server or database. Lite passes none. */
-            overrides: _thresholdOverrides);
+            overrides: _thresholdOverrides,
+            deadlockRollup: deadlockRollup);
     }
 
     /// <summary>

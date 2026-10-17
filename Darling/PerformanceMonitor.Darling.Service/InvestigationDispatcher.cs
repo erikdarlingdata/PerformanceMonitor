@@ -94,10 +94,15 @@ public sealed class InvestigationDispatcher
     /// default is the strictest, so a caller that names none never sends more than any level allows.
     /// </param>
     /// <param name="openSignal">Fired when a request opens (#5822); null fires nothing.</param>
+    /// <param name="agentGate">
+    /// #6005: asked with the server id and metric before an agent request is opened or joined; false holds the agent request
+    /// back and nothing else (the page is the caller's). Null (every caller but the worker) holds nothing back.
+    /// </param>
     public InvestigationDispatcher(InvestigationRequestStore store, IAlertSettings settings, ILogger logger,
-        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, InvestigationOpenSignal? openSignal = null)
+        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, InvestigationOpenSignal? openSignal = null,
+        Func<string, string, CancellationToken, Task<bool>>? agentGate = null)
         : this((store ?? throw new ArgumentNullException(nameof(store))).OpenOrJoinAsync, settings, logger,
-            store.ReadRequestAsync, dataDetail, openSignal)
+            store.ReadRequestAsync, dataDetail, openSignal, agentGate)
     {
     }
 
@@ -108,10 +113,11 @@ public sealed class InvestigationDispatcher
         ILogger logger,
         Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? readRequest = null,
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
-        InvestigationOpenSignal? openSignal = null)
+        InvestigationOpenSignal? openSignal = null,
+        Func<string, string, CancellationToken, Task<bool>>? agentGate = null)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _core = new InvestigationDispatchCore(openOrJoin, settings, logger, openSignal is null ? null : openSignal.Opened);
+        _core = new InvestigationDispatchCore(openOrJoin, settings, logger, openSignal is null ? null : openSignal.Opened, agentGate);
         _readRequest = readRequest;
         _dataDetail = dataDetail;
     }
