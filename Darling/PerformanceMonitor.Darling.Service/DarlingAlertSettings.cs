@@ -95,6 +95,15 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
                     }
                 }
 
+                foreach (var warning in opened.Warnings)
+                {
+                    now.Add(warning);
+                    if (!_reportedFailures.Contains(warning))
+                    {
+                        _logger?.LogWarning("{Warning}", warning);
+                    }
+                }
+
                 _reportedFailures = now;
                 _opened = opened;
                 _openedSignature = signature;
@@ -115,6 +124,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
                 texts.Add(failure.Text);
             }
 
+            texts.AddRange(Opened.Warnings);
             return texts;
         }
     }
@@ -423,6 +433,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool GenericWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.GenericUrl);
     public string GenericWebhookUrl => Opened.Webhooks.GenericUrl;
     public string GenericWebhookHeadersJson => Opened.Webhooks.GenericHeaders;
+
+    /* #5998: the settings row's generic URL's signing keys, opened. */
+    public WebhookSigningKeys GenericWebhookSigning => Opened.Webhooks.GenericSigning ?? WebhookSigningKeys.None;
+    public bool GenericSigningKeyUnreadable => System.Linq.Enumerable.Any(Opened.Failures, f => f.SigningKey);
     public string GenericWebhookBodyTemplate => Opened.Webhooks.GenericBodyTemplate;
     public string GenericWebhookProxyAddress => Opened.Webhooks.GenericProxy;
 

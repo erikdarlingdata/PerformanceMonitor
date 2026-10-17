@@ -127,6 +127,75 @@ ON CONFLICT (id) DO UPDATE SET
 
         await using var command = _dataSource.CreateCommand(NotificationUpsertSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddNotificationUpsertParameters(command, row);
+        await ExecuteWriteAsync(command, cancellationToken);
+    }
+
+    /// <summary>
+    /// The Settings save (#5998): reads the settings row's signing key state and the routes that hold a key, hands them to
+    /// <paramref name="refuseWhenKeysWouldBreak"/> (a sentence refuses the save), and writes the row, all in one transaction. The
+    /// two reads take their rows' locks (<c>FOR UPDATE</c>), so a Generate in another viewer waits for this save and then finds
+    /// the URL changed and is refused, instead of landing between the check and the write and leaving a key tied to the old URL.
+    /// A read-only seat can not read the key columns, so it skips the check and fails on the write as before.
+    /// </summary>
+    public async Task UpsertNotificationCheckingSigningKeysAsync(
+        NotificationRow row, Func<ViewerSigningKeyState?, System.Collections.Generic.IReadOnlyList<int>, string?> refuseWhenKeysWouldBreak,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        ArgumentNullException.ThrowIfNull(refuseWhenKeysWouldBreak);
+        if (IsReadOnly)
+        {
+            await UpsertNotificationAsync(row, cancellationToken);
+            return;
+        }
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            ViewerSigningKeyState? state;
+            await using (var stateRead = new NpgsqlCommand(SettingsSigningStateSql + " FOR UPDATE", connection, transaction))
+            {
+                stateRead.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                state = await ReadSigningStateAsync(stateRead, cancellationToken);
+            }
+
+            var ids = new System.Collections.Generic.List<int>();
+            await using (var idsRead = new NpgsqlCommand(
+                "SELECT route_id FROM config_notification_routes WHERE signing_key <> '' ORDER BY route_id FOR UPDATE", connection, transaction))
+            {
+                idsRead.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                await using var reader = await idsRead.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    ids.Add(reader.GetInt32(0));
+                }
+            }
+
+            if (refuseWhenKeysWouldBreak(state, ids) is { } refusal)
+            {
+                throw new ViewerPasswordRefusedException(refusal);
+            }
+
+            await using var command = new NpgsqlCommand(NotificationUpsertSql, connection, transaction);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            AddNotificationUpsertParameters(command, row);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+    }
+
+    private static void AddNotificationUpsertParameters(NpgsqlCommand command, NotificationRow row)
+    {
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.SmtpHost });            // $1
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.SmtpPort });               // $2
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.SmtpUseSsl });            // $3
@@ -151,7 +220,6 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.TeamsSendResolutions });   // $22
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.GenericSendResolutions }); // $23
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.EmailSendResolutions });   // $24
-        await ExecuteWriteAsync(command, cancellationToken);
     }
 
     private static NotificationRow ReadNotificationRow(NpgsqlDataReader reader) => new()

@@ -387,6 +387,10 @@ public sealed class CollectorRuntimeState
     /// <summary>The latest published snapshot, or null when the worker has not reached a verdict yet.</summary>
     public Snapshot? Read() => _current;
 
+    /// <summary>Whether each generic webhook destination has a signing key, and when a rotation window ends (#5998). The worker
+    /// publishes it when it applies the store's configuration; the web page reads it. It holds no key text.</summary>
+    public WebhookSigningStatusBoard SigningStatus { get; } = new();
+
     /// <summary>
     /// The first line of a failure message, CR-trimmed and length-capped — the same reduction
     /// <c>DarlingCliCommands.FirstLineOf</c> and <c>ViewerStoreUnreachableException</c> apply, for the same

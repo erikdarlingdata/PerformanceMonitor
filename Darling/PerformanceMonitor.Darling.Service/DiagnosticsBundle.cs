@@ -571,7 +571,8 @@ internal static class DiagnosticsBundle
         var hooks = config.Webhooks ?? new WebhooksConfig();
         var routes = config.NotificationRoutes ?? new List<PerformanceMonitor.Notifications.NotificationRoute>();
         var anySealed = new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl, hooks.GenericHeaders, hooks.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed)
-            || routes.Any(r => new[] { r.TeamsUrl, r.SlackUrl, r.GenericUrl, r.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed));
+            || routes.Any(r => new[] { r.TeamsUrl, r.SlackUrl, r.GenericUrl, r.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed))
+            || SigningTexts(hooks.GenericSigning).Concat(routes.SelectMany(r => SigningTexts(r.GenericSigning))).Any(PasswordSeal.IsSealed);
         if (!anySealed)
         {
             return Array.Empty<string>();
@@ -597,8 +598,22 @@ internal static class DiagnosticsBundle
         }
 
         AddHeaderValues(aliaser, opened.Webhooks.GenericHeaders);
+
+        /* #5998: a signing key is a secret: a log line that somehow carried one is aliased, with and without its prefix. */
+        foreach (var key in SigningTexts(opened.Webhooks.GenericSigning).Concat(opened.Routes.SelectMany(r => SigningTexts(r.GenericSigning))))
+        {
+            aliaser.AddSecret(key);
+            if (key.StartsWith(PerformanceMonitor.Notifications.WebhookSigning.KeyPrefix, StringComparison.Ordinal))
+            {
+                aliaser.AddSecret(key[PerformanceMonitor.Notifications.WebhookSigning.KeyPrefix.Length..]);
+            }
+        }
+
         return opened.Failures.Count == 0 ? Array.Empty<string>() : new[] { WebhookHostsNotAliasedNote };
     }
+
+    private static IEnumerable<string> SigningTexts(PerformanceMonitor.Notifications.WebhookSigningKeys? keys) =>
+        keys is null ? Array.Empty<string>() : new[] { keys.Key, keys.PreviousKey }.Where(k => !string.IsNullOrWhiteSpace(k));
 
     /// <summary>Registers each string value of a headers JSON object as a secret. Text that is not a JSON object adds nothing.</summary>
     private static void AddHeaderValues(BundleAliaser aliaser, string? headersJson)

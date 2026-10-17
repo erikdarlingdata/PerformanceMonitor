@@ -751,6 +751,9 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
                                     <TextBlock Grid.Row="0" Grid.Column="0" Text="URL:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
@@ -780,6 +783,23 @@
                                         <TextBlock x:Name="GenericStatusText" FontSize="11" FontStyle="Italic"
                                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </StackPanel>
+
+                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Signing key:" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,8,8,4"/>
+                                    <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Margin="0,8,0,4">
+                                        <Button x:Name="GenericSigningKeyButton" Content="Generate key" Click="GenericSigningKeyButton_Click"
+                                                ToolTip="Makes a key the service signs each generic webhook post with. Rotating keeps the old key signing too for 7 days."/>
+                                        <Button x:Name="GenericSigningKeyRemoveButton" Content="Remove key" Margin="6,0,0,0" Click="GenericSigningKeyRemoveButton_Click"/>
+                                        <TextBlock x:Name="GenericSigningKeyStatusText" FontSize="11" FontStyle="Italic"
+                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Row="6" Grid.Column="1" x:Name="GenericSigningKeyShownPanel" Visibility="Collapsed" Margin="0,0,0,4">
+                                        <TextBox x:Name="GenericSigningKeyShownBox" IsReadOnly="True" FontFamily="Consolas"/>
+                                        <TextBlock x:Name="GenericSigningKeyShownText" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="7" Grid.Column="1" x:Name="GenericUnsignedTestText" FontSize="11" TextWrapping="Wrap"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run Text="Placeholders (each is JSON-escaped when substituted): "/>

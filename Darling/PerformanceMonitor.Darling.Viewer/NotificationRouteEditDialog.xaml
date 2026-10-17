@@ -81,6 +81,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Teams webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
@@ -93,12 +94,30 @@
             <TextBox Grid.Row="2" Grid.Column="1" x:Name="GenericUrlBox" Margin="0,0,0,6"
                      ToolTip="Headers, body template and proxy come from the Notifications section — a route redirects the POST, it does not re-author it."/>
 
-            <TextBlock Grid.Row="3" Grid.Column="0" Text="PagerDuty routing key" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <TextBox Grid.Row="3" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6"
+            <!-- #5998: the signing key of this route's own generic URL. Made, rotated and removed here at once, not with OK. -->
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="Signing key" VerticalAlignment="Top" Margin="0,4,8,6"/>
+            <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,0,0,6">
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="SigningKeyButton" Content="Generate key" Click="SigningKeyButton_Click"
+                            ToolTip="Makes a key the service signs this route's generic webhook posts with. Rotating keeps the old key signing too for 7 days."/>
+                    <Button x:Name="SigningKeyRemoveButton" Content="Remove key" Margin="6,0,0,0" Click="SigningKeyRemoveButton_Click"/>
+                    <TextBlock x:Name="SigningKeyStatusText" FontSize="11" FontStyle="Italic"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                </StackPanel>
+                <StackPanel x:Name="SigningKeyShownPanel" Visibility="Collapsed" Margin="0,4,0,0">
+                    <TextBox x:Name="SigningKeyShownBox" IsReadOnly="True" FontFamily="Consolas"/>
+                    <TextBlock x:Name="SigningKeyShownText" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                </StackPanel>
+                <TextBlock x:Name="SigningKeyTestNoteText" FontSize="11" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
+            </StackPanel>
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="PagerDuty routing key" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="4" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6"
                      ToolTip="An Events API v2 integration key — a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
 
-            <TextBlock Grid.Row="4" Grid.Column="0" Text="Email recipients" VerticalAlignment="Center" Margin="0,0,8,6"/>
-            <TextBox Grid.Row="4" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
+            <TextBlock Grid.Row="5" Grid.Column="0" Text="Email recipients" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="5" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
                      ToolTip="Comma-separated. Redirects email only: the SMTP host, from-address and credentials come from the Notifications section, so email is delivered only where those are set."/>
         </Grid>
 

@@ -649,6 +649,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
         MapInvestigationPractice(app, postgres, logger);
+        MapWebhookSigningStatus(app, collector);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -2545,6 +2546,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return new JsonObject { ["hours_back"] = hoursBack, ["agents"] = agents };
+    }
+
+    /// <summary>
+    /// <c>GET /api/webhook-signing</c> (#5998): whether the settings row's generic webhook and each route that has its own key holds
+    /// a signing key, whether a rotation is in its window and when it ends. A status page only: the web has no write surface for
+    /// notifications, and the answer is served from what the service read when it applied the store's configuration, so it holds no
+    /// key text and does not depend on the web login being able to read the key columns.
+    /// </summary>
+    internal static void MapWebhookSigningStatus(WebApplication app, CollectorRuntimeState collector, Func<DateTime>? utcNow = null)
+    {
+        var clock = utcNow ?? (() => DateTime.UtcNow);
+        app.MapGet("/api/webhook-signing", () => Results.Text(collector.SigningStatus.Answer(clock()).ToJsonString(), "application/json"));
     }
 
     /// <summary>
@@ -6193,6 +6206,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_heatmap"] = R(CatData, "Query counts per (time bin x log-magnitude bucket) - the viewer's Query Heatmap as a table.", PServer(), PHours(24), PText("metric"), PDatabases(), PInt("bucket_minutes", 5), PLimit(500), PAsOf()),
             ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PDatabases(), PLimit(50), PBool("full_text", true), PAsOf()),
             ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf(), PDatabases()),
+            ["get_resource_use_by_tag"] = R(CatData, "Resource use rolled up by query tag, one section per source (plan cache, Query Store, procedures, blocking, deadlocks); sections are never summed. Omit the server for the fleet.", PServer(), PHours(24), PText("tag"), PLimit(DarlingMcpQueryTagRollupTools.DefaultLimit), PAsOf()),
             ["get_query_store_query_history"] = R(CatData, "One Query Store query's executions, duration and CPU per plan over the window (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PHours(24), PAsOf()),
             ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window, optionally filtered by execution outcome or to one exact module before ranking; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PDatabases(), PAsOf(), PText("execution_type"), PText("module_name"), PBool("full_text", false)),
             ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf(), PDatabases()),
@@ -7190,6 +7204,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                query override) reproduces the page exactly as it always rendered. */
             /* #5234: the History button's read. The same refusal ladder as get_query_store_plan_xml: a key that is present
                but unreadable is refused, never defaulted. */
+            ["get_resource_use_by_tag"] = (c, pg, an) => DarlingMcpQueryTagRollupTools.GetResourceUseByTag(pg, Server(c), Hours(c, 24), Str(c, "tag"), Rows(c, "limit", DarlingMcpQueryTagRollupTools.DefaultLimit), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             ["get_query_store_query_history"] = (c, pg, an) => !RequireText(c, "database_name", out var qshDatabase)
                 ? MissingParam("database_name")
                 : !OptionalLong(c, "query_id", out var qshQueryId) ? UnparseableParam("query_id")

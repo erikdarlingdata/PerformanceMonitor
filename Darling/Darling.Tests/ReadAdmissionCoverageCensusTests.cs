@@ -195,6 +195,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "POST \"/api/alerts/test\""] = null,
         [WebFile + "GET \"/api/catalog\""] = null, // round 2, L5: it reads the schedule overrides and resolves ?server=
         [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
+        [WebFile + "GET \"/api/webhook-signing\""] = "status: answers from what the worker read when it applied the configuration, no store read (#5998)",
         [WebFile + "GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
         [WebFile + "GET \"/api/session\""] = "the seat's capability probe: reads no store",
         [WebFile + "GET \"/api/alert-templates\""] = "static: the starter templates, built in memory",

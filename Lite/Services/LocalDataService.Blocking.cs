@@ -421,7 +421,7 @@ LIMIT 1";
     /// it. The wait value's index follows the database values, so it is <c>5 + dbValues.Count</c>.</para>
     /// </summary>
     public async Task<(List<QuerySnapshotRow> Rows, long PopulationCount)> GetActiveQueriesPageAsync(
-        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, string? waitType = null, DateTime? asOfUtc = null)
+        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, string? waitType = null, DateTime? asOfUtc = null, QueryTagReadScope? tags = null)
     {
         using var _q = TimeQuery("GetActiveQueriesPageAsync", "v_query_snapshots filtered page (MCP)");
         using var connection = await OpenConnectionAsync();
@@ -433,6 +433,7 @@ LIMIT 1";
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
         var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
         var waitClause = waitFilter == null ? "" : $" AND upper(w.wait_type) IN (upper(${5 + dbValues.Count}), upper(${5 + dbValues.Count}) || ' ')";
+        var tagValues = new List<object>();
 
         command.CommandText = @"
 WITH window_rows AS (
@@ -487,7 +488,7 @@ population AS (
     LEFT JOIN heads h
       ON  h.collection_time = w.collection_time
       AND h.session_id = w.session_id
-    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + @"
+    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + (tags is null ? "" : QueryTagReadScope.HashToken("w.query_hash")) + @"
 )
 SELECT
     p.session_id,
@@ -527,6 +528,11 @@ SELECT
 FROM population p
 ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
 LIMIT $4";
+        if (tags is not null)
+        {
+            command.CommandText = tags.Apply(command.CommandText, 5 + dbValues.Count + (waitFilter == null ? 0 : 1));
+            tagValues.AddRange(tags.ParameterValues);
+        }
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -536,6 +542,8 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = db });
         if (waitFilter != null)
             command.Parameters.Add(new DuckDBParameter { Value = waitFilter });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var items = new List<QuerySnapshotRow>();
         long populationCount = 0;

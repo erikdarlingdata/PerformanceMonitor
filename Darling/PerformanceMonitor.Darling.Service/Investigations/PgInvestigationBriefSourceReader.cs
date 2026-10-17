@@ -97,6 +97,13 @@ WHERE rp.server_id = $1
 ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
+    /* #6001: the evidence the capture froze for the request, in the order the sections were written. */
+    internal const string EvidenceSql = @"
+SELECT section, state, content::text, captured_at
+FROM config.investigation_evidence
+WHERE request_id = $1
+ORDER BY evidence_id";
+
     /* The server's notes AND the fleet's (server_id NULL): the viewer's note scope offers "Fleet (every server)", and a
        fleet note no brief read was an approved note no agent would ever see (#5632 review L3). A note has no tag scope
        (no tag column; the viewer's note scope lists only the fleet and servers). The server's own notes sort first, so
@@ -407,9 +414,22 @@ ORDER BY m.metric_name, f.day DESC";
             Flush();
         }
 
+        var evidence = new List<InvestigationBriefEvidence>();
+        await using (var command = Command(connection, EvidenceSql, requestId))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                evidence.Add(new InvestigationBriefEvidence(
+                    reader.GetString(0), reader.GetString(1),
+                    reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(3), DateTimeKind.Utc),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
             priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null,
-            recurrence.Count > 0 ? recurrence : null);
+            recurrence.Count > 0 ? recurrence : null, evidence.Count > 0 ? evidence : null);
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each

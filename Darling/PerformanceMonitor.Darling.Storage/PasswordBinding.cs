@@ -39,11 +39,17 @@ public sealed class PasswordBinding
     public const string WebhookPurpose = "webhook";
 
     /// <summary>The webhook slots, in the order the notification row lists its columns: the Teams URL, the Slack URL,
-    /// the generic URL, the PagerDuty routing key and the generic headers.</summary>
+    /// the generic URL, the PagerDuty routing key and the generic headers, then the generic webhook's signing key (#5998).
+    /// The signing key and the previous signing key share the one slot: a rotation moves the sealed text from one column to
+    /// the other without opening it, and both are bound to the same row, proxy and generic URL.</summary>
     public static readonly IReadOnlyList<string> WebhookSlots = new[]
     {
-        "teams", "slack", "generic", "pagerduty", "generic_headers",
+        "teams", "slack", "generic", "pagerduty", "generic_headers", SigningKeySlot,
     };
+
+    /// <summary>The slot of a generic webhook signing key (#5998), current or previous. Its bound URL is the stored text of
+    /// the same row's generic URL, as for the headers.</summary>
+    public const string SigningKeySlot = "signing_key";
 
     /// <summary>The row id of the notification settings row, for <see cref="ForWebhook"/>.</summary>
     public const string WebhookSettingsRow = "notification";

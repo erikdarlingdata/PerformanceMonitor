@@ -162,7 +162,7 @@ ORDER BY bucket";
         return items;
     }
 
-    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null)
+    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
         using var connection = await OpenConnectionAsync();
@@ -170,6 +170,8 @@ ORDER BY bucket";
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        /* #5992: the query tag filter, in the population before the ranking and the cap. */
+        var tagValues = new List<object>();
         var executionTypeParameterIndex = 4 + dbValues.Count;
         var executionTypeClause = string.IsNullOrWhiteSpace(executionType)
             ? ""
@@ -179,6 +181,7 @@ ORDER BY bucket";
         var moduleClause = string.IsNullOrWhiteSpace(moduleName)
             ? ""
             : $" AND module_name = ${moduleParameterIndex}";
+        if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
 
         /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
         async Task<(List<QueryStoreRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
@@ -389,6 +392,7 @@ SELECT p.*
 FROM page p
 ORDER BY p.page_ord";
 
+        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, moduleParameterIndex + (string.IsNullOrWhiteSpace(moduleName) ? 0 : 1));
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -398,6 +402,8 @@ ORDER BY p.page_ord";
             command.Parameters.Add(new DuckDBParameter { Value = executionType });
         if (!string.IsNullOrWhiteSpace(moduleName))
             command.Parameters.Add(new DuckDBParameter { Value = moduleName });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         var candidateRows = new List<QueryStoreRow>();
         using (var reader = await command.ExecuteReaderAsync())

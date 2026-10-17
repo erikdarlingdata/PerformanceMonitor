@@ -53,6 +53,11 @@ public sealed class InvestigationBriefComposer
     /// <summary>The most characters <c>recurrence</c> (#6000) may take, inside what the sections left.</summary>
     public const int RecurrenceCap = 2_000;
 
+    /// <summary>The most characters <c>evidence</c> (#6001) may take, inside what the sections left. Each stored section is held
+    /// to <c>InvestigationToolCore.MaxEvidenceBytes</c> in the store; a section too big for what is left here is cut from the
+    /// tail and named in <c>truncated</c>.</summary>
+    public const int EvidenceCap = 8_000;
+
     /// <summary>The sections in fill order, with each section's cap and the tool that fetches what a cut drops.</summary>
     public static readonly IReadOnlyList<(string Section, int Cap, string? FetchTool)> Sections = new (string, int, string?)[]
     {
@@ -263,6 +268,38 @@ public sealed class InvestigationBriefComposer
             }
         }
 
+        /* #6001: the evidence frozen when the request opened (D9, D10), one item per section with its state, held to its own cap
+           inside what the sections left. Every item passes the brief's masker as a whole (content by key: query text, logins and
+           hosts as the field table says), so the brief and a re-mask of a stored brief agree. Absent, never [], when the
+           request has none, so a brief without one is byte for byte as before. Plans are by hash in the content, never XML. */
+        if (sources.Evidence is { Count: > 0 } evidence)
+        {
+            var list = evidence.Select(e => EvidenceNode(e, masker, cut)).ToList();
+            var budget = Math.Max(0, Math.Min(EvidenceCap, remaining));
+            var used = 0;
+            var kept = 0;
+            for (; kept < list.Count; kept++)
+            {
+                var length = list[kept].ToJsonString().Length + 1;
+                if (used + length > budget) break;
+                used += length;
+            }
+
+            root["evidence"] = new JsonArray(list.Take(kept).Select(n => (JsonNode?)n).ToArray());
+            remaining -= used;
+            if (kept < list.Count)
+            {
+                droppedChars += list.Skip(kept).Sum(n => n.ToJsonString().Length + 1);
+                cuts.Add(new JsonObject
+                {
+                    ["section"] = "evidence",
+                    ["kept"] = kept,
+                    ["dropped"] = list.Count - kept,
+                    ["fetch"] = null,
+                });
+            }
+        }
+
         /* #5914: links earlier reports on this server and family recorded, newest first, held to their own cap inside what
            the sections left. Absent, never [], when there is none, so a brief without one is byte for byte as before. */
         if (!sources.Practice && sources.PriorLinks is { Count: > 0 } priorLinks)
@@ -339,6 +376,24 @@ public sealed class InvestigationBriefComposer
         }
 
         return calls;
+    }
+
+    private static JsonObject EvidenceNode(InvestigationBriefEvidence evidence, McpDataDetailMasker masker, CutCounter cut)
+    {
+        JsonNode? content = null;
+        if (!string.IsNullOrEmpty(evidence.ContentJson))
+        {
+            try { content = JsonNode.Parse(evidence.ContentJson); }
+            catch (System.Text.Json.JsonException) { content = null; }
+        }
+
+        return Masked(new JsonObject
+        {
+            ["section"] = evidence.Section,
+            ["state"] = evidence.State,
+            ["captured_at"] = evidence.CapturedAtUtc is { } at ? Time(at) : null,
+            ["content"] = content,
+        }, masker, cut);
     }
 
     private static JsonObject AlertNode(InvestigationBriefAlert alert, McpDataDetailMasker masker, CutCounter cut)

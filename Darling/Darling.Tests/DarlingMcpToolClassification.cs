@@ -55,7 +55,7 @@ internal static class DarlingMcpToolClassification
         "get_query_heatmap", "get_query_repro_script", "get_query_store_clutter", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_plan_xml", "get_query_store_query_history",
         "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
-        "get_resource_semaphore", "get_running_jobs", "get_server_config", "get_server_config_changes",
+        "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_config", "get_server_config_changes",
         "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
         "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_query_history",
         "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",

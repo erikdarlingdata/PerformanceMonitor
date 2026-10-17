@@ -3085,7 +3085,7 @@ internal static class DarlingDataReader
     /// object initializer rather than threaded positionally. A three-argument
     /// <c>NpgsqlCommand(sql, connection, transaction)</c> is also the shape the HypoPG experiment's
     /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
-    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
+    internal const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
 
     /// <summary>Test-only fault injection: when set, <see cref="TryGetQueryStoreTopFromTableAsync"/> throws the
     /// returned exception right after the gate chose the interval table. Never set by product code.</summary>

@@ -71,7 +71,7 @@ LIMIT {LongQueryGridCap}";
     /// and the <c>LIMIT</c>, so the page is the slowest N of the chosen databases and a cap never counts another database's
     /// rows (Darling's <c>DarlingLongQueryReader</c> predicate sits in the same place). Null or empty reads every database.</para>
     /// </summary>
-    public async Task<List<LongQueryCompletionRow>> GetSlowestLongQueryCompletionsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int limit, IReadOnlyList<string>? databaseNames = null)
+    public async Task<List<LongQueryCompletionRow>> GetSlowestLongQueryCompletionsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int limit, IReadOnlyList<string>? databaseNames = null, QueryTagReadScope? tags = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -79,11 +79,15 @@ LIMIT {LongQueryGridCap}";
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         /* $4 is the row cap, so the optional database list starts at $5. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* #5992: the query tag filter, on the raw rows before the duration ranking and the limit. */
+        var tagValues = new List<object>();
+        if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
 
         command.CommandText = LongQueryCompletionsSelect + @"
 FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND collection_time <= $3" + dbClause, collectedFrom: "$2") + @" AS ev
 ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
 LIMIT $4";
+        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 5 + dbValues.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -91,6 +95,8 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = limit });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var tagValue in tagValues)
+            command.Parameters.Add(new DuckDBParameter { Value = tagValue });
 
         return await ReadLongQueryCompletionsAsync(command);
     }

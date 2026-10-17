@@ -67,6 +67,11 @@ public sealed record NotificationRoute(
     /// go. Null or empty means no channel is off.</summary>
     public IReadOnlyCollection<string>? OffChannels { get; init; }
 
+    /// <summary>The signing keys of this route's own generic URL (#5998, decision D2): sealed as the store holds them, opened
+    /// once the product's reader has opened them. Used only when <see cref="GenericUrl"/> is set; a route that inherits the
+    /// settings row's generic URL signs with the settings row's keys. Null means no key.</summary>
+    public WebhookSigningKeys? GenericSigning { get; init; }
+
     /// <summary>Whether <paramref name="channel"/> is off on this route (see <see cref="OffChannels"/>).</summary>
     public bool IsOffFor(string channel) =>
         OffChannels is not null && OffChannels.Contains(channel, StringComparer.Ordinal);

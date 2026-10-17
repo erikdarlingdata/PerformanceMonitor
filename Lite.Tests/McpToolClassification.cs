@@ -41,7 +41,7 @@ internal static class McpToolClassification
         "get_plan_cache_bloat", "get_plan_corrections", "get_plan_xml", "get_procedure_duration_trend",
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend",
-        "get_resource_semaphore", "get_running_jobs", "get_server_config", "get_server_config_changes",
+        "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_config", "get_server_config_changes",
         "get_server_properties", "get_server_summary", "get_session_stats", "get_spinlock_stats",
         "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",

@@ -178,6 +178,8 @@ public sealed class McpHostService : BackgroundService
             /* #2029 get_pvs_stats — the ADR persistent version store; twin of Darling's DarlingMcpPvsTools. */
             .WithGeminiCompatibleTools<McpPvsTools>()
             .WithGeminiCompatibleTools<McpLongQueryTools>()
+            /* #5992 get_resource_use_by_tag; twin of Darling's DarlingMcpQueryTagRollupTools. */
+            .WithGeminiCompatibleTools<McpQueryTagUsageTools>()
             .WithGeminiCompatibleTools<McpClientTimeoutTools>()
             .WithGeminiCompatibleTools<McpQueryTools>()
             .WithGeminiCompatibleTools<McpCpuTools>()
