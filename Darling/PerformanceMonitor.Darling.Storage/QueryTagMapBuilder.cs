@@ -74,7 +74,7 @@ public sealed class QueryTagMapBuilder
     /// keeps its previous map, and leaves <c>built_version</c> unstamped so the next pass tries again.
     /// </summary>
     /// <returns>True when every server's step succeeded.</returns>
-    public async Task<bool> RunPassAsync(IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken)
+    public async Task<bool> RunMapPassAsync(IReadOnlyCollection<int> serverIds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(serverIds);
 

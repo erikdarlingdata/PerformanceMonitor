@@ -4115,7 +4115,7 @@ LIMIT 1";
                 }
 
                 _queryTagMapBuilder ??= new QueryTagMapBuilder(postgres, _logger);
-                _queryTagMapPass = _queryTagMapBuilder.RunPassAsync(mapServerIds, stoppingToken);
+                _queryTagMapPass = _queryTagMapBuilder.RunMapPassAsync(mapServerIds, stoppingToken);
             }
 
             /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY

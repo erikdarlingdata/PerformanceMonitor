@@ -100,7 +100,7 @@ public sealed class QueryTagMapBuilderLiveTests
         QueryTagSightingWriter.RecordAsync(env.Source, Server, batches.SelectMany(b => b).ToList(), null, env.Ct);
 
     private static async Task<bool> PassAsync(Env env, QueryTagMapBuilder builder) =>
-        await builder.RunPassAsync(new[] { Server }, env.Ct);
+        await builder.RunMapPassAsync(new[] { Server }, env.Ct);
 
     /* "kind|key|tagId|source" per map row, ordered. */
     private static async Task<List<string>> MapAsync(Env env)
