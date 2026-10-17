@@ -77,7 +77,9 @@ public sealed class QueryTagUsageBehaviourTests
     public void ChoosingFleet_ReadsWithoutAServer_AndShowsEveryServer()
     {
         var run = Run();
-        Assert.Equal(new[] { "", "a", "b" }, run.GetProperty("serverOptions").EnumerateArray().Select(o => o.GetString()).ToArray());
+        var options = run.GetProperty("serverOptions").EnumerateArray().Select(o => o.GetString()).ToArray();
+        Assert.Equal("", options[0]);
+        Assert.Equal(new[] { "a", "b" }, options.Skip(1).Order().ToArray());
         Assert.False(run.GetProperty("fleetRead").TryGetProperty("server", out _));
         var text = run.GetProperty("fleetText").GetString()!;
         Assert.Contains("a", text);

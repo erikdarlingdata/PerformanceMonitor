@@ -67,6 +67,7 @@ const planCache = (serverName, tagOnly) => {
     total: fig(tagOnly ? 5 : 9, tagOnly ? 2 : 4),
   };
   if (!tagOnly) b.untagged = fig(4, 2);
+  else b.total_scope = "tag_subtree";
   if (serverName) b.server = serverName;
   return b;
 };
