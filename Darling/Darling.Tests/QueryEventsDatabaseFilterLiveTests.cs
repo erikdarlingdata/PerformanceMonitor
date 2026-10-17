@@ -93,7 +93,7 @@ public sealed class QueryEventsDatabaseFilterLiveTests
             Assert.Equal("empty", miss.GetProperty("status").GetString());
             Assert.Contains("for the chosen databases", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
             var publicMiss = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(
-                postgres, ServerName, 1, 100, DateTime.UtcNow.AddDays(-30).ToString("o"), null, null, ct)).RootElement;
+                postgres, ServerName, 1, 100, DateTime.UtcNow.AddDays(-30).ToString("o"), null, null, null, ct)).RootElement;
             Assert.DoesNotContain("for the chosen databases", publicMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             bodySucceeded = true;

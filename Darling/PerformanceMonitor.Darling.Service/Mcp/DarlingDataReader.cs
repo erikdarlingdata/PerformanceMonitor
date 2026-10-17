@@ -1100,6 +1100,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            /*TAG:hash:query_hash*/
             /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
                TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
                bake into their CREATE, so a raw-served and an hourly-served read of the same window
@@ -1357,6 +1358,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            /*TAG:hash:query_hash*/
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             /* #2235: proc-hosted rows collapse to one row per (database, host object) — every literal
@@ -1438,6 +1440,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            /*TAG:hash:query_hash*/
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, host_object_name,
                      CASE WHEN host_object_name IS NULL THEN query_hash END
@@ -1594,6 +1597,7 @@ internal static class DarlingDataReader
             AND   bucket >= $2
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
             ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, database_name, query_hash
@@ -1843,10 +1847,13 @@ internal static class DarlingDataReader
     /// and the <see cref="TopFill"/> refill rounds (each round re-runs the whole statement with a larger candidate
     /// limit), so a refill can never pull a row from a database the caller did not choose.
     /// </summary>
+    #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
-        bool rollUpByHostObject = false, int minMaxDop = 0, TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default)
+        bool rollUpByHostObject = false, int minMaxDop = 0, TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default,
+        QueryTagFilter? tags = null)
     {
+    #pragma warning restore CA1068
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
         var tier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
@@ -1900,7 +1907,7 @@ internal static class DarlingDataReader
         if (tier == RetentionTier.Hourly)
         {
             var ceiling = HourlyEndCeiling(coverage, ioRoute ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView, startUtc);
-            var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databases, ceiling, ranking, ioRoute, cancellationToken);
+            var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databases, ceiling, ranking, ioRoute, tags, cancellationToken);
             return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly, HourlyFirstBucket: firstBucket, HourlyCeiling: ceiling, IoRoute: ioRoute);
         }
 
@@ -1908,7 +1915,9 @@ internal static class DarlingDataReader
            UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
-        var rawSql = TopRankings.Apply(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql, ranking, hourly: false);
+        /* #5984: the query tag filter sits in the ranking pass (and, rolled up, in the wide pass), ahead of the cap. */
+        var rawSql = QueryTagReadJoin.Apply(
+            TopRankings.Apply(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql, ranking, hourly: false), serverId, tags);
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($7)
            while more candidates exist, under its bound. */
         var rows = await TopFill.RunAsync(top, async candidates =>
@@ -2024,7 +2033,7 @@ internal static class DarlingDataReader
     /// </summary>
     private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
-        int top, DatabaseFilter databases, DateTime? ceiling, TopRanking ranking, bool io, CancellationToken cancellationToken)
+        int top, DatabaseFilter databases, DateTime? ceiling, TopRanking ranking, bool io, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5329: the io route names collect.query_stats_io_hourly itself — one relation, no successor, no stitch — and
            selects the three sums; every other read splices the stitched relation as before and projects typed NULLs. */
@@ -2035,6 +2044,7 @@ internal static class DarlingDataReader
             .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopQueriesHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
             .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(7), StringComparison.Ordinal);
+        sql = QueryTagReadJoin.Apply(sql, serverId, tags);
 
         var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
             postgres, io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,
@@ -2139,6 +2149,7 @@ internal static class DarlingDataReader
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            /*TAG:object:database_name,schema_name,object_name*/
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, schema_name, object_name, object_type
@@ -2240,6 +2251,7 @@ internal static class DarlingDataReader
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
+            /*TAG:object:database_name,schema_name,object_name*/
             GROUP BY database_name, schema_name, object_name
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
             ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, database_name, schema_name, object_name
@@ -2294,10 +2306,12 @@ internal static class DarlingDataReader
 
     /// <summary>#5245: <see cref="GetTopProceduresByCpuRoutedAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,TopRanking,CancellationToken)"/>
     /// over a SET of databases. The list predicate is in the raw statement and in the hourly one (one pass each).</summary>
+    #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     public static async Task<TopProceduresReadResult> GetTopProceduresByCpuRoutedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
-        TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default)
+        TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default, QueryTagFilter? tags = null)
     {
+    #pragma warning restore CA1068
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
         var tier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
@@ -2339,7 +2353,7 @@ internal static class DarlingDataReader
         if (tier == RetentionTier.Hourly)
         {
             var ceiling = HourlyEndCeiling(coverage, ioRoute ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView, startUtc);
-            var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databases, ceiling, ranking, ioRoute, cancellationToken);
+            var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databases, ceiling, ranking, ioRoute, tags, cancellationToken);
             return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket, ceiling, IoRoute: ioRoute);
         }
 
@@ -2347,7 +2361,7 @@ internal static class DarlingDataReader
         /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
            UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        await using var command = postgres.CreateCommand(TopRankings.Apply(TopProceduresSql, ranking, hourly: false));
+        await using var command = postgres.CreateCommand(QueryTagReadJoin.Apply(TopRankings.Apply(TopProceduresSql, ranking, hourly: false), serverId, tags));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
@@ -2403,7 +2417,7 @@ internal static class DarlingDataReader
     /// </summary>
     private static async Task<(List<TopProcedureRow> Rows, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
-        int top, DatabaseFilter databases, DateTime? ceiling, TopRanking ranking, bool io, CancellationToken cancellationToken)
+        int top, DatabaseFilter databases, DateTime? ceiling, TopRanking ranking, bool io, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5329: the io route names collect.procedure_stats_io_hourly itself (one relation, no successor, no stitch) and
            selects the three sums; every other read splices the stitched relation as before and projects typed NULLs. */
@@ -2414,6 +2428,7 @@ internal static class DarlingDataReader
             .Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopProceduresHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
             .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(7), StringComparison.Ordinal);
+        sql = QueryTagReadJoin.Apply(sql, serverId, tags);
 
         var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
             postgres, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,
@@ -2663,6 +2678,7 @@ internal static class DarlingDataReader
             FROM deduped
             WHERE rn = 1
             AND   ($7::text IS NULL OR module_name = $7)
+            /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $8
@@ -2864,6 +2880,7 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM parts
             WHERE ($7::text IS NULL OR module_name = $7)
+            /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $10
@@ -3016,10 +3033,12 @@ internal static class DarlingDataReader
     /// over a SET of databases. The list predicate is in the raw statement, the interval-table statement and the daily
     /// statement, and each runs again under <see cref="TopFill"/>'s refill rounds, so no round reads an unchosen database.
     /// </summary>
+    #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     public static async Task<QueryStoreTopRead> GetQueryStoreTopWithReachAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
-        string? executionType, string? moduleName, CancellationToken cancellationToken = default)
+        string? executionType, string? moduleName, CancellationToken cancellationToken = default, QueryTagFilter? tags = null)
     {
+    #pragma warning restore CA1068
         /* Review D4R H1: the window check first, before the gate's own round trips even open — this surface
            has no live schema probe to save (StorageVersion.SchemaVersion is a compiled constant), but every
            call under QueryStoreTopMinWindow otherwise still opens a second connection, a transaction, and
@@ -3028,7 +3047,7 @@ internal static class DarlingDataReader
         if (QueryStoreTopMayReadTable(startUtc, endUtc))
         {
             var table = await TryGetQueryStoreTopFromTableAsync(
-                postgres, serverId, startUtc, endUtc, top, databases, executionType, moduleName, cancellationToken);
+                postgres, serverId, startUtc, endUtc, top, databases, executionType, moduleName, tags, cancellationToken);
             if (table is var (tableRows, tablePlan, dailyDays, dailySpan))
             {
                 ReadScope.NoteSource(ReadScope.SourceIntervalTable);
@@ -3042,7 +3061,7 @@ internal static class DarlingDataReader
            re-read the window; the tail looks up text only until the page is full, so the answer and the lookups
            are the rounds' own (TopFill.FinalCandidates). */
         List<QueryStoreRow> rows;
-        await using (var command = postgres.CreateCommand(QueryStoreTopSql))
+        await using (var command = postgres.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             AddWindow(command, serverId, startUtc, endUtc);
@@ -3084,7 +3103,7 @@ internal static class DarlingDataReader
     /// </summary>
     private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan, int DailyDays, (DateOnly Start, DateOnly EndExclusive)? DailySpan)?> TryGetQueryStoreTopFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, DatabaseFilter databases,
-        string? executionType, string? moduleName, CancellationToken cancellationToken)
+        string? executionType, string? moduleName, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         var gateDecided = false;
         try
@@ -3152,6 +3171,9 @@ internal static class DarlingDataReader
             {
                 topSql = QueryStoreIntervalWide.WithEdgeMargin(topSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
             }
+
+            /* #5984: the query tag filter, ahead of the ranking and the cap. */
+            topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
 
             /* #5313: the same candidate limit as the raw read, bound LAST ($8 on the interval table read, $10 on the
                daily read, after its two dates). #5815: one run at TopFill's final limit; each fill round used to

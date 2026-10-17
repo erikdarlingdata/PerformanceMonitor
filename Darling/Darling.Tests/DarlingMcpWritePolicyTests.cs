@@ -119,6 +119,30 @@ public sealed class DarlingMcpWritePolicyTests
     }
 
     [Fact]
+    public void QueryTags_WritesOff_ServeTheListAndNoneOfTheFiveWrites_WritesOn_ServeAllSix()
+    {
+        string[] writes = ["create_query_tag", "update_query_tag", "delete_query_tag", "assign_query_tag", "unassign_query_tag"];
+
+        var off = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), DarlingMcpWritePolicy.Effective.Off));
+        var on = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), WritesOnly));
+
+        Assert.Contains("list_query_tags", off);
+        Assert.All(writes, w => Assert.DoesNotContain(w, off));
+        Assert.Contains("list_query_tags", on);
+        Assert.All(writes, w => Assert.Contains(w, on));
+    }
+
+    [Fact]
+    public void QueryTagWrites_AreNeverOfferedToAgents_AndTheListIsAnOrdinaryRead()
+    {
+        string[] writes = ["create_query_tag", "update_query_tag", "delete_query_tag", "assign_query_tag", "unassign_query_tag"];
+
+        Assert.All(writes, w => Assert.Contains(w, DarlingMcpWritePolicy.NeverAgentTools));
+        Assert.All(writes, w => Assert.True(DarlingMcpWritePolicy.IsWrite(w)));
+        Assert.False(DarlingMcpWritePolicy.IsWrite("list_query_tags"));
+    }
+
+    [Fact]
     public void WritesOn_ServerAdminOff_ServesWritesExceptTheRegistryPair()
     {
         var served = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), WritesOnly));
@@ -371,6 +395,11 @@ public sealed class DarlingMcpWritePolicyTests
     [InlineData("/", "add_servers", "{\"servers_json\":\"[]\"}")]
     [InlineData("/core", "create_mute_rule", "{}")]
     [InlineData("/core", "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}")]
+    [InlineData("/", "create_query_tag", "{\"name\":\"Reports\"}")]
+    [InlineData("/", "update_query_tag", "{\"tag_id\":1,\"changes_json\":\"{}\"}")]
+    [InlineData("/", "delete_query_tag", "{\"tag_id\":1}")]
+    [InlineData("/", "assign_query_tag", "{\"tag_id\":1,\"kind\":\"hash\",\"query_hash\":\"0x01\"}")]
+    [InlineData("/", "unassign_query_tag", "{\"kind\":\"hash\",\"query_hash\":\"0x01\"}")]
     public async Task WritesOff_CallingAWriteTool_IsRefusedAsAnUnknownTool(string path, string tool, string arguments)
     {
         using var server = await BuildServer(NoWrites, "");

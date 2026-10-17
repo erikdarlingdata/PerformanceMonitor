@@ -644,10 +644,11 @@ public sealed class DarlingMcpDataTools
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1 (a LIFETIME max_dop; can read stale after a MAXDOP change). See the tool's reading guide.")] bool parallel_only = false,
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
         [Description("Grouping. 'query_hash' (default): one row per (database, query_hash, host_object). 'host_object': rolls a proc's statements into ONE row. See the tool's reading guide.")] string group_by = "query_hash",
+        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (grants, threads, extremes, times), omitting nulls.")] string detail = "summary",
         CancellationToken cancellationToken = default)
-        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken);
+        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag);
 
     /// <summary>
     /// #5226: the body of <see cref="GetTopQueriesByCpu"/> with the ranking choice the web page offers. The MCP tool
@@ -658,9 +659,9 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, bool parallel_only, int min_dop,
-        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken) =>
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null) =>
         GetTopQueriesRanked(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by, cancellationToken);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by, cancellationToken, tag);
 
     /// <summary>
     /// #5245: <see cref="GetTopQueriesRanked(NpgsqlDataSource,string,int,int,string,bool,int,string,string,string,string,CancellationToken)"/>
@@ -670,7 +671,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static async Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, bool parallel_only, int min_dop,
-        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken)
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -711,16 +712,32 @@ public sealed class DarlingMcpDataTools
            is parallel), min_dop when the caller set one above that, 0 (admit all) otherwise; min_dop implies
            parallel filtering, as its description has always said. */
         var minMaxDop = min_dop > 1 ? min_dop : parallel_only ? 2 : 0;
-        var filterApplied = minMaxDop > 0
+        var dopFilterApplied = minMaxDop > 0
             ? $"lifetime max_dop >= {minMaxDop} (applied in SQL before the top-{top} ranking; the page is the top-{top} of the parallel population)"
             : null;
+        string? filterApplied = dopFilterApplied;
 
         try
         {
+            /* #5984: the query tag filter. A name no tag carries is an empty answer that says so; it never reads the store. */
+            var tagFilter = await QueryTagReadJoin.ResolveAsync(postgres, tag, cancellationToken);
+            if (tagFilter.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadJoin.UnknownTagMessage(tagFilter.Requested!));
+            }
+
+            /* #5984 round 1: a tag that cut the population is named in filter_applied beside the parallel floor, so a tag-only call
+               never publishes null over a population the tag shaped. A call without a tag is unchanged. */
+            if (tagFilter.Named is { } queryTagName)
+            {
+                var tagText = $"query tag '{queryTagName}' (applied in SQL before the top-{top} ranking)";
+                filterApplied = dopFilterApplied is null ? tagText : dopFilterApplied + "; " + tagText;
+            }
+
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, databases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken);
+                postgres, resolved.ServerId, requestedStart, now, top, databases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -817,6 +834,14 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
             {
+                /* #5984: a tag that matched nothing is an answer, not a collection miss. */
+                if (tagFilter.Active)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                }
+
                 /* A filtered miss is not a collection miss: with the floor in the query, an empty page under
                    parallel_only means the window held no group whose plan ever ran parallel, and saying
                    "no query stats available" for that would send the caller to collection health. */
@@ -912,7 +937,7 @@ public sealed class DarlingMcpDataTools
                     : null
             }, r.Detail, full));
 
-            return JsonSerializer.Serialize(new
+            var queriesPayload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -952,7 +977,16 @@ public sealed class DarlingMcpDataTools
                    for every other ranking, so the MCP tools (CPU only) always send null. The web page draws it above the grid. */
                 retention_notice = routed.RetentionNotice,
                 queries = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #5984: the row's query tag, by its query_hash; an unmapped hash carries no `tag` member. */
+            if (queriesPayload["queries"] is JsonArray queryRows)
+            {
+                await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, queryRows.OfType<JsonObject>(),
+                    row => row["query_hash"]?.GetValue<string>(), cancellationToken);
+            }
+
+            return queriesPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1053,11 +1087,12 @@ public sealed class DarlingMcpDataTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top procedures. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
+        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.")] string detail = "summary",
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetTopProceduresRanked(postgres, server_name, hours_back, top, database_name, as_of, detail, order_by: null, cancellationToken, logger);
+        => GetTopProceduresRanked(postgres, server_name, hours_back, top, database_name, as_of, detail, order_by: null, cancellationToken, logger, tag);
 
     /// <summary>
     /// #5226: the body of <see cref="GetTopProceduresByCpu"/> with the ranking choice the web page offers; the MCP
@@ -1065,9 +1100,9 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static Task<string> GetTopProceduresRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of, string detail,
-        string? order_by, CancellationToken cancellationToken, ILogger? logger = null) =>
+        string? order_by, CancellationToken cancellationToken, ILogger? logger = null, string? tag = null) =>
         GetTopProceduresRanked(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, detail, order_by, cancellationToken, logger);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, detail, order_by, cancellationToken, logger, tag);
 
     /// <summary>
     /// #5245: <see cref="GetTopProceduresRanked(NpgsqlDataSource,string,int,int,string,string,string,string,CancellationToken)"/>
@@ -1075,7 +1110,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static async Task<string> GetTopProceduresRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of, string detail,
-        string? order_by, CancellationToken cancellationToken, ILogger? logger = null)
+        string? order_by, CancellationToken cancellationToken, ILogger? logger = null, string? tag = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -1099,6 +1134,13 @@ public sealed class DarlingMcpDataTools
 
         try
         {
+            /* #5984: the query tag filter. A name no tag carries is an empty answer that says so; it never reads the store. */
+            var tagFilter = await QueryTagReadJoin.ResolveAsync(postgres, tag, cancellationToken);
+            if (tagFilter.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadJoin.UnknownTagMessage(tagFilter.Requested!));
+            }
+
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
             /* #5633 item 4: with no database chosen the ranking leaves out the databases the server DROPPED (named by an earlier
@@ -1113,13 +1155,19 @@ public sealed class DarlingMcpDataTools
                and of a page with rows (databases_left_out + a note), and an empty page's sentence claims only the databases the server
                still has, so "the collector recorded nothing" is never said over a window where it recorded rows in a dropped database. */
             var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
-            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken);
+            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken, tagFilter);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
             /* #4231 stage 3b: hourly-routed rows have no object_type, sql_handle or plan_handle — stated once
                here rather than per row, since it is a property of the tier, not the row. */
             string? precisionNote = null;
+
+            /* #5984: a tag that matched nothing is an answer, not a collection miss. */
+            if (rows.Count == 0 && tagFilter.Active)
+                return McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
+                    "empty",
+                    $"No procedure on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
 
             if (rows.Count == 0)
                 return McpHelpers.WithDatabasesLeftOut(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
@@ -1219,7 +1267,7 @@ public sealed class DarlingMcpDataTools
                 total_spills = hourly ? (long?)null : r.TotalSpills
             }, r.Detail, r.TotalExecutions, r.TotalSpills, full));
 
-            return JsonSerializer.Serialize(new
+            var proceduresPayload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -1252,7 +1300,22 @@ public sealed class DarlingMcpDataTools
                 databases_left_out = DatabasesLeftOut.Named(leftOut),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOut),
                 procedures = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #5984: the row's query tag, by its (database, schema, object) key; an unmapped procedure carries no `tag` member. */
+            if (proceduresPayload["procedures"] is JsonArray procedureRows)
+            {
+                await QueryTagReadJoin.AttachByKeysAsync(postgres, resolved.ServerId, QueryTagReadJoin.ObjectKind, procedureRows.OfType<JsonObject>().ToList(),
+                    rows.Select(r => (string?)QueryTagReadJoin.ObjectKey(r.DatabaseName, r.SchemaName, r.ObjectName)).ToList(), cancellationToken);
+            }
+
+            /* #5984 round 1: the answer names the tag that cut its population (present only when a tag was sent). */
+            if (tagFilter.Named is { } procedureTagName)
+            {
+                proceduresPayload["tag_filter"] = procedureTagName;
+            }
+
+            return proceduresPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1305,8 +1368,9 @@ public sealed class DarlingMcpDataTools
         [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
         [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null,
         [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
+        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         CancellationToken cancellationToken = default) =>
-        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken);
+        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken, tag);
 
     /// <summary>The sentence beside <c>approximate: true</c> on get_query_store_top (#5094): whole days of the window came from the
     /// daily summary, which is built after each day ends.</summary>
@@ -1321,11 +1385,13 @@ public sealed class DarlingMcpDataTools
     /// query_text already had before this opt-in existed, so the viewer's page does not change. Same overload
     /// shape #3897's trend tools use <c>TrendBudget.Chart</c> for.
     /// </summary>
+    #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
-        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default) =>
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null) =>
+    #pragma warning restore CA1068
         GetQueryStoreTop(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag);
 
     /// <summary>
     /// #5245: <see cref="GetQueryStoreTop(NpgsqlDataSource,string,int,int,string,string,string,string,bool,int,CancellationToken)"/>
@@ -1334,10 +1400,12 @@ public sealed class DarlingMcpDataTools
     /// databases" for two or more names and leaves the one-name text exactly as it was), and the Query Store
     /// precondition, which stays silent while any database in scope is READ_WRITE.
     /// </summary>
+    #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of,
-        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default)
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null)
     {
+    #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
@@ -1357,9 +1425,16 @@ public sealed class DarlingMcpDataTools
 
         try
         {
+            /* #5984: the query tag filter. A name no tag carries is an empty answer that says so; it never reads the store. */
+            var tagFilter = await QueryTagReadJoin.ResolveAsync(postgres, tag, cancellationToken);
+            if (tagFilter.Unknown)
+            {
+                return McpHelpers.Status("empty", QueryTagReadJoin.UnknownTagMessage(tagFilter.Requested!));
+            }
+
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, execution_type, module_name, cancellationToken);
+            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, execution_type, module_name, cancellationToken, tagFilter);
             var rows = read.Rows;
             var tablePlan = read.Table;
 
@@ -1391,6 +1466,14 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
             {
+                /* #5984: a tag that matched nothing is an answer, not a missing collection. */
+                if (tagFilter.Active)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No Query Store query on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                }
+
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
                    so an Aborted or Exception filter is empty far more often than not, and falling through to the
                    chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
@@ -1471,7 +1554,7 @@ public sealed class DarlingMcpDataTools
                 replica_role = r.ReplicaRole
             });
 
-            return JsonSerializer.Serialize(new
+            var storePayload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -1508,7 +1591,22 @@ public sealed class DarlingMcpDataTools
                           + "carry no query_id or plan_id, and plan identity is what it exists to return."
                         : QueryStoreTableNote(effectiveStart, tablePlan.Value.StartBound),
                 queries = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #5984: the row's query tag, by its query_hash; an unmapped hash carries no `tag` member. */
+            if (storePayload["queries"] is JsonArray storeRows)
+            {
+                await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, storeRows.OfType<JsonObject>(),
+                    row => row["query_hash"]?.GetValue<string>(), cancellationToken);
+            }
+
+            /* #5984 round 1: the answer names the tag that cut its population (present only when a tag was sent). */
+            if (tagFilter.Named is { } storeTagName)
+            {
+                storePayload["tag_filter"] = storeTagName;
+            }
+
+            return storePayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -39,10 +40,11 @@ public sealed class DarlingMcpLongQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken);
+        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken, tag);
 
     /// <summary>
     /// #5244: the get_long_query_completions read over a LIST of databases. The MCP tool passes
@@ -58,7 +60,8 @@ public sealed class DarlingMcpLongQueryTools
         string? as_of,
         DatabaseFilter databaseFilter,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? tag = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -70,6 +73,13 @@ public sealed class DarlingMcpLongQueryTools
 
         try
         {
+            /* #5984: the query tag filter. A name no tag carries is an empty answer that says so; it never reads the store. */
+            var tagFilter = await QueryTagReadJoin.ResolveAsync(postgres, tag, cancellationToken);
+            if (tagFilter.Unknown)
+            {
+                return McpHelpers.StatusForDatabase("empty", QueryTagReadJoin.UnknownTagMessage(tagFilter.Requested!), databaseFilter.Describe());
+            }
+
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
 
@@ -77,7 +87,7 @@ public sealed class DarlingMcpLongQueryTools
                The reader's own LIMIT 200 was invisible to the caller, and `total_completions` published it as
                the window's count. */
             var rows = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, tagFilter, cancellationToken);
             if (rows.Count == 0)
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
@@ -104,9 +114,10 @@ public sealed class DarlingMcpLongQueryTools
                    this server in the window, and only then does the answer send the reader to the opt-in switch. With rows for other
                    databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a
                    filtered answer leaves the sentence off. */
-                var collectorMayBeOff = databaseFilter.IsAll || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
+                var collectorMayBeOff = (databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
                 return McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
+                        + (tagFilter.Active ? $" for query tag '{tagFilter.Requested}'" : "")
                         + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
                     databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
                     emptyNotice.AsHints());
@@ -148,7 +159,7 @@ public sealed class DarlingMcpLongQueryTools
                 query_identity = r.QueryIdentity
             });
 
-            var json = JsonSerializer.Serialize(new
+            var payloadNode = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -169,7 +180,22 @@ public sealed class DarlingMcpLongQueryTools
                 newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "duration_ms_desc",
                 completions = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #5984 round 1: the answer names the tag that cut its population, beside the database echo (present only when a tag was sent). */
+            if (tagFilter.Named is { } completionTagName)
+            {
+                payloadNode["tag_filter"] = completionTagName;
+            }
+
+            /* #5984: the row's query tag, by its query_hash; an unmapped hash carries no `tag` member. */
+            if (payloadNode["completions"] is JsonArray completionRows)
+            {
+                await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, completionRows.OfType<JsonObject>(),
+                    row => row["query_hash"]?.GetValue<string>(), cancellationToken);
+            }
+
+            var json = payloadNode.ToJsonString(McpHelpers.JsonOptions);
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;

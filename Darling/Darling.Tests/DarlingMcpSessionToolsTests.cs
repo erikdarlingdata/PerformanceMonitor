@@ -75,7 +75,14 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
     [InlineData("get_waiting_tasks", "server_name,hours_back,limit,as_of,database_name")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
-        Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
+        /* #5984: Darling gained an optional tag on get_active_queries ahead of Lite (#5992). The contract is
+           the one DarlingMcpBlockingToolsTests pins: every Lite name in Lite's relative order, and every
+           Darling-only extra optional, so a Lite-shaped call still works. */
+        var expected = expectedCsv.Split(',');
+        var actual = McpParams(toolName);
+        Assert.Equal(expected, actual.Select(p => p.Name).Where(n => expected.Contains(n, StringComparer.Ordinal)).ToArray());
+        foreach (var extra in actual.Where(p => !expected.Contains(p.Name, StringComparer.Ordinal)))
+            Assert.True(extra.Optional, $"{toolName}.{extra.Name} is Darling-only and must be optional");
     }
 
     [Fact]
