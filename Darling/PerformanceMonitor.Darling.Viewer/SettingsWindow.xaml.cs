@@ -1760,20 +1760,13 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
-    /// Refuses a save that would leave a signing key unreadable (#5998): a key is sealed for the stored generic URL text and
-    /// the generic proxy, and a route's key for the settings row's proxy. Throws <see cref="ViewerPasswordRefusedException"/>.
+    /// The sentence that refuses a save that would leave a signing key unreadable (#5998), or null: a key is sealed for the stored
+    /// generic URL text and the generic proxy, and a route's key for the settings row's proxy. It runs inside the save's own
+    /// transaction (<see cref="ViewerDataService.UpsertNotificationCheckingSigningKeysAsync"/>), on rows that transaction has locked.
     /// </summary>
-    private async Task RefuseSaveThatBreaksSigningKeysAsync(NotificationRow row)
-    {
-        var stored = await _dataService!.GetSettingsSigningKeyStateAsync();
-        var refusal = ViewerWebhookSigningKeys.SaveRefusal(stored, row.GenericUrl, row.GenericProxy, checkProxy: true)
-            ?? ViewerWebhookSigningKeys.RouteKeyRefusal(
-                await _dataService.GetRouteIdsHoldingSigningKeysAsync(), row.GenericProxy, stored?.Proxy ?? _loadedNotification.GenericProxy);
-        if (refusal is not null)
-        {
-            throw new ViewerPasswordRefusedException(refusal);
-        }
-    }
+    private string? SigningKeyRefusal(NotificationRow row, ViewerSigningKeyState? stored, System.Collections.Generic.IReadOnlyList<int> routeIdsHoldingKeys) =>
+        ViewerWebhookSigningKeys.SaveRefusal(stored, row.GenericUrl, row.GenericProxy, checkProxy: true)
+            ?? ViewerWebhookSigningKeys.RouteKeyRefusal(routeIdsHoldingKeys, row.GenericProxy, stored?.Proxy ?? _loadedNotification.GenericProxy);
 
     /// <summary>
     /// Seals the typed webhook values for the settings row (#5366): kept values stay as stored, anything typed is sealed to the
@@ -2354,10 +2347,9 @@ public partial class SettingsWindow : Window
                 }
 
                 await SealWebhookValuesAsync(notifyRow);
-                await RefuseSaveThatBreaksSigningKeysAsync(notifyRow);
                 var routeValuesNeedEnteringAgain = await RouteValuesNeedEnteringAgainAsync(notifyRow);
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
-                await _dataService.UpsertNotificationAsync(notifyRow);
+                await _dataService.UpsertNotificationCheckingSigningKeysAsync(notifyRow, (stored, ids) => SigningKeyRefusal(notifyRow, stored, ids));
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
                     QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps);
                 if (routeValuesNeedEnteringAgain)

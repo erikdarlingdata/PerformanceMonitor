@@ -23,11 +23,14 @@ internal sealed record WebhookOpenFailure(string Channel, string Text, bool Sign
 /// <summary>The webhook settings and routes with every sealed value opened, and the values that would not open.</summary>
 internal sealed class OpenedWebhooks
 {
-    public OpenedWebhooks(WebhooksConfig webhooks, IReadOnlyList<NotificationRoute> routes, IReadOnlyList<WebhookOpenFailure> failures)
+    public OpenedWebhooks(
+        WebhooksConfig webhooks, IReadOnlyList<NotificationRoute> routes, IReadOnlyList<WebhookOpenFailure> failures,
+        IReadOnlyList<string>? warnings = null)
     {
         Webhooks = webhooks;
         Routes = routes;
         Failures = failures;
+        Warnings = warnings ?? Array.Empty<string>();
     }
 
     public WebhooksConfig Webhooks { get; }
@@ -35,6 +38,10 @@ internal sealed class OpenedWebhooks
     public IReadOnlyList<NotificationRoute> Routes { get; }
 
     public IReadOnlyList<WebhookOpenFailure> Failures { get; }
+
+    /// <summary>Health texts for a saved value that was dropped without turning a channel off (#5998): a previous signing key
+    /// that would not open. The current key still signs. Never carries a key.</summary>
+    public IReadOnlyList<string> Warnings { get; }
 }
 
 /// <summary>
@@ -48,8 +55,10 @@ internal sealed class OpenedWebhooks
 internal static class DarlingWebhookSecrets
 {
     /// <summary>Opens <paramref name="stored"/> and <paramref name="routes"/> with <paramref name="ring"/>.</summary>
-    public static OpenedWebhooks Open(WebhooksConfig stored, IReadOnlyList<NotificationRoute> routes, IPasswordKeyRing ring)
+    public static OpenedWebhooks Open(WebhooksConfig stored, IReadOnlyList<NotificationRoute> routes, IPasswordKeyRing ring, DateTime? nowUtc = null)
     {
+        var now = nowUtc ?? DateTime.UtcNow;
+        var warnings = new List<string>();
         ArgumentNullException.ThrowIfNull(stored);
         ArgumentNullException.ThrowIfNull(ring);
         routes ??= Array.Empty<NotificationRoute>();
@@ -79,7 +88,7 @@ internal static class DarlingWebhookSecrets
            destination that was set up signed is never sent unsigned. */
         var signingFailuresBefore = failures.Count;
         opened.GenericSigning = OpenSigning(
-            stored.GenericSigning, stored.GenericUrl, row, stored.GenericProxy, "generic webhook signing key", ring, failures);
+            stored.GenericSigning, stored.GenericUrl, row, stored.GenericProxy, "generic webhook signing key", ring, failures, now, warnings);
         if (failures.Count > signingFailuresBefore)
         {
             opened.GenericUrl = "";
@@ -100,7 +109,7 @@ internal static class DarlingWebhookSecrets
                off for this route; the route's alerts do not go to the settings row's generic URL instead. */
             var routeSigningBefore = failures.Count;
             var routeSigning = OpenSigning(
-                route.GenericSigning, route.GenericUrl, routeRow, stored.GenericProxy, "generic webhook signing key" + where, ring, failures);
+                route.GenericSigning, route.GenericUrl, routeRow, stored.GenericProxy, "generic webhook signing key" + where, ring, failures, now, warnings);
             if (failures.Count > routeSigningBefore)
             {
                 generic = "";
@@ -135,7 +144,7 @@ internal static class DarlingWebhookSecrets
             }
         }
 
-        return new OpenedWebhooks(opened, openedRoutes, failures);
+        return new OpenedWebhooks(opened, openedRoutes, failures, warnings);
     }
 
     /// <summary>One route value. A sealed value that will not open comes back empty and its channel is added to
@@ -164,7 +173,7 @@ internal static class DarlingWebhookSecrets
     /// </summary>
     private static WebhookSigningKeys OpenSigning(
         WebhookSigningKeys? stored, string storedUrl, string row, string? proxy, string label,
-        IPasswordKeyRing ring, List<WebhookOpenFailure> failures)
+        IPasswordKeyRing ring, List<WebhookOpenFailure> failures, DateTime nowUtc, List<string> warnings)
     {
         if (stored is null || !stored.HasKey || string.IsNullOrWhiteSpace(storedUrl))
         {
@@ -172,10 +181,30 @@ internal static class DarlingWebhookSecrets
         }
 
         var key = OpenSigningValue(stored.Key, storedUrl, row, proxy, label, ring, failures);
-        var previous = string.IsNullOrWhiteSpace(stored.PreviousKey)
-            ? ""
-            : OpenSigningValue(stored.PreviousKey, storedUrl, row, proxy, "previous " + label, ring, failures);
-        return key is null || previous is null ? WebhookSigningKeys.None : new WebhookSigningKeys(key, previous, stored.PreviousUntilUtc);
+        if (key is null)
+        {
+            return WebhookSigningKeys.None;
+        }
+
+        /* The previous key is opened only while its window is open: past it, it signs nothing, so an unreadable one must not
+           matter. One that fails to open inside the window is dropped with a warning that names the route; the current key
+           still signs, so this never sends unsigned. The window end stays so the rotation date still shows. */
+        var previous = "";
+        if (stored.PreviousInWindow(nowUtc))
+        {
+            var discarded = new List<WebhookOpenFailure>();
+            var opened = OpenSigningValue(stored.PreviousKey, storedUrl, row, proxy, "previous " + label, ring, discarded);
+            if (opened is null)
+            {
+                warnings.Add($"The previous {label} could not be opened and was dropped. Posts are signed with the current key only.");
+            }
+            else
+            {
+                previous = opened;
+            }
+        }
+
+        return new WebhookSigningKeys(key, previous, stored.PreviousUntilUtc, stored.DatabaseClockAhead);
     }
 
     private static string? OpenSigningValue(
@@ -267,6 +296,7 @@ internal static class DarlingWebhookSecrets
             Add(k?.Key);
             Add(k?.PreviousKey);
             Add(k?.PreviousUntilUtc?.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(k is null ? null : System.Math.Round(k.DatabaseClockAhead.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         Add(status.CanSeal ? "1" : "0");
         Add(status.KeyId);

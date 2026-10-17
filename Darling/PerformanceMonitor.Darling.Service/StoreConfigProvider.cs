@@ -1741,8 +1741,23 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
         return (alerts, analysis);
     }
 
+    /// <summary>
+    /// How far the database's clock is ahead of this machine's, read once (#5998). The previous signing key's window end is written
+    /// on the database's clock, so the send compares it on that clock: the reader adds this to its own now. The read is timed around
+    /// its own round trip, so the midpoint is the instant the database answered.
+    /// </summary>
+    internal static async Task<TimeSpan> ReadDatabaseClockAheadAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var before = DateTime.UtcNow;
+        using var command = new NpgsqlCommand("SELECT now()", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+        var databaseNow = (DateTime)(await command.ExecuteScalarAsync(ct))!;
+        var after = DateTime.UtcNow;
+        return databaseNow.ToUniversalTime() - (before + (after - before) / 2);
+    }
+
     private static async Task<(SmtpConfig Smtp, WebhooksConfig Webhooks)> ReadNotificationAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        var clockAhead = await ReadDatabaseClockAheadAsync(connection, ct);
         using var command = new NpgsqlCommand(@"
 SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address,
        smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy,
@@ -1790,7 +1805,8 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             GenericSendResolutions = reader.GetBoolean(22),
             /* V193 (#5998): the generic URL's signing keys, sealed. DarlingWebhookSecrets.Open opens them. */
             GenericSigning = new WebhookSigningKeys(
-                reader.GetString(24), reader.GetString(25), reader.IsDBNull(26) ? null : reader.GetFieldValue<DateTime>(26)),
+                reader.GetString(24), reader.GetString(25), reader.IsDBNull(26) ? null : reader.GetFieldValue<DateTime>(26),
+                clockAhead),
         };
         return (smtp, webhooks);
     }
@@ -2177,6 +2193,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     internal static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
     {
         var routes = new List<NotificationRoute>();
+        var clockAhead = await ReadDatabaseClockAheadAsync(connection, ct);
         using (var command = new NpgsqlCommand(NotificationRoutesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
         using (var reader = await command.ExecuteReaderAsync(ct))
         {
@@ -2203,7 +2220,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     SendResolutions = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
                     /* V193 (#5998): the route's own generic URL's signing keys, sealed. */
                     GenericSigning = new WebhookSigningKeys(
-                        reader.GetString(16), reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetFieldValue<DateTime>(18)),
+                        reader.GetString(16), reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetFieldValue<DateTime>(18),
+                        clockAhead),
                 });
             }
         }

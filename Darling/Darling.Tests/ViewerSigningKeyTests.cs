@@ -131,15 +131,30 @@ public sealed class ViewerSigningKeyTests
     }
 }
 
-/// <summary>
-/// #5998 part 3, the web status answer: <c>GET /api/webhook-signing</c> carries whether a key is set, whether a rotation is in
-/// its window and when it ends, and never a key, sealed or opened. One clock: the same instant is published and asked.
+//// <summary>
+/// #5998 part 3, the web status answer: <c>GET /api/webhook-signing</c> carries whether a key is set (it opened), whether a stored key
+/// would not open, whether a rotation is in its window and when it ends, and never a key, sealed or opened. One clock: the same
+/// instant is published and asked.
 /// </summary>
 public sealed class WebhookSigningStatusTests
 {
     private static readonly DateTime Now = new(2026, 10, 16, 12, 0, 0, DateTimeKind.Utc);
-    private const string Secret = "whsec_c2VjcmV0LW5ldmVyLXNob3duLWluLWEtcmVzcG9uc2U=";
-    private const string SealedSecret = "seal:v1:ZmFrZS1zZWFsZWQtdGV4dA";
+    private static readonly PasswordPrivateKey RingKey = NewRingKey();
+    private const string SettingsUrl = "https://settings.test/hook-not-real";
+    private const string RouteUrl = "https://route.test/hook-not-real";
+
+    private static PasswordPrivateKey NewRingKey()
+    {
+        using var rsa = System.Security.Cryptography.RSA.Create(DarlingPasswordKeyFile.KeyBits);
+        return PasswordPrivateKey.FromPkcs8(rsa.ExportPkcs8PrivateKey());
+    }
+
+    private static string Seal(IPasswordKeyRing ring, string slot, string row, string value, string? storedUrl) =>
+        ring.Seal(value, PasswordBinding.ForWebhook(slot, row, "", storedUrl));
+
+    private static WebhookSigningKeys Keys(IPasswordKeyRing ring, string row, string storedUrl, string key, string? previous, DateTime? until) =>
+        new(Seal(ring, PasswordBinding.SigningKeySlot, row, key, storedUrl),
+            previous is null ? "" : Seal(ring, PasswordBinding.SigningKeySlot, row, previous, storedUrl), until);
 
     private static async Task<(int Status, JsonObject Body, string Raw)> GetAsync(CollectorRuntimeState state, DateTime now)
     {
@@ -164,16 +179,27 @@ public sealed class WebhookSigningStatusTests
     [Fact]
     public async Task TheAnswer_CarriesPresenceAndDates_ForTheSettingsRowAndRoutesWithKeys_AndNeverTheKey()
     {
+        var ring = DarlingPasswordKey.FromPrivateKey(RingKey);
         var until = Now.AddDays(3);
+        var current = WebhookSigning.NewKey();
+        var previous = WebhookSigning.NewKey();
+        var routeKey = WebhookSigning.NewKey();
+        var settingsUrl = Seal(ring, "generic", PasswordBinding.WebhookSettingsRow, SettingsUrl, null);
+        var routeRow = PasswordBinding.WebhookRouteRow(4);
+        var routeUrl = Seal(ring, "generic", routeRow, RouteUrl, null);
         var state = new CollectorRuntimeState();
         state.SigningStatus.Publish(
-            new WebhooksConfig { GenericSigning = new WebhookSigningKeys(Secret, Secret + "old", until) },
+            new WebhooksConfig
+            {
+                GenericUrl = settingsUrl,
+                GenericSigning = Keys(ring, PasswordBinding.WebhookSettingsRow, settingsUrl, current, previous, until),
+            },
             new[]
             {
-                new NotificationRoute(4, "Deadlocks Detected", "", "", "u", "", "", true) { GenericSigning = new WebhookSigningKeys(SealedSecret, "", null) },
+                new NotificationRoute(4, "Deadlocks Detected", "", "", routeUrl, "", "", true) { GenericSigning = Keys(ring, routeRow, routeUrl, routeKey, null, null) },
                 new NotificationRoute(5, "High CPU", "", "", "u", "", "", true),
             },
-            Now);
+            Now, ring);
 
         var (status, body, raw) = await GetAsync(state, Now);
 
@@ -181,37 +207,80 @@ public sealed class WebhookSigningStatusTests
         Assert.Equal("ok", (string?)body["status"]);
         var settings = body["settings"]!.AsObject();
         Assert.True((bool)settings["key_set"]!);
+        Assert.False((bool)settings["open_failed"]!);
         Assert.True((bool)settings["rotating"]!);
         Assert.Equal(until, DateTime.Parse((string)settings["rotation_ends_utc"]!, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime());
         Assert.Equal(until - WebhookSigning.RotationOverlap, DateTime.Parse((string)settings["last_rotated_utc"]!, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime());
         var route = Assert.Single(body["routes"]!.AsArray())!.AsObject();
         Assert.Equal(4, (int)route["route_id"]!);
         Assert.True((bool)route["key_set"]!);
+        Assert.False((bool)route["open_failed"]!);
         Assert.False((bool)route["rotating"]!);
         Assert.Null(route["rotation_ends_utc"]);
 
-        Assert.DoesNotContain(Secret, raw, StringComparison.Ordinal);
-        Assert.DoesNotContain(SealedSecret, raw, StringComparison.Ordinal);
+        foreach (var secret in new[] { current, previous, routeKey })
+        {
+            Assert.DoesNotContain(secret[WebhookSigning.KeyPrefix.Length..], raw, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("seal:v1", raw, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AKeyThatWillNotOpen_IsNotShownAsSet_AndTheAnswerSaysOpenFailed()
+    {
+        /* The key was sealed for another ring, as after a lost password key: the channel is off, so the page must not say it is signed. */
+        var other = DarlingPasswordKey.FromPrivateKey(NewRingKey());
+        var ring = DarlingPasswordKey.FromPrivateKey(RingKey);
+        var key = WebhookSigning.NewKey();
+        var settingsUrl = Seal(ring, "generic", PasswordBinding.WebhookSettingsRow, SettingsUrl, null);
+        var routeRow = PasswordBinding.WebhookRouteRow(6);
+        var routeUrl = Seal(ring, "generic", routeRow, RouteUrl, null);
+        var state = new CollectorRuntimeState();
+        state.SigningStatus.Publish(
+            new WebhooksConfig { GenericUrl = settingsUrl, GenericSigning = Keys(other, PasswordBinding.WebhookSettingsRow, settingsUrl, key, null, null) },
+            new[] { new NotificationRoute(6, "CPU", "", "", routeUrl, "", "", true) { GenericSigning = Keys(other, routeRow, routeUrl, key, null, null) } },
+            Now, ring);
+
+        var (_, body, raw) = await GetAsync(state, Now);
+
+        var settings = body["settings"]!.AsObject();
+        Assert.False((bool)settings["key_set"]!);
+        Assert.True((bool)settings["open_failed"]!);
+        var route = Assert.Single(body["routes"]!.AsArray())!.AsObject();
+        Assert.Equal(6, (int)route["route_id"]!);
+        Assert.False((bool)route["key_set"]!);
+        Assert.True((bool)route["open_failed"]!);
+        Assert.DoesNotContain(key[WebhookSigning.KeyPrefix.Length..], raw, StringComparison.Ordinal);
         Assert.DoesNotContain("seal:v1", raw, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task AfterTheWindow_NoRotationIsShown_AndAnUnpublishedBoardSaysSo()
     {
+        var ring = DarlingPasswordKey.FromPrivateKey(RingKey);
         var until = Now.AddDays(1);
+        var settingsUrl = Seal(ring, "generic", PasswordBinding.WebhookSettingsRow, SettingsUrl, null);
         var state = new CollectorRuntimeState();
         var unpublished = await GetAsync(state, Now);
         Assert.Equal("unavailable", (string?)unpublished.Body["status"]);
 
-        state.SigningStatus.Publish(new WebhooksConfig { GenericSigning = new WebhookSigningKeys(Secret, Secret + "old", until) }, Array.Empty<NotificationRoute>(), Now);
+        state.SigningStatus.Publish(
+            new WebhooksConfig
+            {
+                GenericUrl = settingsUrl,
+                GenericSigning = Keys(ring, PasswordBinding.WebhookSettingsRow, settingsUrl, WebhookSigning.NewKey(), WebhookSigning.NewKey(), until),
+            },
+            Array.Empty<NotificationRoute>(), Now, ring);
         var after = (await GetAsync(state, until.AddSeconds(1))).Body["settings"]!.AsObject();
         Assert.True((bool)after["key_set"]!);
         Assert.False((bool)after["rotating"]!);
         Assert.Null(after["rotation_ends_utc"]);
 
-        state.SigningStatus.Publish(new WebhooksConfig(), Array.Empty<NotificationRoute>(), Now);
+        state.SigningStatus.Publish(new WebhooksConfig(), Array.Empty<NotificationRoute>(), Now, ring);
         var none = (await GetAsync(state, Now)).Body["settings"]!.AsObject();
         Assert.False((bool)none["key_set"]!);
+        Assert.False((bool)none["open_failed"]!);
         Assert.False((bool)none["rotating"]!);
         Assert.Null(none["last_rotated_utc"]);
     }
@@ -314,6 +383,105 @@ public sealed class ViewerSigningKeyLiveTests
             Assert.False(removed.HasKey);
             Assert.Equal("", removed.PreviousKey);
             Assert.Null(removed.PreviousUntilUtc);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ASettingsSave_LocksTheKeyRowBetweenItsCheckAndItsWrite_SoAGenerateCannotLandInBetween()
+    {
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live signing key checks.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var private_ = PasswordPrivateKey.Generate();
+        var ring = DarlingPasswordKey.FromPrivateKey(private_);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            await using var other = new ViewerDataService(scratch.ConnectionString);
+            var sealer = new ViewerPasswordSealer(private_.PublicKey);
+            var first = NotificationRow.Defaults();
+            first.GenericUrl = Url;
+            ViewerWebhookSealing.ResolveSettingsRow(first, null, sealer, null);
+            await viewer.UpsertNotificationAsync(first, ct);
+
+            /* A save that changes the URL, with no key stored yet so the check passes. Inside the check-then-write window (the refusal
+               callback runs after the check's reads and before the write) another viewer generates a key for the old URL. With the
+               reads under FOR UPDATE that Generate waits for the save, then finds the URL changed and is refused; with plain reads it
+               would complete inside the window and leave a key sealed for the old URL. */
+            var second = NotificationRow.Defaults();
+            second.GenericUrl = Url + "-moved";
+            ViewerWebhookSealing.ResolveSettingsRow(second, null, sealer, null);
+            Task<string>? generate = null;
+            var finishedInsideTheWindow = false;
+            await viewer.UpsertNotificationCheckingSigningKeysAsync(second, (state, ids) =>
+            {
+                generate = Task.Run(() => other.GenerateSettingsSigningKeyAsync(sealer, ct), ct);
+                finishedInsideTheWindow = Task.WhenAny(generate, Task.Delay(TimeSpan.FromSeconds(2), ct)).GetAwaiter().GetResult() == generate;
+                return null;
+            }, ct);
+
+            Assert.False(finishedInsideTheWindow);
+            await Assert.ThrowsAsync<ViewerPasswordRefusedException>(() => generate!);
+            Assert.False((await viewer.GetSettingsSigningKeyStateAsync(ct))!.HasKey);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TheConfigRead_CarriesTheDatabaseClockOffset_OnEachDestinationsKeys()
+    {
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live signing key checks.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var private_ = PasswordPrivateKey.Generate();
+        var bodySucceeded = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            var sealer = new ViewerPasswordSealer(private_.PublicKey);
+            var row = NotificationRow.Defaults();
+            row.GenericUrl = Url;
+            ViewerWebhookSealing.ResolveSettingsRow(row, null, sealer, null);
+            await viewer.UpsertNotificationAsync(row, ct);
+            await viewer.GenerateSettingsSigningKeyAsync(sealer, ct);
+            var routeId = await viewer.SaveNotificationRouteSealedAsync(
+                new NotificationRouteRow { MetricMatch = "High CPU", GenericUrl = Url }, null, NotificationRow.Defaults(), sealer, null, ct);
+            await viewer.GenerateRouteSigningKeyAsync(routeId, sealer, ct);
+
+            /* The database is on this machine, so the offset is only the round trip's jitter. */
+            var view = await ViewAsync(scratch, ct);
+            Assert.InRange(view.Webhooks.GenericSigning!.DatabaseClockAhead, TimeSpan.FromSeconds(-30), TimeSpan.FromSeconds(30));
+            Assert.InRange(Assert.Single(view.NotificationRoutes).GenericSigning!.DatabaseClockAhead, TimeSpan.FromSeconds(-30), TimeSpan.FromSeconds(30));
 
             bodySucceeded = true;
         }

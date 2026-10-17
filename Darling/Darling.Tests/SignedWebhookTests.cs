@@ -93,6 +93,44 @@ public sealed class SignedWebhookSignatureTests
     }
 
     [Fact]
+    public void TheSampleReceiver_StillRejectsAReplay_FromASenderWhoseClockRunsFourMinutesAhead()
+    {
+        /* The id must outlive its own timestamp window, not five minutes from arrival: at arrival + 5:02 the post
+           (stamped arrival + 4:00) is only 1:02 from this clock and still passes the window check. */
+        var key = WebhookSigning.NewKey();
+        var arrival = new DateTime(2026, 10, 16, 12, 0, 0, DateTimeKind.Utc);
+        var body = Encoding.UTF8.GetBytes("{}");
+        var ts = WebhookSigning.UnixSeconds(arrival.AddMinutes(4));
+        var tsText = ts.ToString(CultureInfo.InvariantCulture);
+        var signature = WebhookSigning.Sign(new[] { key }, "msg_skew", ts, body);
+        var receiver = new SampleReceiver(key);
+
+        Assert.Equal(SampleReceiver.Result.Accepted, receiver.Verify("msg_skew", tsText, signature, body, arrival));
+        Assert.Equal(SampleReceiver.Result.Replayed, receiver.Verify("msg_skew", tsText, signature, body, arrival.AddMinutes(5).AddSeconds(2)));
+        Assert.Equal(SampleReceiver.Result.Replayed, receiver.Verify("msg_skew", tsText, signature, body, arrival.AddMinutes(9)));
+        Assert.Equal(SampleReceiver.Result.TooOld, receiver.Verify("msg_skew", tsText, signature, body, arrival.AddMinutes(9).AddSeconds(1)));
+    }
+
+    [Fact]
+    public void TheSampleReceiver_ReturnsFalseOnMalformedHeaders_InsteadOfThrowing()
+    {
+        var key = WebhookSigning.NewKey();
+        var now = new DateTime(2026, 10, 16, 12, 0, 0, DateTimeKind.Utc);
+        var body = Encoding.UTF8.GetBytes("{}");
+        var ts = WebhookSigning.UnixSeconds(now);
+        var tsText = ts.ToString(CultureInfo.InvariantCulture);
+        var good = WebhookSigning.Sign(new[] { key }, "msg_m", ts, body);
+        var receiver = new SampleReceiver(key);
+
+        Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("msg_m", "not-a-number", good, body, now));
+        Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("msg_m", "99999999999999999999", good, body, now));
+        Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("msg_m", "-5", good, body, now));
+        Assert.Equal(SampleReceiver.Result.BadSignature, receiver.Verify("msg_m", tsText, "v1,!!!not base64!!!", body, now));
+        Assert.Equal(SampleReceiver.Result.BadSignature, receiver.Verify("msg_m", tsText, "", body, now));
+        Assert.Equal(SampleReceiver.Result.Accepted, receiver.Verify("msg_m", tsText, "v1,%%% " + good, body, now));
+    }
+
+    [Fact]
     public void DuringTheOverlap_BothKeysSign_AndAfterSevenDays_OnlyTheNewKey()
     {
         /* One clock value; every instant below is derived from it (#3676). */
@@ -132,14 +170,15 @@ public sealed class SignedWebhookSignatureTests
         }
     }
 
-    /// <summary>The receiver check of docs/signed-webhooks.md, in C#.</summary>
+    /// <summary>The receiver check of docs/signed-webhooks.md, in C#. Keep it identical to the sample there.</summary>
     internal sealed class SampleReceiver
     {
-        public enum Result { Accepted, BadSignature, TooOld, Replayed }
+        public enum Result { Accepted, BadSignature, TooOld, Replayed, Malformed }
 
         private static readonly TimeSpan Tolerance = TimeSpan.FromMinutes(5);
         private readonly byte[] _key;
-        private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+        private readonly object _gate = new();
+        private readonly Dictionary<string, DateTime> _seen = new(StringComparer.Ordinal);
 
         public SampleReceiver(string secret)
         {
@@ -148,22 +187,45 @@ public sealed class SignedWebhookSignatureTests
 
         public Result Verify(string id, string timestamp, string signatureHeader, byte[] body, DateTime nowUtc)
         {
-            var sent = DateTimeOffset.FromUnixTimeSeconds(long.Parse(timestamp, CultureInfo.InvariantCulture)).UtcDateTime;
+            if (!long.TryParse(timestamp, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
+                || seconds > 253402300799)
+            {
+                return Result.Malformed;
+            }
+
+            var sent = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
             if ((nowUtc - sent).Duration() > Tolerance)
             {
                 return Result.TooOld;
             }
 
             var expected = HMACSHA256.HashData(_key, Encoding.UTF8.GetBytes(id + "." + timestamp + ".").Concat(body).ToArray());
-            var match = signatureHeader.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                .Where(s => s.StartsWith("v1,", StringComparison.Ordinal))
-                .Any(s => CryptographicOperations.FixedTimeEquals(Convert.FromBase64String(s[3..]), expected));
+            var match = false;
+            foreach (var part in signatureHeader.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var signature = new byte[64];
+                if (part.StartsWith("v1,", StringComparison.Ordinal)
+                    && Convert.TryFromBase64String(part[3..], signature, out var written)
+                    && CryptographicOperations.FixedTimeEquals(signature.AsSpan(0, written), expected))
+                {
+                    match = true;
+                }
+            }
+
             if (!match)
             {
                 return Result.BadSignature;
             }
 
-            return _seen.Add(id) ? Result.Accepted : Result.Replayed;
+            lock (_gate)
+            {
+                foreach (var old in _seen.Where(kv => nowUtc - kv.Value > Tolerance).Select(kv => kv.Key).ToList())
+                {
+                    _seen.Remove(old);
+                }
+
+                return _seen.TryAdd(id, sent) ? Result.Accepted : Result.Replayed;
+            }
         }
     }
 }
@@ -437,5 +499,119 @@ public sealed class SignedWebhookSendTests
             public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
                 lines.Enqueue(formatter(state, exception) + " " + exception);
         }
+    }
+}
+
+/// <summary>
+/// #5998: the previous key's window. A previous key past its window is never opened, so an unreadable one cannot turn the channel off;
+/// one that fails inside its window is dropped with a warning that names the route while the current key still signs; and the window
+/// end, written on the database's clock, is compared on that clock.
+/// </summary>
+public sealed class SignedWebhookWindowTests
+{
+    private static readonly DateTime Now = new(2026, 10, 16, 12, 0, 0, DateTimeKind.Utc);
+    private const string RouteUrl = "https://route.test/hook-not-real";
+    private static readonly PasswordPrivateKey RingKey = NewRingKey();
+
+    private static PasswordPrivateKey NewRingKey()
+    {
+        using var rsa = RSA.Create(DarlingPasswordKeyFile.KeyBits);
+        return PasswordPrivateKey.FromPkcs8(rsa.ExportPkcs8PrivateKey());
+    }
+
+    private static string Seal(IPasswordKeyRing ring, string slot, string row, string value, string? storedUrl) =>
+        ring.Seal(value, PasswordBinding.ForWebhook(slot, row, "", storedUrl));
+
+    /// <summary>A route whose current key opens with <paramref name="ring"/> and whose previous key was sealed by <paramref name="previousSealedBy"/>.</summary>
+    private static (OpenedWebhooks Opened, string Key, string Previous) OpenRoute(IPasswordKeyRing ring, IPasswordKeyRing previousSealedBy, DateTime until)
+    {
+        var key = WebhookSigning.NewKey();
+        var previous = WebhookSigning.NewKey();
+        var row = PasswordBinding.WebhookRouteRow(7);
+        var url = Seal(ring, "generic", row, RouteUrl, null);
+        var route = new NotificationRoute(7, "CPU", "", "", url, "", "", true)
+        {
+            GenericSigning = new WebhookSigningKeys(
+                Seal(ring, PasswordBinding.SigningKeySlot, row, key, url),
+                Seal(previousSealedBy, PasswordBinding.SigningKeySlot, row, previous, url),
+                until),
+        };
+        return (DarlingWebhookSecrets.Open(new WebhooksConfig(), new[] { route }, ring, Now), key, previous);
+    }
+
+    [Fact]
+    public void APreviousKeyPastItsWindow_IsNeverOpened_SoAnUnreadableOneDoesNotTurnTheChannelOff()
+    {
+        var ring = DarlingPasswordKey.FromPrivateKey(RingKey);
+        var other = DarlingPasswordKey.FromPrivateKey(NewRingKey());
+
+        var (opened, key, _) = OpenRoute(ring, other, Now.AddSeconds(-1));
+
+        Assert.Empty(opened.Failures);
+        Assert.Empty(opened.Warnings);
+        var route = Assert.Single(opened.Routes);
+        Assert.False(route.IsOffFor(NotificationRouter.GenericChannel));
+        Assert.NotEmpty(route.GenericUrl);
+        Assert.Equal(new[] { key }, route.GenericSigning!.LiveKeys(Now));
+    }
+
+    [Fact]
+    public void APreviousKeyThatWillNotOpenInsideItsWindow_IsDropped_WithAWarningNamingTheRoute_AndTheCurrentKeyStillSigns()
+    {
+        var ring = DarlingPasswordKey.FromPrivateKey(RingKey);
+        var other = DarlingPasswordKey.FromPrivateKey(NewRingKey());
+
+        var (opened, key, previous) = OpenRoute(ring, other, Now.AddDays(1));
+
+        Assert.Empty(opened.Failures);
+        var warning = Assert.Single(opened.Warnings);
+        Assert.Contains("route 7", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain(previous[WebhookSigning.KeyPrefix.Length..], warning, StringComparison.Ordinal);
+        Assert.DoesNotContain(key[WebhookSigning.KeyPrefix.Length..], warning, StringComparison.Ordinal);
+        var route = Assert.Single(opened.Routes);
+        Assert.False(route.IsOffFor(NotificationRouter.GenericChannel));
+        Assert.NotEmpty(route.GenericUrl);
+        Assert.Equal(new[] { key }, route.GenericSigning!.LiveKeys(Now));
+    }
+
+    [Fact]
+    public void APreviousKeyThatOpensInsideItsWindow_StillSignsBesideTheCurrentKey()
+    {
+        var ring = DarlingPasswordKey.FromPrivateKey(RingKey);
+
+        var (opened, key, previous) = OpenRoute(ring, ring, Now.AddDays(1));
+
+        Assert.Empty(opened.Warnings);
+        Assert.Equal(new[] { key, previous }, Assert.Single(opened.Routes).GenericSigning!.LiveKeys(Now));
+    }
+
+    [Fact]
+    public void TwoReadsOfAnUnchangedRow_AreEqual_WhateverClockOffsetEachMeasured()
+    {
+        var until = Now;
+        var a = new WebhookSigningKeys("k", "p", until, TimeSpan.FromMilliseconds(3));
+        var b = new WebhookSigningKeys("k", "p", until, TimeSpan.FromMilliseconds(9));
+
+        Assert.Equal(a, b);
+        Assert.Equal(a.GetHashCode(), b.GetHashCode());
+        Assert.NotEqual(a, new WebhookSigningKeys("k", "p", until.AddSeconds(1), TimeSpan.FromMilliseconds(3)));
+    }
+
+    [Fact]
+    public void TheWindowEnd_IsComparedOnTheDatabaseClock_NotTheServiceClock()
+    {
+        /* One instant: the window end. The service clock is five minutes behind it; the database's is one second past it. */
+        var until = Now;
+        var serviceNow = until.AddMinutes(-5);
+        var current = WebhookSigning.NewKey();
+        var previous = WebhookSigning.NewKey();
+
+        var databaseOneSecondPast = new WebhookSigningKeys(current, previous, until, TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
+        var databaseOneSecondBefore = new WebhookSigningKeys(current, previous, until, TimeSpan.FromMinutes(5) - TimeSpan.FromSeconds(1));
+        var clocksAgree = new WebhookSigningKeys(current, previous, until);
+
+        Assert.Equal(new[] { current }, databaseOneSecondPast.LiveKeys(serviceNow));
+        Assert.Equal(new[] { current, previous }, databaseOneSecondBefore.LiveKeys(serviceNow));
+        Assert.Equal(new[] { current, previous }, clocksAgree.LiveKeys(serviceNow));
     }
 }

@@ -226,12 +226,14 @@ WHERE route_id = $1";
         }
     }
 
-    /// <summary>Whether the route holds a signing key sealed for a stored URL text other than <paramref name="newUrlText"/> (#5998).</summary>
+    /// <summary>Whether the route holds a signing key sealed for a stored URL text other than <paramref name="newUrlText"/> (#5998).
+    /// The read takes the row's lock (<c>FOR UPDATE</c>) and the caller's transaction keeps it to the commit, so a Generate in another
+    /// viewer waits, then finds the URL changed and is refused: no key is left tied to the old URL.</summary>
     private static async Task<bool> RouteKeyWouldBreakAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string newUrlText, CancellationToken cancellationToken)
     {
         await using var keyRead = new NpgsqlCommand(
-            "SELECT signing_key <> '', generic_url FROM config_notification_routes WHERE route_id = $1", connection, transaction);
+            "SELECT signing_key <> '', generic_url FROM config_notification_routes WHERE route_id = $1 FOR UPDATE", connection, transaction);
         keyRead.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         keyRead.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
         await using var keyReader = await keyRead.ExecuteReaderAsync(cancellationToken);

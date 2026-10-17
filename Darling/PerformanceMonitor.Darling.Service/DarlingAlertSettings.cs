@@ -95,6 +95,15 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
                     }
                 }
 
+                foreach (var warning in opened.Warnings)
+                {
+                    now.Add(warning);
+                    if (!_reportedFailures.Contains(warning))
+                    {
+                        _logger?.LogWarning("{Warning}", warning);
+                    }
+                }
+
                 _reportedFailures = now;
                 _opened = opened;
                 _openedSignature = signature;
@@ -115,6 +124,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
                 texts.Add(failure.Text);
             }
 
+            texts.AddRange(Opened.Warnings);
             return texts;
         }
     }

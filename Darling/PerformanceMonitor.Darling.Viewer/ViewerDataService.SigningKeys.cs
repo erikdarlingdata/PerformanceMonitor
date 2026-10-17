@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    private const string SettingsSigningStateSql =
+    internal const string SettingsSigningStateSql =
         "SELECT signing_key, previous_signing_key, previous_signing_key_until, generic_url, generic_proxy FROM config_notification WHERE id = 1";
 
     private const string RouteSigningStateSql =
@@ -85,7 +85,7 @@ WHERE route_id = $5 AND generic_url = $2
         return await ReadSigningStateAsync(command, cancellationToken);
     }
 
-    private static async Task<ViewerSigningKeyState?> ReadSigningStateAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    internal static async Task<ViewerSigningKeyState?> ReadSigningStateAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))

@@ -68,13 +68,15 @@ Use the body bytes exactly as they arrived. If you parse the JSON and then write
 
 When you make a new key for a URL that already has one, Darling keeps the old key for 7 days. During those 7 days, each post carries two signatures: one from the new key and one from the old key. A receiver that still has the old key continues to accept posts. Put the new key into your receiver during those 7 days. After 7 days, Darling stops using the old key.
 
+If Darling cannot read the old key during those 7 days, it drops it. It then signs with the new key only and says so in the service log.
+
 ## What the receiver must check
 
 Darling only signs. The receiver must do these checks:
 
 1. Find a signature in `webhook-signature` that matches the hash you compute with your key. If none matches, reject the post.
 2. If `webhook-timestamp` is more than 5 minutes from your own clock, reject the post. This stops an old post from being sent again later.
-3. Keep the `webhook-id` values that you accepted in the last 5 minutes. Reject a post whose id you already accepted. Darling uses a new id for each post.
+3. Keep each `webhook-id` that you accepted until the post's own `webhook-timestamp` is more than 5 minutes from your clock. Reject a post whose id you already accepted. Count the time from the timestamp in the post, not from when it arrived. A sender whose clock runs ahead of yours sends timestamps that stay valid longer. Keep the id just as long. Darling uses a new id for each post.
 
 Compare signatures with a constant-time comparison, such as `CryptographicOperations.FixedTimeEquals` in .NET or `hmac.compare_digest` in Python.
 
@@ -91,6 +93,10 @@ public sealed class DarlingWebhookReceiver
 {
     private static readonly TimeSpan Tolerance = TimeSpan.FromMinutes(5);
     private readonly byte[] _key;
+    private readonly object _gate = new();
+
+    // Each accepted id, with the timestamp the post carried. An id stays until that timestamp
+    // is outside the window, because until then the post could still be sent again and pass.
     private readonly Dictionary<string, DateTime> _seen = new(StringComparer.Ordinal);
 
     public DarlingWebhookReceiver(string secret)
@@ -102,7 +108,13 @@ public sealed class DarlingWebhookReceiver
     /// <summary>True when the post is from Darling, is fresh, and was not seen before.</summary>
     public bool Verify(string id, string timestamp, string signatureHeader, byte[] body, DateTime nowUtc)
     {
-        var sent = DateTimeOffset.FromUnixTimeSeconds(long.Parse(timestamp, CultureInfo.InvariantCulture)).UtcDateTime;
+        if (!long.TryParse(timestamp, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
+            || seconds > 253402300799)
+        {
+            return false;
+        }
+
+        var sent = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
         if ((nowUtc - sent).Duration() > Tolerance)
         {
             return false;
@@ -110,20 +122,32 @@ public sealed class DarlingWebhookReceiver
 
         var input = Encoding.UTF8.GetBytes(id + "." + timestamp + ".").Concat(body).ToArray();
         var expected = HMACSHA256.HashData(_key, input);
-        var match = signatureHeader.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Where(s => s.StartsWith("v1,", StringComparison.Ordinal))
-            .Any(s => CryptographicOperations.FixedTimeEquals(Convert.FromBase64String(s[3..]), expected));
+        var match = false;
+        foreach (var part in signatureHeader.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var signature = new byte[64];
+            if (part.StartsWith("v1,", StringComparison.Ordinal)
+                && Convert.TryFromBase64String(part[3..], signature, out var written)
+                && CryptographicOperations.FixedTimeEquals(signature.AsSpan(0, written), expected))
+            {
+                match = true;
+            }
+        }
+
         if (!match)
         {
             return false;
         }
 
-        foreach (var old in _seen.Where(kv => nowUtc - kv.Value > Tolerance).Select(kv => kv.Key).ToList())
+        lock (_gate)
         {
-            _seen.Remove(old);
-        }
+            foreach (var old in _seen.Where(kv => nowUtc - kv.Value > Tolerance).Select(kv => kv.Key).ToList())
+            {
+                _seen.Remove(old);
+            }
 
-        return _seen.TryAdd(id, nowUtc);
+            return _seen.TryAdd(id, sent);
+        }
     }
 }
 ```

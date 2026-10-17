@@ -22,8 +22,12 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 /// <param name="Key">The current key, or empty for none.</param>
 /// <param name="PreviousKey">The key the current one replaced, or empty for none.</param>
-/// <param name="PreviousUntilUtc">When the previous key stops being sent, in UTC, or null.</param>
-public sealed record WebhookSigningKeys(string Key, string PreviousKey, DateTime? PreviousUntilUtc)
+/// <param name="PreviousUntilUtc">When the previous key stops being sent, in UTC, or null. The store writes it on the
+/// database's clock.</param>
+/// <param name="DatabaseClockAhead">How far the database's clock was ahead of the reader's when the row was read (zero when
+/// the two agree or the reader never measured it). A window end is compared on the database's clock, the clock that wrote
+/// it, so skew between the two machines does not move the 7-day cutoff (#5998).</param>
+public sealed record WebhookSigningKeys(string Key, string PreviousKey, DateTime? PreviousUntilUtc, TimeSpan DatabaseClockAhead = default)
 {
     /// <summary>No key: the destination is sent unsigned (D4: signing is on once a key exists).</summary>
     public static readonly WebhookSigningKeys None = new("", "", null);
@@ -43,13 +47,31 @@ public sealed record WebhookSigningKeys(string Key, string PreviousKey, DateTime
             return Array.Empty<string>();
         }
 
-        if (!string.IsNullOrWhiteSpace(PreviousKey) && PreviousUntilUtc is { } until && nowUtc < until)
+        if (PreviousInWindow(nowUtc))
         {
             return new[] { Key, PreviousKey };
         }
 
         return new[] { Key };
     }
+
+    /// <summary>
+    /// Whether a previous key is set and its window is still open at <paramref name="nowUtc"/> (the reader's clock): the
+    /// comparison is made on the database's clock, which wrote the window end.
+    /// </summary>
+    public bool PreviousInWindow(DateTime nowUtc) =>
+        !string.IsNullOrWhiteSpace(PreviousKey) && PreviousUntilUtc is { } until && nowUtc + DatabaseClockAhead < until;
+
+    /// <summary>Equal when the keys and the window end are equal. The clock offset is a measurement that differs a little on every
+    /// read of the same row, so two reads of an unchanged row must still compare equal.</summary>
+    public bool Equals(WebhookSigningKeys? other) =>
+        other is not null
+        && string.Equals(Key, other.Key, StringComparison.Ordinal)
+        && string.Equals(PreviousKey, other.PreviousKey, StringComparison.Ordinal)
+        && PreviousUntilUtc == other.PreviousUntilUtc;
+
+    /// <inheritdoc />
+    public override int GetHashCode() => HashCode.Combine(Key, PreviousKey, PreviousUntilUtc);
 
     /// <summary>Never prints a key.</summary>
     public override string ToString() =>

@@ -1193,6 +1193,7 @@ const ROUTES_NOTE =
 export function signingStatusLines(data) {
   if (!data || data.status !== "ok") return [];
   const one = (label, d) => {
+    if (d && d.open_failed === true) return label + ": the signing key could not be opened, so posts to this destination are not sent. Generate a new key in the desktop Settings window, or remove it.";
     if (!d || d.key_set !== true) return label + ": no signing key. Posts are not signed.";
     let t = label + ": signing key set. Posts are signed.";
     if (d.rotating === true && d.rotation_ends_utc) t += " A rotation is in its window: both keys sign until " + d.rotation_ends_utc + ".";
