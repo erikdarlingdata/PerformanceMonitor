@@ -68,6 +68,12 @@ public sealed class InvestigationEvidenceCaptureLiveTests
             var second = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "top_statements");
             Assert.Equal(first.ContentJson, second.ContentJson);
             Assert.Equal(first.CapturedAtUtc, second.CapturedAtUtc);
+
+            /* The store itself refuses to rewrite a section that is no longer pending, whoever asks. */
+            await setup.Requests.RecordEvidenceAsync(requestId, ServerId,
+                new[] { new InvestigationEvidenceWrite("top_statements", "ready", "{\"rows\":[]}") }, ct);
+            var third = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "top_statements");
+            Assert.Equal(first.ContentJson, third.ContentJson);
         });
     }
 
