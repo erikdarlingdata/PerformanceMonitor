@@ -448,7 +448,7 @@ public sealed class DarlingMcpServerTagTools
 
     /// <summary>Parses update_server_tag's <c>changes_json</c> the way update_mute_rule parses its body: a
     /// whitelist, the first error wins, and nothing is written when any field is bad.</summary>
-    private static (ServerTagEdit? Edit, string? Error, string? Code) ParseChanges(string? changesJson)
+    internal static (ServerTagEdit? Edit, string? Error, string? Code) ParseChanges(string? changesJson)
     {
         if (string.IsNullOrWhiteSpace(changesJson))
         {

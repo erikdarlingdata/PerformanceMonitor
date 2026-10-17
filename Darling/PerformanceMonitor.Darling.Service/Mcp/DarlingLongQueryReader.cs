@@ -85,6 +85,7 @@ internal static class DarlingLongQueryReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        /*TAG:hash:query_hash*/
         ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
         LIMIT $4
         """;
@@ -103,13 +104,22 @@ internal static class DarlingLongQueryReader
     /// <para><paramref name="databases"/> (#5244) narrows the read to the chosen databases BEFORE the cap, so the
     /// page is the slowest N of those databases. <see cref="DatabaseFilter.All"/> (the default) is every database.</para>
     /// </summary>
+    public static Task<List<LongQueryReadRow>> GetRecentLongQueryCompletionsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default) =>
+        GetRecentLongQueryCompletionsAsync(postgres, serverId, startUtc, endUtc, cap, databases, tags: null, cancellationToken);
+
+    /// <summary>
+    /// The same read narrowed to a query tag (#5984): <paramref name="tags"/> keeps only completions whose <c>query_hash</c> carries the tag
+    /// (or a tag beneath it), or none, in the statement and ahead of the cap. Null is no tag filter.
+    /// </summary>
     public static async Task<List<LongQueryReadRow>> GetRecentLongQueryCompletionsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         var rows = new List<LongQueryReadRow>();
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(LongQueryCompletionsSql, connection);
+        var sql = QueryTagReadJoin.Apply(LongQueryCompletionsSql, serverId, tags);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);

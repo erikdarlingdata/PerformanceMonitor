@@ -70,7 +70,7 @@ public sealed class EmptyAnswerDatabaseEchoTests
 
     /// <summary>L2, the other tools: no empty answer of theirs is built without the echo.</summary>
     [Theory]
-    [InlineData("DarlingMcpLongQueryTools.cs", 1)]
+    [InlineData("DarlingMcpLongQueryTools.cs", 2)] // #5984: the second is the unknown query tag name, which echoes the database filter too.
     [InlineData("DarlingMcpPlanCorrectionTools.cs", 1)]
     [InlineData("DarlingMcpQueryStoreClutterTools.cs", 3)] // #5633 review (finding D): the third is the empty page naming the databases the read left out; it keeps the database echo.
     public void EmptyAnswers_GoThroughStatusForDatabase(string file, int expected)
@@ -91,7 +91,7 @@ public sealed class EmptyAnswerDatabaseEchoTests
         var source = Tool("DarlingMcpLongQueryTools.cs");
 
         /* Round 2: the sentence follows the (unfiltered) window-notice probe, so a filtered answer keeps it only when the store holds no row. */
-        Assert.Contains("var collectorMayBeOff = databaseFilter.IsAll || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);", source, StringComparison.Ordinal);
+        Assert.Contains("var collectorMayBeOff = (databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);", source, StringComparison.Ordinal);
         Assert.Contains("(collectorMayBeOff ? \". The long_query_completions collector is opt-in (default OFF)", source, StringComparison.Ordinal);
     }
 }

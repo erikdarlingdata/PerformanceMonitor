@@ -79,7 +79,7 @@ internal static class DarlingMcpInstructions
     /// The census paragraph for a server that serves <paramref name="served"/> out of <paramref name="catalog"/>.
     /// Every figure comes from the two name sets: the total, the Lite overlap (<see cref="LiteToolNames"/>), and
     /// what each write switch adds. The family list names only families that still have a tool served: with the
-    /// writes off, the server-tag and onboarding tools (all writes) are gone.
+    /// writes off, the server-tag and onboarding tools (all writes) are gone, while the query-tag read stays.
     /// </summary>
     internal static string ToolCensus(IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
     {
@@ -125,10 +125,10 @@ internal static class DarlingMcpInstructions
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
         var families = adminServed
-            ? "Custom Views, custom-alert-rule, alert-tuning, server-tag, onboarding and investigation-wait tools"
+            ? "Custom Views, custom-alert-rule, alert-tuning, server/query-tag, onboarding and investigation-wait tools"
             : writesServed
-                ? "Custom Views, custom-alert-rule, alert-tuning, server-tag and investigation-wait tools"
-                : "the Custom Views and custom-alert-rule reads and the investigation-wait tool";
+                ? "Custom Views, custom-alert-rule, alert-tuning, server/query-tag and investigation-wait tools"
+                : "the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
@@ -142,8 +142,8 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 190 tools. 95 are the same names Lite exposes. The remaining 95 are unique to Darling: " +
-        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag, " +
+        "This server exposes 201 tools. 95 are the same names Lite exposes. The remaining 106 are unique to Darling: " +
+        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
 
@@ -195,7 +195,7 @@ internal static class DarlingMcpInstructions
     private const string BodyHead = """
         ## How Data Is Collected
 
-        The Darling service collects 24/7, every 1-15 minutes by collector. Data is only as fresh as the last collection. `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
+        The Darling service collects 24/7, every 1-15 minutes by collector. `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
 
         ## Tools
         """;

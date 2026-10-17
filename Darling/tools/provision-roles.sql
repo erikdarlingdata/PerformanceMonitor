@@ -54,7 +54,7 @@
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
--- V117, the query-tag tables (step 3k, #5977) are V192, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 and the Level 2 tables (step 3j: config_threshold_overrides and investigation_feedback, #5909) are V191 -- so re-run this script after upgrading past each.
+-- V117, the query-tag tables (step 3k, #5977) are V192, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 and the Level 2 tables (step 3j: config_threshold_overrides and investigation_feedback, #5909) are V191 and the Phase C tables (step 3l: investigation_evidence, investigation_signature_days and investigation_signature_merges, #5997) are V193, as are the signing key and fallback route columns the read carve above names -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
@@ -614,6 +614,27 @@ GRANT SELECT (slack_send_resolutions, teams_send_resolutions, generic_send_resol
 $v187$;
    END IF;
 END $$;
+-- V193 (#5997): when the previous webhook signing key stops being sent, on the settings row, and on a route that and the
+-- fallback route. Non-secret. The signing keys (signing_key, previous_signing_key) are deliberately NOT granted: whoever
+-- holds one can forge a signed send. Guarded on the column, so a store below V193 (or without the routes table) still
+-- commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_notification')
+                AND attname = 'previous_signing_key_until' AND NOT attisdropped) THEN
+      EXECUTE $v193$
+GRANT SELECT (previous_signing_key_until) ON config.config_notification TO viewer;
+$v193$;
+   END IF;
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_notification_routes')
+                AND attname = 'fallback_route_id' AND NOT attisdropped) THEN
+      EXECUTE $v193r$
+GRANT SELECT (fallback_route_id, previous_signing_key_until) ON config.config_notification_routes TO viewer;
+$v193r$;
+   END IF;
+END $$;
 
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
@@ -679,6 +700,27 @@ BEGIN
 GRANT SELECT (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
     ON config.config_notification TO mcp;
 $v187$;
+   END IF;
+END $$;
+-- V193 (#5997): when the previous webhook signing key stops being sent, on the settings row, and on a route that and the
+-- fallback route. Non-secret. The signing keys (signing_key, previous_signing_key) are deliberately NOT granted: whoever
+-- holds one can forge a signed send. Guarded on the column, so a store below V193 (or without the routes table) still
+-- commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_notification')
+                AND attname = 'previous_signing_key_until' AND NOT attisdropped) THEN
+      EXECUTE $v193$
+GRANT SELECT (previous_signing_key_until) ON config.config_notification TO mcp;
+$v193$;
+   END IF;
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_notification_routes')
+                AND attname = 'fallback_route_id' AND NOT attisdropped) THEN
+      EXECUTE $v193r$
+GRANT SELECT (fallback_route_id, previous_signing_key_until) ON config.config_notification_routes TO mcp;
+$v193r$;
    END IF;
 END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
@@ -1825,6 +1867,26 @@ BEGIN
    GRANT DELETE ON config.query_tag_assignments TO viewer;
    GRANT DELETE ON config.query_tag_rules TO viewer;
    GRANT DELETE ON config.query_tag_map TO viewer;
+END $do$;
+
+-- 3l. Phase C tables (V193, #5997), mirroring managed provisioning's section 10f grant for grant. Only the store owner (the
+--     service) writes them. REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege from PUBLIC
+--     and the three roles, and SELECT goes back to all three: the web dashboard and the MCP tools read them. A later slice that
+--     lets a role write one adds that single grant here and in managed section 10f.
+--     The three tables are created by V193: on a store below it the block warns and skips, so the rest of the script still
+--     runs; re-run the script once the service has migrated the store to V193.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_evidence') IS NULL
+      OR pg_catalog.to_regclass('config.investigation_signature_days') IS NULL
+      OR pg_catalog.to_regclass('config.investigation_signature_merges') IS NULL THEN
+      RAISE WARNING 'The Phase C tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges FROM PUBLIC, admin, viewer, mcp CASCADE;
+   GRANT SELECT ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges TO admin, viewer;
+   GRANT SELECT ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges TO mcp;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
