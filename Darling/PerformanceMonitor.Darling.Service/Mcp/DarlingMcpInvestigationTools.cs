@@ -664,8 +664,9 @@ public sealed class DarlingMcpInvestigationTools
                 InvestigationSubmitOutcome.NotOpen => InvestigationToolCore.Status("not_open", "The request is closed."),
                 InvestigationSubmitOutcome.NotFound => InvestigationToolCore.Status("not_found", $"No investigation request has id {requestId}."),
                 InvestigationSubmitOutcome.AgentIdInvalid => InvestigationToolCore.Status("agent_id_invalid", "The claim's agent id is not valid. " + InvestigationRules.AgentIdRule),
-                InvestigationSubmitOutcome.FollowUpLimit => McpHelpers.Refusal("follow_up_at",
-                    $"The report was not stored: this request's route already holds {InvestigationReportFields.MaxPendingFollowUpsPerRoute} pending follow-ups. Submit without follow_up_at, or wait for one to open."),
+                InvestigationSubmitOutcome.FollowUpLimit => McpHelpers.Status("refused",
+                    $"The report was not stored: this request's route already holds {InvestigationReportFields.MaxPendingFollowUpsPerRoute} pending follow-ups. Submit without follow_up_at, or wait for one to open.",
+                    new { parameter = "follow_up_at", cap = InvestigationReportFields.MaxPendingFollowUpsPerRoute }),
                 _ => InvestigationToolCore.Status("journal_capped",
                     $"The request already holds {InvestigationRules.MaxAgentJournalRows} agent journal rows; the report was refused."),
             };
