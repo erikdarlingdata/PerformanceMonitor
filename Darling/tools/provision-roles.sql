@@ -1806,12 +1806,24 @@ BEGIN
    GRANT INSERT, DELETE ON config.investigation_notes TO admin;
    GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
+END $do$;
 
-   -- #6003 review: the journal is the request event log the service signs and delivers, and mcp and admin hold INSERT
-   --     on it, so this trigger (managed provisioning's BuildJournalEventRulesSql, text for text) refuses a row from any
-   --     role but the owner that is an event or a delivery or fallback mark (but for a practice request's one opened row,
-   --     which the Viewer writes), that carries an event's or a mark's once key, or that is dated more than five minutes
-   --     ahead of the store's clock.
+-- 3i (continued). #6003 review: the journal is the request event log the service signs and delivers, and mcp and admin
+--     hold INSERT on it, so this trigger (managed provisioning's BuildJournalEventRulesSql, text for text) refuses a row
+--     from any role but the owner that is an event or a delivery or fallback mark (but for a practice request's one
+--     opened row, which the Viewer writes), that carries an event's or a mark's once key, or that is dated more than five
+--     minutes ahead of the store's clock. It reads V191's practice_of, so on a store below V191 the block warns and skips;
+--     re-run the script once the service has migrated the store.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_journal') IS NULL
+      OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                     WHERE attrelid = pg_catalog.to_regclass('config.investigation_requests')
+                       AND attname = 'practice_of' AND NOT attisdropped) THEN
+      RAISE WARNING 'The investigation journal rules were skipped: the store is below V191. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
    EXECUTE $ddl$
 CREATE OR REPLACE FUNCTION config.investigation_journal_owner_rows()
 RETURNS trigger
