@@ -3652,7 +3652,9 @@ LIMIT 1";
         /* #6001: the evidence capture, on its own tick. It reads the store only and opens no connection to a monitored server. */
         var investigationEvidenceLoop = RunInvestigationEvidenceLoopAsync(
             new PerformanceMonitor.Darling.Service.Investigations.InvestigationEvidenceCapture(
-                investigationPostgres, investigationStore, _logger), stoppingToken);
+                investigationPostgres, investigationStore, _logger,
+                collectorIntervalMinutes: (collector, serverId) => PerformanceMonitor.Collectors.CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+                    StoreConfigProvider.ResolveSchedule(collector, serverId, _scheduleOverrides).FrequencyMinutes)), stoppingToken);
 
         /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and

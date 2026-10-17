@@ -181,6 +181,130 @@ public sealed class InvestigationEvidenceCaptureLiveTests
         });
     }
 
+    /* #6001 slow collectors. These four run on the CODE-DEFAULT schedule (query_store_health hourly, the other four collectors every
+       one to five minutes), so query_store's grace is two hours and the other sections' is the base twenty minutes. Every other
+       fact in this class runs with every collector at five minutes, so the base grace governs all five sections there. */
+
+    /// <summary>Opens a High CPU request, every collector but the hourly Query Store health has completed a run past the window end,
+    /// and the first pass has run: four sections ready, query_store pending, nothing journaled yet (the base grace has not passed).</summary>
+    private static async Task<Guid> OpenWithOnlyTheHourlyCollectorMissingAsync(Setup setup, CancellationToken ct)
+    {
+        var requestId = (await setup.Requests.OpenOrJoinAsync(HighCpu(), ct)).RequestId!.Value;
+        foreach (var collector in InvestigationEvidenceCapture.SectionCollectors.Values.Where(c => c != "query_store_health"))
+            await PlantRunAsync(setup.Connection, ct, collector, WindowEnd.AddSeconds(5));
+        await setup.Capture.CaptureOnceAsync(ct);
+
+        var evidence = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+        Assert.Equal(4, evidence.Count(r => r.State == "ready"));
+        Assert.Equal("pending", evidence.Single(r => r.Section == "query_store").State);
+        Assert.Equal(0, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+        return requestId;
+    }
+
+    private static async Task<(string[] Ready, string[] NotCollected, string[] Pending)> JournalDetailAsync(Setup setup, Guid requestId, CancellationToken ct)
+    {
+        var detail = JsonNode.Parse(await EvidenceReadyDetailAsync(setup.Connection, requestId, ct))!;
+        static string[] Names(JsonNode? node) =>
+            node is null ? [] : node.AsArray().Select(n => n!.GetValue<string>()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        return (Names(detail["sections"]), Names(detail["not_collected"]), Names(detail["pending"]));
+    }
+
+    [Fact]
+    public async Task AnHourlyCollectorWithNoRunAtTwentyMinutes_DoesNotHoldEvidenceReadyBack_AndIsNamedPending_NotNotCollected()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = await OpenWithOnlyTheHourlyCollectorMissingAsync(setup, ct);
+
+            setup.Clock.Advance(InvestigationEvidenceCapture.PendingGrace + TimeSpan.FromMinutes(1));
+            await setup.Capture.CaptureOnceAsync(ct);
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+            var (ready, notCollected, pending) = await JournalDetailAsync(setup, requestId, ct);
+            Assert.Equal(new[] { "active_requests", "jobs", "top_statements", "waits" }, ready);
+            Assert.Equal(new[] { "query_store" }, pending);
+            Assert.Empty(notCollected);
+
+            var queryStore = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store");
+            Assert.Equal("pending", queryStore.State);
+            Assert.Null(queryStore.ContentJson);
+            /* The request stays a capture candidate: the table allows no other state for it than pending. */
+            Assert.Equal("pending", await RequestEvidenceStateAsync(setup.Connection, requestId, ct));
+        }, codeDefaultSchedule: true);
+    }
+
+    [Fact]
+    public async Task TheHourlyCollectorsRunAtFiftyMinutes_FlipsQueryStoreToReadyInPlace_WithItsRows_AndTheJournalKeepsOneEntry()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = await OpenWithOnlyTheHourlyCollectorMissingAsync(setup, ct);
+            setup.Clock.Advance(InvestigationEvidenceCapture.PendingGrace + TimeSpan.FromMinutes(1));
+            await setup.Capture.CaptureOnceAsync(ct);
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+
+            /* Fifty minutes after the open (the clock started a minute past the alert) the health collector lands a run and a row. */
+            setup.Clock.Advance(TimeSpan.FromMinutes(29));
+            var landed = setup.Clock.Now.AddSeconds(-30);
+            await PlantQueryStoreHealthAsync(setup.Connection, ct, ServerId, ServerName, "SalesDb", landed);
+            await PlantRunAsync(setup.Connection, ct, "query_store_health", landed);
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var queryStore = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store");
+            Assert.Equal("ready", queryStore.State);
+            var rows = JsonNode.Parse(queryStore.ContentJson!)!["rows"]!.AsArray();
+            Assert.Equal("SalesDb", Assert.Single(rows)!["database_name"]!.GetValue<string>());
+            Assert.Equal("ready", await RequestEvidenceStateAsync(setup.Connection, requestId, ct));
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+        }, codeDefaultSchedule: true);
+    }
+
+    [Fact]
+    public async Task AnHourlyCollectorWithNoRunByTwoIntervals_IsNotCollected_AndTheJournalStillHoldsOneEntry()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = await OpenWithOnlyTheHourlyCollectorMissingAsync(setup, ct);
+            setup.Clock.Advance(InvestigationEvidenceCapture.PendingGrace + TimeSpan.FromMinutes(1));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            /* One minute short of two intervals (the request opened a minute after the alert): still waiting for its run. */
+            setup.Clock.Advance(TimeSpan.FromMinutes(98));
+            await setup.Capture.CaptureOnceAsync(ct);
+            Assert.Equal("pending", Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store").State);
+
+            setup.Clock.Advance(TimeSpan.FromMinutes(2));
+            await setup.Capture.CaptureOnceAsync(ct);
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            Assert.Equal("not_collected", Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "query_store").State);
+            Assert.Equal("ready", await RequestEvidenceStateAsync(setup.Connection, requestId, ct));
+            Assert.Equal(1, await EvidenceReadyRowsAsync(setup.Connection, requestId, ct));
+            /* The entry is the journal's record of that moment, so it still says pending. */
+            Assert.Equal(new[] { "query_store" }, (await JournalDetailAsync(setup, requestId, ct)).Pending);
+        }, codeDefaultSchedule: true);
+    }
+
+    [Fact]
+    public async Task ASectionsGraceFollowsItsCollectorsConfiguredInterval_NotAConstant()
+    {
+        /* The worker hands the capture the interval it schedules the collector by (overrides included): wait_stats every 30 minutes
+           gets sixty minutes, the others stay on the base twenty. */
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(HighCpu(), ct)).RequestId!.Value;
+            setup.Clock.Advance(InvestigationEvidenceCapture.PendingGrace + TimeSpan.FromMinutes(1));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var evidence = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+            Assert.Equal("pending", evidence.Single(r => r.Section == "waits").State);
+            Assert.All(evidence.Where(r => r.Section != "waits"), r => Assert.Equal("not_collected", r.State));
+            Assert.Equal(TimeSpan.FromMinutes(60), setup.Capture.GraceFor("waits", ServerId));
+            Assert.Equal(InvestigationEvidenceCapture.PendingGrace, setup.Capture.GraceFor("jobs", ServerId));
+        }, intervalMinutes: (collector, _) => collector == "wait_stats" ? 30 : 5);
+    }
+
     [Fact]
     public async Task ActiveRequests_CountOneRequestOnce_WhateverHowManySnapshotsSawIt_AndRankByThatFigure()
     {
@@ -474,7 +598,12 @@ public sealed class InvestigationEvidenceCaptureLiveTests
         NpgsqlDataSource DataSource, NpgsqlConnection Connection, InvestigationRequestStore Requests,
         InvestigationEvidenceCapture Capture, TestClock Clock);
 
-    private static async Task RunAsync(Func<Setup, CancellationToken, Task> body)
+    /// <param name="body">The test.</param>
+    /// <param name="codeDefaultSchedule">True runs the capture on the code-default collector schedule (query_store_health hourly);
+    /// false (every fact but the slow-collector ones) puts every collector at five minutes, under the base grace.</param>
+    /// <param name="intervalMinutes">A schedule of the test's own; wins over <paramref name="codeDefaultSchedule"/>.</param>
+    private static async Task RunAsync(
+        Func<Setup, CancellationToken, Task> body, bool codeDefaultSchedule = false, Func<string, int, int>? intervalMinutes = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -491,7 +620,9 @@ public sealed class InvestigationEvidenceCaptureLiveTests
         var clock = new TestClock();
         var requests = new InvestigationRequestStore(dataSource, 30, () => clock.Now);
         /* The capture is handed the store's data source and nothing else: there is no monitored-server connection string to give it. */
-        var capture = new InvestigationEvidenceCapture(dataSource, requests, NullLogger.Instance, () => clock.Now);
+        var capture = new InvestigationEvidenceCapture(
+            dataSource, requests, NullLogger.Instance, () => clock.Now,
+            intervalMinutes ?? (codeDefaultSchedule ? null : (_, _) => 5));
         await body(new Setup(dataSource, connection, requests, capture, clock), ct);
     }
 }

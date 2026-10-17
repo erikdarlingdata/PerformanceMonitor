@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -34,6 +35,14 @@ namespace PerformanceMonitor.Darling.Service.Investigations;
 /// <c>not_collected</c> at once. The store journals <c>evidence_ready</c> once per request when no section is pending
 /// (<see cref="InvestigationRequestStore.RecordEvidenceAsync"/>); #6003 delivers it.</para>
 ///
+/// <para><b>Slow collectors (#6001).</b> A section's grace is <see cref="GraceFor"/>: the larger of <see cref="PendingGrace"/> and
+/// <see cref="SlowCollectorGraceMultiplier"/> of its collector's configured interval, read from the schedule the worker runs the
+/// collector by. A section whose grace is above <see cref="PendingGrace"/> (<c>query_store</c> on the hourly default) does not hold
+/// <c>evidence_ready</c> back: the event is journaled once the sections on the base grace are final and the base grace has passed
+/// (or every section is final sooner), and a slow section still <c>pending</c> then is named under <c>pending</c> in its detail.
+/// It stays <c>pending</c>, looked at every pass: its collector's run flips it to <c>ready</c> in place with its rows, or its own
+/// grace flips it to <c>not_collected</c>. The request leaves the candidate set only when every section is final.</para>
+///
 /// <para><b>Size.</b> Each section's content is held to <see cref="MaxSectionBytes"/>, the report evidence's own cap (aliased,
 /// not copied): rows are dropped from the tail until it fits, and the content says how many.</para>
 /// </summary>
@@ -55,6 +64,10 @@ public sealed class InvestigationEvidenceCapture
     /// <summary>How long after a request opened an empty section stays <c>pending</c> before it is <c>not_collected</c>.</summary>
     public static readonly TimeSpan PendingGrace = TimeSpan.FromMinutes(20);
 
+    /// <summary>A collector gets two of its own intervals to land a run after the window end before it is called
+    /// <c>not_collected</c>: the section's grace is the larger of <see cref="PendingGrace"/> and this many intervals.</summary>
+    public const int SlowCollectorGraceMultiplier = 2;
+
     /// <summary>A request older than this is left as it is: its window is long past.</summary>
     public static readonly TimeSpan CaptureHorizon = TimeSpan.FromHours(6);
 
@@ -74,6 +87,9 @@ public sealed class InvestigationEvidenceCapture
     /// <see cref="CommandTimeoutSeconds"/> deadline), so 100 requests keep a pass to a few hundred short reads even in an alert
     /// storm across the fleet. A request left over waits for the next pass, and the leftovers are the NEWEST (farthest from
     /// <see cref="PendingGrace"/>), so the cap never costs a request its grace.
+    /// A request waiting only on a slow collector stays a candidate for that collector's grace (two hours on the hourly default,
+    /// and never past <see cref="CaptureHorizon"/>), so the cost of a pass is still this cap, and the requests that can hold a
+    /// place in it are bounded by the route open limits over those two hours.
     /// </summary>
     public const int CandidatesPerTick = 100;
 
@@ -177,18 +193,37 @@ LIMIT 10";
     private readonly InvestigationRequestStore _requests;
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
+    private readonly Func<string, int, int> _collectorIntervalMinutes;
 
     /// <param name="store">The monitoring store's data source: the only connection the capture holds.</param>
     /// <param name="requests">The request store, over the same store (it should share <paramref name="utcNow"/>).</param>
     /// <param name="logger">Where a failure is logged.</param>
     /// <param name="utcNow">The one clock the grace is judged by (a test supplies its own).</param>
+    /// <param name="collectorIntervalMinutes">A collector's configured interval in minutes on one server, as (collector name, server id):
+    /// the worker passes the schedule it runs the collector by, overrides included. Without it the code defaults are used.</param>
     public InvestigationEvidenceCapture(
-        NpgsqlDataSource store, InvestigationRequestStore requests, ILogger logger, Func<DateTime>? utcNow = null)
+        NpgsqlDataSource store, InvestigationRequestStore requests, ILogger logger, Func<DateTime>? utcNow = null,
+        Func<string, int, int>? collectorIntervalMinutes = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _requests = requests ?? throw new ArgumentNullException(nameof(requests));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _collectorIntervalMinutes = collectorIntervalMinutes ?? DefaultIntervalMinutes;
+    }
+
+    /// <summary>The interval the code defaults give a collector (no override): the same resolution the worker schedules it by.</summary>
+    private static int DefaultIntervalMinutes(string collectorName, int serverId) =>
+        CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+            StoreConfigProvider.ResolveSchedule(collectorName, serverId, []).FrequencyMinutes);
+
+    /// <summary>How long after the request opened a section may wait for its collector's run before it is <c>not_collected</c>:
+    /// <see cref="PendingGrace"/>, or <see cref="SlowCollectorGraceMultiplier"/> of the collector's own interval when that is longer.</summary>
+    public TimeSpan GraceFor(string section, int serverId)
+    {
+        var interval = TimeSpan.FromMinutes(_collectorIntervalMinutes(SectionCollectors[section], serverId));
+        var slow = TimeSpan.FromTicks(interval.Ticks * SlowCollectorGraceMultiplier);
+        return slow > PendingGrace ? slow : PendingGrace;
     }
 
     /// <summary>One pass: every High CPU request still needing evidence gets its sections looked at. A failed request is
@@ -241,10 +276,11 @@ LIMIT 10";
                 settled.Add(row.Section);
         }
 
-        var expired = now - request.OpenedAtUtc >= PendingGrace;
+        var age = now - request.OpenedAtUtc;
         var from = request.FirstAlertAtUtc - BreachLeadIn;
         var to = request.FirstAlertAtUtc + BreachTail;
         var writes = new List<InvestigationEvidenceWrite>();
+        var slow = new HashSet<string>(StringComparer.Ordinal);
         HashSet<string>? ran = null;
         foreach (var section in Sections)
         {
@@ -267,11 +303,21 @@ LIMIT 10";
                 writes.Add(new InvestigationEvidenceWrite(section, "ready", Fit(from, to, rows.Rows, rows.DatabasesDropped)));
             }
             else
-                writes.Add(new InvestigationEvidenceWrite(section, expired ? "not_collected" : "pending", null));
+            {
+                /* A slow collector (its grace is above the base) does not hold evidence_ready back, and keeps its own, longer
+                   grace before it is called not_collected. */
+                var grace = GraceFor(section, request.ServerId);
+                if (grace > PendingGrace)
+                    slow.Add(section);
+                writes.Add(new InvestigationEvidenceWrite(section, age >= grace ? "not_collected" : "pending", null));
+            }
         }
 
         if (writes.Count > 0)
-            await _requests.RecordEvidenceAsync(request.RequestId, request.ServerId, writes, cancellationToken).ConfigureAwait(false);
+        {
+            await _requests.RecordEvidenceAsync(
+                request.RequestId, request.ServerId, writes, slow, age >= PendingGrace, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>What one section read found: its ranked rows and, for <c>query_store</c> only, how many databases the cap left out.</summary>

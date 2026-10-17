@@ -139,9 +139,22 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
     /// is pending, <c>ready</c> when none is and at least one is ready, else <c>not_collected</c>), and the moment it becomes
     /// <c>ready</c> the journal gets ONE <see cref="EvidenceReadyEvent"/> row (<see cref="EvidenceReadyOnceKey"/>, the
     /// journal's <c>once_key</c>), however often this runs.
+    ///
+    /// <para>Slow collectors (#6001): <paramref name="slowSections"/> are the sections whose collector runs too rarely for the
+    /// base grace. Once <paramref name="baseGraceElapsed"/> and every section NOT in that set is final, the one journal row is
+    /// written although a slow section is still <c>pending</c> (and at least one section is ready); its detail lists that
+    /// section under <c>pending</c>. The request's <c>evidence_state</c> stays <c>pending</c> (the table allows no other state
+    /// for it), so the capture keeps visiting the request until the slow section flips in place to <c>ready</c> or
+    /// <c>not_collected</c>; that later flip writes no second journal row.</para>
     /// </summary>
+    public Task<InvestigationEvidenceRecorded> RecordEvidenceAsync(
+        Guid requestId, int serverId, IReadOnlyList<InvestigationEvidenceWrite> sections, CancellationToken cancellationToken = default) =>
+        RecordEvidenceAsync(requestId, serverId, sections, null, false, cancellationToken);
+
+    /// <inheritdoc cref="RecordEvidenceAsync(Guid, int, IReadOnlyList{InvestigationEvidenceWrite}, CancellationToken)"/>
     public async Task<InvestigationEvidenceRecorded> RecordEvidenceAsync(
-        Guid requestId, int serverId, IReadOnlyList<InvestigationEvidenceWrite> sections, CancellationToken cancellationToken = default)
+        Guid requestId, int serverId, IReadOnlyList<InvestigationEvidenceWrite> sections,
+        IReadOnlySet<string>? slowSections, bool baseGraceElapsed, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(sections);
         var now = Now();
@@ -160,6 +173,8 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
         long pending = 0, ready = 0;
         var readySections = new JsonArray();
         var notCollectedSections = new JsonArray();
+        var pendingSections = new JsonArray();
+        var pendingOnBaseGrace = 0;
         await using (var tally = Command(connection, transaction, EvidenceTallySql, P(requestId)))
         await using (var reader = await tally.ExecuteReaderAsync(cancellationToken))
         {
@@ -170,6 +185,9 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
                 {
                     case "pending":
                         pending++;
+                        pendingSections.Add(name);
+                        if (slowSections is null || !slowSections.Contains(name))
+                            pendingOnBaseGrace++;
                         break;
                     case "ready":
                         ready++;
@@ -185,11 +203,15 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
         var state = pending > 0 ? "pending" : ready > 0 ? "ready" : "not_collected";
         await ExecAsync(connection, transaction, EvidenceStateSql, cancellationToken, P(requestId), P(state));
         var journaled = false;
-        if (state == "ready")
+        /* Every section final, or only slow ones left after the base grace with something ready to report. */
+        if (state == "ready" || (state == "pending" && baseGraceElapsed && pendingOnBaseGrace == 0 && ready > 0))
         {
             /* #6001 review: `sections` names the READY sections and `not_collected` the ones that never landed, read from the
                rows the request holds now, not from this call's writes (the grace-expiry call writes only the not_collected ones). */
-            var detail = new JsonObject { ["sections"] = readySections, ["not_collected"] = notCollectedSections }.ToJsonString();
+            var detailNode = new JsonObject { ["sections"] = readySections, ["not_collected"] = notCollectedSections };
+            if (pendingSections.Count > 0)
+                detailNode["pending"] = pendingSections;
+            var detail = detailNode.ToJsonString();
             journaled = await JournalAsync(connection, transaction, now, requestId, null, serverId, EvidenceReadyEvent, "service",
                 null, detail, EvidenceReadyOnceKey(requestId), cancellationToken) > 0;
         }
