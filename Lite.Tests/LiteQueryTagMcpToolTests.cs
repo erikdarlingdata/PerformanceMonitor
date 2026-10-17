@@ -241,7 +241,7 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
     }
 
     [Fact]
-    public async Task ResourceUse_OnAnAzureSqlDatabaseServer_AnsweringNoRows_SaysNotCollectedForTheSectionsItsCollectorsSkip()
+    public async Task ResourceUse_OnAnAzureSqlDatabaseServerWithNoRows_IsEmptyWithItsSections_BecauseNoSourceCollectorSkipsThatEdition()
     {
         await ExecAsync(
             "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition) VALUES ($1, $2, $3, 'x', 'Edition', '12.0.2000.8', 'RTM', 5)",
@@ -250,8 +250,9 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
         var root = Parse(await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerA, 24));
 
         var sections = root.GetProperty("sections").EnumerateArray().ToDictionary(s => s.GetProperty("section").GetString()!);
-        Assert.Equal("not_collected", sections["blocking_snapshots"].GetProperty("status").GetString());
-        Assert.Equal("empty", sections["plan_cache"].GetProperty("status").GetString());
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Equal(6, sections.Count);
+        Assert.All(sections.Values, s => Assert.Equal("empty", s.GetProperty("status").GetString()));
     }
 
     [Fact]
