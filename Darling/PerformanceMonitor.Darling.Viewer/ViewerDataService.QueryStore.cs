@@ -24,7 +24,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// in SQL; reads/writes/rows/tempdb pages / log bytes stay raw. The View-Plan surface is deferred, so
 /// unlike Lite there is no QueryPlanText/HasQueryPlan (the collected query_plan_text is not read).
 /// </summary>
-public sealed class ViewerQueryStoreRow
+public sealed class ViewerQueryStoreRow : QueryTagRowBase
 {
     public string DatabaseName { get; set; } = "";
     public long QueryId { get; set; }
@@ -302,6 +302,7 @@ public sealed partial class ViewerDataService
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
             FROM deduped
             WHERE rn = 1
+            /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $6
@@ -449,8 +450,8 @@ public sealed partial class ViewerDataService
     /// </summary>
     public async Task<List<ViewerQueryStoreRow>> GetQueryStoreTopQueriesAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null,
-        DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
-        => (await GetQueryStoreTopQueriesWithReachAsync(serverId, startUtc, endUtc, top, databaseNames, literalEndUtc, cancellationToken)).Rows;
+        DateTime? literalEndUtc = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
+        => (await GetQueryStoreTopQueriesWithReachAsync(serverId, startUtc, endUtc, top, databaseNames, literalEndUtc, tags, cancellationToken)).Rows;
 
     /// <summary>
     /// <see cref="GetQueryStoreTopQueriesAsync"/> plus the read plan when the interval table served
@@ -460,7 +461,16 @@ public sealed partial class ViewerDataService
     /// </summary>
     public async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan? Plan)> GetQueryStoreTopQueriesWithReachAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null,
-        DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
+        DateTime? literalEndUtc = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
+    {
+        var read = await GetQueryStoreTopQueriesUntaggedAsync(serverId, startUtc, endUtc, top, databaseNames, literalEndUtc, tags, cancellationToken);
+        await LabelTagsAsync(serverId, QueryTagReadJoin.HashKind, read.Rows, r => r.QueryHash, cancellationToken);
+        return read;
+    }
+
+    private async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan? Plan)> GetQueryStoreTopQueriesUntaggedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames,
+        DateTime? literalEndUtc, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* Review D4R H1: the window check comes FIRST, before the schema probe (a 121-column
            EXISTS catalog query) and before TryGetQueryStoreTopQueriesFromTableAsync (a second
@@ -473,7 +483,7 @@ public sealed partial class ViewerDataService
             if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
             {
                 var tableRead = await TryGetQueryStoreTopQueriesFromTableAsync(
-                    serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, cancellationToken);
+                    serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, tags, cancellationToken);
                 if (tableRead is { } served)
                 {
                     return (served.Rows, served.Plan);
@@ -485,7 +495,7 @@ public sealed partial class ViewerDataService
            at TopFill's final limit, not up to three rounds that each re-read the window; the tail looks up text only
            until the page is full, so the answer is the rounds' own (TopFill.FinalCandidates). */
         List<ViewerQueryStoreRow> rows;
-        await using (var command = _dataSource.CreateCommand(QueryStoreTopSql))
+        await using (var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             AddServerWindowParameters(command, serverId, startUtc, endUtc);
@@ -510,7 +520,7 @@ public sealed partial class ViewerDataService
     /// catch), and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
     private async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopQueriesFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         try
         {
@@ -546,6 +556,7 @@ public sealed partial class ViewerDataService
                 topSql = QueryStoreIntervalWide.WithEdgeMargin(topSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
             }
 
+            topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
             await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });

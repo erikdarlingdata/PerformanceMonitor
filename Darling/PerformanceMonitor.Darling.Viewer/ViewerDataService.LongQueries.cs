@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// Mirrors Lite's <c>LongQueryCompletionRow</c>; event_time is stored naive-UTC, so
 /// <see cref="EventTimeLocal"/> converts to viewer-local via <see cref="ViewerTimeHelper.ForDisplay"/>.
 /// </summary>
-public sealed class ViewerLongQueryRow
+public sealed class ViewerLongQueryRow : QueryTagRowBase
 {
     public DateTime CollectionTime { get; set; }
     public DateTime? EventTime { get; set; }
@@ -101,6 +101,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        /*TAG:hash:query_hash*/
         ORDER BY event_time DESC
         LIMIT 200
         """;
@@ -123,11 +124,11 @@ public sealed partial class ViewerDataService
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     public async Task<List<ViewerLongQueryRow>> GetRecentLongQueryCompletionsAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<ViewerLongQueryRow>();
 
-        await using var command = _dataSource.CreateCommand(LongQueryCompletionsSql);
+        await using var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(LongQueryCompletionsSql, serverId, tags));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -159,6 +160,7 @@ public sealed partial class ViewerDataService
             });
         }
 
+        await LabelTagsAsync(serverId, QueryTagReadJoin.HashKind, rows, r => r.QueryHash, cancellationToken);
         return rows;
     }
 

@@ -291,6 +291,30 @@ public static class QueryTagReadJoin
         }
     }
 
+    /// <summary>One query tag for a read-only picker or pill (#5988): its id, its path name (<c>Parent / Child</c>) and its stored colour.</summary>
+    public sealed record TagChoice(int Id, string Path, string? Colour);
+
+    /// <summary>Every query tag with its path name and colour, by path. A read only; the viewer's filter list and its tag pill use it.</summary>
+    public static async Task<List<TagChoice>> ListAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var colours = new Dictionary<int, string?>();
+        await using (var command = postgres.CreateCommand("SELECT id, colour FROM config.query_tags"))
+        {
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                colours[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
+            }
+        }
+
+        var paths = PathsOf(await ReadTagsAsync(postgres, cancellationToken));
+        return paths
+            .Select(p => new TagChoice(p.Key, p.Value, colours.TryGetValue(p.Key, out var c) ? c : null))
+            .OrderBy(t => t.Path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     /// <summary>The status message a read answers with when its <c>tag</c> names no tag.</summary>
     public static string UnknownTagMessage(string requested) =>
         new StringBuilder("No query tag is named '").Append(requested)

@@ -154,7 +154,7 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         async Task<List<string>> GridAsync(DateTime? literalEnd)
         {
-            var (rows, plan) = await viewer.GetQueryStoreTopQueriesWithReachAsync(TwoHour, WindowStart, WindowEnd, Top, null, literalEnd, ct);
+            var (rows, plan) = await viewer.GetQueryStoreTopQueriesWithReachAsync(TwoHour, WindowStart, WindowEnd, Top, null, literalEnd, cancellationToken: ct);
             Assert.NotNull(plan);   /* the table served, so the margin was resolved */
             return rows.Select(r => string.Join('|', r.DatabaseName, r.QueryId, r.PlanId, r.AvgDurationMs, r.TotalExecutions)).ToList();
         }

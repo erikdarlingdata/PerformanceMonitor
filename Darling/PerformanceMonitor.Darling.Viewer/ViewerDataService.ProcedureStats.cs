@@ -24,7 +24,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (dm_exec_procedure_stats), shown raw. Procedure stats carry no DOP / rows columns (the DMV does
 /// not expose them), matching Lite's row.
 /// </summary>
-public sealed class ViewerProcedureStatsRow
+public sealed class ViewerProcedureStatsRow : QueryTagRowBase
 {
     public string DatabaseName { get; set; } = "";
     public string SchemaName { get; set; } = "";
@@ -134,6 +134,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        /*TAG:object:database_name,schema_name,object_name*/
         GROUP BY database_name, schema_name, object_name, object_type
         HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
         ORDER BY SUM(delta_elapsed_time) DESC
@@ -156,25 +157,33 @@ public sealed partial class ViewerDataService
     /// <see cref="GetTopProceduresByCpuTierAsync"/> to also learn which tier answered.</para>
     /// </summary>
     public async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
     {
-        var (rows, _) = await GetTopProceduresByCpuTierAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        var (rows, _) = await GetTopProceduresByCpuTierAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
         return rows;
     }
 
     /// <summary>#4231 stage 3b: <see cref="GetTopProceduresByCpuAsync"/>'s routed form, also returning which
     /// tier answered ("raw" or "hourly") — the Queries-tab header suffix reads this.</summary>
     public async Task<(List<ViewerProcedureStatsRow> Rows, string Tier)> GetTopProceduresByCpuTierAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
     {
-        var read = await GetTopProceduresByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        var read = await GetTopProceduresByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
         return (read.Rows, read.Tier);
     }
 
     /// <summary>#5329: <see cref="GetTopProceduresByCpuTierAsync"/> with the window's real edges (see
     /// <see cref="GetTopQueriesByCpuRoutedAsync"/>).</summary>
     public async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuRoutedAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
+    {
+        var read = await GetTopProceduresByCpuRoutedUntaggedAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
+        await LabelObjectTagsAsync(serverId, read.Rows, cancellationToken);
+        return read;
+    }
+
+    private async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuRoutedUntaggedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
@@ -187,10 +196,10 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            return await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            return await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
         }
 
-        return new ViewerRoutedRead<ViewerProcedureStatsRow>(await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
+        return new ViewerRoutedRead<ViewerProcedureStatsRow>(await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken), "raw", null);
     }
 
     /// <summary>#4231 stage 3b: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -200,7 +209,7 @@ public sealed partial class ViewerDataService
     /// rollup has none of those columns.</summary>
     private async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
-        IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+        IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5329: the io hourly rollup, when it reaches the window's start, in place of the interval rollup (same
            columns plus the three I/O sums); otherwise today's route and blank columns. See the queries arm. */
@@ -209,7 +218,7 @@ public sealed partial class ViewerDataService
         var fromClause = coverage.StitchedRelationSql(answeringView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
         /* #5329: the materialization-ceiling bound and the window's real edges, as the queries arm and the service do. */
         var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
-        var sql = BuildTopProceduresHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
+        var sql = QueryTagReadJoin.Apply(BuildTopProceduresHourlySql(fromClause, withIo: useIo, ceiling: ceiling), serverId, tags);
         /* #5329: this server's own first bucket in the window, from the shared per-server probe, beside the grid read. */
         var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
             _dataSource, answeringView, serverId, startUtc, endUtc, ceiling, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
@@ -273,6 +282,7 @@ public sealed partial class ViewerDataService
         AND   bucket >= $2
         AND   bucket < $3{HourlyCeilingSql(ceiling)}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        /*TAG:object:database_name,schema_name,object_name*/
         GROUP BY database_name, schema_name, object_name
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
         ORDER BY SUM(worker_time_sum) DESC
@@ -282,11 +292,11 @@ public sealed partial class ViewerDataService
     /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopProceduresByCpuAsync"/> ran before #4231
     /// stage 3b added the hourly arm.</summary>
     private async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuRawAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         var rows = new List<ViewerProcedureStatsRow>();
 
-        await using var command = _dataSource.CreateCommand(TopProceduresSql);
+        await using var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(TopProceduresSql, serverId, tags));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
