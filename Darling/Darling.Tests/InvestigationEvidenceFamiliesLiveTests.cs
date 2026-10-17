@@ -82,6 +82,10 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
             /* The cached statement the frame's handle and offsets name, collected the hour before the window. */
             await PlantCachedStatementAsync(setup.Connection, ct, WindowStart.AddHours(-1), "0x0200AB", 10, 90,
                 "UPDATE dbo.Orders SET qty = qty + 1 WHERE id = @id");
+            /* A decoy for the SAME handle at other offsets (the procedure header), collected later: a lookup by handle alone
+               would take it. */
+            await PlantCachedStatementAsync(setup.Connection, ct, WindowStart.AddMinutes(-10), "0x0200AB", 0, 9,
+                "CREATE PROCEDURE dbo.UpdateOrders @id int AS");
             var report = BlockedProcessReport(blockingFrame: "<frame line=\"3\" stmtstart=\"10\" stmtend=\"90\" sqlhandle=\"0x0200ab\"/>");
             await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), report);
             var requestId = await OpenBlockingAndCaptureAsync(setup, ct);
@@ -234,6 +238,173 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
         });
     }
 
+    [Fact]
+    public async Task ReportXml_PastTheFirstCut_EveryLaterRowKeepsItsFlagInsideTheCap_AndTheStoreTakesTheRow()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, AlertEngine.BlockingWatermarkMetric, AlertAt), ct)).RequestId!.Value;
+            /* Ten 14,000-character reports: the third is cut, and the seven after it each still carry a flag and an empty
+               report, which must fit beside the cut one. */
+            var reports = Enumerable.Range(0, InvestigationEvidenceCapture.SectionRows)
+                .Select(i => "<r" + i + ">" + string.Concat(Enumerable.Repeat("<n>x</n>", 2_000))[..13_990] + "</r" + i + ">")
+                .ToList();
+            var rows = reports.Select((_, i) => new JsonObject { ["blocked_spid"] = 60 + i, ["report_xml"] = null }).ToList();
+
+            var fitted = InvestigationEvidenceCapture.FitReportXml(WindowStart, WindowEnd, rows, reports);
+
+            Assert.True(InvestigationEvidenceCapture.StoredBytes(fitted) <= InvestigationToolCore.MaxEvidenceBytes);
+            var kept = JsonNode.Parse(fitted)!["rows"]!.AsArray();
+            Assert.Equal(reports.Count, kept.Count);
+            Assert.Equal(reports[0], kept[0]!["report_xml"]!.GetValue<string>());
+            Assert.Equal(reports[1], kept[1]!["report_xml"]!.GetValue<string>());
+            Assert.StartsWith(kept[2]!["report_xml"]!.GetValue<string>(), reports[2], StringComparison.Ordinal);
+            for (var i = 2; i < kept.Count; i++)
+                Assert.True(kept[i]!["report_xml_truncated"]!.GetValue<bool>());
+            for (var i = 3; i < kept.Count; i++)
+                Assert.Equal("", kept[i]!["report_xml"]!.GetValue<string>());
+
+            /* The store takes the row: its content check would refuse the whole write over the cap. */
+            await setup.Requests.RecordEvidenceAsync(requestId, ServerId,
+                new[] { new InvestigationEvidenceWrite("blocking_chains", "ready", fitted) }, ct);
+            var stored = await new NpgsqlCommand(
+                "SELECT octet_length(content::text) FROM config.investigation_evidence WHERE section = 'blocking_chains' AND request_id = '" + requestId + "'",
+                setup.Connection).ExecuteScalarAsync(ct);
+            Assert.InRange(Convert.ToInt32(stored, System.Globalization.CultureInfo.InvariantCulture), 1, InvestigationToolCore.MaxEvidenceBytes);
+        });
+    }
+
+    [Fact]
+    public async Task ASessionBlockedByTwoBlockersInOneWindow_GetsOneHead_AndTheSectionsFreeze()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* Session 70 is blocked by 55, then by 61: 55 blocks but no chain resolves to it any more. */
+            var report = BlockedProcessReport(blockingFrame: null);
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-3), report, blockedSpid: 70, blockingSpid: 55);
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), report, blockedSpid: 70, blockingSpid: 61);
+            var requestId = await OpenBlockingAndCaptureAsync(setup, ct);
+
+            var evidence = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+            var head = Assert.Single(Rows(evidence, "head_blocker"));
+            Assert.Equal(61, head["spid"]!.GetValue<int>());
+            Assert.Equal(2, head["reports_in_chain"]!.GetValue<int>());
+            /* Two pairs with the same blocked session and the same wait: the blocking session breaks the tie. */
+            var chains = Rows(evidence, "blocking_chains");
+            Assert.Equal(new[] { 55, 61 }, chains.Select(c => c["blocking_spid"]!.GetValue<int>()).ToArray());
+            Assert.All(chains, c => Assert.Equal(61, c["head_blocker_spid"]!.GetValue<int>()));
+        });
+    }
+
+    [Fact]
+    public async Task ASectionThatFails_StaysPendingThroughItsGrace_ThenFreezesUnavailable_AndTheOthersStillFreeze()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-1),
+                BlockedProcessReport(blockingFrame: "<frame line=\"3\" stmtstart=\"10\" stmtend=\"90\" sqlhandle=\"0x0200ab\"/>"));
+            /* The head blocker's statement read fails: the relation it reads is gone. */
+            await DarlingMcpTestData.ExecAsync(setup.Connection, ct, "ALTER VIEW v_query_stats RENAME TO v_query_stats_gone");
+            var requestId = await OpenBlockingAndCaptureAsync(setup, ct);
+
+            var evidence = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+            Assert.Single(Rows(evidence, "blocking_chains"));
+            Assert.Equal("pending", Assert.Single(evidence, r => r.Section == "head_blocker").State);
+
+            setup.Clock.Advance(InvestigationEvidenceCapture.PendingGrace + TimeSpan.FromMinutes(1));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var failed = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "head_blocker");
+            Assert.Equal("ready", failed.State);
+            var content = JsonNode.Parse(failed.ContentJson!)!;
+            Assert.Equal("unavailable", content["status"]!.GetValue<string>());
+            Assert.Equal("PostgresException", content["error"]!.GetValue<string>());
+            Assert.Empty(content["rows"]!.AsArray());
+        });
+    }
+
+    [Fact]
+    public void ALateJoinedSectionsGrace_EndsBeforeTheCaptureHorizon()
+    {
+        var opened = AlertAt;
+        var margin = InvestigationEvidenceCapture.HorizonMargin;
+        var horizon = InvestigationEvidenceCapture.CaptureHorizon;
+        /* A metric that joined 5 h 50 m in: its two-hour grace would run past the horizon, where the request is no longer read. */
+        var joined = opened + TimeSpan.FromMinutes(350);
+        var capped = InvestigationEvidenceCapture.CappedGrace(TimeSpan.FromHours(2), joined, opened);
+        Assert.Equal(opened + horizon - margin, joined + capped);
+        /* A grace that ends well inside the horizon is untouched, and one that starts past the last pass is over at once. */
+        Assert.Equal(InvestigationEvidenceCapture.PendingGrace,
+            InvestigationEvidenceCapture.CappedGrace(InvestigationEvidenceCapture.PendingGrace, opened, opened));
+        Assert.Equal(TimeSpan.Zero, InvestigationEvidenceCapture.CappedGrace(TimeSpan.FromHours(2), opened + horizon, opened));
+    }
+
+    [Fact]
+    public async Task ADeadlockOfManyParties_KeepsItsVictimAndObjects_UnderTheCap_AndCountsThePartiesDropped()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* Twenty-five parties, each with a 1,000-character statement: whole, the one deadlock is over the 32 KB cap. */
+            var statement = "UPDATE dbo.Orders SET qty = qty + 1 WHERE note = '" + new string('n', 1_100) + "'";
+            await PlantDeadlockGraphAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), ManyPartyGraph(25, victim: 25, statement));
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, InvestigationEvidenceCapture.DeadlockMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "deadlocks", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var deadlock = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "deadlocks"));
+            var parties = deadlock["parties"]!.AsArray();
+            Assert.Equal(InvestigationEvidenceCapture.DeadlockPartiesMax, parties.Count);
+            Assert.Equal(25 - InvestigationEvidenceCapture.DeadlockPartiesMax, deadlock["parties_dropped"]!.GetValue<int>());
+            Assert.True(parties[0]!["is_victim"]!.GetValue<bool>());
+            Assert.Equal("process25", parties[0]!["process_id"]!.GetValue<string>());
+            Assert.Equal("tempdb.dbo.#t_____________0001", Assert.Single(deadlock["objects"]!.AsArray())!["object_name"]!.GetValue<string>());
+        });
+    }
+
+    [Fact]
+    public async Task ADeadlockStatementTheFilterNames_IsWithheldWhole_NotCutAndKept()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* The statement names a passphrase function past the 1,000-character cut: cut first, its head would be kept. */
+            var statement = "UPDATE dbo.Vault SET v = 1 WHERE note = '" + new string('n', 1_100) + "' AND PWDCOMPARE(N'hunter2', h) = 1";
+            await PlantDeadlockGraphAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), ManyPartyGraph(2, victim: 1, statement));
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, InvestigationEvidenceCapture.DeadlockMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "deadlocks", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var section = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "deadlocks");
+            Assert.Equal("ready", section.State);
+            Assert.DoesNotContain("dbo.Vault", section.ContentJson!, StringComparison.Ordinal);
+            Assert.DoesNotContain("hunter2", section.ContentJson!, StringComparison.Ordinal);
+            Assert.Equal(2, Assert.Single(JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray())!["parties"]!.AsArray().Count);
+        });
+    }
+
+    [Fact]
+    public async Task ACompiledValueInAStatementTheFilterNames_IsNeverFrozen()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            await PlantQueryStoreAsync(setup.Connection, ct, 503, 5, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 503, 6, 2, cpuUs: 8_000, lastExec: AlertAt.AddMinutes(-1));
+            const string Statement = "SELECT DECRYPTBYPASSPHRASE(@city, secret_col) FROM dbo.Vault";
+            await PlantPlanAsync(setup.Connection, ct, 5, "N'hunter2'", Statement);
+            await PlantPlanAsync(setup.Connection, ct, 6, "N'swordfish'", Statement);
+            var requestId = await OpenQueryPerformanceAndCaptureAsync(setup, ct);
+
+            var section = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "regression_targets");
+            var target = Assert.Single(Rows(new[] { section }, "regression_targets"));
+            Assert.Null(target["good_compiled"]);
+            Assert.Null(target["bad_compiled"]);
+            Assert.DoesNotContain("hunter2", section.ContentJson!, StringComparison.Ordinal);
+            Assert.DoesNotContain("swordfish", section.ContentJson!, StringComparison.Ordinal);
+        });
+    }
+
     private static List<JsonNode> Rows(IReadOnlyList<InvestigationEvidenceRow> evidence, string section)
     {
         var row = Assert.Single(evidence, r => r.Section == section);
@@ -269,13 +440,15 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
         + "<inputbuf>EXEC dbo.UpdateOrders @id = 1</inputbuf></process></blocking-process>"
         + "</blocked-process-report>";
 
-    private static Task PlantBlockedReportAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, string reportXml) =>
+    private static Task PlantBlockedReportAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime at, string reportXml, int blockedSpid = 61, int blockingSpid = 62) =>
         DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO blocked_process_reports
     (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid,
      blocked_ecid, blocking_ecid, blocking_status, database_name, blocked_sql_text, blocking_sql_text, blocked_process_report_xml)
-VALUES ($1, $2, $3, $4, $5, 12000, 62, 61, 0, 0, NULL, $6, 'SELECT * FROM dbo.Orders WHERE id = 1', 'EXEC dbo.UpdateOrders @id = 1', $7)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at.AddSeconds(5)), ServerId, ServerName, DarlingMcpTestData.Naive(at), Db, reportXml);
+VALUES ($1, $2, $3, $4, $5, 12000, $8, $9, 0, 0, NULL, $6, 'SELECT * FROM dbo.Orders WHERE id = 1', 'EXEC dbo.UpdateOrders @id = 1', $7)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at.AddSeconds(5)), ServerId, ServerName, DarlingMcpTestData.Naive(at), Db, reportXml,
+            blockingSpid, blockedSpid);
 
     private static Task PlantCachedStatementAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime at, string sqlHandle, int start, int end, string text) =>
@@ -297,6 +470,27 @@ VALUES ($1, $2, $3, $4, $5, '0xQH6002', '0xQPH6002', $6, '0xPLANH', $7, $8, $9, 
         + "<owner-list><owner id=\"process2\" mode=\"X\"/></owner-list><waiter-list><waiter id=\"process1\" mode=\"U\" requestType=\"wait\"/></waiter-list></keylock>"
         + "</resource-list></deadlock>";
 
+    /// <summary>A deadlock of <paramref name="parties"/> processes on one temporary-table key lock, each running
+    /// <paramref name="statement"/>; <c>process{victim}</c> is the victim.</summary>
+    private static string ManyPartyGraph(int parties, int victim, string statement)
+    {
+        var text = System.Security.SecurityElement.Escape(statement);
+        var processes = string.Concat(Enumerable.Range(1, parties).Select(i =>
+            "<process id=\"process" + i + "\" spid=\"" + (60 + i) + "\" lockMode=\"U\" isolationlevel=\"read committed (2)\" currentdbname=\"tempdb\">"
+            + "<executionStack><frame procname=\"adhoc\" line=\"1\">" + text + "</frame></executionStack><inputbuf>" + text + "</inputbuf></process>"));
+        return "<deadlock><victim-list><victimProcess id=\"process" + victim + "\"/></victim-list><process-list>" + processes
+            + "</process-list><resource-list>"
+            + "<keylock hobtid=\"72057594\" dbid=\"2\" objectname=\"tempdb.dbo.#t_____________0001\" indexname=\"PK_t\" id=\"lock1\" mode=\"X\" associatedObjectId=\"72057594\">"
+            + "<owner-list><owner id=\"process1\" mode=\"X\"/></owner-list><waiter-list><waiter id=\"process2\" mode=\"U\" requestType=\"wait\"/></waiter-list></keylock>"
+            + "</resource-list></deadlock>";
+    }
+
+    private static Task PlantDeadlockGraphAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, string graph) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
+VALUES ($1, $2, $3, $4, 'tempdb', $5, 'process1', NULL, $6)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at.AddSeconds(5)), ServerId, ServerName, DarlingMcpTestData.Naive(at), graph);
+
     private static Task PlantDeadlockAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, string objectName, string indexName) =>
         DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
@@ -316,10 +510,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $9, $10, '0xQH' || 
             DarlingMcpTestData.Naive(lastExec.AddMinutes(-30)), DarlingMcpTestData.Naive(lastExec), cpuUs);
 
     /// <summary>A stored Query Store plan whose one parameter, <c>@city</c>, was compiled for <paramref name="compiledValue"/>.</summary>
-    private static async Task PlantPlanAsync(NpgsqlConnection connection, CancellationToken ct, long planId, string compiledValue)
+    private static async Task PlantPlanAsync(
+        NpgsqlConnection connection, CancellationToken ct, long planId, string compiledValue,
+        string statement = "SELECT * FROM dbo.Customers WHERE city = @city")
     {
         var plan = "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.564\"><BatchSequence><Batch><Statements>"
-            + "<StmtSimple StatementText=\"SELECT * FROM dbo.Customers WHERE city = @city\" StatementId=\"1\" StatementType=\"SELECT\">"
+            + "<StmtSimple StatementText=\"" + System.Security.SecurityElement.Escape(statement) + "\" StatementId=\"1\" StatementType=\"SELECT\">"
             + "<QueryPlan CachedPlanSize=\"16\"><ParameterList><ColumnReference Column=\"@city\" ParameterDataType=\"nvarchar(40)\" ParameterCompiledValue=\""
             + System.Security.SecurityElement.Escape(compiledValue) + "\"/></ParameterList>"
             + "</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";

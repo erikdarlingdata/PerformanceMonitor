@@ -33,6 +33,14 @@ public sealed partial class InvestigationEvidenceCapture
     /// <summary>A deadlock party's statement is kept up to this many characters.</summary>
     public const int DeadlockStatementMaxChars = 1000;
 
+    /// <summary>A deadlock keeps this many parties, the victims first, and says how many more it had (<c>parties_dropped</c>), so
+    /// one deadlock of many parties cannot outgrow the section cap and take every row with it (#6002 review).</summary>
+    public const int DeadlockPartiesMax = 8;
+
+    /// <summary>A deadlock keeps this many of the objects its resources name, in graph order, and says how many more it had
+    /// (<c>objects_dropped</c>).</summary>
+    public const int DeadlockObjectsMax = 20;
+
     /// <summary>How far before the window end <c>regression_targets</c> looks for a target's plans: one day, so one capture
     /// reads one day of the server's Query Store rows and not the detector's fourteen.</summary>
     public static readonly TimeSpan RegressionLookback = TimeSpan.FromDays(1);
@@ -59,7 +67,10 @@ WHERE server_id = $1
 ORDER BY deadlock_time DESC
 LIMIT 10";
 
-    /// <summary>The blocked-process reports in the window, newest first. Same parameters as <see cref="DeadlocksSql"/>.</summary>
+    /// <summary>The blocked-process reports in the window, newest first, at most 500 of them. Same parameters as
+    /// <see cref="DeadlocksSql"/>. In a window with more, the oldest are not read: a chain link only an older report shows is
+    /// then missing, and the head is resolved over the links that were read (a blocked session's head can be named one link
+    /// short of the true head, never an error).</summary>
     internal const string BlockedReportsSql = @"
 SELECT event_time, database_name, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode,
        contentious_object, blocked_sql_text, blocking_sql_text, blocked_login_name, blocking_login_name, blocked_host_name,
@@ -72,20 +83,24 @@ WHERE server_id = $1
 ORDER BY event_time DESC, wait_time_ms DESC
 LIMIT 500";
 
-    /// <summary>The statement a (sql handle, statement offsets) triple names, from the store's <c>query_stats</c>, which keeps
-    /// each statement's own text with its handle and offsets: $1 server, $2 the handle as the collector writes it
-    /// (<c>CONVERT(varchar, sql_handle, 1)</c>), $3 and $4 the offsets, $5 the floor on <c>collection_time</c>.</summary>
-    internal const string StatementByOffsetSql = @"
-SELECT query_text
-FROM v_query_stats
-WHERE server_id = $1
-  AND sql_handle = $2
-  AND statement_start_offset = $3
-  AND statement_end_offset = $4
-  AND collection_time >= $5
-  AND query_text IS NOT NULL
-ORDER BY collection_time DESC
-LIMIT 1";
+    /// <summary>The statements a set of (sql handle, statement offsets) triples name, newest per triple, from the store's
+    /// <c>query_stats</c>, which keeps each statement's own text with its handle and offsets. One read for every head blocker
+    /// of a capture (#6002 review: one lookup per head was up to ten reads on an unindexed handle). $1 server, $2 the handles as
+    /// the collector writes them (<c>CONVERT(varchar, sql_handle, 1)</c>), $3 and $4 the offsets, aligned with $2, $5 the floor
+    /// on <c>collection_time</c>.</summary>
+    internal const string StatementsByOffsetSql = @"
+SELECT DISTINCT ON (q.sql_handle, q.statement_start_offset, q.statement_end_offset)
+       q.sql_handle, q.statement_start_offset, q.statement_end_offset, q.query_text
+FROM v_query_stats AS q
+JOIN unnest($2::text[], $3::integer[], $4::integer[]) AS k (sql_handle, stmt_start, stmt_end)
+  ON q.sql_handle = k.sql_handle
+ AND q.statement_start_offset = k.stmt_start
+ AND q.statement_end_offset = k.stmt_end
+WHERE q.server_id = $1
+  AND q.collection_time >= $5
+  AND q.query_text IS NOT NULL
+  AND btrim(q.query_text) <> ''
+ORDER BY q.sql_handle, q.statement_start_offset, q.statement_end_offset, q.collection_time DESC";
 
     /// <summary>
     /// The regression targets (#6002): per query, its newest plan against its cheapest plan over <see cref="RegressionLookback"/>,
@@ -148,7 +163,9 @@ LIMIT $6";
     /// <summary>
     /// <c>deadlocks</c>: each deadlock in the window with its parties (from the shared graph parser) and the objects and
     /// indexes its resources name, read from the graph at capture and COPIED into the row. A temporary object's generated name
-    /// (<c>#orders_____…</c>) is kept as the graph spells it.
+    /// (<c>#orders_____…</c>) is kept as the graph spells it. The whole graph goes through the statement filter (#4348) before
+    /// it is parsed or any statement is cut, so a cut can never hide a statement the filter would name. A deadlock keeps
+    /// <see cref="DeadlockPartiesMax"/> parties and <see cref="DeadlockObjectsMax"/> objects, with counts of the rest.
     /// </summary>
     private async Task<List<JsonObject>> ReadDeadlocksAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
@@ -160,10 +177,12 @@ LIMIT $6";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            var graph = reader.GetString(3);
+            var graph = SensitiveStatements.Xml(reader.GetString(3)) ?? "";
             var model = DeadlockGraphParser.Parse(graph);
             var parties = new JsonArray();
-            foreach (var p in model.Processes)
+            /* The victims first, then graph order, so the cap never drops the victim. */
+            var kept = model.Processes.OrderByDescending(p => p.IsVictim).Take(DeadlockPartiesMax).ToList();
+            foreach (var p in kept)
             {
                 parties.Add(new JsonObject
                 {
@@ -183,15 +202,24 @@ LIMIT $6";
                 });
             }
 
-            rows.Add(new JsonObject
+            var objects = DeadlockObjects(graph);
+            var objectsDropped = Math.Max(0, objects.Count - DeadlockObjectsMax);
+            for (var i = 0; i < objectsDropped; i++)
+                objects.RemoveAt(objects.Count - 1);
+            var row = new JsonObject
             {
                 ["deadlock_time"] = Value(reader.GetDateTime(0)),
                 ["database_name"] = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ["victim_process_id"] = reader.IsDBNull(2) ? null : reader.GetString(2),
                 ["is_parallel"] = model.IsParallel,
-                ["objects"] = DeadlockObjects(graph),
+                ["objects"] = objects,
                 ["parties"] = parties,
-            });
+            };
+            if (objectsDropped > 0)
+                row["objects_dropped"] = objectsDropped;
+            if (model.Processes.Count > kept.Count)
+                row["parties_dropped"] = model.Processes.Count - kept.Count;
+            rows.Add(row);
         }
 
         return rows;
@@ -283,7 +311,7 @@ LIMIT $6";
         var chains = reports
             .GroupBy(r => (r.BlockedSpid, r.BlockingSpid))
             .Select(g => g.OrderByDescending(r => r.WaitMs).ThenByDescending(r => r.EventTime).First())
-            .OrderByDescending(r => r.WaitMs).ThenBy(r => r.BlockedSpid)
+            .OrderByDescending(r => r.WaitMs).ThenBy(r => r.BlockedSpid).ThenBy(r => r.BlockingSpid)
             .Take(SectionRows)
             .ToList();
         var rows = chains.ConvertAll(r => new JsonObject
@@ -307,7 +335,8 @@ LIMIT $6";
                     ["blocking_host_name"] = r.BlockingHost,
                     ["report_xml"] = null,
                 });
-        return new SectionRead(rows, ReportXml: chains.ConvertAll(r => r.ReportXml));
+        /* #4348: each report goes through the statement filter whole, before FitReportXml cuts it. */
+        return new SectionRead(rows, ReportXml: chains.ConvertAll(r => SensitiveStatements.Xml(r.ReportXml)));
     }
 
     /// <summary>
@@ -316,6 +345,9 @@ LIMIT $6";
     /// does not fit whole is cut at the cap and its row says <c>report_xml_truncated: true</c>; once the cap is spent, every later
     /// report is cut to nothing and says so. A report is never left out silently and never cut at a fixed length. A cut report no
     /// longer parses as XML, so under <c>maskLiterals</c> or <c>metadataOnly</c> the masker withholds it whole.
+    /// <para>#6002 review: every row with a report first takes its floor, <c>report_xml: ""</c> and <c>report_xml_truncated:
+    /// true</c>, so a report placed earlier can never leave a later row's flag over the cap (the store refuses the whole write
+    /// then). When the floors themselves do not fit, rows come off the tail, counted in <c>rows_dropped</c>.</para>
     /// </summary>
     internal static string FitReportXml(DateTime from, DateTime to, List<JsonObject> rows, IReadOnlyList<string?> reportXml)
     {
@@ -323,15 +355,31 @@ LIMIT $6";
         var kept = content["rows"]!.AsArray();
         for (var i = 0; i < kept.Count && i < reportXml.Count; i++)
         {
+            if (string.IsNullOrEmpty(reportXml[i]))
+                continue;
+            kept[i]!.AsObject()["report_xml"] = "";
+            kept[i]!.AsObject()["report_xml_truncated"] = true;
+        }
+
+        while (kept.Count > 0 && FittedBytes(content) > MaxSectionBytes)
+        {
+            kept.RemoveAt(kept.Count - 1);
+            content["rows_dropped"] = (content["rows_dropped"]?.GetValue<int>() ?? 0) + 1;
+        }
+
+        for (var i = 0; i < kept.Count && i < reportXml.Count; i++)
+        {
             var xml = reportXml[i];
             if (string.IsNullOrEmpty(xml))
                 continue;
             var row = kept[i]!.AsObject();
+            row.Remove("report_xml_truncated");
             row["report_xml"] = xml;
             if (FittedBytes(content) <= MaxSectionBytes)
                 continue;
 
-            /* The longest prefix that fits, by halving: the bytes a prefix takes grow with its length. */
+            /* The longest prefix that fits, by halving: the bytes a prefix takes grow with its length. The floor ("") is known
+               to fit, so the search always ends inside the cap. */
             row["report_xml_truncated"] = true;
             int low = 0, high = xml.Length - 1;
             while (low < high)
@@ -382,26 +430,33 @@ LIMIT $6";
     {
         var reports = await ReadBlockedReportsAsync(serverId, from, to, cancellationToken).ConfigureAwait(false);
         var blockedBy = BlockedBy(reports);
+        /* #6002 review: the heads are the chains' own heads, grouped from every report, so each head has at least one report
+           (a session blocked by 55 and later by 61 leaves 55 a blocker no chain resolves to, and that is no head). The head's
+           newest report is the newest one that shows it blocking; a head no report shows blocking (a blocked session whose
+           blocker is 0) has none to read a statement from and is left out. */
         var heads = reports
-            .Where(r => r.BlockingSpid != 0 && !blockedBy.ContainsKey(r.BlockingSpid))
-            .GroupBy(r => r.BlockingSpid)
-            .Select(g => (Newest: g.OrderByDescending(r => r.EventTime).First(),
-                          Blocked: reports.Count(r => HeadOf(r.BlockedSpid, blockedBy) == g.Key),
-                          MaxWait: reports.Where(r => HeadOf(r.BlockedSpid, blockedBy) == g.Key).Max(r => r.WaitMs)))
-            .OrderByDescending(h => h.Blocked).ThenByDescending(h => h.MaxWait).ThenBy(h => h.Newest.BlockingSpid)
+            .GroupBy(r => HeadOf(r.BlockedSpid, blockedBy))
+            .Select(g => (Newest: reports.Where(r => r.BlockingSpid == g.Key).OrderByDescending(r => r.EventTime).FirstOrDefault(),
+                          Blocked: g.Count(),
+                          MaxWait: g.Max(r => r.WaitMs)))
+            .Where(h => h.Newest is not null && h.Newest.BlockingSpid != 0)
+            .OrderByDescending(h => h.Blocked).ThenByDescending(h => h.MaxWait).ThenBy(h => h.Newest!.BlockingSpid)
             .Take(SectionRows)
+            .Select(h => (Newest: h.Newest!, h.Blocked, h.MaxWait,
+                          /* #4348: the report goes through the statement filter whole before it is parsed. */
+                          Process: BlockingProcess(SensitiveStatements.Xml(h.Newest!.ReportXml))))
             .ToList();
 
+        var statements = await ReadStatementsAsync(
+            serverId, heads.Where(h => h.Process.SqlHandle is not null).Select(h => h.Process).ToList(), from - StatementLookback,
+            cancellationToken).ConfigureAwait(false);
+
         var rows = new List<JsonObject>();
-        foreach (var (newest, blocked, maxWait) in heads)
+        foreach (var (newest, blocked, maxWait, process) in heads)
         {
-            var process = BlockingProcess(newest.ReportXml);
             string? statement = null;
             if (process.SqlHandle is not null)
-            {
-                statement = await ReadStatementAsync(
-                    serverId, process.SqlHandle, process.StmtStart, process.StmtEnd, from - StatementLookback, cancellationToken).ConfigureAwait(false);
-            }
+                statements.TryGetValue((process.SqlHandle, process.StmtStart, process.StmtEnd), out statement);
 
             var exact = statement is not null;
             rows.Add(new JsonObject
@@ -464,18 +519,26 @@ LIMIT $6";
         return "0x" + hex.ToUpperInvariant();
     }
 
-    private async Task<string?> ReadStatementAsync(
-        int serverId, string handle, int start, int end, DateTime floor, CancellationToken cancellationToken)
+    /// <summary>The stored statement of each frame, by (handle, start, end), in one read; a frame no stored statement matches is
+    /// absent.</summary>
+    private async Task<Dictionary<(string Handle, int Start, int End), string>> ReadStatementsAsync(
+        int serverId, List<BlockingProcessFrame> frames, DateTime floor, CancellationToken cancellationToken)
     {
-        await using var command = _store.CreateCommand(StatementByOffsetSql);
+        var statements = new Dictionary<(string, int, int), string>();
+        if (frames.Count == 0)
+            return statements;
+
+        await using var command = _store.CreateCommand(StatementsByOffsetSql);
         command.CommandTimeout = CommandTimeoutSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddText(command, handle);
-        DarlingMcpReadParameters.AddInt(command, start);
-        DarlingMcpReadParameters.AddInt(command, end);
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = frames.ConvertAll(f => f.SqlHandle!).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = frames.ConvertAll(f => f.StmtStart).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = frames.ConvertAll(f => f.StmtEnd).ToArray() });
         DarlingMcpReadParameters.AddTimestamp(command, floor);
-        var text = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-        return string.IsNullOrWhiteSpace(text) ? null : text;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            statements[(reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2))] = reader.GetString(3);
+        return statements;
     }
 
     /// <summary>
@@ -505,8 +568,11 @@ LIMIT $6";
             var good = target["good_plan_id"]!.GetValue<long>();
             var bad = target["bad_plan_id"]!.GetValue<long>();
             var plans = await ReadPlansAsync(serverId, database, good, bad, cancellationToken).ConfigureAwait(false);
-            target["good_compiled"] = Compiled(plans.GetValueOrDefault(good));
-            target["bad_compiled"] = Compiled(plans.GetValueOrDefault(bad));
+            /* #4348 review: each plan goes through the statement filter, as every MCP plan read does (DarlingStoredPlanReader),
+               before a compiled value is read from it: a value inside a statement the filter names comes back withheld, and
+               CompiledValues returns null for a plan with a withheld value or the withheld placeholder. */
+            target["good_compiled"] = Compiled(SensitiveStatements.Xml(plans.GetValueOrDefault(good)));
+            target["bad_compiled"] = Compiled(SensitiveStatements.Xml(plans.GetValueOrDefault(bad)));
             target["stopped_running"] = target["window_executions"]?.GetValue<long>() == 0;
         }
 

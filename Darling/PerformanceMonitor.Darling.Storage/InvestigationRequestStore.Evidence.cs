@@ -211,7 +211,9 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
         {
             await ExecAsync(connection, transaction, EvidenceUpsertSql, cancellationToken,
                 P(requestId), P(section.Section), P(section.State),
-                new NpgsqlParameter<string?> { TypedValue = section.State == "ready" ? section.ContentJson : null, NpgsqlDbType = NpgsqlDbType.Text },
+                /* #4348 (#6002 review): the statement filter at the write, as the finding and alert stores have it. The capture
+                   already scrubbed each row before fitting it under the cap, so clean content comes back the same instance. */
+                new NpgsqlParameter<string?> { TypedValue = section.State == "ready" ? DerivedStoreScrub.Json(section.ContentJson) : null, NpgsqlDbType = NpgsqlDbType.Text },
                 section.State == "pending"
                     ? new NpgsqlParameter<DateTime?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.TimestampTz }
                     : new NpgsqlParameter<DateTime?> { TypedValue = DateTime.SpecifyKind(now, DateTimeKind.Utc), NpgsqlDbType = NpgsqlDbType.TimestampTz });

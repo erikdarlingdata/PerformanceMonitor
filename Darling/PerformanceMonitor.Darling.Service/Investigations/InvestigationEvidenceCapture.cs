@@ -80,6 +80,16 @@ public sealed partial class InvestigationEvidenceCapture
     /// <summary>A request older than this is left as it is: its window is long past.</summary>
     public static readonly TimeSpan CaptureHorizon = TimeSpan.FromHours(6);
 
+    /// <summary>A section's grace ends at the latest this long before <see cref="CaptureHorizon"/> (#6002 review), so a pass (every
+    /// 20 seconds) still sees the request after the grace is over and settles the section: a section of a metric that joined
+    /// late would otherwise keep its grace past the horizon and stay <c>pending</c> for good.</summary>
+    public static readonly TimeSpan HorizonMargin = TimeSpan.FromMinutes(5);
+
+    /// <summary>All of one request's reads share this deadline (#6002 review), on top of each command's own
+    /// <see cref="CommandTimeoutSeconds"/>. Sections read before it ran out are recorded; the rest stay as they were and are read
+    /// on the next pass.</summary>
+    public static readonly TimeSpan RequestDeadline = TimeSpan.FromMinutes(2);
+
     /// <summary>Statements kept in <c>top_statements</c>.</summary>
     public const int TopStatements = 10;
 
@@ -327,6 +337,9 @@ LIMIT 10";
         var writes = new List<InvestigationEvidenceWrite>();
         var slow = new HashSet<string>(StringComparer.Ordinal);
         var runsByWindowEnd = new Dictionary<DateTime, HashSet<string>>();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(RequestDeadline);
+        var readToken = deadline.Token;
         foreach (var (section, anchor) in SectionsOf(request))
         {
             if (settled.Contains(section))
@@ -336,38 +349,64 @@ LIMIT 10";
                it came after the open (a metric that joined later), so a joined family is judged on its own window. */
             var from = anchor - BreachLeadIn;
             var to = anchor + BreachTail;
-            var age = now - (anchor > request.OpenedAtUtc ? anchor : request.OpenedAtUtc);
+            var graceStart = anchor > request.OpenedAtUtc ? anchor : request.OpenedAtUtc;
+            var age = now - graceStart;
             if (request.IsPostgres)
             {
                 writes.Add(new InvestigationEvidenceWrite(section, "not_collected", null));
                 continue;
             }
 
+            var grace = CappedGrace(GraceFor(section, request.ServerId), graceStart, request.OpenedAtUtc);
+            try
+            {
+
             /* #6001 review: ready means the section's collector COMPLETED a run at or after the window end, whether or not the run
                found anything (an empty window is a true "nothing found", not a missing collection), so rows in the window
                never freeze a section early. A collector with no run since the window end keeps the section pending until the
                grace is over, and only then is it not_collected. */
-            if (!runsByWindowEnd.TryGetValue(to, out var ran))
-            {
-                ran = await ReadCollectorRunsAsync(request.ServerId, to, cancellationToken).ConfigureAwait(false);
-                runsByWindowEnd[to] = ran;
-            }
+                if (!runsByWindowEnd.TryGetValue(to, out var ran))
+                {
+                    ran = await ReadCollectorRunsAsync(request.ServerId, to, readToken).ConfigureAwait(false);
+                    runsByWindowEnd[to] = ran;
+                }
 
-            if (ran.Contains(SectionCollectors[section]))
-            {
-                var rows = await ReadSectionAsync(section, request, from, to, cancellationToken).ConfigureAwait(false);
-                writes.Add(new InvestigationEvidenceWrite(section, "ready", rows.ReportXml is null
-                    ? Fit(from, to, rows.Rows, rows.DatabasesDropped)
-                    : FitReportXml(from, to, rows.Rows, rows.ReportXml)));
+                if (ran.Contains(SectionCollectors[section]))
+                {
+                    var rows = await ReadSectionAsync(section, request, from, to, readToken).ConfigureAwait(false);
+                    var scrubbed = ScrubRows(rows.Rows);
+                    writes.Add(new InvestigationEvidenceWrite(section, "ready", rows.ReportXml is null
+                        ? Fit(from, to, scrubbed, rows.DatabasesDropped)
+                        : FitReportXml(from, to, scrubbed, rows.ReportXml)));
+                }
+                else
+                {
+                    /* A slow collector (its grace is above the base) does not hold evidence_ready back, and keeps its own, longer
+                       grace before it is called not_collected. */
+                    if (grace > PendingGrace)
+                        slow.Add(section);
+                    writes.Add(new InvestigationEvidenceWrite(section, age >= grace ? "not_collected" : "pending", null));
+                }
             }
-            else
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {
-                /* A slow collector (its grace is above the base) does not hold evidence_ready back, and keeps its own, longer
-                   grace before it is called not_collected. */
-                var grace = GraceFor(section, request.ServerId);
+                /* The request's deadline ran out: what was read is recorded, the rest is read on the next pass. */
+                _logger.LogWarning(
+                    "Evidence capture for investigation {RequestId} ran past its {Deadline} deadline at section {Section}; the sections not read are tried again next pass",
+                    request.RequestId, RequestDeadline, section);
+                break;
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                /* #6002 review: one section that fails does not cost the others their write. It is read again on the next pass
+                   while its grace lasts, and is then frozen as unavailable with the error's class (never its message, which can
+                   carry collected text). */
+                _logger.LogWarning(ex, "Evidence section {Section} failed for investigation {RequestId}", section, request.RequestId);
                 if (grace > PendingGrace)
                     slow.Add(section);
-                writes.Add(new InvestigationEvidenceWrite(section, age >= grace ? "not_collected" : "pending", null));
+                writes.Add(age >= grace
+                    ? new InvestigationEvidenceWrite(section, "ready", Unavailable(from, to, ex))
+                    : new InvestigationEvidenceWrite(section, "pending", null));
             }
         }
 
@@ -377,6 +416,43 @@ LIMIT 10";
                 request.RequestId, request.ServerId, writes, slow, now - request.OpenedAtUtc >= PendingGrace, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>A section's grace, ended no later than <see cref="HorizonMargin"/> before the request's
+    /// <see cref="CaptureHorizon"/>: the grace counts from <paramref name="graceStart"/>, which is after the open for a metric
+    /// that joined late (#6002 review).</summary>
+    internal static TimeSpan CappedGrace(TimeSpan grace, DateTime graceStart, DateTime openedAt)
+    {
+        var latest = openedAt + CaptureHorizon - HorizonMargin - graceStart;
+        if (latest < TimeSpan.Zero)
+            latest = TimeSpan.Zero;
+        return grace > latest ? latest : grace;
+    }
+
+    /// <summary>The content of a section whose read failed past its grace: no rows, <c>status: unavailable</c>, and the error's
+    /// class name only.</summary>
+    internal static string Unavailable(DateTime from, DateTime to, Exception error) => new JsonObject
+    {
+        ["window_start"] = from.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+        ["window_end"] = to.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+        ["rows"] = new JsonArray(),
+        ["status"] = "unavailable",
+        ["error"] = error.GetType().Name,
+    }.ToJsonString();
+
+    /// <summary>
+    /// #4348 (#6002 review): each row through <see cref="DerivedStoreScrub.Json"/> BEFORE it is fitted, so the bytes the cap
+    /// measures are the bytes stored (the store runs the same scrub at the write, and finds these rows clean). A row the filter
+    /// cannot read is kept as <c>{"withheld": true}</c>, so the rows stay aligned with any report XML beside them.
+    /// </summary>
+    internal static List<JsonObject> ScrubRows(List<JsonObject> rows) =>
+        rows.ConvertAll(row =>
+        {
+            var json = row.ToJsonString();
+            var scrubbed = DerivedStoreScrub.Json(json);
+            if (ReferenceEquals(scrubbed, json))
+                return row;
+            return scrubbed is null ? new JsonObject { ["withheld"] = true } : JsonNode.Parse(scrubbed)!.AsObject();
+        });
 
     /// <summary>
     /// The sections <paramref name="request"/> gets (#6002), each with the alert time its window is built around: the sections of

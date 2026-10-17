@@ -209,7 +209,7 @@ public static class PlanInputComparison
     /// different values). The investigation evidence is the only caller: see the class remarks on the one stored copy.
     /// </summary>
     public static IReadOnlyList<KeyValuePair<string, string?>>? CompiledValues(string? planXml) =>
-        ReadInputs(planXml) is { } inputs ? new List<KeyValuePair<string, string?>>(inputs.Parameters) : null;
+        ReadInputs(planXml) is { } inputs ? inputs.InPlanOrder.ToArray() : null;
 
     /// <summary>True for the three outcomes that drop the candidate.</summary>
     public static bool IsDrop(PlanInputOutcome outcome) =>
@@ -231,6 +231,10 @@ public static class PlanInputComparison
     {
         /// <summary>Parameter column to its compiled value (null when the parameter has none).</summary>
         public Dictionary<string, string?> Parameters { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The same parameters in the order the plan lists them, each once (#6002 review: a dictionary's order is not
+        /// the plan's).</summary>
+        public List<KeyValuePair<string, string?>> InPlanOrder { get; } = [];
 
         /// <summary>The optimizer statistics the plan used, with their last-update strings; null when the plan has no <c>OptimizerStatsUsage</c>.</summary>
         public HashSet<(string Database, string Schema, string Table, string Statistics, string LastUpdate)>? Statistics { get; set; }
@@ -288,7 +292,8 @@ public static class PlanInputComparison
                                 && !string.Equals(seen, value, StringComparison.Ordinal))
                                 return null;
 
-                            result.Parameters[column] = value;
+                            if (result.Parameters.TryAdd(column, value))
+                                result.InPlanOrder.Add(new KeyValuePair<string, string?>(column, value));
                             break;
                         case "OptimizerStatsUsage":
                             result.Statistics ??= [];

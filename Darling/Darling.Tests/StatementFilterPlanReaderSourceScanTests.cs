@@ -24,6 +24,9 @@ namespace Darling.Tests;
 /// <c>SensitiveStatements.Xml</c> (or through another listed method that does); a new public read fails until it is listed,
 /// wrapped and planted in <c>StatementFilterPlanReadsLiveTests</c>. (2) No other file under <c>Mcp</c> names a plan column in
 /// SQL it runs, so a tool cannot read a plan around the seam. (3) The scan itself is proven against planted sources.
+/// (4) #6002 review: a file under <c>Investigations</c> that reads a stored plan (a plan column in its own SQL, or another
+/// class's plan SQL by name) passes it through <c>SensitiveStatements.Xml</c>, so the evidence capture cannot freeze a value
+/// from a raw plan.
 /// </summary>
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
 public sealed class StatementFilterPlanReaderSourceScanTests
@@ -125,6 +128,30 @@ public sealed class StatementFilterPlanReaderSourceScanTests
         // A flag does not excuse a read beside it.
         Assert.Equal(new[] { "blocked_query_plan_xml" },
             PlanColumnReads("const string S = \"SELECT blocked_query_plan_xml, (blocking_query_plan_xml IS NOT NULL) AS f FROM t\";"));
+    }
+
+    /// <summary>Plan SQL another class owns, run by name (<c>PgFactCollector.PlanRegressionPlansSql</c>).</summary>
+    private static readonly Regex PlanSqlName = new(@"\b\w*Plans?Sql\b", RegexOptions.Compiled);
+
+    [Fact]
+    public void EveryFileUnderInvestigations_ThatReadsAStoredPlan_PassesItThroughTheStatementFilter()
+    {
+        string investigations = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Investigations");
+        var readers = new List<string>();
+        var offenders = new List<string>();
+        foreach (string file in Directory.EnumerateFiles(investigations, "*.cs", SearchOption.AllDirectories))
+        {
+            string source = File.ReadAllText(file);
+            string code = CSharpSourceWalker.StripCommentsAndStrings(source);
+            if (PlanColumnReads(source).Count == 0 && !PlanSqlName.IsMatch(code)) continue;
+            readers.Add(Path.GetFileName(file));
+            if (!Regex.IsMatch(code, @"\bSensitiveStatements\s*\.\s*Xml\s*\("))
+                offenders.Add(Path.GetFileName(file));
+        }
+
+        Assert.Empty(offenders);
+        // The regression evidence reads two stored plans: a scan that finds no reader there reads nothing.
+        Assert.Contains("InvestigationEvidenceCapture.Families.cs", readers);
     }
 
     // ── helpers ──
