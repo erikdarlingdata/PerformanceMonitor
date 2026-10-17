@@ -58,12 +58,6 @@ public sealed class McpLongQueryTools
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1,
                 databaseNames: database == null ? null : new[] { database }, tags: tagScope);
-            if (rows.Count == 0 && tagScope.Active)
-            {
-                return McpHelpers.StatusForDatabase("empty",
-                    $"No long-running query completions in the specified time range carry query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the slowest-{limit} ranking.", database);
-            }
-
             if (rows.Count == 0)
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
@@ -86,9 +80,10 @@ public sealed class McpLongQueryTools
                 /* #5244 round 2 (L3): the twin of Darling's. The floor probe is not database-filtered, so a null floor (no effective_start)
                    means the store holds no long-query row for this server in the window, and only then does the answer send the reader to
                    the opt-in switch; with rows for other databases the collector is on. */
-                var collectorMayBeOff = database == null || emptyNotice.EffectiveStart is null;
+                var collectorMayBeOff = (database == null && !tagScope.Active) || emptyNotice.EffectiveStart is null;
                 return McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
+                        + (tagScope.Active ? $" for query tag '{tagScope.Requested}'" : "")
                         + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
                     database, /* #5244 review L2: the echo rides on an empty answer too */
                     emptyNotice.AsHints());

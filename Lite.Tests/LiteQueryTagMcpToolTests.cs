@@ -227,6 +227,55 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
     }
 
     [Fact]
+    public async Task LongQueryCompletions_WithATagAndNoRows_StillSaysTheCollectorIsOptIn_AndNamesTheTag()
+    {
+        await CpuTagAsync("Dec", _idA, "0x00000000000000AA");
+
+        var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerA, 24, 10, tag: "Dec"));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("for query tag 'Dec'", message, StringComparison.Ordinal);
+        Assert.Contains("collector is opt-in (default OFF)", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("carry query tag", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResourceUse_OnAnAzureSqlDatabaseServer_AnsweringNoRows_SaysNotCollectedForTheSectionsItsCollectorsSkip()
+    {
+        await ExecAsync(
+            "INSERT INTO server_properties (server_id, collection_time, engine_edition) VALUES ($1, $2, 5)", _idA, Ago(5));
+
+        var root = Parse(await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerA, 24));
+
+        var sections = root.GetProperty("sections").EnumerateArray().ToDictionary(s => s.GetProperty("section").GetString()!);
+        Assert.Equal("not_collected", sections["blocking_snapshots"].GetProperty("status").GetString());
+        Assert.Equal("empty", sections["plan_cache"].GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task ResourceUse_DeadlockSection_UnderATag_FleetTotalCountsOnlyTheGraphsWithAProcessUnderTheTag()
+    {
+        var a = await _service.CreateQueryTagAsync("A", null);
+        foreach (var (server, apps) in new[] { (_idA, new[] { "appA", "other" }), (_idB, new[] { "other", "other2" }) })
+        {
+            await ExecAsync(
+                "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1, $2, $3, 'x', $2, $4, 'db1')",
+                _nextId++, Ago(15), server,
+                "<deadlock><process-list>" + string.Concat(apps.Select((x, i) => $"<process id=\"p{i}\" clientapp=\"{x}\" loginname=\"lg\" hostname=\"h\" currentdbname=\"db1\" />")) + "</process-list></deadlock>");
+        }
+
+        await MapAsync(_idA, "caller", QueryTagRollup.CallerKey("appA", "lg", "h", "db1"), a);
+        await MapAsync(_idB, "caller", QueryTagRollup.CallerKey("appA", "lg", "h", "db1"), a);
+
+        var root = Parse(await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, null, 24, "A"));
+        var deadlocks = root.GetProperty("sections").EnumerateArray().Single(s => s.GetProperty("section").GetString() == "deadlocks");
+
+        Assert.Equal(1.0, deadlocks.GetProperty("fleet_total").GetProperty("deadlocks").GetDouble());
+        Assert.Equal(1.0, deadlocks.GetProperty("fleet_total").GetProperty("processes").GetDouble());
+    }
+
+    [Fact]
     public async Task QueryStoreTop_WithATag_KeepsOnlyTheTaggedQueryAndNamesTheFilter()
     {
         await CpuTagAsync("Qs", _idA, "0x00000000000000AA");

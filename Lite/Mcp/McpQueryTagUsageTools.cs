@@ -90,12 +90,16 @@ public sealed class McpQueryTagUsageTools
                 anyData |= facts.Any(f => QueryTagRollup.IsUnderTag(f.TagId, data.Tags, tagFilter));
                 data.Unavailable.TryGetValue(section.Name, out var why);
                 if (why is not null) notServed.Add((section.Name, why));
-                sections.Add(QueryTagRollup.Section(section, facts, scope, allServers, data.Tags, tagFilter, limit, why));
+                sections.Add(facts.Count == 0 && why is null && await NotCollectedAsync(dataService, scope, allServers, section.Name) is { } gap
+                    ? QueryTagRollup.Empty(section, gap, "not_collected", tagFilter)
+                    : QueryTagRollup.Section(section, facts, scope, allServers, data.Tags, tagFilter, limit, why));
             }
 
             data.Unavailable.TryGetValue(QueryTagRollupSection.Deadlocks.Name, out var deadlockWhy);
             if (deadlockWhy is not null) notServed.Add((QueryTagRollupSection.Deadlocks.Name, deadlockWhy));
-            sections.Add(QueryTagRollup.DeadlockSection(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated, deadlockWhy));
+            sections.Add(data.Deadlocks.Count == 0 && deadlockWhy is null && await NotCollectedAsync(dataService, scope, allServers, QueryTagRollupSection.Deadlocks.Name) is { } deadlockGap
+                ? QueryTagRollup.Empty(QueryTagRollupSection.Deadlocks, deadlockGap, "not_collected", tagFilter)
+                : QueryTagRollup.DeadlockSection(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated, deadlockWhy));
 
             /* Six independent sections answer from the ones they could serve: "unavailable" only when none could be, else "empty" when the
                served ones held no rows, else data. The sections not served are named with why. Lite has no interval tier and no
@@ -144,6 +148,28 @@ public sealed class McpQueryTagUsageTools
         {
             return McpHelpers.FormatError("get_resource_use_by_tag", ex);
         }
+    }
+
+    /// <summary>
+    /// The not_collected sentence for a section whose collector never runs on this server's engine (a section with no rows, one server),
+    /// else null. Lite's twin of Darling's engine check: the same CollectorEngineCapability sentence, asked per section, so an Azure SQL
+    /// Database target answers not_collected for blocking_snapshots (the query_snapshots collector) instead of a plain empty. The
+    /// all-servers view makes no per-server claim.
+    /// </summary>
+    private static async Task<string?> NotCollectedAsync(LocalDataService dataService, List<(int Id, string Name)> scope, bool allServers, string section)
+    {
+        if (allServers) return null;
+        var collector = section switch
+        {
+            "plan_cache" => "query_stats",
+            "query_store" => "query_store",
+            "procedures" => "procedure_stats",
+            "blocking_reports" => "blocked_process_report",
+            "blocking_snapshots" => "query_snapshots",
+            _ => "deadlocks",
+        };
+        var edition = await McpEngineCapability.EngineEditionAsync(dataService, scope[0].Id);
+        return PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage(scope[0].Name, edition, null, collector);
     }
 
     private static string NotServedText(List<(string Section, string Reason)> notServed)
