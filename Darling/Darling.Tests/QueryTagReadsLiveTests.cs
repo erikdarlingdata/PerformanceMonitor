@@ -25,7 +25,8 @@ namespace Darling.Tests;
 /// <c>config.query_tag_map</c> directly (the builder is #5985) and read through the MCP tools: a mapped row carries one
 /// <c>tag</c> (its path name), an unmapped row carries none, the filter matches the tag and every tag beneath it before the
 /// top-N cut, <c>untagged</c> keeps the unmapped rows, and an unknown name answers empty and says so. One read of each kind:
-/// query stats, procedure stats, Query Store, active-query snapshots and long-query completions.
+/// query stats, procedure stats, Query Store, active-query snapshots and long-query completions. Map keys match the rows' key text
+/// exactly (no case folding at read time), so the lookup can use the map's primary key.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class QueryTagReadsLiveTests
@@ -89,7 +90,7 @@ public sealed class QueryTagReadsLiveTests
                 ServerId, kind, key, tag);
         }
 
-        var at = DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-10));
+        var at = DarlingMcpTestData.Naive(LiveClock.Now().AddMinutes(-10));
         foreach (var (hash, cpu) in new[] { (Hog, 9_000_000L), (Ord, 5_000_000L), (Bat, 1_000_000L) })
         {
             var text = "SELECT " + hash;
@@ -193,6 +194,66 @@ public sealed class QueryTagReadsLiveTests
         Assert.Equal([null, "TagReadsProd / TagReadsOrders"], Tags(all));
         var filtered = Rows(await DarlingMcpDataTools.GetTopProceduresByCpu(pg, ServerName, 1, 1, Db, tag: "TagReadsProd", cancellationToken: ct), "procedures");
         Assert.Equal("dbo.usp_TagOrders", Assert.Single(filtered.EnumerateArray()).GetProperty("full_name").GetString());
+    });
+
+    [Fact]
+    public Task ObjectKeys_MatchExactly_ARowDifferingOnlyInCaseIsNotTagged() => RunAsync(async (pg, ct) =>
+    {
+        /* #5984: reads join the map by exact key text. The map key is TagDb.dbo.usp_TagOrders; a row whose name differs only in case is
+           a different key, and case folding belongs to the map build (#5985), never to the read. */
+        await using (var connection = await pg.OpenConnectionAsync(ct))
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+                                               delta_execution_count, delta_worker_time, delta_elapsed_time)
+                  VALUES ($1,$2,$3,$4,$5,'dbo','usp_tagorders','SQL_STORED_PROCEDURE',10,1000000,1000000)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(LiveClock.Now().AddMinutes(-10)), ServerId, ServerName, Db);
+        }
+
+        var all = Rows(await DarlingMcpDataTools.GetTopProceduresByCpu(pg, ServerName, 1, 10, Db, cancellationToken: ct), "procedures");
+        var byName = all.EnumerateArray().ToDictionary(r => r.GetProperty("full_name").GetString()!, r => r.TryGetProperty("tag", out var t) ? t.GetString() : null);
+        Assert.Equal("TagReadsProd / TagReadsOrders", byName["dbo.usp_TagOrders"]);
+        Assert.Null(byName["dbo.usp_tagorders"]);
+
+        var filtered = Rows(await DarlingMcpDataTools.GetTopProceduresByCpu(pg, ServerName, 1, 10, Db, tag: "TagReadsProd", cancellationToken: ct), "procedures");
+        Assert.Equal("dbo.usp_TagOrders", Assert.Single(filtered.EnumerateArray()).GetProperty("full_name").GetString());
+        var untagged = Rows(await DarlingMcpDataTools.GetTopProceduresByCpu(pg, ServerName, 1, 10, Db, tag: "untagged", cancellationToken: ct), "procedures");
+        Assert.Equal(["dbo.usp_TagPlain", "dbo.usp_tagorders"], untagged.EnumerateArray().Select(r => r.GetProperty("full_name").GetString()).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    });
+
+    [Fact]
+    public Task TagLookup_ProbesTheMapsPrimaryKey_NotAScanOfTheServersKeys() => RunAsync(async (pg, ct) =>
+    {
+        /* #5984: a function on the key (lower(key)) cannot use the primary key (server_id, key_kind, key), and a server's hash map can hold
+           hundreds of thousands of rows. Seed a few hundred more rows, then EXPLAIN the shipped lookup with sequential scans off: only a
+           statement whose key predicate is a plain comparison can answer from the primary key. */
+        await using var connection = await pg.OpenConnectionAsync(ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO config.query_tag_map (server_id, key_kind, key, tag_id, source)
+              SELECT $1, 'hash', '0xFILL' || g, id, 'rule' FROM config.query_tags, generate_series(1, 400) AS g WHERE name = 'TagReadsBatch'",
+            ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE config.query_tag_map");
+        await DarlingMcpTestData.ExecAsync(connection, ct, "SET enable_seqscan = off");
+
+        var plan = new System.Text.StringBuilder();
+        await using (var explain = new NpgsqlCommand("EXPLAIN (COSTS OFF) " + QueryTagReadJoin.LookupSql, connection))
+        {
+            explain.Parameters.Add(new NpgsqlParameter { Value = ServerId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+            explain.Parameters.Add(new NpgsqlParameter { Value = "hash", NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            explain.Parameters.Add(new NpgsqlParameter { Value = new[] { Ord, Bat }, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text });
+            await using var reader = await explain.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                plan.AppendLine(reader.GetString(0));
+            }
+        }
+
+        var text = plan.ToString();
+        /* The planner may take the primary key or idx_query_tag_map_key (key_kind, key); either answers from the key columns. */
+        Assert.True(text.Contains("query_tag_map_pkey", StringComparison.Ordinal) || text.Contains("idx_query_tag_map_key", StringComparison.Ordinal), text);
+        Assert.Matches("Index (Only )?Scan|Bitmap Index Scan", text);
+        Assert.DoesNotContain("Seq Scan", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("lower(", text, StringComparison.Ordinal);
     });
 
     [Fact]

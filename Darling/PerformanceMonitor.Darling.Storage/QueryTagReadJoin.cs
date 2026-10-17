@@ -54,6 +54,9 @@ public static class QueryTagReadJoin
     /// <summary>The word that matches rows with no tag (when no tag is itself named so).</summary>
     public const string UntaggedWord = "untagged";
 
+    /// <summary>The page lookup: an exact-key probe of the map's primary key (<c>server_id, key_kind, key</c>), with no function on the key.</summary>
+    internal const string LookupSql = "SELECT key, tag_id FROM config.query_tag_map WHERE server_id = $1 AND key_kind = $2 AND key = ANY($3)";
+
     /// <summary>The description every query read gives its optional <c>tag</c> parameter.</summary>
     public const string TagParameterDescription =
         "Optional query tag. Keeps only rows whose query carries this tag or a tag beneath it (name or path such as 'Parent / Child', any case), applied in SQL before the row cap. 'untagged' keeps rows with no tag. A name no tag carries answers empty. Each row also carries its tag when it has one.";
@@ -177,7 +180,7 @@ public static class QueryTagReadJoin
             var isObject = match.Groups["kind"].Value == ObjectKind;
             var kind = isObject ? ObjectKind : HashKind;
             var join = isObject
-                ? $"lower(m.key) = lower(COALESCE({cols[0]}, '') || '.' || COALESCE({cols[1]}, '') || '.' || COALESCE({cols[2]}, ''))"
+                ? $"m.key = COALESCE({cols[0]}, '') || '.' || COALESCE({cols[1]}, '') || '.' || COALESCE({cols[2]}, '')"
                 : $"m.key = {cols[0]}";
             var scope = string.Create(CultureInfo.InvariantCulture,
                 $"FROM config.query_tag_map AS m WHERE m.server_id = {serverId} AND m.key_kind = '{kind}' AND {join}");
@@ -193,26 +196,25 @@ public static class QueryTagReadJoin
 
     /// <summary>
     /// The tag of each key, as its path name (<c>Parent / Child</c>), for a page of rows. A key with no map row is not in the
-    /// result. Hash keys compare exactly; object keys compare ignoring case.
+    /// result. Every key compares exactly (#5984): the map's primary key is (server_id, key_kind, key), so a lower() on either side would
+    /// defeat it. Case is folded once, when the map is built (#5985 writes the sighted key text), never at read time.
     /// </summary>
     public static async Task<Dictionary<string, string>> LookupAsync(
         NpgsqlDataSource postgres, int serverId, string keyKind, IEnumerable<string?> keys, CancellationToken cancellationToken)
     {
         var wanted = keys.Where(k => !string.IsNullOrEmpty(k)).Select(k => k!).Distinct(StringComparer.Ordinal).ToArray();
-        var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var found = new Dictionary<string, string>(StringComparer.Ordinal);
         if (wanted.Length == 0)
         {
             return found;
         }
 
-        var lowered = wanted.Select(k => k.ToLowerInvariant()).ToArray();
-        var tagByKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        await using (var command = postgres.CreateCommand(
-            "SELECT key, tag_id FROM config.query_tag_map WHERE server_id = $1 AND key_kind = $2 AND lower(key) = ANY($3)"))
+        var tagByKey = new Dictionary<string, int>(StringComparer.Ordinal);
+        await using (var command = postgres.CreateCommand(LookupSql))
         {
             command.Parameters.Add(new NpgsqlParameter { Value = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
             command.Parameters.Add(new NpgsqlParameter { Value = keyKind, NpgsqlDbType = NpgsqlDbType.Text });
-            command.Parameters.Add(new NpgsqlParameter { Value = lowered, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            command.Parameters.Add(new NpgsqlParameter { Value = wanted, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
