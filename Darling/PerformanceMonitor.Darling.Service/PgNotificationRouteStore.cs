@@ -314,7 +314,7 @@ UPDATE config_notification_routes
         {
             clear.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
             clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-            await clear.ExecuteNonQueryAsync(cancellationToken);
+            await Task.CompletedTask;
         }
 
         int deleted;
