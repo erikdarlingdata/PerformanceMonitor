@@ -1771,6 +1771,17 @@ GRANT UPDATE (follow_up_at) ON {config}.investigation_requests TO {mcp};
 $v193u$;
    END IF;
 END $$;
+-- #6009 (V193): the deploy condition beside it, guarded the same way; provision-roles.sql step 3i mirrors it.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('{config}.investigation_requests')
+                AND attname = 'follow_up_condition' AND NOT attisdropped) THEN
+      EXECUTE $v193c$
+GRANT UPDATE (follow_up_condition) ON {config}.investigation_requests TO {mcp};
+$v193c$;
+   END IF;
+END $$;
 GRANT INSERT ON {config}.investigation_reports TO {mcp};
 GRANT INSERT ({JournalWriterColumns}) ON {config}.investigation_journal TO {mcp};
 GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id)
