@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Common.Tags;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -154,19 +155,16 @@ ORDER BY tag_id, kind, server_id NULLS FIRST, query_hash, database_name, schema_
     private const string AssignmentColumns =
         "id, tag_id, kind, server_id, query_hash, database_name, schema_name, object_name, query_id, created_at, created_by";
 
-    /// <summary>The one row a key addresses in a server scope, locked for the write. $1 kind, $2 server_id (NULL = every server), $3 hash,
-    /// $4 database, $5 schema, $6 object. The hash and the three object parts compare ignoring case (NULL parts as the empty string), because the
-    /// resolver matches a hash with OrdinalIgnoreCase and an object through SameObjectAs (#6020); the V192 unique indexes stay exact, and this find under
-    /// <see cref="AssignLockKey"/> is what keeps a case-twin row from being written. The assignments table is small and hand-made, so no index is needed.</summary>
+    /// <summary>The candidate rows for a key in a server scope, locked for the write. $1 kind, $2 server_id (NULL = every server). The kind and server
+    /// match exactly; which candidate is the key is decided in .NET by <see cref="QueryTagKeyRule"/>, the rule the resolver uses (#6027), because
+    /// PostgreSQL lower() folds differently from OrdinalIgnoreCase for some non-ASCII names. The V192 unique indexes stay exact, and the find under
+    /// <see cref="AssignLockKey"/> is what keeps a case-twin row from being written. The assignments table is small and hand-made, so reading a
+    /// server-and-kind slice is fine and no index is needed.</summary>
     private const string FindAssignmentSql = @"
 SELECT " + AssignmentColumns + @"
 FROM config.query_tag_assignments
 WHERE kind = $1
   AND server_id IS NOT DISTINCT FROM $2
-  AND lower(COALESCE(query_hash, '')) = lower(COALESCE($3, ''))
-  AND lower(COALESCE(database_name, '')) = lower(COALESCE($4, ''))
-  AND lower(COALESCE(schema_name, '')) = lower(COALESCE($5, ''))
-  AND lower(COALESCE(object_name, '')) = lower(COALESCE($6, ''))
 FOR UPDATE";
 
     private const string InsertAssignmentSql = @"
@@ -419,8 +417,7 @@ RETURNING " + AssignmentColumns;
             await using (var find = Command(FindAssignmentSql, connection, transaction))
             {
                 AddKeyParameters(find, key);
-                await using var reader = await find.ExecuteReaderAsync(ct);
-                existing = await reader.ReadAsync(ct) ? ReadAssignment(reader) : null;
+                existing = await ReadMatchAsync(find, key, ct);
             }
 
             if (existing is not null && existing.TagId == tagId)
@@ -483,8 +480,7 @@ RETURNING " + AssignmentColumns;
         await using (var find = Command(FindAssignmentSql, connection, transaction))
         {
             AddKeyParameters(find, key);
-            await using var reader = await find.ExecuteReaderAsync(ct);
-            existing = await reader.ReadAsync(ct) ? ReadAssignment(reader) : null;
+            existing = await ReadMatchAsync(find, key, ct);
         }
 
         if (existing is null)
@@ -506,10 +502,23 @@ RETURNING " + AssignmentColumns;
     {
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = key.Kind });
         command.Parameters.Add(NullableInt(key.ServerId));
-        command.Parameters.Add(NullableText(key.QueryHash));
-        command.Parameters.Add(NullableText(key.DatabaseName));
-        command.Parameters.Add(NullableText(key.SchemaName));
-        command.Parameters.Add(NullableText(key.ObjectName));
+    }
+
+    /// <summary>Reads the locked candidates and returns the one the resolver's rule calls the same key, or null.</summary>
+    private static async Task<QueryTagAssignmentRow?> ReadMatchAsync(NpgsqlCommand find, QueryTagKey key, CancellationToken ct)
+    {
+        var wanted = new QueryTagObject(key.DatabaseName, key.SchemaName, key.ObjectName);
+        await using var reader = await find.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var row = ReadAssignment(reader);
+            if (QueryTagKeyRule.SameKey(row.QueryHash, new QueryTagObject(row.DatabaseName, row.SchemaName, row.ObjectName), key.QueryHash, wanted))
+            {
+                return row;
+            }
+        }
+
+        return null;
     }
 
     private NpgsqlCommand Command(string sql, NpgsqlConnection connection, NpgsqlTransaction? transaction) =>

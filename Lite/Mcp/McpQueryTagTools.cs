@@ -742,10 +742,9 @@ public sealed class McpQueryTagTools
 
     private static bool SameKey(QueryTagAssignmentRow a, QueryTagKey key) =>
         a.Kind == key.Kind && a.ServerId == key.ServerId
-        && string.Equals(a.QueryHash ?? "", key.Hash ?? "", StringComparison.OrdinalIgnoreCase)
-        && string.Equals((a.DatabaseName ?? "").ToLowerInvariant(), (key.Database ?? "").ToLowerInvariant(), StringComparison.Ordinal)
-        && string.Equals((a.SchemaName ?? "").ToLowerInvariant(), (key.Schema ?? "").ToLowerInvariant(), StringComparison.Ordinal)
-        && string.Equals((a.ObjectName ?? "").ToLowerInvariant(), (key.Name ?? "").ToLowerInvariant(), StringComparison.Ordinal);
+        && PerformanceMonitor.Common.QueryTags.QueryTagKeyRule.SameKey(
+            a.QueryHash, new PerformanceMonitor.Common.QueryTags.QueryTagObject(a.DatabaseName, a.SchemaName, a.ObjectName),
+            key.Hash, new PerformanceMonitor.Common.QueryTags.QueryTagObject(key.Database, key.Schema, key.Name));
 
     private static QueryTagKey? BuildKey(
         string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal)

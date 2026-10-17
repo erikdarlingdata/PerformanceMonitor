@@ -300,6 +300,30 @@ public sealed class DarlingMcpQueryTagToolsLiveTests
         });
     }
 
+    [Theory]
+    [InlineData("Caf\u00e9", "CAF\u00c9", "caf\u00c9")]
+    // Final sigma and sigma share an upper case, so OrdinalIgnoreCase says one key; PostgreSQL lower() keeps them apart in every locale.
+    [InlineData("Orders\u03c2", "Orders\u03c3", "ORDERS\u03a3")]
+    public async Task ANonAsciiObjectInAnotherCase_IsTheSameKeyAsTheResolverSeesIt_AssignMovesItAndUnassignRemovesIt(string first, string twin, string unassignAs)
+    {
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            var tagA = await CreateAsync(source, "Reports", null, ct);
+            var tagB = await CreateAsync(source, "Etl", null, ct);
+            await DarlingMcpQueryTagTools.AssignQueryTag(source, tagA, "object", null, "db", "dbo", first, cancellationToken: ct);
+
+            var moved = Parse(await DarlingMcpQueryTagTools.AssignQueryTag(source, tagB, "object", null, "db", "dbo", twin, cancellationToken: ct));
+
+            Assert.Equal("moved", (string?)moved["status"]);
+            Assert.Equal(1, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+
+            var removed = Parse(await DarlingMcpQueryTagTools.UnassignQueryTag(source, "object", null, "DB", "DBO", unassignAs, cancellationToken: ct));
+
+            Assert.Equal("unassigned", (string?)removed["status"]);
+            Assert.Equal(0, await ScalarAsync(owner, "SELECT count(*) FROM config.query_tag_assignments", ct));
+        });
+    }
+
     [Fact]
     public async Task AnObjectInAnotherCase_IsTheSameKey_AssignMovesIt_AndUnassignRemovesIt()
     {

@@ -147,6 +147,37 @@ public sealed class McpQueryTagToolTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal("not_found", unknown.GetProperty("status").GetString());
     }
 
+    [Theory]
+    [InlineData("Caf\u00e9", "CAF\u00c9", "DB.DBO.CAF\u00c9")]
+    // Final sigma and sigma share an upper case (one key to the resolver) but ToLowerInvariant keeps them apart.
+    [InlineData("Orders\u03c2", "Orders\u03c3", "DB.DBO.ORDERS\u03a3")]
+    public async Task Assign_ANonAsciiObjectCaseTwin_MovesIt_AndUnassignRemovesIt(string first, string twin, string unassignAs)
+    {
+        var tagA = await _data.CreateQueryTagAsync("A", null);
+        var tagB = await _data.CreateQueryTagAsync("B", null);
+        await McpQueryTagTools.AssignQueryTagCore(_data, [], tagA, "object", null, "db", "dbo", first, null, null);
+        var moved = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [], tagB, "object", null, "db", "dbo", twin, null, null));
+
+        Assert.Equal("moved", moved.GetProperty("status").GetString());
+        Assert.Single(await _data.GetQueryTagAssignmentsAsync());
+
+        var parts = unassignAs.Split('.');
+        await McpQueryTagTools.UnassignQueryTagCore(_data, "object", null, parts[0], parts[1], parts[2], null);
+        Assert.Empty(await _data.GetQueryTagAssignmentsAsync());
+    }
+
+    [Fact]
+    public async Task Assign_AKelvinSignAndALowerKAreTwoKeys_BecauseTheResolverUpperCasesThem()
+    {
+        var tagA = await _data.CreateQueryTagAsync("A", null);
+        var tagB = await _data.CreateQueryTagAsync("B", null);
+        await McpQueryTagTools.AssignQueryTagCore(_data, [], tagA, "object", null, "db", "dbo", "\u212Aey", null, null);
+        var added = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [], tagB, "object", null, "db", "dbo", "key", null, null));
+
+        Assert.NotEqual("moved", added.GetProperty("status").GetString());
+        Assert.Equal(2, (await _data.GetQueryTagAssignmentsAsync()).Count);
+    }
+
     [Fact]
     public async Task Assign_ACaseTwinOfAnExistingKey_MovesIt_AndStoresTheCanonicalHash()
     {

@@ -41,6 +41,14 @@ public sealed record QueryTagObject(string? Database, string? Schema, string? Na
         && string.Equals(Name ?? string.Empty, other.Name ?? string.Empty, StringComparison.OrdinalIgnoreCase);
 }
 
+/// <summary>The one rule for "is this the same key" that hand-assignment writes use (#6027), so assign and unassign find what the resolver would treat as one key.</summary>
+public static class QueryTagKeyRule
+{
+    /// <summary>A hash compares with OrdinalIgnoreCase, an object through <see cref="QueryTagObject.SameObjectAs"/>; a missing part is the empty string.</summary>
+    public static bool SameKey(string? hashA, QueryTagObject objectA, string? hashB, QueryTagObject objectB) =>
+        string.Equals(hashA ?? string.Empty, hashB ?? string.Empty, StringComparison.OrdinalIgnoreCase) && objectA.SameObjectAs(objectB);
+}
+
 /// <summary>
 /// What one collected row saw, for one key: the key plus the caller fields and a sample of the query text.
 /// A plain value with no store references. The collectors (#5980) fill it, and the map builders (#5985
