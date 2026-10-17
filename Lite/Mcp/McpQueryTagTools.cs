@@ -175,8 +175,10 @@ public sealed class McpQueryTagTools
         [Description("Draft: the tag the rule applies; omit for text_tag.")] int? tag_id = null,
         [Description("Draft: the rule priority (lower first); default 100.")] int priority = DefaultPriority,
         [Description("Test against this server's sightings (from list_servers); omit for every server.")] int? server_id = null,
-        [Description("How far back to look at sightings, in hours (1-8760); default 168.")] int window_hours = DefaultWindowHours) =>
-        TestRuleCore(dataService, serverManager.GetKnownServerIds(), rule_id, field, pattern, tag_id, priority, server_id, window_hours);
+        [Description("How far back to look at sightings, in hours (1-8760); default 168.")] int window_hours = DefaultWindowHours)
+    {
+        return TestRuleCore(dataService, serverManager.GetKnownServerIds(), rule_id, field, pattern, tag_id, priority, server_id, window_hours);
+    }
 
     // ------------------------------------------------------------------ tag cores
 
