@@ -509,6 +509,8 @@
                 </ComboBox>
                 <Button x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click"
                         Padding="12,4" Margin="0,0,8,4"/>
+                <Button x:Name="ResourceUseByTagButton" Content="Use by tag" Click="ResourceUseByTagButton_Click"
+                        Padding="12,4" Margin="0,0,8,4" ToolTip="Resource use rolled up by query tag, for this server or the fleet"/>
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
                 <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center"
                           Margin="0,0,4,4" Foreground="{DynamicResource ForegroundBrush}"

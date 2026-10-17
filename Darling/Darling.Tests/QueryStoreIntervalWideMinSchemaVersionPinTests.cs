@@ -44,6 +44,12 @@ public sealed class QueryStoreIntervalWideMinSchemaVersionPinTests
             .GetRawConstantValue()!;
         Assert.Equal(migration.Version, mcpConstant);
 
+        /* #5988: the by-tag roll-up reader moved to Storage with its own copy of the same gate constant. */
+        var rollupConstant = (int)typeof(DarlingQueryTagRollupReader)
+            .GetField("QueryStoreTableMinSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!
+            .GetRawConstantValue()!;
+        Assert.Equal(migration.Version, rollupConstant);
+
         var viewerConstant = (int)typeof(ViewerDataService)
             .GetField("QueryStoreIntervalWideMinSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!
             .GetRawConstantValue()!;

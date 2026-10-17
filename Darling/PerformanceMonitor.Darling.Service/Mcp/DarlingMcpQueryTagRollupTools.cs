@@ -85,7 +85,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                 scope = servers.Where(s => s.ServerId == resolved.ServerId).ToList();
             }
 
-            var tags = await DarlingQueryTagRollupReader.ReadTagsAsync(postgres, cancellationToken);
+            var tags = await DarlingQueryTagRollupReader.ReadTagsAsync(postgres, cancellationToken, McpCommandDeadlines.ReadSeconds);
             int? tagFilter = null;
             if (!string.IsNullOrWhiteSpace(tag))
             {
@@ -101,7 +101,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             /* Each stats section routes on its own (their rollups and floors are independent) and says how far back it reached: the raw branch
                carries effective_start / window_truncated, the hourly branch the served window_end. The routing lives in the reader, which judges
                the retention tier against the wall clock; this tool's only "now" is the as_of anchor (windowEnd). */
-            var (planRoute, procRoute) = await DarlingQueryTagRollupReader.ChooseStatsRoutesAsync(postgres, serverIds, windowStart, windowEnd, cancellationToken);
+            var (planRoute, procRoute) = await DarlingQueryTagRollupRouting.ChooseStatsRoutesAsync(postgres, serverIds, windowStart, windowEnd, cancellationToken);
 
             var sections = new List<object>();
             /* anyWork: any collected work in the window at all. anyData: the answer holds figures, so with a tag filter it is decided from the
@@ -118,7 +118,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                 try
                 {
                     facts = await DarlingQueryTagRollupReader.ReadFactsAsync(
-                        postgres, sql, section, serverIds, windowStart, windowEnd, ceiling, cancellationToken);
+                        postgres, sql, section, serverIds, windowStart, windowEnd, ceiling, cancellationToken, McpCommandDeadlines.ReadSeconds);
                 }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
                 {
@@ -147,7 +147,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                ANY server refuses is not fully served, so it is named in notServed even when other servers were read (a fleet answer of
                "empty" must not hide the refusal). */
             {
-                var read = await DarlingQueryTagRollupReader.ReadQueryStoreAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
+                var read = await DarlingQueryTagRollupReader.ReadQueryStoreAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken, McpCommandDeadlines.ReadSeconds);
                 var allowed = read.Allowed;
                 var refused = read.Refused;
                 var facts = read.Facts;
@@ -207,7 +207,7 @@ public sealed class DarlingMcpQueryTagRollupTools
 
             try
             {
-                var (deadlocks, scanTruncated) = await DarlingQueryTagRollupReader.ReadDeadlocksAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
+                var (deadlocks, scanTruncated) = await DarlingQueryTagRollupReader.ReadDeadlocksAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken, McpCommandDeadlines.ReadSeconds);
                 anyWork |= deadlocks.Count > 0;
                 anyData |= HasMatchDeadlocks(deadlocks, tags, tagFilter);
                 sections.Add(WrapDeadlocks(fleet, scope, names, tags, tagFilter, limit, deadlocks, scanTruncated));
