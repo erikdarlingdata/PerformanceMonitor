@@ -66,7 +66,7 @@ export const SERVER_WIDE = new Set([
   "get_read_latency", "get_resource_semaphore", "get_running_jobs", "get_server_config", "get_server_config_changes",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
   "get_spinlock_stats", "get_store_query_history", "get_tempdb_trend", "get_trace_flag_changes", "get_trace_flags",
-  "get_wait_stats", "get_wait_trend",
+  "get_wait_stats", "get_wait_trend", "list_query_tags",
 ]);
 
 /** The class a read is in: "filtered", "unfiltered", "identity" or "server" (server-wide); null for a read no class names

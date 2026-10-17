@@ -188,11 +188,11 @@ public sealed class DarlingCustomViewsTests
     {
         /* Builder 2 binds these keys onto ?query=strings, so they MUST be the literal keys the dispatch lambdas
            read — the whole reason the metadata is hand-authored (reflection would emit the C# param names). */
-        AssertParamKeys("get_query_store_top", "server", "hours", "top", "database_name", "as_of", "execution_type", "module_name", "full_text");
+        AssertParamKeys("get_query_store_top", "server", "hours", "top", "database_name", "as_of", "execution_type", "module_name", "full_text", "tag");
         AssertParamKeys("get_wait_stats", "server", "hours", "limit", "as_of");
         AssertParamKeys("get_wait_trend", "wait_type", "server", "hours", "as_of", "bucket_minutes");
         AssertParamKeys("get_plan_xml", "query_hash", "server", "database_name");
-        AssertParamKeys("get_top_queries_by_cpu", "server", "hours", "top", "database_name", "parallel_only", "min_dop", "order_by", "as_of", "detail");
+        AssertParamKeys("get_top_queries_by_cpu", "server", "hours", "top", "database_name", "parallel_only", "min_dop", "order_by", "as_of", "detail", "tag");
         AssertParamKeys("compare_analysis", "server", "hours", "baseline_hours_back", "as_of");
         AssertParamKeys("get_fleet_overview", "hours", "detail", "worst_only", "band");
         AssertParamKeys("list_servers");

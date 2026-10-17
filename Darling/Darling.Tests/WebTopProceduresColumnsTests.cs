@@ -110,7 +110,7 @@ public sealed class WebTopProceduresColumnsTests
     {
         var js = Tab();
         Assert.Equal(2, Regex.Matches(js,
-            @"""get_top_procedures_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}, ranking\),\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
+            @"""get_top_procedures_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}, ranking, ""procedures""\),\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
         /* #5226: the selector is the last argument. #5299: the ranking's retention notice rides the window note, so the grid has no further note key. */
         Assert.Equal(2, Regex.Matches(js, @"""truncation_note"",\s*null,\s*TOP_PROC_GROUPS,\s*picker\s*\)").Count);
     }
@@ -122,7 +122,7 @@ public sealed class WebTopProceduresColumnsTests
         Assert.Contains("string? as_of = null,\n        [Description(\"'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.\")] string detail = \"summary\",\n        ILogger? logger = null,\n        CancellationToken cancellationToken = default)",
             src, StringComparison.Ordinal);
         var web = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        Assert.Matches(@"\[""get_top_procedures_by_cpu""\] = R\([^\n]*PAsOf\(\), PTextDefault\(""detail"", ""summary""\)\)", web);
+        Assert.Matches(@"\[""get_top_procedures_by_cpu""\] = R\([^\n]*PAsOf\(\), PTextDefault\(""detail"", ""summary""\), PText\(""tag""\)\)", web);
         /* #5226: the web dispatch calls the ranked sibling, so the MCP tool keeps its own signature. */
         Assert.Matches(@"GetTopProceduresRanked\([^\n]*detail: Str\(c, ""detail""\) \?\? ""summary""", web);
     }

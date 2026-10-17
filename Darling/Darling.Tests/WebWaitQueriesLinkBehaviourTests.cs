@@ -152,7 +152,7 @@ public sealed class WebWaitQueriesLinkBehaviourTests
         Assert.Equal("?server=A&hours=24&limit=500&wait_type=LCK_M_X", r.GetProperty("filteredQuery").GetString());
         // The heading stays "Active Queries"; the subtitle names the wait; the strip sits between the heading and the grid.
         Assert.Equal("Active Queries last 24 hours, waiting on LCK_M_X", r.GetProperty("filteredHeadText").GetString());
-        Assert.Equal(new[] { "h3:", "div:strip", "div:panel-body" }, Strings(r.GetProperty("filteredHeadChildOrder")));
+        Assert.Equal(new[] { "h3:", "div:picker-row", "div:strip", "div:panel-body" }, Strings(r.GetProperty("filteredHeadChildOrder")));
         Assert.Equal(1, r.GetProperty("stripCount").GetInt32());
         Assert.Equal("Only requests waiting on LCK_M_X. Show all active queries", r.GetProperty("stripText").GetString());
         Assert.Equal("Show all active queries", r.GetProperty("showAllLabel").GetString());
