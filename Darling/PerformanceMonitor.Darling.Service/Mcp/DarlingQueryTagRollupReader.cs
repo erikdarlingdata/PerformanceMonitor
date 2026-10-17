@@ -194,11 +194,20 @@ internal static class DarlingQueryTagRollupReader
         return new QueryStoreRead(allowed, refused, facts, false);
     }
 
+    /* The deadline is set HERE, on the name the construction is bound to, so the read-surface deadline scan certifies each site itself. */
     private static NpgsqlCommand Command(NpgsqlDataSource postgres, string sql, int[] serverIds, DateTime startUtc, DateTime endUtc)
-        => WithWindow(postgres.CreateCommand(sql), serverIds, startUtc, endUtc);
+    {
+        var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        return WithWindow(command, serverIds, startUtc, endUtc);
+    }
 
     private static NpgsqlCommand Command(NpgsqlConnection connection, string sql, int[] serverIds, DateTime startUtc, DateTime endUtc)
-        => WithWindow(new NpgsqlCommand(sql, connection), serverIds, startUtc, endUtc);
+    {
+        var command = new NpgsqlCommand(sql, connection);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        return WithWindow(command, serverIds, startUtc, endUtc);
+    }
 
     private static NpgsqlCommand WithWindow(NpgsqlCommand command, int[] serverIds, DateTime startUtc, DateTime endUtc)
     {
