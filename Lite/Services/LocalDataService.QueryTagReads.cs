@@ -33,7 +33,7 @@ public sealed class QueryTagReadScope
 
     /// <summary>The description every query read gives its optional <c>tag</c> parameter.</summary>
     public const string ParameterDescription =
-        "Optional query tag. Keeps only rows whose query carries this tag or a tag beneath it (name or path such as 'Parent / Child', any case), applied in SQL before the row cap. 'untagged' keeps rows with no tag. A name no tag carries answers empty. Each row also carries its tag when it has one.";
+        "Keep rows whose query has this tag or one beneath it (name or Parent / Child path), applied before the row cap. 'untagged' keeps untagged rows. Each row carries its tag.";
 
     private readonly Dictionary<string, int> _hash;
     private readonly Dictionary<string, int> _object;
