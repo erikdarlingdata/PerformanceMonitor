@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -115,4 +116,7 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
        definition could not `override` it and the interface map would keep resolving to null no matter what
        the definition said. */
     public virtual OversizedPlanObservation? DescribeOversizedPlan(TRow row) => null;
+
+    /* Declared here as well as on the interface for the same reason as DescribeOversizedPlan above (#5980). */
+    public virtual IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(TRow row) => null;
 }

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -266,4 +267,16 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// keeps the shared definition free of a table only one SKU has.</para>
     /// </summary>
     OversizedPlanObservation? DescribeOversizedPlan(TRow row) => null;
+
+    /// <summary>
+    /// Describes the query keys and caller fields one already-read row saw (#5980, part of #5971): a hash
+    /// sighting for a row with a query_hash, an object sighting for a procedure row, a caller sighting per
+    /// application, login and host for a row with no query_hash (blocking and deadlock rows). Null when the row
+    /// has no key, and for every collector that does not describe its rows, which is the default.
+    ///
+    /// <para><b>It reads a row; it writes nothing and never opens a connection.</b> Each store builds its tag
+    /// map from these sightings itself (#5985 Darling, #5990 Lite), the same split as
+    /// <see cref="DescribeOversizedPlan"/>.</para>
+    /// </summary>
+    IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(TRow row) => null;
 }

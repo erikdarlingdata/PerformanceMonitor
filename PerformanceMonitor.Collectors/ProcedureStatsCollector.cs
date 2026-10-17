@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -994,4 +995,8 @@ OPTION(RECOMPILE);");
             null,
             row.QueryPlanXmlBytes!.Value);
     }
+
+    /// <summary>#5980: one object sighting (database, schema, object) and no hash sighting. Null when the row names no object.</summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(QueryTagSightings.ObjectKey(row.DatabaseName, row.SchemaName, row.ObjectName));
 }

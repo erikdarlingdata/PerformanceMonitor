@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -814,4 +815,13 @@ SELECT /* PerformanceMonitorLite */
             .Value(row.DurationUs)         /* duration_us BIGINT */
             .Value(row.EndTime);           /* end_time TIMESTAMP */
     }
+
+    /// <summary>
+    /// #5980: one caller sighting for the row's login, host, application and database. The row carries no
+    /// query_hash and its text is a trace event's, not a query's, so there is no hash sighting and no text sample.
+    /// Null when the row names no login, host or application.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(
+            QueryTagSightings.Caller(row.DatabaseName, row.ApplicationName, row.LoginName, row.HostName, null));
 }
