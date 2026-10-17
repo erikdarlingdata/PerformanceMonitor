@@ -336,7 +336,7 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
         }
 
         Assert.Equal(2, refreshCalls.Count);
-        Assert.Contains("DarlingModuleMap.RefreshAsync(moduleMapConnection", worker, StringComparison.Ordinal);
+        Assert.Contains("DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, outcome", worker, StringComparison.Ordinal);
         Assert.Contains("DarlingModuleMap.RefreshRecentAsync(connection", worker, StringComparison.Ordinal);
         Assert.Contains("await RefreshModuleMapRecentAsync(stoppingToken);", worker, StringComparison.Ordinal);
 
