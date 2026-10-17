@@ -538,7 +538,10 @@ public sealed class DarlingMcpInvestigationTools
         "later briefs for the same server and family list it under prior_links. Darling stores the link and never calls Jira or git. " +
         "family_of (optional) is the request_id of the first report in this family; it must name a request (else invalid). " +
         "queries_run (optional) is a JSON array of the statements you ran, " + InvestigationReportFields.QueriesRunRule + " (over a cap: refused, never cut); " +
-        "it is masked as statement text.")]
+        "it is masked as statement text. " +
+        "follow_up_at (optional) asks Darling to open a new request for this case later: " + InvestigationReportFields.FollowUpRule + ". " +
+        "When the time comes the new request names this one (follow_up_of), its brief carries this report, and one follow_up event is " +
+        "journaled. A time in the past, more than 30 days ahead, or a route already holding 20 pending follow-ups is refused (invalid), and nothing is stored.")]
     public static Task<string> SubmitInvestigationReport(
         NpgsqlDataSource postgres,
         [Description("The request you claimed.")] string request_id,
@@ -553,9 +556,10 @@ public sealed class DarlingMcpInvestigationTools
         [Description("Optional JSON array of at most 10 {kind, url, key}; https only. See the guide.")] string? links = null,
         [Description("Optional. The request_id of the first report in this family; it must exist.")] string? family_of = null,
         [Description("Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + ".")] string? queries_run = null,
+        [Description("Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + ".")] string? follow_up_at = null,
         CancellationToken cancellationToken = default) =>
         SubmitAsync(Store(postgres), request_id, claim_id, report_format, verdict, root_cause, evidence, summary,
-            proposed_note, action_proposals, cancellationToken, links, family_of, queries_run);
+            proposed_note, action_proposals, cancellationToken, links, family_of, queries_run, follow_up_at);
 
     /// <summary>The <c>reported</c> answer: <c>links_recorded</c> (the distinct URLs stored, #5914) only when the report
     /// carried a link, so a report without one answers exactly as before.</summary>
@@ -576,7 +580,7 @@ public sealed class DarlingMcpInvestigationTools
     internal static async Task<string> SubmitAsync(InvestigationRequestStore store, string request_id, string claim_id,
         int report_format, string verdict, string root_cause, string evidence, string summary, string? proposed_note,
         string? action_proposals, CancellationToken cancellationToken, string? links = null, string? family_of = null,
-        string? queries_run = null)
+        string? queries_run = null, string? follow_up_at = null)
     {
         var problems = InvestigationToolCore.ValidateReport(request_id, claim_id, verdict, root_cause, evidence, summary, proposed_note,
             action_proposals, out var requestId, out var claimId, out var evidenceJson, requireBasis: true);
@@ -595,6 +599,9 @@ public sealed class DarlingMcpInvestigationTools
 
         if (InvestigationReportFields.Validate(queries_run, out var queriesRunJson) is { } queriesProblem)
             problems.Add("queries_run: " + queriesProblem);
+        /* #6008: follow_up_at after queries_run, for the same reason. The route's pending cap is the store's, under the route lock. */
+        if (InvestigationReportFields.ValidateFollowUp(follow_up_at, DateTime.UtcNow, out var followUpAtUtc) is { } followUpProblem)
+            problems.Add("follow_up_at: " + followUpProblem);
         try
         {
             var agent = requestId != Guid.Empty && claimId != Guid.Empty
@@ -646,7 +653,7 @@ public sealed class DarlingMcpInvestigationTools
                 requestId, claimId, agent, (short)report_format, verdict, root_cause.Trim(),
                 RootCauseFound: verdict != "needs_person", summary.Trim(), evidenceJson!,
                 string.IsNullOrWhiteSpace(proposed_note) ? null : proposed_note.Trim(), reportLinks.Count > 0 ? reportLinks : null,
-                familyOf, queriesRunJson), cancellationToken);
+                familyOf, queriesRunJson, followUpAtUtc), cancellationToken);
 
             return outcome switch
             {
@@ -657,6 +664,8 @@ public sealed class DarlingMcpInvestigationTools
                 InvestigationSubmitOutcome.NotOpen => InvestigationToolCore.Status("not_open", "The request is closed."),
                 InvestigationSubmitOutcome.NotFound => InvestigationToolCore.Status("not_found", $"No investigation request has id {requestId}."),
                 InvestigationSubmitOutcome.AgentIdInvalid => InvestigationToolCore.Status("agent_id_invalid", "The claim's agent id is not valid. " + InvestigationRules.AgentIdRule),
+                InvestigationSubmitOutcome.FollowUpLimit => McpHelpers.Refusal("follow_up_at",
+                    $"The report was not stored: this request's route already holds {InvestigationReportFields.MaxPendingFollowUpsPerRoute} pending follow-ups. Submit without follow_up_at, or wait for one to open."),
                 _ => InvestigationToolCore.Status("journal_capped",
                     $"The request already holds {InvestigationRules.MaxAgentJournalRows} agent journal rows; the report was refused."),
             };

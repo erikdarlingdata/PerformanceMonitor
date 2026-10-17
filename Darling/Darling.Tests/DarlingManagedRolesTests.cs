@@ -560,7 +560,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains($"GRANT SELECT ON {Six} TO mcp;", flat, StringComparison.Ordinal);
 
         /* mcp: the claim and report columns only, and a note without its state, so an agent's note stays pending. */
-        Assert.Contains("GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at) ON config.investigation_requests TO mcp;", flat, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at, follow_up_at) ON config.investigation_requests TO mcp;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT ON config.investigation_reports TO mcp;", flat, StringComparison.Ordinal);
         /* #6003 review round 2: the journal grant names its columns and leaves out journal_id and event_id. */
         Assert.Contains($"GRANT INSERT ({DarlingManagedRoles.JournalWriterColumns}) ON config.investigation_journal TO mcp;", flat, StringComparison.Ordinal);

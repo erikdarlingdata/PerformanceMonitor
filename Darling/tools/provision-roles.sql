@@ -1807,7 +1807,7 @@ BEGIN
    GRANT SELECT ON config.investigation_requests, config.investigation_request_alerts, config.investigation_reports,
       config.investigation_journal, config.investigation_notes, config.agent_environment_profiles
       TO mcp;
-   GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at)
+   GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at, follow_up_at)
       ON config.investigation_requests TO mcp;
    GRANT INSERT ON config.investigation_reports TO mcp;
    GRANT INSERT (event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)

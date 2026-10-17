@@ -34,6 +34,49 @@ public static class InvestigationReportFields
     /// published description against them.</summary>
     public const string QueriesRunRule = "at most 20 statement strings, each at most 2,000 characters";
 
+    /// <summary>How far ahead a report may set <c>follow_up_at</c> (#6008, D16).</summary>
+    public const int MaxFollowUpDays = 30;
+
+    /// <summary>The most pending follow-ups one route may hold (#6008, D16): reported requests whose follow-up has not opened.</summary>
+    public const int MaxPendingFollowUpsPerRoute = 20;
+
+    /// <summary>The <c>follow_up_at</c> rule as a tool description states it.</summary>
+    public const string FollowUpRule = "an ISO 8601 time after now and at most 30 days ahead; at most 20 pending follow-ups per route";
+
+    /// <summary>
+    /// Parses the <c>follow_up_at</c> argument (null or blank is none; a time with no offset is UTC). Gives one sentence
+    /// (without the field name) when it is not a time, is not after <paramref name="nowUtc"/>, or is more than
+    /// <see cref="MaxFollowUpDays"/> days past it; never a clamp (#6008).
+    /// </summary>
+    public static string? ValidateFollowUp(string? followUpAt, DateTime nowUtc, out DateTime? followUpAtUtc)
+    {
+        followUpAtUtc = null;
+        if (string.IsNullOrWhiteSpace(followUpAt))
+            return null;
+        if (!DateTimeOffset.TryParse(followUpAt.Trim(), System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var parsed))
+            return "not a time; give an ISO 8601 time such as 2026-11-01T09:00:00Z.";
+        var utc = parsed.UtcDateTime;
+        return FollowUpProblem(utc, nowUtc) is { } problem ? problem : Accept(utc, out followUpAtUtc);
+    }
+
+    private static string? Accept(DateTime utc, out DateTime? followUpAtUtc)
+    {
+        followUpAtUtc = utc;
+        return null;
+    }
+
+    /// <summary>The sentence a <c>follow_up_at</c> of <paramref name="utc"/> earns, or null when it is after <paramref name="nowUtc"/>
+    /// and within <see cref="MaxFollowUpDays"/> days of it.</summary>
+    public static string? FollowUpProblem(DateTime utc, DateTime nowUtc)
+    {
+        if (utc <= nowUtc)
+            return "must be after now.";
+        if (utc > nowUtc.AddDays(MaxFollowUpDays))
+            return $"is more than {MaxFollowUpDays} days ahead.";
+        return null;
+    }
+
     /// <summary>The evidence item the agent checked against collected data.</summary>
     public const string BasisVerified = "verified";
 
