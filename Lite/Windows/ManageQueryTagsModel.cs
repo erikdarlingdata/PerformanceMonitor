@@ -129,17 +129,23 @@ public sealed class ManageQueryTagsModel(LocalDataService data)
     public Task<QueryTagWriteOutcome> DeleteRuleAsync(int ruleId) =>
         RunAsync(() => _data.DeleteQueryTagRuleAsync(ruleId));
 
-    /// <summary>The Test button: the shared resolver over Lite's stored sightings for the rule in the form. <paramref name="editingRuleId"/>
-    /// is the saved rule being edited, which the draft replaces.</summary>
+    /// <summary>The Test button: the one shared dry run (<see cref="QueryTagRuleTester"/>, also behind <c>test_query_tag_rule</c>) over
+    /// the stored sightings of the default window. <paramref name="editingRuleId"/> is the saved rule being edited, which the draft replaces.</summary>
     public async Task<QueryTagTestResult> TestRuleAsync(QueryTagRuleForm form, int? editingRuleId = null, int? serverId = null)
     {
         ArgumentNullException.ThrowIfNull(form);
-        var sightings = await _data.GetQueryTagSightingsAsync(serverId);
-        var (assignments, rules, names) = await _data.GetQueryTagResolverInputsAsync();
         var pattern = form.Field == QueryTagRuleField.TextTag ? null : form.Pattern;
-        var draft = new QueryTagRule(0, form.Field, pattern, form.Priority, true,
+        var draft = new QueryTagRule(editingRuleId ?? QueryTagRuleTester.DraftRuleId, form.Field, pattern, form.Priority, true,
             form.Field == QueryTagRuleField.TextTag ? null : form.TagId, form.ServerId);
-        return QueryTagRuleTester.Run(draft, sightings, assignments, rules, names, editingRuleId);
+        var error = QueryTagRuleValidator.Validate(draft);
+        if (error != QueryTagRuleError.None)
+        {
+            return QueryTagTestResult.Invalid(error);
+        }
+
+        var rules = await _data.GetQueryTagRulesAsync();
+        var tags = await _data.GetQueryTagsAsync();
+        return await QueryTagRuleTester.RunAsync(_data, draft, rules, tags, serverId, QueryTagRuleTester.DefaultWindowHours);
     }
 
     /// <summary>The one-line summary the Test button shows.</summary>
@@ -151,6 +157,6 @@ public sealed class ManageQueryTagsModel(LocalDataService data)
             return $"The rule is not valid ({result.Error}).";
         }
 
-        return $"Matches {result.Matches} of {result.KeysTested} sighted keys; {result.Held} already held by a hand assignment or an earlier rule.";
+        return $"Matches {result.Matches} of {result.KeysTested} sighted keys; {result.Held} already held by a hand assignment or an earlier rule." + (result.SightingsTruncated ? $" Only the newest {result.SightingsRead:N0} sighting rows were read." : string.Empty);
     }
 }

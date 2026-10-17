@@ -105,11 +105,11 @@ public sealed class ManageQueryTagsModelTests : IClassFixture<SharedDuckDbFixtur
 
         var result = await _model.TestRuleAsync(form);
 
-        var sightings = await _data.GetQueryTagSightingsAsync();
+        var sightings = await _data.GetQueryTagSightingsAsync(null, 168, 1000);
         var expected = sightings
-            .GroupBy(s => (s.ServerId, s.Kind, s.Key))
-            .Count(g => QueryTagResolver.Resolve(g.Key.ServerId, g.Select(x => x.Sighting).ToList(), [],
-                [new QueryTagRule(1, QueryTagRuleField.Application, "report*", 100, true, tag)], new System.Collections.Generic.Dictionary<string, long>()).HasTag);
+            .GroupBy(s => (s.ServerId, s.KeyKind, s.Key))
+            .Count(g => g.Any(x => string.Equals(x.ApplicationName, "Report Server", StringComparison.Ordinal)
+                || string.Equals(x.ApplicationName, "Report Builder", StringComparison.Ordinal)));
         Assert.Equal(3, expected);
         Assert.Equal(expected, result.Matches);
         Assert.Equal(1, result.Held);

@@ -421,7 +421,7 @@ public partial class ManageQueryTagsWindow : Window
             var result = await Task.Run(() => _model.TestRuleAsync(form, editing));
             var lines = new List<string> { ManageQueryTagsModel.DescribeTest(result) };
             lines.AddRange(result.Samples.Take(10).Select(s =>
-                $"  {ServerName(s.ServerId)}  {s.Kind}  {s.Key}  ({s.MatchedField}: {s.MatchedValue}){(s.Held ? "  held" : string.Empty)}"));
+                $"  {ServerName(s.ServerId)}  {s.KeyKind}  {s.Key}  ({(s.MatchedField is { } f ? QueryTagRuleTester.FieldName(f) : null)}: {s.MatchedValue}){(s.Held ? "  held" : string.Empty)}"));
             TestOutput.Text = string.Join(Environment.NewLine, lines);
         }
         catch (Exception ex)

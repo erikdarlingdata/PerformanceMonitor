@@ -40,11 +40,11 @@ public sealed class McpQueryTagTools
 {
     internal const int MaxKeyPartLength = 256;
     internal const int MaxListedAssignments = 2000;
-    internal const int MaxSamples = 25;
-    internal const int MaxHeldSamples = 5;
-    internal const int MaxSightingRows = QueryTagLimits.MaxKeysPerServerPerPass;
-    internal const int DefaultWindowHours = 168;
-    internal const int MaxWindowHours = 8760;
+    internal const int MaxSamples = QueryTagRuleTester.MaxSamples;
+    internal const int MaxHeldSamples = QueryTagRuleTester.MaxHeldSamples;
+    internal const int MaxSightingRows = QueryTagRuleTester.MaxSightingRows;
+    internal const int DefaultWindowHours = QueryTagRuleTester.DefaultWindowHours;
+    internal const int MaxWindowHours = QueryTagRuleTester.MaxWindowHours;
     internal const int DefaultPriority = 100;
     internal const string CreatedBy = "mcp";
     internal const string MapNote = "The tag map is not rebuilt by this write: it takes effect on the next map pass, not at once.";
@@ -636,7 +636,7 @@ public sealed class McpQueryTagTools
                 }
 
                 // A new rule gets the highest id, so it ranks last among equals.
-                testRule = new QueryTagRule(long.MaxValue, parsed, stored, priority, true, tagId);
+                testRule = new QueryTagRule(QueryTagRuleTester.DraftRuleId, parsed, stored, priority, true, tagId);
                 ruleNode = new JsonObject
                 {
                     ["draft"] = true,
@@ -653,73 +653,43 @@ public sealed class McpQueryTagTools
                 return UnknownServer(sid);
             }
 
-            // One row more than the bound: the extra row is how a cut is observed (a window of exactly the bound is not cut).
-            var fetched = await data.GetQueryTagSightingsAsync(serverId, windowHours, MaxSightingRows + 1);
-            var truncated = fetched.Count > MaxSightingRows;
-            var rows = truncated ? CutAtKeyBoundary(fetched) : fetched;
-            var assignments = (await data.GetQueryTagAssignmentsAsync()).Select(ToHandAssignment).ToList();
-            var names = new TagNames(tags);
+            var result = await QueryTagRuleTester.RunAsync(data, testRule, allRules, tags, serverId, windowHours);
             var tagById = tags.ToDictionary(t => t.Id);
-            var competing = allRules.Where(r => r.Id != testRule.Id).Select(ToRule).ToList();
-            var withTest = competing.Append(testRule).ToList();
-            var alone = new[] { testRule };
-            var none = Array.Empty<QueryTagHandAssignment>();
-
-            int matched = 0, wouldTag = 0, heldByAssignment = 0, heldByRule = 0, keys = 0;
-            var tagged = new List<JsonObject>();
-            var held = new List<JsonObject>();
-            foreach (var group in rows.GroupBy(r => (r.ServerId, r.KeyKind, r.Key)))
+            JsonObject SampleNode(QueryTagTestSample s)
             {
-                keys++;
-                var sightings = group.Select(ToSighting).ToList();
-                var hit = QueryTagResolver.Resolve(group.Key.ServerId, sightings, none, alone, names);
-                if (!hit.HasTag)
+                var node = new JsonObject
                 {
-                    continue;
-                }
-
-                matched++;
-                var full = QueryTagResolver.Resolve(group.Key.ServerId, sightings, assignments, withTest, names);
-                var sample = new JsonObject
-                {
-                    ["server_id"] = group.Key.ServerId,
-                    ["key_kind"] = group.Key.KeyKind,
-                    ["key"] = group.Key.Key,
-                    ["tag_id"] = hit.TagId,
-                    ["tag"] = hit.TagId is long tid && tagById.ContainsKey((int)tid) ? TagPath(tags, (int)tid) : null,
-                    ["matched_field"] = hit.MatchedField is QueryTagRuleField f ? FieldName(f) : null,
-                    ["matched_value"] = hit.MatchedValue,
+                    ["server_id"] = s.ServerId,
+                    ["key_kind"] = s.KeyKind,
+                    ["key"] = s.Key,
+                    ["tag_id"] = s.TagId,
+                    ["tag"] = s.TagId is long tid && tagById.ContainsKey((int)tid) ? TagPath(tags, (int)tid) : null,
+                    ["matched_field"] = s.MatchedField is QueryTagRuleField f ? FieldName(f) : null,
+                    ["matched_value"] = s.MatchedValue,
                 };
-
-                if (full.Source == QueryTagSource.Rule && full.RuleId == testRule.Id)
+                node["outcome"] = s.Outcome switch
                 {
-                    wouldTag++;
-                    sample["outcome"] = "would_tag";
-                    tagged.Add(sample);
-                    continue;
+                    QueryTagTestOutcome.WouldTag => "would_tag",
+                    QueryTagTestOutcome.HeldByRule => "held_by_rule",
+                    QueryTagTestOutcome.HeldByHandHash => "held_by_hand_hash",
+                    _ => "held_by_hand_object",
+                };
+                if (s.Held)
+                {
+                    if (s.Outcome == QueryTagTestOutcome.HeldByRule)
+                    {
+                        node["held_by_rule_id"] = s.HeldByRuleId;
+                    }
+
+                    node["held_tag_id"] = s.HeldTagId;
+                    node["held_tag"] = s.HeldTagId is long ht && tagById.ContainsKey((int)ht) ? TagPath(tags, (int)ht) : null;
                 }
 
-                if (full.Source == QueryTagSource.Rule)
-                {
-                    heldByRule++;
-                    sample["outcome"] = "held_by_rule";
-                    sample["held_by_rule_id"] = full.RuleId;
-                }
-                else
-                {
-                    heldByAssignment++;
-                    sample["outcome"] = full.Source == QueryTagSource.HandHash ? "held_by_hand_hash" : "held_by_hand_object";
-                }
-
-                sample["held_tag_id"] = full.TagId;
-                sample["held_tag"] = full.TagId is long ht && tagById.ContainsKey((int)ht) ? TagPath(tags, (int)ht) : null;
-                held.Add(sample);
+                return node;
             }
 
-            // Held keys answer "why will this rule not take effect", so up to MaxHeldSamples slots are theirs when any key is held.
-            var taggedShown = Math.Min(tagged.Count, MaxSamples - Math.Min(held.Count, MaxHeldSamples));
-            var heldShown = Math.Min(held.Count, MaxSamples - taggedShown);
-            var samples = tagged.Take(taggedShown).Concat(held.Take(heldShown)).ToList();
+            var truncated = result.SightingsTruncated;
+            var keys = result.KeysTested;
             var cutNote = truncated
                 ? string.Create(CultureInfo.InvariantCulture, $" The newest {MaxSightingRows:N0} sighting rows were read; the counts are of those rows.")
                 : string.Empty;
@@ -734,27 +704,16 @@ public sealed class McpQueryTagTools
                 ["server_id"] = serverId,
                 ["window_hours"] = windowHours,
                 ["keys_examined"] = keys,
-                ["sightings_read"] = rows.Count,
+                ["sightings_read"] = result.SightingsRead,
                 ["sightings_truncated"] = truncated,
-                ["keys_matched"] = matched,
-                ["would_tag"] = wouldTag,
-                ["held_by_hand_assignment"] = heldByAssignment,
-                ["held_by_higher_rule"] = heldByRule,
-                ["samples_truncated"] = tagged.Count + held.Count > MaxSamples,
-                ["samples"] = new JsonArray(samples.Select(s => (JsonNode?)s).ToArray()),
+                ["keys_matched"] = result.Matches,
+                ["would_tag"] = result.WouldTag,
+                ["held_by_hand_assignment"] = result.HeldByAssignment,
+                ["held_by_higher_rule"] = result.HeldByRule,
+                ["samples_truncated"] = result.SamplesTruncated,
+                ["samples"] = new JsonArray(result.Samples.Select(x => (JsonNode?)SampleNode(x)).ToArray()),
             });
         });
-
-    /// <summary>The first <see cref="MaxSightingRows"/> rows of a read that was cut, less every row of the key the cut landed in: that
-    /// key's older sightings were not read, so resolving it would judge it on a partial set. The rows come newest first.</summary>
-    private static List<QueryTagSightingRow> CutAtKeyBoundary(List<QueryTagSightingRow> fetched)
-    {
-        var edge = fetched[MaxSightingRows];
-        return fetched
-            .Take(MaxSightingRows)
-            .Where(r => !(r.ServerId == edge.ServerId && r.KeyKind == edge.KeyKind && r.Key == edge.Key))
-            .ToList();
-    }
 
     // ------------------------------------------------------------------ checks and mapping
 
@@ -894,72 +853,11 @@ public sealed class McpQueryTagTools
         _ => "The rule is not valid.",
     };
 
-    internal static bool TryParseField(string? text, out QueryTagRuleField field)
-    {
-        field = default;
-        switch (text?.Trim().ToLowerInvariant())
-        {
-            case "application": field = QueryTagRuleField.Application; return true;
-            case "login": field = QueryTagRuleField.Login; return true;
-            case "host": field = QueryTagRuleField.Host; return true;
-            case "database": field = QueryTagRuleField.Database; return true;
-            case "object": field = QueryTagRuleField.Object; return true;
-            case "text": field = QueryTagRuleField.Text; return true;
-            case "text_tag": field = QueryTagRuleField.TextTag; return true;
-            default: return false;
-        }
-    }
+    internal static bool TryParseField(string? text, out QueryTagRuleField field) => QueryTagRuleTester.TryParseField(text, out field);
 
-    internal static string FieldName(QueryTagRuleField field) => field switch
-    {
-        QueryTagRuleField.Application => "application",
-        QueryTagRuleField.Login => "login",
-        QueryTagRuleField.Host => "host",
-        QueryTagRuleField.Database => "database",
-        QueryTagRuleField.Object => "object",
-        QueryTagRuleField.Text => "text",
-        _ => "text_tag",
-    };
+    internal static string FieldName(QueryTagRuleField field) => QueryTagRuleTester.FieldName(field);
 
-    private static QueryTagRule ToRule(QueryTagRuleRow r)
-    {
-        TryParseField(r.MatchField, out var field);
-        return new QueryTagRule(r.Id, field, r.Pattern, r.Priority, r.Enabled, r.TagId, r.ServerId);
-    }
-
-    private static QueryTagHandAssignment ToHandAssignment(QueryTagAssignmentRow a) =>
-        a.Kind == KindObject
-            ? new QueryTagHandAssignment(a.TagId, QueryTagKeyKind.Object, null, new QueryTagObject(a.DatabaseName, a.SchemaName, a.ObjectName), a.ServerId)
-            : new QueryTagHandAssignment(a.TagId, QueryTagKeyKind.Hash, a.QueryHash, null, a.ServerId);
-
-    /// <summary>The sighting's object, in the form the resolver matches: the stored <c>object_name</c> is read as
-    /// <c>database.schema.name</c> or <c>schema.name</c> when it carries dots, else as a bare name in the sighting's database.</summary>
-    private static QueryTagObject? ObjectOf(QueryTagSightingRow row)
-    {
-        if (string.IsNullOrEmpty(row.ObjectName))
-        {
-            return null;
-        }
-
-        var parts = row.ObjectName.Split('.');
-        return parts.Length switch
-        {
-            3 => new QueryTagObject(parts[0], parts[1], parts[2]),
-            2 => new QueryTagObject(row.DatabaseName, parts[0], parts[1]),
-            _ => new QueryTagObject(row.DatabaseName, null, row.ObjectName),
-        };
-    }
-
-    private static QueryTagSighting ToSighting(QueryTagSightingRow row)
-    {
-        var kind = row.KeyKind switch
-        {
-            "object" => QueryTagKeyKind.Object,
-            "caller" => QueryTagKeyKind.Caller,
-            _ => QueryTagKeyKind.Hash,
-        };
-        return new QueryTagSighting(kind, row.Key, row.DatabaseName, ObjectOf(row), row.ApplicationName, row.LoginName, row.HostName, row.TextSample);
-    }
+    private static QueryTagRule ToRule(QueryTagRuleRow r) => QueryTagRuleTester.ToRule(r);
 
     // ------------------------------------------------------------------ changes parsing
 
@@ -1318,44 +1216,5 @@ public sealed class McpQueryTagTools
         }
 
         return names.Count == 0 ? null : string.Join('/', names);
-    }
-
-    /// <summary>The tag names the resolver reads for a <c>/* tag:NAME */</c> comment. A list, not a dictionary: the store lets the
-    /// same name stand under two parents, and the resolver treats a name that folds to two entries as ambiguous.</summary>
-    private sealed class TagNames : IReadOnlyDictionary<string, long>
-    {
-        private readonly List<KeyValuePair<string, long>> _entries;
-
-        public TagNames(IEnumerable<QueryTagRow> tags) =>
-            _entries = tags.Select(t => new KeyValuePair<string, long>(t.Name, t.Id)).ToList();
-
-        public int Count => _entries.Count;
-
-        public IEnumerable<string> Keys => _entries.Select(e => e.Key);
-
-        public IEnumerable<long> Values => _entries.Select(e => e.Value);
-
-        public long this[string key] => TryGetValue(key, out var v) ? v : throw new KeyNotFoundException(key);
-
-        public bool ContainsKey(string key) => TryGetValue(key, out _);
-
-        public bool TryGetValue(string key, out long value)
-        {
-            foreach (var e in _entries)
-            {
-                if (string.Equals(e.Key, key, StringComparison.OrdinalIgnoreCase))
-                {
-                    value = e.Value;
-                    return true;
-                }
-            }
-
-            value = 0;
-            return false;
-        }
-
-        public IEnumerator<KeyValuePair<string, long>> GetEnumerator() => _entries.GetEnumerator();
-
-        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }
