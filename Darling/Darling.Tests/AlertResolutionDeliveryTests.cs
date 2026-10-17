@@ -294,7 +294,8 @@ public sealed class AlertResolutionDeliveryTests
         Assert.Single(pagerDuty);
         Assert.Equal("backup", mutedSource);
         var row = rig.History.Records[^1];
-        Assert.Equal("{}", row.ContextJson);
+        /* #6003, D7: the clear's row names the metric it resolves, and the caller's empty context adds nothing else. */
+        Assert.Equal("{\"Resolves\":\"External:backup:nightly\"}", row.ContextJson);
         Assert.Equal(NotificationRouter.SlackChannel, row.ResolutionChannels);
         Assert.Equal("sent", row.ResolutionOutcome);
     }

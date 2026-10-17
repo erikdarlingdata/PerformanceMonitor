@@ -603,16 +603,27 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// #6003, D8: the last fallback for an investigation request that expired with no agent on it, when its agent route has
     /// no fallback route and no human channel. One alert per request, raised once: the request's fallback mark is written
-    /// before the send, so there is no later pass to send it again. No resolution row: the request is final.
+    /// before the send, so there is no later pass to send it again. No resolution row: the request is final. The alert
+    /// carries the request as its incident (#6003 review), so the email and webhook cooldowns, which are per incident, do
+    /// not fold a second request on the same server into the first one's window. Answers what the channels did, so the
+    /// delivery pass can warn when no channel took it.
     /// </summary>
-    public async Task RaiseInvestigationUnansweredAsync(
-        string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken)
+    public Task<AlertDelivery?> RaiseInvestigationUnansweredAsync(
+        Guid requestId, string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken)
     {
-        await FireAsync(
+        var context = new AlertContext
+        {
+            Incidents = AlertFingerprint.ForObjects(serverName, InvestigationIncidentType,
+                [requestId.ToString("D", CultureInfo.InvariantCulture)]) is { } incident ? [incident] : null,
+        };
+        return FireAsync(
             serverId.ToString(CultureInfo.InvariantCulture), serverName, AlertFamily.InvestigationUnansweredMetric,
             currentValue: "1", thresholdValue: "0", detail: detail, severity: AlertSeverityLevel.Warning,
-            shortMessage: shortMessage, numericCurrentValue: 1, numericThresholdValue: 0, cancellationToken);
+            shortMessage: shortMessage, numericCurrentValue: 1, numericThresholdValue: 0, cancellationToken, context);
     }
+
+    /// <summary>The incident type of <see cref="RaiseInvestigationUnansweredAsync"/>'s per-request fingerprint.</summary>
+    internal const string InvestigationIncidentType = "investigation_request";
 
     /// <summary>The span the undelivered count looks back over, and so how long the alert stands after the last give-up.</summary>
     internal static readonly TimeSpan ExternalAlertsWindow = TimeSpan.FromHours(1);
@@ -8796,12 +8807,22 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
         catch (JsonException)
         {
+            /* A resolution context that is not JSON is replaced: the caller's text, not a store read. */
             node = new System.Text.Json.Nodes.JsonObject();
         }
 
         node[ResolvesMember] = metricName;
-        return node.ToJsonString();
+        return node.ToJsonString(ResolutionContextJsonOptions);
     }
+
+    /// <summary>
+    /// #6003 review: the store's resolved sweep finds <see cref="ResolvesMember"/> as text, the metric name encoded by
+    /// PostgreSQL's <c>to_json</c>, which escapes only a quote, a backslash and the control characters. The default encoder
+    /// also escapes <c>&lt;</c>, <c>&gt;</c>, <c>&amp;</c>, <c>'</c> and <c>+</c>, so a rule named "CPU &gt; 90%" would never
+    /// match; this one escapes what <c>to_json</c> escapes. The column is stored data, read by a JSON parser.
+    /// </summary>
+    private static readonly JsonSerializerOptions ResolutionContextJsonOptions =
+        new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     /// <summary>
     /// The explicit "this metric has no measurement" value for the history stores' NOT NULL

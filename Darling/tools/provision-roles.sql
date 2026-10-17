@@ -1806,6 +1806,48 @@ BEGIN
    GRANT INSERT, DELETE ON config.investigation_notes TO admin;
    GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
+
+   -- #6003 review: the journal is the request event log the service signs and delivers, and mcp and admin hold INSERT
+   --     on it, so this trigger (managed provisioning's BuildJournalEventRulesSql, text for text) refuses a row from any
+   --     role but the owner that is an event or a delivery or fallback mark (but for a practice request's one opened row,
+   --     which the Viewer writes), that carries an event's or a mark's once key, or that is dated more than five minutes
+   --     ahead of the store's clock.
+   EXECUTE $ddl$
+CREATE OR REPLACE FUNCTION config.investigation_journal_owner_rows()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $rules$
+BEGIN
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent')
+      AND NOT (NEW.event = 'opened'
+               AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
+                           WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL)
+               AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS j
+                               WHERE j.request_id = NEW.request_id AND j.event = 'opened')) THEN
+      RAISE EXCEPTION 'Only the Darling service journals the request event %.', NEW.event USING ERRCODE = '42501';
+   END IF;
+
+   IF split_part(NEW.once_key, ':', 1) IN ('delivered', 'fallback', 'resolved', 'expired', 'evidence_ready') THEN
+      RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'Only the Darling service writes the once keys of request events and their delivery marks.';
+   END IF;
+
+   IF NEW.event_time > now() + interval '5 minutes' THEN
+      RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'A journal row cannot be dated in the future.';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$
+$ddl$;
+   REVOKE ALL ON FUNCTION config.investigation_journal_owner_rows() FROM PUBLIC;
+   CREATE OR REPLACE TRIGGER trg_investigation_journal_owner_rows
+      BEFORE INSERT ON config.investigation_journal
+      FOR EACH ROW EXECUTE FUNCTION config.investigation_journal_owner_rows();
 END $do$;
 
 -- 3j. Level 2 tables (V191, #5909), mirroring managed provisioning's section 10e grant for grant. The default privileges

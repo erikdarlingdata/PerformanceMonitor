@@ -3546,7 +3546,10 @@ public class WebhookAlertService
         CancellationToken cancellationToken)
     {
         var sendsHeaders = headers is { Count: > 0 };
-        var client = GetHttpClient(proxyAddress, followRedirects: !sendsHeaders);
+        /* #6003 review: a signed send is held to #5366's rule too. A followed 307/308 would carry the body and a valid
+           webhook-signature to whatever host the endpoint names. */
+        var noRedirects = sendsHeaders || signing is not null;
+        var client = GetHttpClient(proxyAddress, followRedirects: !noRedirects);
 
         /* #5998: a signed send puts these exact bytes on the wire and signs these same bytes, so no re-encoding sits
            between the signature and the body. An unsigned send is the StringContent it always was. */
@@ -3594,8 +3597,8 @@ public class WebhookAlertService
             if (response.IsSuccessStatusCode)
                 return null;
 
-            /* #5366: a redirect is not followed on a send with headers. The message names no URL and no header. */
-            if (sendsHeaders && (int)response.StatusCode is >= 300 and < 400)
+            /* #5366: a redirect is not followed on a send with headers or a signature. The message names no URL and no header. */
+            if (noRedirects && (int)response.StatusCode is >= 300 and < 400)
             {
                 return string.Create(CultureInfo.InvariantCulture,
                     $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address.");

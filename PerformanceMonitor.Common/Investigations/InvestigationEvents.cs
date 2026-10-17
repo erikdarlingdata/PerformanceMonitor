@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace PerformanceMonitor.Common;
 
@@ -73,8 +75,61 @@ public static class InvestigationEvents
     /// <summary>The once key of an expired request's fallback.</summary>
     public static string FallbackOnceKey(Guid requestId) => "fallback:" + requestId.ToString("D");
 
-    /// <summary>The once key of a request's <see cref="Resolved"/> event.</summary>
-    public static string ResolvedOnceKey(Guid requestId) => "resolved:" + requestId.ToString("D");
+    /* #6003 review: the detail members each event kind may carry out to the agent route and the long-poll. The writers are
+       the service's own, but deadlock_digest and follow_up have none yet (#6005, #6008), and a member nobody listed here is
+       dropped at the read, so a later writer cannot put text that was never meant to leave the store on the wire. */
+    private static readonly Dictionary<string, string[]> DetailMembers = new(StringComparer.Ordinal)
+    {
+        [Joined] = ["new_metric", "severity"],
+        [Expired] = ["unclaimed"],
+        [ClaimsExhausted] = ["unclaimed"],
+        [EvidenceReady] = ["sections", "not_collected", "pending"],
+    };
+
+    /// <summary>
+    /// The detail an event of kind <paramref name="eventKind"/> sends: only the members its kind lists, as a JSON object, or
+    /// null when none is left (or <paramref name="detailJson"/> is not a JSON object). Read by both event readers.
+    /// </summary>
+    public static string? PublicDetail(string eventKind, string? detailJson)
+    {
+        if (string.IsNullOrWhiteSpace(detailJson) || !DetailMembers.TryGetValue(eventKind, out var members))
+        {
+            return null;
+        }
+
+        JsonObject? source;
+        try
+        {
+            source = JsonNode.Parse(detailJson) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        if (source is null)
+        {
+            return null;
+        }
+
+        var kept = new JsonObject();
+        foreach (var member in members)
+        {
+            if (source.TryGetPropertyValue(member, out var value))
+            {
+                kept[member] = value?.DeepClone();
+            }
+        }
+
+        return kept.Count == 0 ? null : kept.ToJsonString();
+    }
+
+    /// <summary>
+    /// The reason an event of kind <paramref name="eventKind"/> sends: the metric that opened or joined the request, which the
+    /// service writes from its own alert; null for every other kind (#6003 review, as <see cref="PublicDetail"/>).
+    /// </summary>
+    public static string? PublicReason(string eventKind, string? reason) =>
+        eventKind is Opened or Joined ? reason : null;
 }
 
 /// <summary>

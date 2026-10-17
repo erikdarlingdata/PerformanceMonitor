@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -1749,6 +1750,11 @@ GRANT INSERT ON {config}.investigation_journal TO {admin};
 GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
 GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
+-- #6003 review: the journal is the event log the service signs and delivers, and mcp and admin hold INSERT on it, so a
+--     trigger keeps the event rows, their delivery and fallback marks and the time order to the owner (see
+--     BuildJournalEventRulesSql). Created here, not in a migration, as the password rules are; a self-managed store gets
+--     the same function and trigger from tools/provision-roles.sql step 3i.
+{BuildJournalEventRulesSql(config)}
 
 -- 10e. Level 2 tables (V191, #5909): the threshold overrides an agent sets and the feedback on a report. The default
 --     privileges already give admin INSERT/UPDATE/DELETE and viewer SELECT on a table made after them, but the grants are
@@ -2601,6 +2607,60 @@ AS $fn$
       p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, NULL::text, NULL::text) AS e;
 $fn$;
 REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) FROM PUBLIC;";
+
+    /// <summary>
+    /// #6003 review: the journal rows only the store owner writes. <c>config.investigation_journal</c> is the request event
+    /// log: the service signs each event row with the agent route's key and posts it, and the MCP long-poll orders its cursor
+    /// by <c>event_time</c>. <c>mcp</c> (the claim and submit tools) and <c>admin</c> (the desktop Viewer) hold INSERT on it
+    /// to journal their own actions, so this <c>BEFORE INSERT</c> trigger refuses a row from any role but the owner that
+    /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>) or a delivery or fallback mark, but for the one
+    /// <c>opened</c> row of a practice request (the Viewer opens those, #5918); (b) carries a once key the service's
+    /// events and marks use (<c>delivered:</c>, <c>fallback:</c>, <c>resolved:</c>, <c>expired:</c>, <c>evidence_ready:</c>),
+    /// which would otherwise let a role pre-empt a real one; or (c) is dated more than five minutes past the store's clock,
+    /// which would move every long-poll cursor past the real events after it. Five minutes, not zero: the tools and the
+    /// Viewer stamp the row with their own clock. The owner (the table's owner or a superuser) is not held to any of this.
+    /// The same text is in <c>tools/provision-roles.sql</c> for a self-managed store.
+    /// </summary>
+    internal static string BuildJournalEventRulesSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.investigation_journal_owner_rows()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $rules$
+BEGIN
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   IF NEW.event IN ({JournalOwnerEventList})
+      AND NOT (NEW.event = 'opened'
+               AND EXISTS (SELECT 1 FROM {config}.investigation_requests AS r
+                           WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL)
+               AND NOT EXISTS (SELECT 1 FROM {config}.investigation_journal AS j
+                               WHERE j.request_id = NEW.request_id AND j.event = 'opened')) THEN
+      RAISE EXCEPTION 'Only the Darling service journals the request event %.', NEW.event USING ERRCODE = '42501';
+   END IF;
+
+   IF split_part(NEW.once_key, ':', 1) IN ('delivered', 'fallback', 'resolved', 'expired', 'evidence_ready') THEN
+      RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'Only the Darling service writes the once keys of request events and their delivery marks.';
+   END IF;
+
+   IF NEW.event_time > now() + interval '5 minutes' THEN
+      RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'A journal row cannot be dated in the future.';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$;
+REVOKE ALL ON FUNCTION {config}.investigation_journal_owner_rows() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER trg_investigation_journal_owner_rows
+   BEFORE INSERT ON {config}.investigation_journal
+   FOR EACH ROW EXECUTE FUNCTION {config}.investigation_journal_owner_rows();";
+
+    /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list.</summary>
+    internal static string JournalOwnerEventList => string.Join(", ",
+        InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent)
+            .Select(k => "'" + k + "'"));
 
     /// <summary>
     /// The store's own password rules for every role but the owner: a <c>BEFORE INSERT OR UPDATE</c> trigger on

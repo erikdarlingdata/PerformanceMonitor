@@ -64,6 +64,49 @@ Each signature is an HMAC-SHA256 hash. The hash input is the id, a period, the t
 
 Use the body bytes exactly as they arrived. If you parse the JSON and then write it again, the bytes change and the check fails.
 
+## Investigation request events
+
+An agent route (a notification route set to investigate) gets one signed post for each investigation request event, sent to the route's own generic webhook URL with that route's key. The events are:
+
+- `opened`: a request opened.
+- `joined`: a later alert joined the request with a metric it did not have yet, or a higher severity. A join that brings neither is not posted.
+- `resolved`: every metric linked to the request has cleared since its last alert.
+- `expired`: the request reached its expiry.
+- `claims_exhausted`: the request ran out of claims before its expiry.
+- `evidence_ready`: the request's evidence is collected.
+
+`webhook-id` is the event's own id, the same value as `event_id` in the body. The body is JSON:
+
+```json
+{
+  "type": "investigation.resolved",
+  "event_id": "8a1f0c2e-5b7d-4e2a-9c61-0f3d2b7a4e10",
+  "event": "resolved",
+  "occurred_at": "2026-10-17T14:05:00.0000000Z",
+  "request_id": "3c9e1b52-7f04-4d8b-a2e6-51b0c8d9f7a3",
+  "route_id": 4,
+  "server_id": 7,
+  "server_name": "sql-prod-01",
+  "family": "resources",
+  "reason": null,
+  "detail": null
+}
+```
+
+`reason` names the metric for `opened` and `joined`, and is null for every other event. `detail` carries only these members, and is null for every other event:
+
+- `joined`: `new_metric` (true or false) and `severity` (`warning` or `critical`).
+- `expired` and `claims_exhausted`: `unclaimed`, true when no agent was working on the request.
+- `evidence_ready`: `sections` (ready), `not_collected` and `pending`, each a list of section names.
+
+Each event is posted at most once. Darling writes the event's delivery mark before it sends, so a post that fails is logged and not sent again. A route with no generic URL gets no post. A post that answers with a redirect is not followed. Your receiver should still keep each `webhook-id` it accepted, as described above.
+
+When a request expires and no agent was working on it, Darling tells a person instead, once. It tries these in order and uses the first that applies:
+
+1. The agent route's fallback route, when it is enabled and has email, Teams or Slack set.
+2. The agent route's own email, Teams and Slack.
+3. The service's own alert, "Investigation Not Picked Up".
+
 ## Key rotation
 
 When you make a new key for a URL that already has one, Darling keeps the old key for 7 days. During those 7 days, each post carries two signatures: one from the new key and one from the old key. A receiver that still has the old key continues to accept posts. Put the new key into your receiver during those 7 days. After 7 days, Darling stops using the old key.

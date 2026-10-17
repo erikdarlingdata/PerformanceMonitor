@@ -81,10 +81,10 @@ public sealed class InvestigationRequestEventsLiveTests
             return Task.FromResult<IReadOnlyList<string>>(targets.Select(t => t.Channel).ToList());
         }
 
-        public Task RaiseSelfAlertAsync(string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken)
+        public Task<bool> RaiseSelfAlertAsync(Guid requestId, string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken)
         {
             SelfAlerts.Add(shortMessage);
-            return Task.CompletedTask;
+            return Task.FromResult(true);
         }
     }
 
@@ -139,7 +139,7 @@ public sealed class InvestigationRequestEventsLiveTests
                 $"SELECT max_severity FROM config.investigation_requests WHERE request_id = '{opened.RequestId}'", ct));
             var pending = await store.PendingDeliveriesAsync(T0.AddMinutes(-1), 100, ct);
             Assert.Equal(new[] { InvestigationEvents.Opened, InvestigationEvents.Joined }, pending.Select(p => p.Event));
-            Assert.Contains("\"severity\": \"critical\"", pending[1].DetailJson, StringComparison.Ordinal);
+            Assert.Equal("critical", (string)JsonNode.Parse(pending[1].DetailJson!)!["severity"]!);
         });
     }
 
@@ -177,30 +177,68 @@ public sealed class InvestigationRequestEventsLiveTests
         });
     }
 
-    [Fact]
-    public async Task ARouteWithSendResolutionsOff_SendsNoClear_AndStillResolvesTheRequest()
+    /// <summary>
+    /// D7: a clear that sends nothing still writes its row naming the metric it ends, so the request resolves: the route's
+    /// SendResolutions off, a mute rule on the clear, a fire that went to the digest, and a fire the cooldown throttled (the
+    /// last two leave no delivered fire, so the clear has nothing to answer). Each clear goes through the deliverer.
+    /// </summary>
+    [Theory]
+    [InlineData("off")]
+    [InlineData("muted")]
+    [InlineData("digested")]
+    [InlineData("throttled")]
+    public async Task AClearThatSendsNothing_StillWritesItsRow_AndResolvesTheRequest(string why)
     {
         await RunAsync(async (store, connection, ct) =>
         {
             using var slack = new CapturingWebhookEndpoint();
             var config = new DarlingConfig();
             config.Webhooks.SlackSendResolutions = true;
-            config.NotificationRoutes = [new NotificationRoute(1, "High CPU", "", slack.Url, "", "", "", true) { SendResolutions = false }];
+            config.NotificationRoutes = [new NotificationRoute(1, "High CPU", "", slack.Url, "", "", "", true) { SendResolutions = why != "off" }];
             var settings = new DarlingAlertSettings(config);
             var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
             var webhooks = new WebhookAlertService(
                 settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
-            var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+            var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance,
+                isAlertMuted: why == "muted" ? _ => true : null);
             var key = ServerId.ToString(CultureInfo.InvariantCulture);
 
             var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
-            await deliverer.DeliverAsync(new AlertOutcome(key, "srv-7", "High CPU", "97%", "90%", Context: null, DetailText: null,
-                NumericCurrentValue: 97, NumericThresholdValue: 90, Muted: false, Severity: null), ct);
+            AlertHistoryRecord Fire(AlertDelivery delivery) =>
+                new(key, "srv-7", "High CPU", "97%", "90%", 97, 90, delivery, false, null, null) { AlertTimeUtc = T0 };
+            switch (why)
+            {
+                case "digested":
+                    await history.RecordAlertAsync(Fire(AlertDelivery.RoutedToDigest()));
+                    break;
+                case "throttled":
+                    await history.RecordAlertAsync(Fire(AlertDelivery.FromFanout(
+                        new EmailFanoutResult(AlertChannelOutcome.Throttled, null, AlertChannelOutcome.Throttled, null, true),
+                        muted: false, trayChannelPresent: false)));
+                    break;
+                default:
+                    await deliverer.DeliverAsync(new AlertOutcome(key, "srv-7", "High CPU", "97%", "90%", Context: null, DetailText: null,
+                        NumericCurrentValue: 97, NumericThresholdValue: 90, Muted: false, Severity: null), ct);
+                    break;
+            }
+
             await deliverer.DeliverResolutionAsync(
                 new AlertResolution(key, "srv-7", "High CPU", "CPU Resolved", "srv-7: back to 12%"), cancellationToken: ct);
 
-            /* The fire reached Slack; the clear did not, and still wrote its row naming the metric it ends. */
-            Assert.Single(slack.Bodies);
+            /* What reached Slack is the fire, never the clear; the clear still wrote its row naming the metric it ends. */
+            if (why is "off" or "muted")
+            {
+                var body = Assert.Single(slack.Bodies);
+                Assert.Contains("High CPU", body, StringComparison.Ordinal);
+                Assert.DoesNotContain("CPU Resolved", body, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Empty(slack.Bodies);
+            }
+
+            Assert.Equal(why == "muted" ? "True" : "False", await ScalarAsync(connection,
+                "SELECT muted FROM config.config_alert_log WHERE metric_name = 'CPU Resolved'", ct));
             Assert.Equal("High CPU", await ScalarAsync(connection,
                 "SELECT context_json::jsonb ->> 'Resolves' FROM config.config_alert_log WHERE metric_name = 'CPU Resolved'", ct));
 
@@ -208,6 +246,219 @@ public sealed class InvestigationRequestEventsLiveTests
             Assert.Equal(1, (await store.SweepAsync(ct)).Resolved);
             Assert.Equal("resolved", await ScalarAsync(connection,
                 $"SELECT event FROM config.investigation_journal WHERE request_id = '{id}' ORDER BY journal_id DESC LIMIT 1", ct));
+        });
+    }
+
+    /// <summary>A metric that fires again after its clear (and joins the request) keeps the request open until it clears
+    /// again: the clear must come after the metric's LAST alert, not any alert.</summary>
+    [Fact]
+    public async Task AMetricThatFiresAgainAfterItsClear_KeepsTheRequestOpen_UntilItClearsAgain()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(3)));
+
+            _now = T0.AddMinutes(5);
+            Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(_now, "High CPU"), ct)).Outcome);
+            _now = T0.AddMinutes(6);
+            Assert.Equal(0, (await store.SweepAsync(ct)).Resolved);
+
+            await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(7)));
+            _now = T0.AddMinutes(8);
+            Assert.Equal(1, (await store.SweepAsync(ct)).Resolved);
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE event = 'resolved' AND request_id = '{id}'", ct));
+        });
+    }
+
+    /// <summary>#6003 review: an alert-log context a text column holds but jsonb refuses (a \u0000 escape) neither fails the
+    /// sweep nor hides the clear it carries: the detector matches the member as text, in a transaction of its own.</summary>
+    [Fact]
+    public async Task AContextJsonbRefuses_StillResolves_AndTheExpiryStillCommits()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var resolvedId = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            var expiringId = (await store.OpenOrJoinAsync(Alert(T0, "Blocking Detected") with { Family = "blocking", ExpiryMinutes = 5 }, ct))
+                .RequestId!.Value;
+            await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(3))
+                with { ContextJson = "{\"Resolves\":\"High CPU\",\"note\":\"\\u0000\"}" });
+            Assert.Equal("1", await ScalarAsync(connection,
+                "SELECT count(*) FROM config.config_alert_log WHERE strpos(context_json, '\\u0000') > 0", ct));
+
+            _now = T0.AddMinutes(6);
+            var swept = await store.SweepAsync(ct);
+            Assert.Equal((1, 1), (swept.Expired, swept.Resolved));
+            Assert.Equal("expired|resolved", await ScalarAsync(connection,
+                $"SELECT (SELECT state FROM config.investigation_requests WHERE request_id = '{expiringId}') || '|' || "
+                + $"(SELECT event FROM config.investigation_journal WHERE request_id = '{resolvedId}' ORDER BY journal_id DESC LIMIT 1)", ct));
+        });
+    }
+
+    /// <summary>#6003 review: a claim whose lease lapsed with no report leaves the request claimed, but no agent is on it, so
+    /// its expiry is unclaimed and sends the fallback.</summary>
+    [Fact]
+    public async Task AClaimWhoseLeaseLapsed_ExpiresUnclaimed_AndFallsBack()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var sends = new FakeSends();
+            var delivery = Delivery(store, sends, Route(1, teams: "https://teams.example/agent-route"));
+            var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            Assert.Equal(InvestigationClaimOutcome.Claimed, (await store.ClaimAsync(id, "agent-a", ct)).Outcome);
+
+            _now = T0.AddMinutes(241);
+            var swept = await store.SweepAsync(ct);
+            Assert.Equal((1, 1), (swept.LeasesLapsed, swept.Expired));
+            Assert.Equal("true", await ScalarAsync(connection,
+                $"SELECT detail ->> 'unclaimed' FROM config.investigation_journal WHERE event = 'expired' AND request_id = '{id}'", ct));
+            Assert.Equal(1, (await delivery.RunOnceAsync(ct)).Fallbacks);
+            Assert.Equal((NotificationRouter.TeamsChannel, "https://teams.example/agent-route"), Assert.Single(Assert.Single(sends.Notices)));
+        });
+    }
+
+    /// <summary>The delivery pass, with the service's real signal, wakes a long-poll parked on its cursor for an event the
+    /// sweep journaled (the sweep itself wakes nobody), and the waiter answers that event alone.</summary>
+    [Fact]
+    public async Task ADeliveryPass_WakesAParkedLongPoll_ForAResolvedEvent()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var signal = new InvestigationOpenSignal();
+            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var delivery = new InvestigationEventDelivery(store, () => [Route(1)], new FakeSends(), signal, NullLogger.Instance, () => _now);
+            Task<string> Wait(string? after, int seconds) =>
+                DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, [1], after, seconds, ct);
+
+            var start = (string)JsonNode.Parse(await Wait(null, 0))!["cursor"]!;
+            _now = T0.AddSeconds(10);
+            var id = (await store.OpenOrJoinAsync(Alert(_now, "High CPU"), ct)).RequestId!.Value;
+            var cursor = (string)JsonNode.Parse(await Wait(start, 0))!["cursor"]!;
+
+            var wait = Wait(cursor, 20);
+            var until = DateTime.UtcNow.AddSeconds(10);
+            while (signal.WaiterCount < 1 && DateTime.UtcNow < until)
+            {
+                await Task.Delay(10, ct);
+            }
+
+            Assert.True(signal.WaiterCount == 1, wait.IsCompleted ? await wait : "the long-poll did not park");
+            await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(3)));
+            _now = T0.AddMinutes(4);
+            Assert.Equal(1, (await store.SweepAsync(ct)).Resolved);
+            await Task.Delay(300, ct);
+            Assert.False(wait.IsCompleted);
+
+            await delivery.RunOnceAsync(ct);
+            var woke = JsonNode.Parse(await wait.WaitAsync(TimeSpan.FromSeconds(10), ct))!;
+            var resolved = Assert.Single(woke["requests"]!.AsArray())!;
+            Assert.Equal((InvestigationEvents.Resolved, id.ToString("D")), ((string)resolved["event"]!, (string)resolved["request_id"]!));
+        });
+    }
+
+    /// <summary>Two events journaled at the same instant, the cursor taken after the first: the next call answers the second
+    /// alone, and the call after that answers neither.</summary>
+    [Fact]
+    public async Task TwoEventsAtOneInstant_WithTheCursorTakenBetween_AreEachAnsweredOnce()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var signal = new InvestigationOpenSignal();
+            Task<string> Wait(string? after) =>
+                DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, [1], after, 0, ct);
+
+            var start = (string)JsonNode.Parse(await Wait(null))!["cursor"]!;
+            _now = T0.AddSeconds(10);
+            var first = (await store.OpenOrJoinAsync(Alert(_now, "High CPU"), ct)).RequestId!.Value;
+            var a = JsonNode.Parse(await Wait(start))!;
+            Assert.Equal(first.ToString("D"), (string)Assert.Single(a["requests"]!.AsArray())!["request_id"]!);
+
+            var second = (await store.OpenOrJoinAsync(Alert(_now, "Blocking Detected") with { Family = "blocking" }, ct)).RequestId!.Value;
+            Assert.Equal("1", await ScalarAsync(connection,
+                "SELECT count(DISTINCT event_time) FROM config.investigation_journal WHERE event = 'opened'", ct));
+            var b = JsonNode.Parse(await Wait((string)a["cursor"]!))!;
+            Assert.Equal(second.ToString("D"), (string)Assert.Single(b["requests"]!.AsArray())!["request_id"]!);
+
+            var c = JsonNode.Parse(await Wait((string)b["cursor"]!))!;
+            Assert.Empty(c["requests"]!.AsArray());
+        });
+    }
+
+    /// <summary>
+    /// #6003 review: the journal trigger (managed provisioning's <see cref="DarlingManagedRoles.BuildJournalEventRulesSql"/>)
+    /// refuses, from a role holding the mcp role's journal grants, an event row, a delivery or fallback mark, a once key an
+    /// event or a mark uses, and a row dated in the future, and lets in the role's own audit rows and a practice request's
+    /// one opened row. The service's own writers (open, the sweep, the delivery and fallback marks) still write.
+    /// </summary>
+    [Fact]
+    public async Task TheJournalTrigger_RefusesForgedEventsAndMarks_FromTheMcpRole_AndTheServiceStillWrites()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            var practiceId = Guid.NewGuid();
+            await ExecAsync(connection,
+                $"CREATE TEMP TABLE practice AS SELECT * FROM config.investigation_requests WHERE request_id = '{id}'; "
+                + $"UPDATE practice SET request_id = '{practiceId}', practice_of = '{id}'; "
+                + "INSERT INTO config.investigation_requests SELECT * FROM practice;", ct);
+            await ExecAsync(connection, DarlingManagedRoles.BuildJournalEventRulesSql("config"), ct);
+
+            var roleName = "inv_evt_" + Guid.NewGuid().ToString("N")[..8];
+            var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            await ExecAsync(connection,
+                $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'; GRANT USAGE ON SCHEMA config TO {roleName}; "
+                + $"GRANT SELECT ON config.investigation_requests, config.investigation_journal TO {roleName}; "
+                + $"GRANT INSERT ON config.investigation_journal TO {roleName};", ct);
+            try
+            {
+                var asMcp = new NpgsqlConnectionStringBuilder(connection.ConnectionString) { Username = roleName, Password = rolePassword }.ConnectionString;
+                await using var mcp = new NpgsqlConnection(asMcp);
+                await mcp.OpenAsync(ct);
+                string Row(string journalEvent, string? onceKey = null, string time = "now()", Guid? request = null) =>
+                    "INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, once_key) "
+                    + $"VALUES ({time}, '{request ?? id}', 1, {ServerId}, '{journalEvent}', 'agent:forger', "
+                    + (onceKey is null ? "NULL)" : $"'{onceKey}')");
+
+                foreach (var forged in new[]
+                {
+                    Row(InvestigationEvents.Resolved), Row(InvestigationEvents.Expired), Row(InvestigationEvents.Opened),
+                    Row(InvestigationEvents.EvidenceReady), Row(InvestigationEvents.Delivered), Row(InvestigationEvents.FallbackSent),
+                    Row("claimed", "delivered:" + Guid.NewGuid().ToString("D")), Row("claimed", InvestigationEvents.FallbackOnceKey(id)),
+                    Row("claimed", "resolved:" + id.ToString("D")), Row("claimed", "expired:" + id.ToString("D")),
+                    Row("claimed", "evidence_ready:" + id.ToString("D")), Row("claimed", time: "now() + interval '1 day'"),
+                })
+                {
+                    Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(mcp, forged, ct))).SqlState);
+                }
+
+                await ExecAsync(mcp, Row("claimed"), ct);
+                await ExecAsync(mcp, Row("refused", "refused:" + id.ToString("D")), ct);
+                await ExecAsync(mcp, Row(InvestigationEvents.Opened, request: practiceId), ct);
+                Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(
+                    () => ExecAsync(mcp, Row(InvestigationEvents.Opened, request: practiceId), ct))).SqlState);
+            }
+            finally
+            {
+                await ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
+            }
+
+            /* The service writes through the trigger: a join event, the resolved sweep, the delivery marks. Only the real
+               events are delivered. */
+            var sends = new FakeSends();
+            _now = T0.AddMinutes(2);
+            Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Memory Pressure"), ct)).Evented);
+            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(3)));
+            await history.RecordAlertAsync(Clear("Memory Pressure", "Memory Pressure Resolved", T0.AddMinutes(3)));
+            _now = T0.AddMinutes(4);
+            Assert.Equal(1, (await store.SweepAsync(ct)).Resolved);
+            Assert.Equal(4, (await Delivery(store, sends, Route(1, generic: "https://agent.example/hook")).RunOnceAsync(ct)).Posted);
+            Assert.Equal(
+                new[] { InvestigationEvents.Opened, InvestigationEvents.Opened, InvestigationEvents.Joined, InvestigationEvents.Resolved },
+                sends.Posts.Select(p => (string)JsonNode.Parse(p.Payload)!["event"]!));
         });
     }
 
@@ -229,8 +480,10 @@ public sealed class InvestigationRequestEventsLiveTests
             var delivery = Delivery(store, sends, routes);
 
             await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct);
-            /* A request an agent claimed and let lapse is not unclaimed: its expiry sends no fallback. */
+            /* A request an agent still holds when it expires (its lease runs past the expiry) is not unclaimed: its expiry
+               sends no fallback. */
             var claimedId = (await store.OpenOrJoinAsync(Alert(T0, "Blocking Detected") with { Family = "blocking" }, ct)).RequestId!.Value;
+            _now = T0.AddMinutes(230);
             Assert.Equal(InvestigationClaimOutcome.Claimed, (await store.ClaimAsync(claimedId, "agent-a", ct)).Outcome);
 
             _now = T0.AddMinutes(241);
@@ -421,6 +674,12 @@ public sealed class InvestigationRequestEventsLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<string?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)

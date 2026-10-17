@@ -44,7 +44,9 @@ public sealed class InvestigationFamilyTests
         foreach (var (metric, notificationFamily) in AlertFamily.MetricFamilies)
         {
             var family = InvestigationFamily.Of(metric);
-            if (notificationFamily == AlertFamily.Reports || AlertFamily.RecoveryPairs.ContainsKey(metric))
+            /* #6003: the alert about a request no agent took never maps to a family (it would open another request). */
+            if (notificationFamily == AlertFamily.Reports || AlertFamily.RecoveryPairs.ContainsKey(metric)
+                || metric == AlertFamily.InvestigationUnansweredMetric)
             {
                 Assert.Null(family);
                 Assert.False(InvestigationFamily.StartsInvestigation(metric));
@@ -94,6 +96,14 @@ public sealed class InvestigationFamilyTests
     public void ReportsAndRecoveriesNeverStartAnInvestigation(string metric)
     {
         Assert.Null(InvestigationFamily.Of(metric));
+    }
+
+    /// <summary>#6003: the alert raised for a request no agent took has no family, so it can never open another request
+    /// (an agent route matching every metric would otherwise expire, alert and open again without end).</summary>
+    [Fact]
+    public void TheUnansweredRequestAlert_NeverStartsAnInvestigation()
+    {
+        Assert.Null(InvestigationFamily.Of(AlertFamily.InvestigationUnansweredMetric));
     }
 
     [Fact]

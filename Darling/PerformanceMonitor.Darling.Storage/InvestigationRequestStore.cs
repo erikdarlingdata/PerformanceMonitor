@@ -228,8 +228,9 @@ LIMIT $2";
     /* #6003, D7: a live request is resolved when EVERY metric linked to it has a resolution row after that metric's last
        alert on the same server. A resolution row is stored under its title ("CPU Resolved"); its context_json names the
        metric it resolves (Resolves, written by DarlingSelfAlertEvaluator.BuildResolutionRecord on every clear, whatever the
-       route's SendResolutions says). The CASE keeps a context that is not a JSON object from reaching the cast. Journaled once
-       per request (once key resolved:<request_id>). */
+       route's SendResolutions says). The member is matched as text, the metric name JSON-encoded as the writer encodes it
+       (DarlingSelfAlertEvaluator.ResolutionContextJson), never cast: one context_json a text column holds but jsonb refuses
+       (a \u0000 escape) would fail every sweep (#6003 review). Journaled once per request (once key resolved:<request_id>). */
     internal const string SweepResolvedSql = @"
 INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, once_key)
 SELECT $1, r.request_id, r.route_id, r.server_id, 'resolved', 'service', 'resolved:' || r.request_id::text
@@ -249,8 +250,7 @@ WHERE r.state IN ('open', 'claimed', 'reported')
             FROM config.config_alert_log AS h
             WHERE h.server_id = m.server_id
               AND h.alert_time > m.last_alert
-              AND CASE WHEN h.context_json LIKE '{%' AND h.context_json LIKE '%""Resolves""%'
-                       THEN h.context_json::jsonb ->> 'Resolves' END = m.metric_name))
+              AND strpos(h.context_json, '""Resolves"":' || to_json(m.metric_name)::text) > 0))
 ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     internal static readonly string ListSql = $@"
@@ -415,10 +415,11 @@ WHERE r.state = 'claimed' AND r.lease_until < $1
 ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     /* #6003: the row names the request's route, and its detail says whether an agent held the request when it expired
-       (unclaimed: its state was still open), which is what sends the D8 fallback. */
+       (unclaimed), which is what sends the D8 fallback. A claimed request whose lease lapsed counts as unclaimed: the lapse
+       is journaled but leaves the state claimed, and a reported request is never due, so no agent was working on it. */
     internal const string SweepExpireSql = @"
 WITH due AS (
-    SELECT request_id, state AS was
+    SELECT request_id, state = 'open' OR (state = 'claimed' AND lease_until < $1) AS unclaimed
     FROM config.investigation_requests
     WHERE (state IN ('open', 'claimed') AND expires_at <= $1)
        OR (state = 'claimed' AND lease_until < $1 AND claim_count >= 3)
@@ -430,7 +431,7 @@ expired AS (
     SET state = 'expired'
     FROM due AS d
     WHERE r.request_id = d.request_id
-    RETURNING r.request_id, r.route_id, r.server_id, r.expires_at > $1 AS exhausted, d.was = 'open' AS unclaimed
+    RETURNING r.request_id, r.route_id, r.server_id, r.expires_at > $1 AS exhausted, d.unclaimed
 )
 INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, detail, once_key)
 SELECT $1, e.request_id, e.route_id, e.server_id, CASE WHEN e.exhausted THEN 'claims_exhausted' ELSE 'expired' END, 'service',
@@ -1093,7 +1094,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 EventId = reader.GetGuid(7),
                 Event = reader.GetString(8),
                 EventTimeUtc = reader.GetFieldValue<DateTime>(9),
-                DetailJson = reader.IsDBNull(10) ? null : reader.GetString(10),
+                /* #6003 review: only the members the event's kind lists leave the store. */
+                DetailJson = InvestigationEvents.PublicDetail(reader.GetString(8), reader.IsDBNull(10) ? null : reader.GetString(10)),
             });
         }
 
@@ -1117,10 +1119,13 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         var rows = new List<InvestigationEventRow>();
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #6003 review: the signed POST carries only the reason and the detail members the event's kind lists. */
+            var kind = reader.GetString(2);
             rows.Add(new InvestigationEventRow(
-                reader.GetInt64(0), reader.GetGuid(1), reader.GetString(2), reader.GetFieldValue<DateTime>(3),
+                reader.GetInt64(0), reader.GetGuid(1), kind, reader.GetFieldValue<DateTime>(3),
                 reader.GetGuid(4), reader.GetInt32(5), reader.GetInt32(6), reader.GetString(7), reader.GetString(8),
-                reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10)));
+                InvestigationEvents.PublicReason(kind, reader.IsDBNull(9) ? null : reader.GetString(9)),
+                InvestigationEvents.PublicDetail(kind, reader.IsDBNull(10) ? null : reader.GetString(10))));
         }
 
         return rows;
@@ -1185,7 +1190,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// <summary>
     /// The expiry sweep: journals each lapsed lease once per claim, then moves every request past its expiry, or out of
     /// claims (its last claim's lease lapsed, or released), to <c>expired</c> and journals that once: <c>expired</c> past the
-    /// expiry, <c>claims_exhausted</c> before it. It never reopens a lease.
+    /// expiry, <c>claims_exhausted</c> before it. It never reopens a lease. Then, in a transaction of its own, it journals
+    /// each live request whose every metric has cleared (<see cref="SweepResolvedSql"/>), so a failure there cannot hold
+    /// back the expiry and its fallback (#6003 review).
     /// </summary>
     public async Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default)
     {
@@ -1194,8 +1201,10 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var lapsed = await ExecAsync(connection, transaction, SweepLapsedSql, cancellationToken, P(now));
         var expired = await ExecAsync(connection, transaction, SweepExpireSql, cancellationToken, P(now));
-        var resolved = await ExecAsync(connection, transaction, SweepResolvedSql, cancellationToken, P(now));
         await transaction.CommitAsync(cancellationToken);
+        await using var resolvedTransaction = await connection.BeginTransactionAsync(cancellationToken);
+        var resolved = await ExecAsync(connection, resolvedTransaction, SweepResolvedSql, cancellationToken, P(now));
+        await resolvedTransaction.CommitAsync(cancellationToken);
         return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved };
     }
 

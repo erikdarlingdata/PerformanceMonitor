@@ -36,8 +36,9 @@ public interface IInvestigationEventSends
         IReadOnlyList<(string Channel, string Destination)> targets, string title, string serverName, string currentValue,
         string detail, CancellationToken cancellationToken);
 
-    /// <summary>Raises the self-monitor alert (<see cref="AlertFamily.InvestigationUnansweredMetric"/>).</summary>
-    Task RaiseSelfAlertAsync(string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken);
+    /// <summary>Raises the self-monitor alert (<see cref="AlertFamily.InvestigationUnansweredMetric"/>); answers whether a
+    /// channel took it.</summary>
+    Task<bool> RaiseSelfAlertAsync(Guid requestId, string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken);
 }
 
 /// <summary>The service's sends: the webhook service, the deliverer and the self-alert evaluator it already runs.</summary>
@@ -52,10 +53,9 @@ internal sealed class ServiceInvestigationEventSends(
         string detail, CancellationToken cancellationToken) =>
         deliverer.SendNoticeAsync(targets, title, serverName, currentValue, detail, cancellationToken);
 
-    public Task RaiseSelfAlertAsync(string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken) =>
+    public async Task<bool> RaiseSelfAlertAsync(Guid requestId, string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken) =>
         selfAlerts() is { } evaluator
-            ? evaluator.RaiseInvestigationUnansweredAsync(serverName, serverId, shortMessage, detail, cancellationToken)
-            : Task.CompletedTask;
+        && (await evaluator.RaiseInvestigationUnansweredAsync(requestId, serverName, serverId, shortMessage, detail, cancellationToken))?.Sent == true;
 }
 
 /// <summary>
@@ -122,6 +122,12 @@ public sealed class InvestigationEventDelivery
         }
 
         var pending = await _store.PendingDeliveriesAsync(since, BatchSize, cancellationToken);
+        /* The long-poll reads the journal, not the posts, so its waiters wake now rather than after every POST's timeout. */
+        if (pending.Count > 0)
+        {
+            _signal?.WakeAll();
+        }
+
         var posted = 0;
         foreach (var row in pending)
         {
@@ -129,11 +135,6 @@ public sealed class InvestigationEventDelivery
             {
                 posted++;
             }
-        }
-
-        if (pending.Count > 0)
-        {
-            _signal?.WakeAll();
         }
 
         return (fallbacks, posted);
@@ -166,12 +167,25 @@ public sealed class InvestigationEventDelivery
             if (targets.Count > 0)
             {
                 var sent = await _sends.SendNoticeAsync(targets, NoticeTitle, expiry.ServerName, "expired", detail, cancellationToken);
-                _logger.LogInformation("Investigation request {RequestId} expired unclaimed; its fallback ({Target}) reached {Channels}",
-                    expiry.RequestId, target, sent.Count == 0 ? "no channel" : string.Join(",", sent));
+                if (sent.Count == 0)
+                {
+                    _logger.LogWarning("Investigation request {RequestId} expired unclaimed; its fallback ({Target}) reached no channel",
+                        expiry.RequestId, target);
+                }
+                else
+                {
+                    _logger.LogInformation("Investigation request {RequestId} expired unclaimed; its fallback ({Target}) reached {Channels}",
+                        expiry.RequestId, target, string.Join(",", sent));
+                }
             }
             else
             {
-                await _sends.RaiseSelfAlertAsync(expiry.ServerName, expiry.ServerId, shortMessage, detail, cancellationToken);
+                /* #6003 review: the last fallback reaching no channel is a warning; nothing else says this request went unanswered. */
+                if (!await _sends.RaiseSelfAlertAsync(expiry.RequestId, expiry.ServerName, expiry.ServerId, shortMessage, detail, cancellationToken))
+                {
+                    _logger.LogWarning("Investigation request {RequestId} expired unclaimed; its self-alert fallback reached no channel",
+                        expiry.RequestId);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

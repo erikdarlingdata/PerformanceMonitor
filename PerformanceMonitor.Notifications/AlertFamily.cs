@@ -81,15 +81,16 @@ public static class AlertFamily
     /// <summary>Every family, in the order the settings surfaces list them.</summary>
     public static readonly IReadOnlyList<string> All = new[] { SelfMonitor, Reports, AgentJobs, Performance, External };
 
+    /// <summary>#6003, D8: the self-alert for an investigation request that expired with no agent on it and nowhere else to go.
+    /// A WEBHOOK AUTOMATION KEY like every metric name, so it must stay stable across releases.</summary>
+    public const string InvestigationUnansweredMetric = "Investigation Not Picked Up";
+
     /// <summary>
     /// The exact metric NAME → family census. Every entry is a string the engines deliver verbatim — the
     /// <c>AlertEngine</c>/<c>PostgresAlertEvaluator</c>/<c>AgAlertPolicy</c> constants and the self-alert
     /// evaluator's — spelled here as literals only because this assembly sits below the ones that declare
     /// them; the census test asserts each literal equals its declaring constant.
     /// </summary>
-    /// <summary>#6003, D8: the self-alert for an investigation request that expired with no agent on it and nowhere else to go.
-    /// A WEBHOOK AUTOMATION KEY like every metric name, so it must stay stable across releases.</summary>
-    public const string InvestigationUnansweredMetric = "Investigation Not Picked Up";
 
     public static readonly IReadOnlyDictionary<string, string> MetricFamilies = new Dictionary<string, string>(StringComparer.Ordinal)
     {

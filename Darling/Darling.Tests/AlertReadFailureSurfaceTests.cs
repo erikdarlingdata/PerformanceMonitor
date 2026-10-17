@@ -927,7 +927,7 @@ public sealed class AlertReadFailureSurfaceTests
            catch - the delivery self-alert's report is a parameter, with the count read counted in DarlingWorker. 20th exempt since
            #5867: EvaluateComposeHoursStuckAsync's wrapper catch - the compose rollup self-alert's failure record is a parameter,
            with the read exempt in DarlingWorker (it holds the alert on a failed read). */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 20),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 21),
     };
 
     /// <summary>
@@ -1055,6 +1055,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Could not persist incident occurrences"] = "a write",
         ["Could not persist the {Metric} persistence gate"] = "a write (#3282; one save path for every gated built-in since #3653 A5 put tempdb Space behind the same gate as High CPU); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOADs beside it are the reads, and they are counted",
         ["Alert resolution callback failed"] = "the delivery path",
+        ["A resolution context that is not JSON is replaced"] = "#6003: parses the caller's context text for the Resolves member, not a store read",
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
@@ -1288,8 +1289,9 @@ public sealed class AlertReadFailureSurfaceTests
            maintenance write no alert is judged on, redone by the next pass. 40th since #5867: the Compose Rollup Hours Stuck
            self-alert's wrapper catch, handed its failure record as a parameter. 41st since #5867: the worker's read of that
            record, which holds the standing alert on a failure. 42nd since #5910: the engine's threshold-override
-           fallback, an in-memory lookup and not a read. */
-        Assert.Equal(42, totalExempt);
+           fallback, an in-memory lookup and not a read. 43rd since #6003: the resolution context parse, the caller's text and
+           not a store read. */
+        Assert.Equal(43, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
