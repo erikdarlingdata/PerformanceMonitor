@@ -122,8 +122,6 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         AND first_execution_time <= $5 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
         """ + " " + HistoryOrder;
 
-    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
-
     internal readonly record struct HistoryRow(
         long PlanId, DateTime CollectionTime, long ExecutionCount, double? AvgDurationMs, double? AvgCpuMs,
         DateTime? FirstExecutionTime, DateTime? LastExecutionTime, bool IsForcedPlan);
@@ -219,7 +217,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
-            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            await using (var readOnly = new NpgsqlCommand(DarlingDataReader.SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }

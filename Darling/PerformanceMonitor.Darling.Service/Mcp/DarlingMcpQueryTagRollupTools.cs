@@ -104,6 +104,10 @@ public sealed class DarlingMcpQueryTagRollupTools
             var (planRoute, procRoute) = await DarlingQueryTagRollupReader.ChooseStatsRoutesAsync(postgres, serverIds, windowStart, windowEnd, cancellationToken);
 
             var sections = new List<object>();
+            /* anyWork: any collected work in the window at all. anyData: the answer holds figures, so with a tag filter it is decided from the
+               TAG-FILTERED facts (a known tag that matches nothing in a window that holds work answers empty, with its own message, not as
+               zero-figure data; matches the Lite twin, #5992). */
+            var anyWork = false;
             var anyData = false;
             /* Sections this call could not serve, with why. The top-level status is "unavailable" only when every section is in here (#5983). */
             var notServed = new List<(string Section, string Reason)>();
@@ -124,7 +128,8 @@ public sealed class DarlingMcpQueryTagRollupTools
                     return;
                 }
 
-                anyData |= facts.Count > 0;
+                anyWork |= facts.Count > 0;
+                anyData |= HasMatch(facts, tags, tagFilter);
                 sections.Add(Merge(Wrap(section, source, fleet, scope, names, tags, tagFilter, limit, facts, facts.Count == 0 ? "empty" : "ok",
                     facts.Count == 0 ? "No rows in the window." : null, null), disclosure));
             }
@@ -160,7 +165,8 @@ public sealed class DarlingMcpQueryTagRollupTools
                     reach["window_truncated"] = RawWindowFloor.IsTruncated(from, windowStart);
                 }
 
-                anyData |= facts.Count > 0;
+                anyWork |= facts.Count > 0;
+                anyData |= HasMatch(facts, tags, tagFilter);
                 var refusalNote = refused.Count == 0
                     ? null
                     : "Query Store is read from the composed interval table only, and it is not readable for " + string.Join("; ",
@@ -202,7 +208,8 @@ public sealed class DarlingMcpQueryTagRollupTools
             try
             {
                 var (deadlocks, scanTruncated) = await DarlingQueryTagRollupReader.ReadDeadlocksAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
-                anyData |= deadlocks.Count > 0;
+                anyWork |= deadlocks.Count > 0;
+                anyData |= HasMatchDeadlocks(deadlocks, tags, tagFilter);
                 sections.Add(WrapDeadlocks(fleet, scope, names, tags, tagFilter, limit, deadlocks, scanTruncated));
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
@@ -212,7 +219,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                 sections.Add(Wrap(QueryTagRollupSection.Deadlocks, "collect.deadlocks", fleet, scope, names, tags, tagFilter, limit, [], "unavailable", reason, null));
             }
 
-            if (!anyData)
+            if (!anyWork)
             {
                 if (!fleet)
                 {
@@ -226,15 +233,11 @@ public sealed class DarlingMcpQueryTagRollupTools
                 {
                     return McpHelpers.Status("unavailable", "No section of the roll-up could be read. " + NotServedText(notServed));
                 }
-
-                if (notServed.Count == 0)
-                {
-                    return McpHelpers.Status("empty", "No resource use was collected in the window" + (fleet ? " on any server." : " on this server."));
-                }
             }
 
-            /* Data, or the mixed empty answer: the served sections held no rows, so the status is "empty", and the sections ride along so the
-               unserved one's own status and reason are there to read. */
+            /* Data, or an empty answer: no served section held figures (nothing collected, or nothing carrying the requested tag), so the status
+               is "empty", and the sections ride along (Lite does the same) so each section's own status and any unserved section's reason are
+               there to read. */
             var payload = new Dictionary<string, object?>();
             if (!anyData)
             {
@@ -249,10 +252,16 @@ public sealed class DarlingMcpQueryTagRollupTools
             payload["tag"] = tagFilter is int id ? tags.First(t => t.Id == id).Name : null;
             /* The sections never add up: the plan cache and Query Store count the same executions and procedures overlap both. */
             payload["sections_additive"] = false;
-            if (notServed.Count > 0)
+            if (!anyData)
             {
-                payload["message"] = (anyData ? string.Empty : "No resource use was collected in the window" + (fleet ? " on any server. " : " on this server. "))
-                    + "Sections not served: " + NotServedText(notServed);
+                var emptyMessage = !anyWork
+                    ? "No resource use was collected in the window" + (fleet ? " on any server." : " on this server.")
+                    : $"No collected work carries query tag '{tags.First(t => t.Id == tagFilter!.Value).Name}' in the window" + (fleet ? " on any server." : " on this server.");
+                payload["message"] = notServed.Count > 0 ? emptyMessage + " Sections not served: " + NotServedText(notServed) : emptyMessage;
+            }
+            else if (notServed.Count > 0)
+            {
+                payload["message"] = "Sections not served: " + NotServedText(notServed);
             }
 
             payload["note"] = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.";
@@ -263,6 +272,30 @@ public sealed class DarlingMcpQueryTagRollupTools
         {
             return McpHelpers.FormatError("get_resource_use_by_tag", ex);
         }
+    }
+
+    /// <summary>Whether the facts hold figures for the request: any fact at all without a tag filter, else a fact on the tag or a tag under it.</summary>
+    private static bool HasMatch(List<QueryTagRollupFact> facts, IReadOnlyList<QueryTagNode> tags, int? tagFilter)
+    {
+        if (tagFilter is not int filter)
+        {
+            return facts.Count > 0;
+        }
+
+        var byId = tags.ToDictionary(t => t.Id);
+        return facts.Any(f => f.TagId is int id && byId.ContainsKey(id) && DarlingQueryTagRollupReader.IsUnder(id, filter, byId));
+    }
+
+    /// <summary>The deadlock twin of <see cref="HasMatch"/>: a graph counts where one of its processes carries the tag or a tag under it.</summary>
+    private static bool HasMatchDeadlocks(List<QueryTagDeadlockFact> facts, IReadOnlyList<QueryTagNode> tags, int? tagFilter)
+    {
+        if (tagFilter is not int filter)
+        {
+            return facts.Count > 0;
+        }
+
+        var byId = tags.ToDictionary(t => t.Id);
+        return facts.Any(f => f.ProcessesByTag.Any(p => p.Value > 0 && byId.ContainsKey(p.Key) && DarlingQueryTagRollupReader.IsUnder(p.Key, filter, byId)));
     }
 
     private static string NotServedText(List<(string Section, string Reason)> notServed)

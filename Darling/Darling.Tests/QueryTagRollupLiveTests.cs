@@ -399,6 +399,59 @@ public sealed class QueryTagRollupLiveTests
 
             using var doc = await ReadAsync(c, "srv-one");
             Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            /* The empty answer carries the sections, as the Lite twin's does (#5983), not a bare status and message. */
+            Assert.Equal(6, doc.RootElement.GetProperty("sections").GetArrayLength());
+            Assert.Contains("No resource use was collected", doc.RootElement.GetProperty("message").GetString());
+        });
+    }
+
+    /// <summary>A KNOWN tag that no collected work carries, in a window that holds work, answers empty with its own message (not as zero-figure
+    /// data, and not the unknown-name refusal), and the empty carries the sections. Plan-cache work tagged B, asked for as tag A, for one
+    /// server and for the fleet; asked for as tag B the same window holds data.</summary>
+    [Fact]
+    public async Task AKnownTagThatNoWorkCarries_InAWindowThatHoldsWork_AnswersEmptyWithItsOwnMessage()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await TagAsync(c, "A");
+            var b = await TagAsync(c, "B");
+            await MapAsync(c, ServerOne, "hash", "0xB1", b);
+            await PlanCacheAsync(c, ServerOne, "0xB1", 30, 3_000_000, 5);
+            await CoverQueryStoreAsync(c, ServerOne);
+
+            foreach (var server in new string?[] { "srv-one", null })
+            {
+                using var doc = await ReadAsync(c, server, tag: "A");
+                Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+                Assert.Contains("No collected work carries query tag 'A'", doc.RootElement.GetProperty("message").GetString());
+                Assert.Equal(6, doc.RootElement.GetProperty("sections").GetArrayLength());
+                Assert.Equal("A", doc.RootElement.GetProperty("tag").GetString());
+            }
+
+            using var withData = await ReadAsync(c, "srv-one", tag: "B");
+            Assert.False(withData.RootElement.TryGetProperty("status", out _));
+        });
+    }
+
+    /// <summary>The deadlock section counts toward "the tag matched" the way the stats sections do: a window whose only work is a deadlock between
+    /// tags A and B is data for tag A and empty for tag C.</summary>
+    [Fact]
+    public async Task ADeadlockOnlyWindow_IsDataForATagItsProcessesCarry_AndEmptyForAnotherKnownTag()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var a = await TagAsync(c, "A");
+            var b = await TagAsync(c, "B");
+            await TagAsync(c, "C");
+            await MapAsync(c, ServerOne, "caller", Caller("appA", "lg", "h", "db1"), a);
+            await MapAsync(c, ServerOne, "caller", Caller("appB", "lg", "h", "db1"), b);
+            await DeadlockAsync(c, ServerOne, "appA", "appB");
+
+            using var forA = await ReadAsync(c, "srv-one", tag: "A");
+            Assert.False(forA.RootElement.TryGetProperty("status", out _));
+            using var forC = await ReadAsync(c, "srv-one", tag: "C");
+            Assert.Equal("empty", forC.RootElement.GetProperty("status").GetString());
+            Assert.Contains("No collected work carries query tag 'C'", forC.RootElement.GetProperty("message").GetString());
         });
     }
 
