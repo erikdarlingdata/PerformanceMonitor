@@ -185,8 +185,10 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
                 _nextId++, Ago(30), _idA, name);
         }
 
-        var root = Parse(await McpQueryTools.GetTopProceduresByCpu(_service, _serverManager, ServerA, 24, 10, tag: "procs"));
+        var json = await McpQueryTools.GetTopProceduresByCpu(_service, _serverManager, ServerA, 24, 10, tag: "procs");
+        var root = Parse(json);
 
+        Assert.True(root.TryGetProperty("tag_filter", out _), json.Length > 300 ? json[..300] : json);
         Assert.Equal("procs", root.GetProperty("tag_filter").GetString());
         var rows = root.GetProperty("procedures").EnumerateArray().ToList();
         var only = Assert.Single(rows);
