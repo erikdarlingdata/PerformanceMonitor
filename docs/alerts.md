@@ -33,7 +33,7 @@ All thresholds are configurable in Settings.
 - **Microsoft Teams** — styled card messages with color-coded severity indicators sent to Teams channels via incoming webhooks
 - **Slack** — styled messages with color-coded severity indicators sent to Slack channels via incoming webhooks
 - **PagerDuty** — native Events API v2 integration that triggers PagerDuty incidents with proper severity mapping (critical/error/warning/info) and automatic incident correlation via dedup_key. Supports both US and EU data centers
-- **Generic webhook** — HTTP POST to any configurable endpoint for integration with other alerting systems (Opsgenie, n8n, custom automation, etc.)
+- **Generic webhook** — HTTP POST to any configurable endpoint for integration with other alerting systems (Opsgenie, n8n, custom automation, etc.). Darling can sign these posts: see [Signed webhooks](signed-webhooks.md).
 
 All cooldown periods are independently configurable in Settings under the Performance Alerts section.
 
