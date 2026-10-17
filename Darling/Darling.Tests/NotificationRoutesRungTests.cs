@@ -242,7 +242,7 @@ public sealed class NotificationRoutesRungTests
         /* The scope columns (V181, #5750) follow, then the agent columns (V184, #5632), both set by init so the constructor
            below is unchanged. */
         /* V193 (#5998): the signing key columns come last on the service read; the viewer reads them by their own statements. */
-        /* #6003 (D8): fallback_route_id follows them, set by init like the agent columns; the viewer neither reads nor writes it. */
+        /* #6003 (D8): fallback_route_id follows them, set by init like the agent columns; the viewer reads and writes it since #6036. */
         Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id" }), serviceSelect);
         Assert.EndsWith("ORDER BY route_id", StoreConfigProvider.NotificationRoutesSelectSql, StringComparison.Ordinal);
 
@@ -251,17 +251,17 @@ public sealed class NotificationRoutesRungTests
         Assert.Equal(new[] { "RouteId", "MetricMatch", "TeamsUrl", "SlackUrl", "GenericUrl", "PagerDutyRoutingKey", "SmtpRecipients", "Enabled" }, ctor);
 
         var viewerSelect = ColumnsOf(ViewerDataService.NotificationRoutesSelectSql, "SELECT", "FROM");
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns), viewerSelect);
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "fallback_route_id" }), viewerSelect);
         Assert.Equal(
-            new[] { "route_id", "metric_match", "smtp_recipients", "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns),
+            new[] { "route_id", "metric_match", "smtp_recipients", "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns).Concat(new[] { "fallback_route_id" }),
             ColumnsOf(ViewerDataService.NotificationRoutesSelectNoSecretSql, "SELECT", "FROM"));
 
         var insert = ColumnsOf(ViewerDataService.NotificationRouteInsertSql, "(", ")");
-        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "modified_at" }), insert);
+        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "fallback_route_id", "modified_at" }), insert);
         Assert.DoesNotContain("route_id", insert);
         Assert.Contains("RETURNING route_id", ViewerDataService.NotificationRouteInsertSql, StringComparison.Ordinal);
 
-        foreach (var column in DestinationColumns.Concat(AgentColumns).Concat(new[] { "metric_match", "enabled", "scope_server_id", "scope_tag_id", "modified_at" }))
+        foreach (var column in DestinationColumns.Concat(AgentColumns).Concat(new[] { "fallback_route_id", "metric_match", "enabled", "scope_server_id", "scope_tag_id", "modified_at" }))
         {
             Assert.Contains($"{column} = ", ViewerDataService.NotificationRouteUpdateSql, StringComparison.Ordinal);
         }
