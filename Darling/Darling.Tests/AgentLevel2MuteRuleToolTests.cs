@@ -61,6 +61,7 @@ public sealed class AgentLevel2ToolPolicyTests
     [Theory]
     [InlineData("update_alert_settings")]
     [InlineData("set_notification_route_enabled")]
+    [InlineData("set_notification_route_fallback")]
     [InlineData("delete_notification_route")]
     [InlineData("mute_analysis_finding")]
     [InlineData("create_custom_view")]

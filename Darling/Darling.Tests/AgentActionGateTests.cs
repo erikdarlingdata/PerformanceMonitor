@@ -49,6 +49,7 @@ public sealed class AgentActionPolicyTests
     [InlineData("mute_analysis_finding")]
     [InlineData("delete_notification_route")]
     [InlineData("set_notification_route_enabled")]
+    [InlineData("set_notification_route_fallback")]
     [InlineData("create_custom_view")]
     [InlineData("delete_server_tag")]
     [InlineData("assign_server_tag")]

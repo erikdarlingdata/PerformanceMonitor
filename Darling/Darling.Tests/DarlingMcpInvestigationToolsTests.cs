@@ -157,7 +157,7 @@ public sealed class DarlingMcpInvestigationToolsTests
         /* Every other write stays unserved: alert settings, the finding mute, routes, Custom Views, server tags, server admin. */
         foreach (var never in new[]
         {
-            "update_alert_settings", "mute_analysis_finding", "set_notification_route_enabled", "delete_notification_route",
+            "update_alert_settings", "mute_analysis_finding", "set_notification_route_enabled", "set_notification_route_fallback", "delete_notification_route",
             "create_custom_view", "update_custom_view", "delete_custom_view", "create_server_tag", "update_server_tag",
             "delete_server_tag", "assign_server_tag", "unassign_server_tag", "add_servers", "edit_server", "remove_server",
         })

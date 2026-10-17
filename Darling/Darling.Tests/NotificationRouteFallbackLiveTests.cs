@@ -92,6 +92,7 @@ public sealed class NotificationRouteFallbackLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+            await scratch.DisposeAsync();
         }
     }
 
@@ -137,6 +138,7 @@ public sealed class NotificationRouteFallbackLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+            await scratch.DisposeAsync();
         }
     }
 }

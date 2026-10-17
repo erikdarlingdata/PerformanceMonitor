@@ -64,6 +64,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         "get_notification_routes",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
+        "set_notification_route_fallback",
         "update_alert_settings",
         "update_mute_rule",
     };
@@ -107,6 +108,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("set_mute_rule_enabled", "rule_id,enabled,agent_action")]
     [InlineData("update_mute_rule", "rule_id,changes_json,agent_action")]
     [InlineData("set_notification_route_enabled", "route_id,enabled")]
+    [InlineData("set_notification_route_fallback", "route_id,fallback_route_id")]
     [InlineData("delete_notification_route", "route_id")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
@@ -1303,6 +1305,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("update_mute_rule", "changes_json,rule_id")]
     [InlineData("get_notification_routes", "")]
     [InlineData("set_notification_route_enabled", "enabled,route_id")]
+    [InlineData("set_notification_route_fallback", "route_id")]
     [InlineData("delete_notification_route", "route_id")]
     public void AdvertisedSchema_RequiredParams_MatchTheContract(string toolName, string expectedCsv)
     {
