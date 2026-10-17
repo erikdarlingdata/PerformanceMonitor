@@ -13109,6 +13109,34 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
     }
 
+    /// <summary>#6044: the module map repair runs at most once per this span.</summary>
+    internal static readonly TimeSpan ModuleMapRepairInterval = TimeSpan.FromHours(24);
+
+    private DateTime? _lastModuleMapRepairUtc;
+
+    /// <summary>#6044: whether the repair is due. Never run (this process), or a run at least
+    /// <see cref="ModuleMapRepairInterval"/> ago, or a clock that stepped back past the stamp. Internal so a test can pin it.</summary>
+    internal static bool IsModuleMapRepairDue(DateTime? lastSuccessUtc, DateTime nowUtc) =>
+        lastSuccessUtc is not { } last || nowUtc < last || nowUtc - last >= ModuleMapRepairInterval;
+
+    /// <summary>#6044: runs <paramref name="repair"/> when due and stamps the run only when it returns true (a failed
+    /// or cancelled repair leaves the stamp, so the next pass retries). The purge slot is single, so passes do not overlap.
+    /// Returns whether it ran.</summary>
+    internal async Task<bool> RunModuleMapRepairIfDueAsync(DateTime nowUtc, Func<CancellationToken, Task<bool>> repair, CancellationToken cancellationToken)
+    {
+        if (!IsModuleMapRepairDue(_lastModuleMapRepairUtc, nowUtc))
+        {
+            return false;
+        }
+
+        if (await repair(cancellationToken))
+        {
+            _lastModuleMapRepairUtc = nowUtc;
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// The daily retention purge's actual work — <see cref="DarlingRetention.PurgeAsync"/>, then the AN3
     /// findings cleanup, the #1652 log-file sweep, and the module-map refresh — moved out of the launch loop
@@ -13153,11 +13181,22 @@ AND   j.hypertable_name = '{relation}'", connection))
         DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
 
         /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
-           CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. #5519: with a watermark
-           it re-reads from DailyRepairSlack behind it, not a flat two days; that span is the repair for rows
-           the hourly path missed by committing more than WatermarkSlack late. */
-        await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
-        await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
+           CAGG windows). #6044: the repair is once per 24 hours, not once per pass: a pass the wall budget stopped
+           brings the next one forward (#5592), and each repair read 13 to 17 GB, so six a day on a large store.
+           The pass still does all its purge work; only this step is skipped. Failure-isolated inside RefreshAsync,
+           which reports a failed read so it does not count as a run. #5519: with a watermark it re-reads from
+           DailyRepairSlack behind it, not a flat two days; that span is the repair for rows the hourly path
+           missed by committing more than WatermarkSlack late. */
+        await RunModuleMapRepairIfDueAsync(
+            DateTime.UtcNow,
+            async token =>
+            {
+                await using var moduleMapConnection = await postgres.OpenConnectionAsync(token);
+                var outcome = new DarlingModuleMap.RefreshOutcome();
+                await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, outcome, token);
+                return !outcome.Failed;
+            },
+            stoppingToken);
 
         /* #4211: the raw hypertable chunk-interval reconcile. Rides the daily purge tick like every other
            maintenance chore above — first pass after startup (TryStartScheduledPurge's own MinValue seed),

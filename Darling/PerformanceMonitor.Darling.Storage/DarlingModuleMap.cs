@@ -291,6 +291,18 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     public static Task<int> RefreshAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
         RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map daily refresh", cancellationToken);
 
+    /// <summary>#6044: the daily refresh, reporting whether its read failed. A failure is swallowed (the map keeps
+    /// serving) and returns 0, which is also what a read that found nothing returns, so the caller that must
+    /// not count a failed run as a run reads <paramref name="outcome"/> instead.</summary>
+    public static Task<int> RefreshAsync(NpgsqlConnection connection, ILogger? logger, RefreshOutcome outcome, CancellationToken cancellationToken = default) =>
+        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map daily refresh", cancellationToken, outcome);
+
+    /// <summary>#6044: set when a refresh's read failed and was swallowed.</summary>
+    public sealed class RefreshOutcome
+    {
+        public bool Failed { get; internal set; }
+    }
+
     /// <summary>The map has at least one row. A watermark over an empty map means the map was rebuilt without its
     /// state row; the refresh then reads the full two days instead of trusting the watermark.</summary>
     public const string MapHasRowsSql = "SELECT EXISTS (SELECT 1 FROM collect.module_map)";
@@ -298,7 +310,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// <summary>The daily refresh against an explicit clock and slack; the tests pass a fixed clock.
     /// <paramref name="label"/> names the caller in the log lines.</summary>
     public static async Task<int> RefreshFromWatermarkOrFullAsync(
-        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, TimeSpan slack, string label, CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, TimeSpan slack, string label, CancellationToken cancellationToken = default, RefreshOutcome? outcome = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         DateTime? watermark = null;
@@ -321,13 +333,13 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
 
         if (watermark is null || !mapHasRows)
         {
-            return await RefreshFullAsync(connection, logger, cancellationToken);
+            return await RefreshFullAsync(connection, logger, cancellationToken, outcome);
         }
 
-        return await RefreshSinceWatermarkAsync(connection, logger, watermark, utcNow, slack, label, cancellationToken);
+        return await RefreshSinceWatermarkAsync(connection, logger, watermark, utcNow, slack, label, cancellationToken, outcome);
     }
 
-    private static async Task<int> RefreshFullAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task<int> RefreshFullAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken, RefreshOutcome? outcome = null)
     {
         try
         {
@@ -339,6 +351,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning("module_map refresh failed — the existing map keeps serving: {Message}", ex.Message);
+            if (outcome is not null) { outcome.Failed = true; }
             return 0;
         }
     }
@@ -366,7 +379,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// <see cref="SinceFor(DateTime?, DateTime, TimeSpan)"/> over <see cref="RefreshSinceSql"/>.
     /// <paramref name="label"/> names the caller in the log lines.</summary>
     private static async Task<int> RefreshSinceWatermarkAsync(
-        NpgsqlConnection connection, ILogger? logger, DateTime? watermarkBefore, DateTime utcNow, TimeSpan slack, string label, CancellationToken cancellationToken)
+        NpgsqlConnection connection, ILogger? logger, DateTime? watermarkBefore, DateTime utcNow, TimeSpan slack, string label, CancellationToken cancellationToken, RefreshOutcome? outcome = null)
     {
         try
         {
@@ -404,6 +417,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning("{Label} failed — the existing map keeps serving and the next run reads from the same watermark: {Message}", label, ex.Message);
+            if (outcome is not null) { outcome.Failed = true; }
             return 0;
         }
     }
