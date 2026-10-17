@@ -124,22 +124,26 @@ public sealed class DarlingMcpInvestigationTools
     }
 
     [McpServerTool(Name = "wait_for_investigation_requests"), Description(
-        "Waits up to 25 seconds for an investigation request to open on your agent routes and answers its id, server and " +
+        "Waits up to 25 seconds for an investigation request event on your agent routes (opened, joined, resolved, expired, " +
+        "claims_exhausted, evidence_ready, follow_up, deadlock_digest) and answers each with its request's id, server and " +
         "family. Writes nothing. status ok or empty. Call again with the cursor it answers; claim with " +
         "claim_investigation_request. <<GUIDE>> " +
         "A long poll (#5822): the MCP transport is stateless, so the server cannot push a notification; this call is how an " +
-        "agent hears of a new request without listing on a timer. It answers at once when a request opened on route_ids after " +
-        "the cursor; otherwise it waits up to timeout_seconds (0-25, default 20; capped at 25 so a proxy or a client's request " +
-        "timeout never cuts the call) for one to open, and at the timeout answers empty with the same cursor. Each row: " +
-        "request_id, route_id, server_name, family and opened_at, nothing more: no lease and no brief. The claim stays pull: " +
+        "agent hears of a new request, and of what happens to one, without listing on a timer. It answers at once when an " +
+        "event was journaled on route_ids after the cursor; otherwise it waits up to timeout_seconds (0-25, default 20; capped " +
+        "at 25 so a proxy or a client's request timeout never cuts the call) for one, and at the timeout answers empty with the " +
+        "same cursor. Each row: request_id, route_id, server_name, family, opened_at, event, event_id, event_time and the " +
+        "event's detail; no lease and no brief. joined comes only for a new metric or a higher severity. evidence_ready's " +
+        "detail names the evidence sections ready, not_collected and pending: the brief is composed at claim, so evidence that " +
+        "lands later reaches a claimed agent only through this detail (#6003 handoff: no evidence read tool yet). The claim stays pull: " +
         "the first claim_investigation_request call wins, exactly as for a request found by listing, so one request can wake " +
         "several agents and only one claims it. route_ids: the agent routes to wait on (get_notification_routes, agent_level " +
         "1); omit them for every route. There is one shared bearer token, so every token holder can wait on every route; a " +
         "route that is not an agent route opens no request, so a wait on it only times out. after: the opaque cursor the last " +
-        "call answered. Omit it to start now: requests already open are not answered (list them with " +
-        "list_investigation_requests). Nothing is queued for an agent: the store is the queue, so a cursor catches up on every " +
-        "request opened since its last answer (at most 100 per answer, oldest first), including one that opened while no call " +
-        "was waiting, and answers each request once.")]
+        "call answered. Omit it to start now: events already journaled are not answered (list requests with " +
+        "list_investigation_requests). Nothing is queued for an agent: the journal is the queue, so a cursor catches up on " +
+        "every event since its last answer (at most 100 per answer, oldest first), including one journaled while no call " +
+        "was waiting, and answers each event once.")]
     public static Task<string> WaitForInvestigationRequests(
         NpgsqlDataSource postgres,
         InvestigationOpenSignal signal,
@@ -221,6 +225,26 @@ public sealed class DarlingMcpInvestigationTools
         if (r.InstanceName is not null) node["instance_name"] = r.InstanceName;
         node["family"] = r.Family;
         node["opened_at"] = r.OpenedAtUtc;
+        /* #6003: the event this row answers. An evidence_ready detail names the sections that are ready, not collected and
+           still pending: the agent re-reads the request's evidence by its id. */
+        if (r.Event is not null)
+        {
+            node["event"] = r.Event;
+            node["event_id"] = r.EventId;
+            node["event_time"] = r.EventTimeUtc;
+            if (r.DetailJson is not null)
+            {
+                try
+                {
+                    node["detail"] = JsonSerializer.Deserialize<JsonElement>(r.DetailJson);
+                }
+                catch (JsonException)
+                {
+                    /* A detail that is not JSON is left out: the event still answers. */
+                }
+            }
+        }
+
         return node;
     }
 
@@ -229,7 +253,7 @@ public sealed class DarlingMcpInvestigationTools
         {
             status = rows.Count == 0 ? "empty" : "ok",
             message = rows.Count == 0
-                ? $"No investigation request opened on these routes in {timeoutSeconds} seconds. Call again with this cursor."
+                ? $"No investigation request event on these routes in {timeoutSeconds} seconds. Call again with this cursor."
                 : null,
             count = rows.Count,
             requests = rows.Select(WaitRequest),
@@ -259,7 +283,7 @@ public sealed class DarlingMcpInvestigationTools
         /// <summary>The cursor of a call that named none: everything opened by <paramref name="nowUtc"/> counts as seen.</summary>
         internal static WaitCursor Start(DateTime nowUtc, IReadOnlyList<InvestigationOpenedRow> rows) =>
             new(DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc),
-                rows.Where(r => r.OpenedAtUtc <= nowUtc).Select(r => r.RequestId).ToHashSet());
+                rows.Where(r => r.CursorTimeUtc <= nowUtc).Select(r => r.CursorKey).ToHashSet());
 
         /// <summary>
         /// The rows of a catch-up read (every request opened after <see cref="Watermark"/> minus the overlap, oldest first)
@@ -271,7 +295,7 @@ public sealed class DarlingMcpInvestigationTools
             var known = new List<InvestigationOpenedRow>();
             foreach (var row in rows)
             {
-                if (Seen.Contains(row.RequestId))
+                if (Seen.Contains(row.CursorKey))
                 {
                     known.Add(row);
                 }
@@ -282,10 +306,12 @@ public sealed class DarlingMcpInvestigationTools
                 }
             }
 
-            var watermarkTicks = known.Count == 0 ? Watermark.Ticks : Math.Max(Watermark.Ticks, known.Max(r => r.OpenedAtUtc.Ticks));
+            /* #6003: a row is keyed by its event (CursorKey, CursorTimeUtc), so a request's later events are answered too and
+               none twice. */
+            var watermarkTicks = known.Count == 0 ? Watermark.Ticks : Math.Max(Watermark.Ticks, known.Max(r => r.CursorTimeUtc.Ticks));
             var watermark = new DateTime(watermarkTicks, DateTimeKind.Utc);
             var floor = watermark - CursorOverlap;
-            var seen = known.Where(r => r.OpenedAtUtc > floor).Select(r => r.RequestId).ToHashSet();
+            var seen = known.Where(r => r.CursorTimeUtc > floor).Select(r => r.CursorKey).ToHashSet();
             return (fresh, new WaitCursor(watermark, seen));
         }
 

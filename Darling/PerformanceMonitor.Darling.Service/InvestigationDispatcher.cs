@@ -60,8 +60,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>The brief is not composed here.</b> It is built when an agent claims the request
 /// (<see cref="InvestigationRequestStore.SetBriefAsync"/> needs the claim id), so the dispatcher leaves <c>brief</c> NULL.</para>
 ///
-/// <para><b>The long-poll's wake-up (#5822).</b> When the store answers <see cref="InvestigationOpenOutcome.Opened"/>, and only
-/// then (a join is not a new request, and a limit opens nothing), the dispatcher fires <see cref="InvestigationOpenSignal.Opened"/>
+/// <para><b>The long-poll's wake-up (#5822, #6003).</b> When the store answers <see cref="InvestigationOpenOutcome.Opened"/>, or a
+/// join it journaled as a <c>joined</c> event (a new metric or a higher severity; a quiet join and a limit wake nothing), the dispatcher fires <see cref="InvestigationOpenSignal.Opened"/>
 /// for the route (the core calls it through the <c>opened</c> delegate it is given), which wakes every
 /// <c>wait_for_investigation_requests</c> call waiting on it. The signal carries nothing: the woken call reads the committed
 /// request from the store. With nobody waiting it costs a lock and an empty loop.</para>

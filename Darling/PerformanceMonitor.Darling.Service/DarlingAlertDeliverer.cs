@@ -426,11 +426,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     {
         ArgumentNullException.ThrowIfNull(resolution);
         options ??= AlertResolutionSendOptions.Default;
-        var record = DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution);
-        if (options.ContextJson is not null)
-        {
-            record = record with { ContextJson = options.ContextJson };
-        }
+        /* #6003: the row's context carries the firing metric (Resolves) beside the caller's own context, on every path:
+           sent, muted, digested, throttled or with resolutions off. The investigation resolved detector reads it. */
+        var record = DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution, options.ContextJson);
 
         try
         {
@@ -447,6 +445,62 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         }
 
         await _historyStore.RecordAlertAsync(record);
+    }
+
+    /// <summary>
+    /// #6003, D8: the human channels of <paramref name="route"/> a notice can go to: Teams, Slack and email, each where the
+    /// route has a destination and does not turn the channel off. The generic webhook is the agent's channel and PagerDuty
+    /// would open an incident nothing resolves, so neither carries a notice.
+    /// </summary>
+    public static IReadOnlyList<(string Channel, string Destination)> NoticeTargets(NotificationRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        var targets = new List<(string Channel, string Destination)>();
+        if (!route.Enabled)
+        {
+            return targets;
+        }
+
+        void Add(string channel, string destination)
+        {
+            if (!string.IsNullOrWhiteSpace(destination) && !route.IsOffFor(channel))
+            {
+                targets.Add((channel, destination));
+            }
+        }
+
+        Add(NotificationRouter.EmailChannel, route.SmtpRecipients);
+        Add(NotificationRouter.TeamsChannel, route.TeamsUrl);
+        Add(NotificationRouter.SlackChannel, route.SlackUrl);
+        return targets;
+    }
+
+    /// <summary>
+    /// #6003, D8: sends one notice to each of <paramref name="targets"/> and answers the channels that took it. Never throws
+    /// for a channel's failure, which is logged.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> SendNoticeAsync(
+        IReadOnlyList<(string Channel, string Destination)> targets, string title, string serverName, string currentValue,
+        string detail, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        var delivered = new List<string>();
+        foreach (var (channel, destination) in targets)
+        {
+            var error = channel == NotificationRouter.EmailChannel
+                ? await _core.TrySendNoticeEmailAsync(destination, title, serverName, currentValue, detail)
+                : await _webhooks.TrySendNoticeAsync(channel, destination, title, serverName, currentValue, detail, cancellationToken);
+            if (error is null)
+            {
+                delivered.Add(channel);
+            }
+            else
+            {
+                _logger.LogWarning("Notice {Title} on {Server} was not sent to {Channel}: {Error}", title, serverName, channel, error);
+            }
+        }
+
+        return delivered;
     }
 
     private async Task<AlertHistoryRecord> SendResolutionAsync(

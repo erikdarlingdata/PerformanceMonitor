@@ -69,6 +69,8 @@ public sealed class SelfAlertFailedSendCensusTests
                 (1, "the failing-channel notice is stated once when the policy decides it; the next decision is the channel's recovery"),
             ["GiveUpOnHistoryAuditDayAsync"] =
                 (1, "the history audit gave up on a day at the next day's slot: the day is not audited again, so there is no later tick to send it on, and the stamp that matters is the new slot's own"),
+            ["RaiseInvestigationUnansweredAsync"] =
+                (1, "#6003: one alert per expired request, after the request's fallback mark is written: the mark is the once, so there is no later pass to send it on"),
             ["ApplyPolicyJobsStuckAsync"] =
                 (1, "the auto-re-armed notice is a state-machine edge: the next pass escalates or records the recovery, and neither is gated by a stamp"),
         };

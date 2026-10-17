@@ -358,6 +358,28 @@ public sealed class EmailSendCore
     }
 
     /// <summary>
+    /// #6003, D8: a notice (an investigation request that expired with no agent on it) to <paramref name="recipients"/>,
+    /// rendered as an alert email with no threshold. Null on success, else the error.
+    /// </summary>
+    internal async Task<string?> TrySendNoticeEmailAsync(
+        string recipients, string title, string serverName, string currentValue, string detailText)
+    {
+        try
+        {
+            var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
+                title, serverName, currentValue, "", _settings.EmailCooldownMinutes, _branding, detailText: detailText);
+            await SendEmailAsync(_settings, $"[SQL Monitor] {title} on {serverName}", htmlBody, plainTextBody, context: null,
+                recipients: recipients);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"NOTICE EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
     /// Sends a test email to verify SMTP configuration. Returns null on success, or the error
     /// message on failure. Static — the test-send path supplies its own <see cref="IAlertSettings"/>
     /// (Lite: <c>new AppAlertSettings()</c>; Dashboard: the transient form-values adapter, MOD-1).

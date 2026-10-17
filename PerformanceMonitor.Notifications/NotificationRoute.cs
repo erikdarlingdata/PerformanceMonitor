@@ -72,6 +72,10 @@ public sealed record NotificationRoute(
     /// settings row's generic URL signs with the settings row's keys. Null means no key.</summary>
     public WebhookSigningKeys? GenericSigning { get; init; }
 
+    /// <summary>#6003, D8: the route an agent route's unclaimed, expired request goes to instead (V193
+    /// <c>fallback_route_id</c>); null for none. An id that names no enabled route reads as none.</summary>
+    public int? FallbackRouteId { get; init; }
+
     /// <summary>Whether <paramref name="channel"/> is off on this route (see <see cref="OffChannels"/>).</summary>
     public bool IsOffFor(string channel) =>
         OffChannels is not null && OffChannels.Contains(channel, StringComparer.Ordinal);

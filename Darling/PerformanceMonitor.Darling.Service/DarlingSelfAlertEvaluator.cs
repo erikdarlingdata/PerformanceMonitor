@@ -600,6 +600,20 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     internal const string ExternalAlertsUndeliveredMetric = "External Alerts Undelivered";
 
+    /// <summary>
+    /// #6003, D8: the last fallback for an investigation request that expired with no agent on it, when its agent route has
+    /// no fallback route and no human channel. One alert per request, raised once: the request's fallback mark is written
+    /// before the send, so there is no later pass to send it again. No resolution row: the request is final.
+    /// </summary>
+    public async Task RaiseInvestigationUnansweredAsync(
+        string serverName, int serverId, string shortMessage, string detail, CancellationToken cancellationToken)
+    {
+        await FireAsync(
+            serverId.ToString(CultureInfo.InvariantCulture), serverName, AlertFamily.InvestigationUnansweredMetric,
+            currentValue: "1", thresholdValue: "0", detail: detail, severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage, numericCurrentValue: 1, numericThresholdValue: 0, cancellationToken);
+    }
+
     /// <summary>The span the undelivered count looks back over, and so how long the alert stands after the last give-up.</summary>
     internal static readonly TimeSpan ExternalAlertsWindow = TimeSpan.FromHours(1);
 
@@ -8752,12 +8766,42 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// of resolutions. The pairing this method exists for is unaffected: the row is still written, still
     /// carries the resolution title, and still reads as resolved.</para>
     /// </summary>
-    public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution) => new(
+    public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution, string? contextJson = null) => new(
         resolution.ServerKey, resolution.ServerName, resolution.Title,
         CurrentValueText: "resolved", ThresholdValueText: "",
         NumericCurrentValue: null, NumericThresholdValue: null,
         Delivery: AlertDelivery.NoChannelApplies(),
-        Muted: false, DetailText: SensitiveStatements.Text(resolution.Message), ContextJson: null);
+        Muted: false, DetailText: SensitiveStatements.Text(resolution.Message),
+        ContextJson: ResolutionContextJson(contextJson, resolution.MetricName));
+
+    /// <summary>The member of a resolution row's <c>context_json</c> that names the metric the row resolves (#6003).</summary>
+    public const string ResolvesMember = "Resolves";
+
+    /// <summary>
+    /// A resolution row's <c>context_json</c> (#6003, D7): the caller's context, when it gave one, plus <see cref="ResolvesMember"/>
+    /// naming the FIRING metric. The row's <c>metric_name</c> is the resolution's title ("CPU Resolved"), not the metric that
+    /// fired ("High CPU"), so without this member nothing in the store ties a clear back to the alert it ends, and the
+    /// investigation <c>resolved</c> detector reads exactly this. A context that is not a JSON object is replaced: no writer
+    /// passes one.
+    /// </summary>
+    public static string ResolutionContextJson(string? contextJson, string metricName)
+    {
+        System.Text.Json.Nodes.JsonObject node;
+        try
+        {
+            node = string.IsNullOrWhiteSpace(contextJson)
+                ? new System.Text.Json.Nodes.JsonObject()
+                : System.Text.Json.Nodes.JsonNode.Parse(contextJson) as System.Text.Json.Nodes.JsonObject
+                  ?? new System.Text.Json.Nodes.JsonObject();
+        }
+        catch (JsonException)
+        {
+            node = new System.Text.Json.Nodes.JsonObject();
+        }
+
+        node[ResolvesMember] = metricName;
+        return node.ToJsonString();
+    }
 
     /// <summary>
     /// The explicit "this metric has no measurement" value for the history stores' NOT NULL

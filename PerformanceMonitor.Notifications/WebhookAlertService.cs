@@ -2938,6 +2938,63 @@ public class WebhookAlertService
     }
 
     /// <summary>
+    /// #6003, D8: a notice (an investigation request that expired with no agent on it) to one Teams or Slack destination,
+    /// rendered as an alert card. Null on success, else the error. Any other channel is refused: a notice goes to people.
+    /// </summary>
+    internal async Task<string?> TrySendNoticeAsync(
+        string channel, string destination, string title, string serverName, string currentValue, string detailText,
+        CancellationToken cancellationToken = default)
+    {
+        var delivery = _settings.SnapshotForDelivery();
+        var now = _utcNow();
+        return channel switch
+        {
+            NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
+                delivery, destination, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
+                displayName: null, cancellationToken),
+            NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
+                delivery, destination, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
+                displayName: null, cancellationToken),
+            _ => $"{channel} does not carry a notice",
+        };
+    }
+
+    /// <summary>
+    /// #6003, D5: posts one investigation event to an agent route's own generic URL, signed with that route's keys (#5998),
+    /// with the event's id as <c>webhook-id</c> so a receiver that saw it already can drop it. <paramref name="payload"/> is
+    /// sent as given: no body template and no configured headers, which belong to the alert channel. A route whose key would
+    /// not open is not sent to, rather than sent unsigned. Null on success, else the error.
+    /// </summary>
+    internal async Task<string?> TrySendInvestigationEventAsync(
+        int routeId, string url, string payload, string eventId, CancellationToken cancellationToken = default)
+    {
+        var delivery = _settings.SnapshotForDelivery();
+        var signing = GenericSigningFor(delivery, routeId, url);
+        if (!signing.HasKey && delivery.GenericSigningKeyUnreadable)
+        {
+            return GenericSigningKeyUnreadableText;
+        }
+
+        var sendUtc = _utcNow();
+        var signed = signing.HasKey
+            ? new WebhookSendSigning(signing.LiveKeys(sendUtc), eventId, WebhookSigning.UnixSeconds(sendUtc))
+            : null;
+        try
+        {
+            return await PostWebhookAsync(
+                url, payload, delivery.GenericWebhookProxyAddress, headers: null, WebhookPostTimeout, signed, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
     /// Closes one PagerDuty incident an alert's fire opened (#5825): a <c>resolve</c> on <paramref name="dedupKey"/> (the
     /// key the fire's trigger used) to <paramref name="routingKey"/> (the service the fire went to). The caller checks
     /// <c>pagerduty_auto_resolve</c>. A delivered resolve clears the fire's cooldown entry, as

@@ -550,6 +550,8 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
             /* #5654: the external-alert delivery health check's alert. */
             DarlingSelfAlertEvaluator.ExternalAlertsUndeliveredMetric,
+            /* #6003: the last fallback of an investigation request that expired with no agent on it. */
+            AlertFamily.InvestigationUnansweredMetric,
             /* #5641: the Runnable Queue alert fires from AlertEngine.CheckRunnableQueueAsync through
                RunnableQueueEvaluator.MetricName (a constant, so the AlertOutcome literal scan below cannot see it),
                listed here like the engine's other constant-fired names. */

@@ -406,8 +406,7 @@ public sealed class ExternalAlertDrain
         }
         else
         {
-            await _history.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution)
-                with { ContextJson = resolvedContext });
+            await _history.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution, resolvedContext));
         }
 
         await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Delivered,

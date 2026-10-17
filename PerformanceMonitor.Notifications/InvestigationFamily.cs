@@ -143,6 +143,13 @@ public static class InvestigationFamily
             return null;
         }
 
+        /* #6003: the alert about a request no agent took never opens another one, or an agent route matching every metric
+           would expire, alert and open again without end. */
+        if (string.Equals(metricName, AlertFamily.InvestigationUnansweredMetric, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
         if (PerformanceMetricFamilies.TryGetValue(metricName, out var named))
         {
             return named;

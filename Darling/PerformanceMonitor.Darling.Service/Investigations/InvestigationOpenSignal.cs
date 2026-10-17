@@ -15,8 +15,9 @@ namespace PerformanceMonitor.Darling.Service.Investigations;
 
 /// <summary>
 /// The in-process wake-up of the investigation long-poll (#5822). <c>wait_for_investigation_requests</c> registers a
-/// <see cref="Waiter"/> for the routes it waits on; the dispatcher calls <see cref="Opened"/> when a request OPENS (never on a
-/// join or at a limit), and every waiter on that route wakes. A waiter carries no payload: the woken call reads the store,
+/// <see cref="Waiter"/> for the routes it waits on; the dispatcher calls <see cref="Opened"/> when a request opens or a join is
+/// an event (#6003: a new metric or a higher severity; never a quiet join or a limit), and every waiter on that route wakes. The
+/// event pass calls <see cref="WakeAll"/> for the events the sweep and the evidence capture journal. A waiter carries no payload: the woken call reads the store,
 /// which is the queue (decision 3: nothing is held in memory for an agent that is not waiting).
 ///
 /// <para>One waiter per waiting call: it leaves the registry when the call is answered, times out or is cancelled
@@ -71,6 +72,19 @@ public sealed class InvestigationOpenSignal
                 {
                     waiter.Wake();
                 }
+            }
+        }
+    }
+
+    /// <summary>#6003: wakes every waiter, whatever its routes: a pass that found new request events of any kind (the woken
+    /// call reads its own routes' events from the store). Never throws.</summary>
+    public void WakeAll()
+    {
+        lock (_gate)
+        {
+            foreach (var waiter in _waiters)
+            {
+                waiter.Wake();
             }
         }
     }

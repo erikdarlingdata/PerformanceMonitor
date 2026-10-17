@@ -2101,7 +2101,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
         + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, "
-        + NotificationRouteSigningColumns + " "
+        + NotificationRouteSigningColumns + ", fallback_route_id "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>A route's signing key columns (V193, #5998), last in both the service's and the viewer's route SELECT.</summary>
@@ -2222,6 +2222,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     GenericSigning = new WebhookSigningKeys(
                         reader.GetString(16), reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetFieldValue<DateTime>(18),
                         clockAhead),
+                    /* V193 (#6003, D8): where an unclaimed, expired investigation request goes instead. */
+                    FallbackRouteId = reader.IsDBNull(19) ? null : reader.GetInt32(19),
                 });
             }
         }

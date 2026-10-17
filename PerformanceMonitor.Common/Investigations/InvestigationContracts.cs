@@ -41,6 +41,10 @@ public sealed record InvestigationAlert(
     /// new request and lowers a joined request to it, so the lowest level among a request's routes wins. An init member with
     /// the Level 1 default, so every existing construction keeps its meaning; Lite never sets it.</summary>
     public int AutonomyLevel { get; init; } = 1;
+
+    /// <summary>The alert's severity, <see cref="InvestigationEvents.Warning"/> or <see cref="InvestigationEvents.Critical"/>
+    /// (#6003, D6): stamped as a new request's <c>max_severity</c>, and a join above it is an event. Null reads as warning.</summary>
+    public string? Severity { get; init; }
 }
 
 /// <summary>
@@ -69,7 +73,12 @@ public enum InvestigationOpenOutcome
 }
 
 /// <summary>The result of <see cref="IInvestigationRequestStore.OpenOrJoinAsync"/>; the request is null at a limit.</summary>
-public sealed record InvestigationOpenResult(InvestigationOpenOutcome Outcome, Guid? RequestId);
+public sealed record InvestigationOpenResult(InvestigationOpenOutcome Outcome, Guid? RequestId)
+{
+    /// <summary>#6003: true when the store journaled an event (<c>opened</c>, or a <c>joined</c> that brought a new metric or a
+    /// higher severity); a quiet join and a limit journal none.</summary>
+    public bool Evented { get; init; }
+}
 
 /// <summary>What a claim answered.</summary>
 public enum InvestigationClaimOutcome
@@ -202,7 +211,27 @@ public sealed record InvestigationReportsRead(
 /// </summary>
 public sealed record InvestigationOpenedRow(
     Guid RequestId, int RouteId, string ServerName, string Family, DateTime OpenedAtUtc,
-    string? DisplayName = null, string? InstanceName = null);
+    string? DisplayName = null, string? InstanceName = null)
+{
+    /// <summary>#6003: the journal event this row answers (the long-poll reads events, not only opens); null on a row read
+    /// from the requests alone, which answers its open.</summary>
+    public string? Event { get; init; }
+
+    /// <summary>#6003: the event's id, the cursor's key; <see cref="Guid.Empty"/> keys the row by its request id.</summary>
+    public Guid EventId { get; init; }
+
+    /// <summary>#6003: when the event was journaled, the cursor's watermark; null uses <see cref="OpenedAtUtc"/>.</summary>
+    public DateTime? EventTimeUtc { get; init; }
+
+    /// <summary>#6003: the journal row's detail (for <c>evidence_ready</c>, the sections to re-read).</summary>
+    public string? DetailJson { get; init; }
+
+    /// <summary>The cursor's key for this row: the event id, else the request id.</summary>
+    public Guid CursorKey => EventId == Guid.Empty ? RequestId : EventId;
+
+    /// <summary>The cursor's time for this row: the event's time, else the open's.</summary>
+    public DateTime CursorTimeUtc => EventTimeUtc ?? OpenedAtUtc;
+}
 
 /// <summary>One request as a list reads it, with the state computed from the lease and the expiry, not the stored word.
 /// <see cref="PracticeOf"/> (#5918) is the request a practice request replays; null for every other request, and then absent from the answer.
@@ -233,7 +262,11 @@ public sealed record InvestigationRequestRow(
     string? InstanceName = null);
 
 /// <summary>What one expiry sweep did.</summary>
-public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired);
+public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
+{
+    /// <summary>#6003: how many requests this pass journaled <c>resolved</c> for (D7).</summary>
+    public int Resolved { get; init; }
+}
 
 /// <summary>
 /// The <c>agent_action</c> argument a Level 2 tool carries under the investigations arm (#5912), validated: the request and

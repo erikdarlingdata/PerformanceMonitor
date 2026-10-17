@@ -3656,7 +3656,14 @@ LIMIT 1";
         /* #5632 Phase A (ruling R4): the investigation expiry sweep, beside the external alert loop on its own 60-second
            tick. It only expires: it journals a lapsed lease once per claim and moves a request past its expiry, or out of
            claims, to expired. It never reopens a lease; a claim's own WHERE takes a lapsed lease over. */
-        var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, stoppingToken);
+        /* #6003: after each sweep, the request events go out: the D8 fallback of a request that expired unclaimed, and the
+           signed POST of every new event to its agent route; the pass wakes the MCP long-poll for what it found. */
+        var investigationEvents = new PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery(
+            investigationStore, () => alertSettings.NotificationRoutes,
+            new PerformanceMonitor.Darling.Service.Investigations.ServiceInvestigationEventSends(
+                webhookAlertService, deliverer, () => _selfAlerts),
+            PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared, _logger);
+        var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, investigationEvents, stoppingToken);
 
         /* #6001: the evidence capture, on its own tick. It reads the store only and opens no connection to a monitored server. */
         var investigationEvidenceLoop = RunInvestigationEvidenceLoopAsync(
@@ -6604,7 +6611,8 @@ LIMIT 1";
     /// expires lapsed leases and old requests, through the shared <see cref="InvestigationDispatchCore.SweepOnceAsync"/> (#5820). It honors the service pause as the external alert loop does, and a failed
     /// pass is logged and tried again next tick.
     /// </summary>
-    private async Task RunInvestigationSweepLoopAsync(InvestigationRequestStore store, CancellationToken stoppingToken)
+    private async Task RunInvestigationSweepLoopAsync(InvestigationRequestStore store,
+        PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery events, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -6621,6 +6629,20 @@ LIMIT 1";
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Investigation sweep failed; it is tried again next pass");
+                }
+
+                /* #6003: its own try, so a failed sweep still delivers what is already journaled, and the reverse. */
+                try
+                {
+                    await events.RunOnceAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Investigation event delivery failed; it is tried again next pass");
                 }
             }
 

@@ -92,6 +92,18 @@ public sealed class InvestigationDispatchCore
     }
 
     /// <summary>
+    /// #6003: the alert's severity word for the request's <c>max_severity</c>: the tier graded at the fire site when it carries
+    /// one, else the metric's own tier (red is critical; every other tier is warning).
+    /// </summary>
+    public static string SeverityOf(string metricName, AlertContext? context) =>
+        context?.SeverityOverride switch
+        {
+            AlertSeverityLevel.Critical => InvestigationEvents.Critical,
+            AlertSeverityLevel.Warning => InvestigationEvents.Warning,
+            _ => AlertSeverity.ForMetric(metricName).HexColor == "#DC2626" ? InvestigationEvents.Critical : InvestigationEvents.Warning,
+        };
+
+    /// <summary>
     /// #5821: the values an alert's history row stores, for its link rows: the two numbers resolved from the numeric value or
     /// its display text exactly as the history store resolves them (<see cref="AlertValueParser.ResolveStoredValue"/>).
     /// </summary>
@@ -158,6 +170,8 @@ public sealed class InvestigationDispatchCore
                 /* #5912: the route's level is stamped on the request; the store lowers it to 1 for an alert of a custom rule
                    an agent last wrote, and to the lowest level on a join. */
                 AutonomyLevel = route.AgentLevel ?? NotificationRoute.AgentLevelInvestigate,
+                /* #6003, D6: a join above the request's max_severity is an event. */
+                Severity = SeverityOf(metricName, context),
             };
 
             var result = await _openOrJoin(alert, cancellationToken);
@@ -178,6 +192,12 @@ public sealed class InvestigationDispatchCore
                     _logger.LogDebug(
                         "Alert {Metric} on {Server} joined investigation request {RequestId}",
                         metricName, serverName, result.RequestId);
+                    /* #6003: a join that brought a new metric or a higher severity is an event, and wakes the long-poll. */
+                    if (result.Evented)
+                    {
+                        _opened?.Invoke(route.RouteId);
+                    }
+
                     break;
             }
 
