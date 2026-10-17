@@ -68,10 +68,30 @@ public sealed class LiteQueryTagRollupStatusTests : IDisposable
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    /// <summary>The deadlock source gone: the table and every view over it.</summary>
+    /// <summary>The deadlock source gone: the views and indexes over the table, then the table.</summary>
     private async Task DropDeadlocksAsync()
     {
-        await ExecAsync("DROP TABLE IF EXISTS deadlocks CASCADE");
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        var drops = new System.Collections.Generic.List<string>();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT 'DROP VIEW IF EXISTS ' || view_name FROM duckdb_views() WHERE NOT internal AND sql ILIKE '%deadlocks%' "
+                + "UNION ALL SELECT 'DROP INDEX IF EXISTS ' || index_name FROM duckdb_indexes() WHERE table_name = 'deadlocks'";
+            using var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+            {
+                drops.Add(reader.GetString(0));
+            }
+        }
+
+        drops.Add("DROP TABLE IF EXISTS deadlocks");
+        foreach (var drop in drops)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = drop;
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
     }
 
     [Fact]
