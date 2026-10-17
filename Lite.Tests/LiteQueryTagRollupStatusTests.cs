@@ -68,11 +68,10 @@ public sealed class LiteQueryTagRollupStatusTests : IDisposable
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    /// <summary>The deadlock source gone: its view first, then the table behind it.</summary>
+    /// <summary>The deadlock source gone: the table and every view over it.</summary>
     private async Task DropDeadlocksAsync()
     {
-        await ExecAsync("DROP VIEW IF EXISTS v_deadlocks");
-        await ExecAsync("DROP TABLE IF EXISTS deadlocks");
+        await ExecAsync("DROP TABLE IF EXISTS deadlocks CASCADE");
     }
 
     [Fact]
