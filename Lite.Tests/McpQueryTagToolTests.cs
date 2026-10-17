@@ -163,7 +163,7 @@ public sealed class McpQueryTagToolTests : IClassFixture<SharedDuckDbFixture>
         var stored = await _data.GetQueryTagAssignmentsAsync();
         Assert.Equal(2, stored.Count);
         Assert.Contains(stored, a => a.QueryHash == "0xABCDEF");
-        Assert.Contains(stored, a => a.ObjectName == "Orders");
+        Assert.Contains(stored, a => a.ObjectName == "orders" && a.TagId == second);
     }
 
     [Fact]
