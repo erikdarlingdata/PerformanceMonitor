@@ -30,14 +30,15 @@ public sealed class AdminPageBehaviourTests
 
     [Theory]
     [InlineData("servers", "Alpha", "GET /api/admin/servers")]
-    [InlineData("routes", "Blocking Detected", "GET /api/read/get_notification_routes")]
+    // The routes tab also reads the webhook signing status (#5998), second, after its routes.
+    [InlineData("routes", "Blocking Detected", "GET /api/read/get_notification_routes", "GET /api/webhook-signing")]
     [InlineData("settings", "CPU: threshold (%)", "GET /api/read/get_alert_settings")]
-    public void EachTab_ReadsItsTool_AndDrawsTheRow(string tab, string expectedText, string read)
+    public void EachTab_ReadsItsTool_AndDrawsTheRow(string tab, string expectedText, params string[] reads)
     {
         var page = Tab("tab:" + tab);
 
         Assert.Contains(Texts(page), t => t == expectedText);
-        Assert.Equal(read, Assert.Single(Reads(page)));
+        Assert.Equal(reads, Reads(page));
     }
 
     [Fact]

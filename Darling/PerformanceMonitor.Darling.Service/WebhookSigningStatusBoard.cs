@@ -13,7 +13,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using PerformanceMonitor.Notifications;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// Whether each generic webhook destination has a signing key, for the web page (#5998). The key columns are denied to the read
