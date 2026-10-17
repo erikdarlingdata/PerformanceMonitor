@@ -13192,7 +13192,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             async token =>
             {
                 await using var moduleMapConnection = await postgres.OpenConnectionAsync(token);
-                var outcome = new DarlingModuleMap.RefreshOutcome();
+                var outcome = new ModuleMapRefreshOutcome();
                 await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, outcome, token);
                 return !outcome.Failed;
             },
