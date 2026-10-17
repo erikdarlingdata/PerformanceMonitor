@@ -449,6 +449,11 @@
                                ToolTip="Newest collection time across all collectors — the service collects, the viewer reads"/>
                 </StackPanel>
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
+                <!-- #5988: the query tag filter for the Queries grids (read only; tags are edited on the web page and over MCP). -->
+                <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="11"/>
+                <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,4" Padding="4,2" FontSize="11"
+                          DropDownOpened="QueryTagFilterCombo_DropDownOpened" SelectionChanged="QueryTagFilterCombo_SelectionChanged"
+                          ToolTip="Show only the Queries grids' rows with this tag (a parent shows its children), or only untagged rows. Applied before each grid's top-N cut."/>
                 <!-- #1319: per-server global database filter (display-only) -->
                 <Button x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
                         Padding="8,4" Margin="0,0,8,4"
@@ -903,6 +908,16 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                                       Sorting="QueryStatsGrid_Sorting">
                                 <DataGrid.Columns>
+                                    <DataGridTemplateColumn Header="Tag" Width="140" SortMemberPath="QueryTag">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{Binding QueryTagFill}" CornerRadius="8" Padding="8,1" Margin="4,2" HorizontalAlignment="Left"
+                                                        Visibility="{Binding HasQueryTag, Converter={StaticResource BoolToVis}}">
+                                                    <TextBlock Text="{Binding QueryTag}" Foreground="{Binding QueryTagTextBrush}" FontSize="11" ToolTip="{Binding QueryTag}"/>
+                                                </Border>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -1208,6 +1223,16 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                                       Sorting="ProcedureStatsGrid_Sorting">
                                 <DataGrid.Columns>
+                                    <DataGridTemplateColumn Header="Tag" Width="140" SortMemberPath="QueryTag">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{Binding QueryTagFill}" CornerRadius="8" Padding="8,1" Margin="4,2" HorizontalAlignment="Left"
+                                                        Visibility="{Binding HasQueryTag, Converter={StaticResource BoolToVis}}">
+                                                    <TextBlock Text="{Binding QueryTag}" Foreground="{Binding QueryTagTextBrush}" FontSize="11" ToolTip="{Binding QueryTag}"/>
+                                                </Border>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -1418,6 +1443,16 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                                       Sorting="QueryStoreGrid_Sorting">
                                 <DataGrid.Columns>
+                                    <DataGridTemplateColumn Header="Tag" Width="140" SortMemberPath="QueryTag">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{Binding QueryTagFill}" CornerRadius="8" Padding="8,1" Margin="4,2" HorizontalAlignment="Left"
+                                                        Visibility="{Binding HasQueryTag, Converter={StaticResource BoolToVis}}">
+                                                    <TextBlock Text="{Binding QueryTag}" Foreground="{Binding QueryTagTextBrush}" FontSize="11" ToolTip="{Binding QueryTag}"/>
+                                                </Border>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -3960,6 +3995,16 @@
                         </Style>
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>
+                                    <DataGridTemplateColumn Header="Tag" Width="140" SortMemberPath="QueryTag">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{Binding QueryTagFill}" CornerRadius="8" Padding="8,1" Margin="4,2" HorizontalAlignment="Left"
+                                                        Visibility="{Binding HasQueryTag, Converter={StaticResource BoolToVis}}">
+                                                    <TextBlock Text="{Binding QueryTag}" Foreground="{Binding QueryTagTextBrush}" FontSize="11" ToolTip="{Binding QueryTag}"/>
+                                                </Border>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                         <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="150" SortMemberPath="EventTime">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>

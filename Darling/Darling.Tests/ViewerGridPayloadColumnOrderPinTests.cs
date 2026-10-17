@@ -80,17 +80,17 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     [
         new(ViewerServerTab, "QuerySnapshotsGrid", "Collected", 1, ["Query Text", "Query Plan"]),
         new(ViewerServerTab, "CurrentActiveQueriesGrid", "Collected", 1, ["Query Text", "Query Plan"]),
-        new(ViewerServerTab, "QueryStatsGrid", "Creation Time", 3, ["Query Text", "Query Plan"]),
+        new(ViewerServerTab, "QueryStatsGrid", "Creation Time", 4, ["Query Text", "Query Plan"]),
         new(ViewerServerTab, "QueryStatsComparisonGrid", "Database", 1, ["Query Text"]),
-        new(ViewerServerTab, "ProcedureStatsGrid", "Cached Time", 4, ["Query Plan"]),
-        new(ViewerServerTab, "QueryStoreGrid", "First Execution", 5, ["Query Text", "Query Plan"]),
+        new(ViewerServerTab, "ProcedureStatsGrid", "Cached Time", 5, ["Query Plan"]),
+        new(ViewerServerTab, "QueryStoreGrid", "First Execution", 6, ["Query Text", "Query Plan"]),
         new(ViewerServerTab, "QueryStoreComparisonGrid", "Database", 1, ["Query Text"]),
         new(ViewerServerTab, "QueryStoreRegressionsGrid", "Last Execution", 0, ["Query Text"]),
         new(ViewerServerTab, "PlanCorrectionGrid", "Collected", 0, ["Query Text"]),
         new(ViewerServerTab, "BlockedProcessReportGrid", "Event Time", 0, ["Blocked SQL", "Blocking SQL", "XML"]),
         new(ViewerServerTab, "DeadlockGrid", "Time", 0, ["SQL Text", "XML"]),
         new(ViewerServerTab, "SignificantWaitsGrid", "Event Time", 0, ["Query Text"]),
-        new(ViewerServerTab, "LongQueryCompletionsGrid", "Event Time", 0, ["Statement"]),
+        new(ViewerServerTab, "LongQueryCompletionsGrid", "Event Time", 1, ["Statement"]),
         new(ViewerWaitDrillDown, "ResultsDataGrid", "Collected", 1, ["Query Text"]),
         new(ViewerProcedureHistory, "HistoryDataGrid", "Cached Time", 2, ["Plan"]),
         new(ViewerQueryStatsHistory, "HistoryDataGrid", "Creation Time", 2, ["Plan"]),
@@ -210,12 +210,6 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         {
             var lite = ColumnHeaders(ReadRepoFile(liteFile), liteGrid);
             var viewer = ColumnHeaders(ReadRepoFile(viewerFile), viewerGrid);
-            // Exempt exactly the column named "Tag", and nothing else, until Darling's viewer gets its tag column, #5988 (which removes this).
-            if (!viewer.Contains("Tag"))
-            {
-                lite = lite.Where(h => h != "Tag").ToList();
-            }
-
             if (lite.SequenceEqual(viewer))
             {
                 continue;

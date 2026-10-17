@@ -79,7 +79,8 @@ public partial class ViewerServerTab
         var traceTask = Timed(timer, "trace check", _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId));
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = Timed(timer, "data start", _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var tagFilter = await CurrentQueryTagFilterAsync();
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
         try
         {
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Long Queries");

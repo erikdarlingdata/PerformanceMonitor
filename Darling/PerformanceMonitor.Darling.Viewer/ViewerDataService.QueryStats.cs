@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// query_plan_xml is fetched on demand by <see cref="ViewerDataService.GetQueryStatsPlanXmlAsync"/>, so a
 /// multi-KB plan never rides in every grid row (Lite's HasQueryPlan gating pattern, sourced from the store).
 /// </summary>
-public sealed class ViewerQueryStatsRow
+public sealed class ViewerQueryStatsRow : QueryTagRowBase
 {
     public string DatabaseName { get; set; } = "";
     public string QueryHash { get; set; } = "";
@@ -214,6 +214,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
             ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name
@@ -379,18 +380,18 @@ public sealed partial class ViewerDataService
     /// <see cref="GetTopQueriesByCpuTierAsync"/> to also learn which tier answered.</para>
     /// </summary>
     public async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
     {
-        var (rows, _) = await GetTopQueriesByCpuTierAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        var (rows, _) = await GetTopQueriesByCpuTierAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
         return rows;
     }
 
     /// <summary>#4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, also returning which tier
     /// answered ("raw" or "hourly") — the Queries-tab header suffix reads this.</summary>
     public async Task<(List<ViewerQueryStatsRow> Rows, string Tier)> GetTopQueriesByCpuTierAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
     {
-        var read = await GetTopQueriesByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        var read = await GetTopQueriesByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
         return (read.Rows, read.Tier);
     }
 
@@ -398,7 +399,15 @@ public sealed partial class ViewerDataService
     /// answers <see cref="ViewerRoutedRead{TRow}.HourlyEdgesNote"/> (<see cref="HourlyEdgesNote"/>), the text the MCP tool
     /// puts in its precision note; a raw read answers none.</summary>
     public async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
+    {
+        var read = await GetTopQueriesByCpuRoutedUntaggedAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
+        await LabelTagsAsync(serverId, QueryTagReadJoin.HashKind, read.Rows, r => r.QueryHash, cancellationToken);
+        return read;
+    }
+
+    private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedUntaggedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
@@ -411,10 +420,10 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            return await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            return await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
         }
 
-        return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
+        return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken), "raw", null);
     }
 
     /// <summary>#4231 stage 3: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -423,7 +432,7 @@ public sealed partial class ViewerDataService
     /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
     private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
-        IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+        IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5329: when the io hourly rollup reaches the window's start, read it instead of the interval rollup (it
            carries every column the interval one does) and fill reads, physical reads and writes from its three sums.
@@ -435,7 +444,7 @@ public sealed partial class ViewerDataService
         /* #5329: bound the read at the materialization ceiling of the relation that answers the window's END, as the
            service's twin does (RollupCoverage.HourlyEndCeiling); null = no bound. */
         var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
-        var sql = BuildTopQueriesHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
+        var sql = QueryTagReadJoin.Apply(BuildTopQueriesHourlySql(fromClause, withIo: useIo, ceiling: ceiling), serverId, tags);
         /* #5329: the first bucket THIS server holds in the window, from the same per-server probe the service's tools run
            (RollupCoverage.GetHourlyFirstBucketAsync), beside the grid read. The store-wide floor belongs to the oldest
            server, so a server added later would otherwise get no start edge. */
@@ -581,6 +590,7 @@ public sealed partial class ViewerDataService
         AND   bucket >= $2
         AND   bucket < $3{HourlyCeilingSql(ceiling)}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        /*TAG:hash:query_hash*/
         GROUP BY database_name, query_hash
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
         ORDER BY SUM(elapsed_time_sum) DESC
@@ -590,7 +600,7 @@ public sealed partial class ViewerDataService
     /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopQueriesByCpuAsync"/> ran before #4231
     /// stage 3 added the hourly arm.</summary>
     private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuRawAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
            while more candidates exist, under its bound. */
@@ -599,7 +609,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQueryStatsRow>();
         var candidateCount = 0;
 
-        await using var command = _dataSource.CreateCommand(TopQueriesSql);
+        await using var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(TopQueriesSql, serverId, tags));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
