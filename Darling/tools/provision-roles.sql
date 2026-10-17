@@ -1809,8 +1809,8 @@ BEGIN
       TO mcp;
    GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at)
       ON config.investigation_requests TO mcp;
-   /* #6008 (V193): submit_investigation_report writes follow_up_at onto the report's own request. Guarded on the column, so a
-      store at V184 to V192 still takes the rest of this block; re-run the script once the service has migrated it to V193. */
+   -- #6008 (V193): submit_investigation_report writes follow_up_at onto the report's own request. Guarded on the column, so a
+   -- store at V184 to V192 still takes the rest of this block; re-run the script once the service has migrated it to V193.
    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
               WHERE attrelid = 'config.investigation_requests'::regclass
                 AND attname = 'follow_up_at' AND NOT attisdropped) THEN
