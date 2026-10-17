@@ -46,7 +46,7 @@ public static class DarlingQueryTagRollupReader
     public static readonly TimeSpan QueryStoreMinWindow = TimeSpan.FromHours(24);
 
     /// <summary>The store schema version that has the interval table; pinned equal to the other readers' copies of it.</summary>
-    public const int QueryStoreTableMinSchemaVersion = 145;
+    private const int QueryStoreTableMinSchemaVersion = 145;
 
     private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
 
