@@ -32,11 +32,11 @@ public partial class LocalDataService
         command.CommandText = @"
 SELECT server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, last_seen
 FROM query_tag_sightings
-WHERE last_seen >= now()::TIMESTAMP - to_hours($1::BIGINT)
+WHERE last_seen >= $1
 AND   ($2 IS NULL OR server_id = $2)
 ORDER BY last_seen DESC, server_id, key_kind, key
 LIMIT $3";
-        command.Parameters.Add(new DuckDBParameter { Value = (long)windowHours });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-windowHours) });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)serverId ?? DBNull.Value });
         command.Parameters.Add(new DuckDBParameter { Value = (long)maxRows });
 
