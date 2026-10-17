@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 70;
+    internal const int CurrentSchemaVersion = 71;
 
     private readonly string _archivePath;
 
@@ -3003,6 +3003,24 @@ public partial class DuckDbInitializer : IDisposable
                 {
                     _logger?.LogWarning("Migration to v70 query-tag tables encountered an error (non-fatal): {Error}", ex.Message);
                 }
+            }
+        }
+
+        if (fromVersion < 71)
+        {
+            /* v71 (#5990): query_tag_sightings gains database_name in its primary key (one hash seen in two databases is two
+               rows). DuckDB cannot change a primary key in place, and the table is DERIVED data: the collectors refill it on
+               their next rounds and the map pass rebuilds from it, so the old rows are dropped rather than migrated.
+               Non-fatal: a failure leaves the table as it was, and the CREATE retries on the next start. */
+            _logger?.LogInformation("Running migration to v71: recreating query_tag_sightings with the database in its key");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS query_tag_sightings");
+                await ExecuteNonQueryAsync(connection, Schema.CreateQueryTagSightingsTable);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v71 query_tag_sightings encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

@@ -302,14 +302,14 @@ CREATE TABLE IF NOT EXISTS query_tag_rules (
        (server_id, key_kind, key) AND caller triple, as Darling's ux_query_tag_sightings_key: that index COALESCEs the
        three caller fields to '', so a sighting with no application is one row rather than many, and two callers of one
        query_hash are two rows the resolver can match separately. DuckDB has no expression index and treats two NULLs as
-       distinct in a unique key, so the fold is in the column defaults instead: NOT NULL DEFAULT '' gives the same six-part
-       key as a plain PRIMARY KEY, which is what the sightings write (#5990) needs for its ON CONFLICT upsert. */
+       distinct in a unique key, so the fold is in the column defaults instead: NOT NULL DEFAULT '' gives a seven-part key
+       (the database is part of the identity since v71, so one hash seen in two databases is two rows) as a plain PRIMARY KEY, which is what the sightings write (#5990) needs for its ON CONFLICT upsert. */
     public static readonly string CreateQueryTagSightingsTable = string.Create(System.Globalization.CultureInfo.InvariantCulture, $@"
 CREATE TABLE IF NOT EXISTS query_tag_sightings (
     server_id INTEGER NOT NULL,
     key_kind VARCHAR NOT NULL,
     key VARCHAR NOT NULL,
-    database_name VARCHAR,
+    database_name VARCHAR NOT NULL DEFAULT '',
     object_name VARCHAR,
     application_name VARCHAR NOT NULL DEFAULT '',
     login_name VARCHAR NOT NULL DEFAULT '',
@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS query_tag_sightings (
     first_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
     last_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
     seen_count BIGINT NOT NULL DEFAULT 1,
-    PRIMARY KEY (server_id, key_kind, key, application_name, login_name, host_name),
+    PRIMARY KEY (server_id, key_kind, key, database_name, application_name, login_name, host_name),
     CHECK (key_kind IN ('hash', 'object', 'caller')),
     CHECK (text_sample IS NULL OR length(text_sample) <= {PerformanceMonitor.Common.QueryTags.QueryTagLimits.TextSampleCap}),
     CHECK (seen_count >= 1)

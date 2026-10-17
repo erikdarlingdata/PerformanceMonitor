@@ -1277,9 +1277,9 @@ public partial class RemoteCollectorService
             }
         }
 
-        /* #5990: the batch's query-tag sightings, after the appender flushed. One statement, none for a batch with no
-           sightings, and failure-isolated: a failed write logs and the collection is unaffected. */
-        WriteQueryTagSightings(duckConnection, definition, rows, serverId);
+        /* #5990: the batch's query-tag sightings go to an in-memory buffer. No store write happens here; the map pass
+           flushes the buffer in one upsert. */
+        _queryTagSightings.Append(definition, rows, serverId, duckConnection);
 
         return rowsWritten;
     }

@@ -38,11 +38,11 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         _service = new LocalDataService(fixture.DuckDb);
     }
 
-    private static QuerySnapshotsCollector.Row Snapshot(string? hash, string text = "SELECT 1", string app = "Reports") => new()
+    private static QuerySnapshotsCollector.Row Snapshot(string? hash, string text = "SELECT 1", string app = "Reports", string db = "Sales") => new()
     {
         QueryHash = hash,
         QueryText = text,
-        DatabaseName = "Sales",
+        DatabaseName = db,
         ProgramName = app,
         LoginName = "svc",
         HostName = "web1",
@@ -52,7 +52,9 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     {
         using var connection = _fixture.DuckDb.CreateConnection();
         connection.Open();
-        RemoteCollectorService.WriteQueryTagSightings(connection, QuerySnapshotsCollector.Instance, rows.ToList(), serverId: 7);
+        var buffer = new QueryTagSightingBuffer();
+        buffer.Append(QuerySnapshotsCollector.Instance, rows.ToList(), serverId: 7);
+        buffer.Flush(connection);
     }
 
     private async Task<List<(string Kind, string Key, int TagId, string Source)>> MapAsync()
@@ -116,8 +118,9 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
             drop.CommandText = "DROP TABLE query_tag_sightings";
             drop.ExecuteNonQuery();
 
-            var ex = Record.Exception(() => RemoteCollectorService.WriteQueryTagSightings(
-                connection, QuerySnapshotsCollector.Instance, [Snapshot(HashA)], serverId: 7));
+            var buffer = new QueryTagSightingBuffer();
+            buffer.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA)], serverId: 7);
+            var ex = Record.Exception(() => buffer.Flush(connection));
             Assert.Null(ex);
 
             using var create = connection.CreateCommand();
@@ -266,6 +269,8 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     {
         var tag = await _service.CreateQueryTagAsync("Orders", null);
         await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        Sight(Snapshot(HashB, "SELECT 2"));
+        await SetLastSeenAsync(HashB, DateTime.UtcNow.AddHours(-1));
         var cursors = new Dictionary<int, QueryTagMapCursor>();
         await _service.BuildQueryTagMapAsync(cursors);
         await _service.BuildQueryTagMapAsync(cursors);
@@ -280,27 +285,140 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task APassThatHitsTheCap_ContinuesAfterItsLastKey_SoTwoPassesCoverEveryKeyOnce()
+    public async Task AnExtendPassThatHitsTheCap_ContinuesAfterItsLastKey_SoTwoPassesCoverEveryKeyOnce()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        Sight(Snapshot("0x00000000000000F0", "SELECT 0"));
+        await SetLastSeenAsync("0x00000000000000F0", DateTime.UtcNow.AddHours(-1));
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
+
+        var keys = Enumerable.Range(1, 5).Select(n => $"0x{n:X16}").ToList();
+        Sight(keys.Select(k => Snapshot(k, "SELECT * FROM Orders")).ToArray());
+        var start = DateTime.UtcNow.AddSeconds(-30);
+        for (var i = 0; i < keys.Count; i++)
+        {
+            await SetLastSeenAsync(keys[i], start.AddSeconds(i));
+        }
+
+        var first = await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
+        var afterFirst = (await MapAsync()).Select(r => r.Key).OrderBy(k => k).ToList();
+        var second = await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
+
+        Assert.False(first.Rebuilt);
+        Assert.Equal(3, first.KeysResolved);
+        Assert.Equal(keys.Take(3), afterFirst);
+        Assert.Equal(2, second.KeysResolved);
+        Assert.Equal(keys, (await MapAsync()).Select(r => r.Key).OrderBy(k => k).ToList());
+    }
+
+    [Fact]
+    public async Task AServerWithNoCursor_GetsTheWholeMapInOnePass_EvenOverTheCap()
     {
         var tag = await _service.CreateQueryTagAsync("Orders", null);
         await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
         await _service.BuildQueryTagMapAsync();
         var keys = Enumerable.Range(1, 5).Select(n => $"0x{n:X16}").ToList();
         Sight(keys.Select(k => Snapshot(k, "SELECT * FROM Orders")).ToArray());
-        var start = DateTime.UtcNow.AddHours(-1);
-        for (var i = 0; i < keys.Count; i++)
-        {
-            await SetLastSeenAsync(keys[i], start.AddSeconds(i));
-        }
 
         var cursors = new Dictionary<int, QueryTagMapCursor>();
-        var first = await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
-        var afterFirst = (await MapAsync()).Select(r => r.Key).OrderBy(k => k).ToList();
-        var second = await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
+        var pass = await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
 
-        Assert.Equal(3, first.KeysResolved);
-        Assert.Equal(keys.Take(3), afterFirst);
-        Assert.Equal(2, second.KeysResolved);
         Assert.Equal(keys, (await MapAsync()).Select(r => r.Key).OrderBy(k => k).ToList());
+        Assert.Equal(5, pass.KeysResolved);
+        Assert.True(cursors.ContainsKey(7));
+    }
+
+    [Fact]
+    public async Task OneHashSeenInTwoDatabases_IsTwoSightingRows_AndADatabaseRuleTagsIt()
+    {
+        Sight(Snapshot(HashA, "SELECT 1", "Reports", "Sales"), Snapshot(HashA, "SELECT 1", "Reports", "Archive"));
+        Assert.Equal(2, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}'"));
+
+        var tag = await _service.CreateQueryTagAsync("Archive", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Database, "archive", tag));
+        await _service.BuildQueryTagMapAsync();
+
+        Assert.Equal(tag, Assert.Single(await MapAsync()).TagId);
+    }
+
+    [Fact]
+    public async Task ACollectionBatch_WritesNothingToTheStore_UntilTheBufferFlushes()
+    {
+        var buffer = new QueryTagSightingBuffer();
+        buffer.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA, "SELECT * FROM Orders"), Snapshot(HashA, "SELECT * FROM Orders")], serverId: 7);
+
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings"));
+
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        using (var connection = _fixture.DuckDb.CreateConnection())
+        {
+            connection.Open();
+            buffer.Flush(connection);
+        }
+
+        await _service.BuildQueryTagMapAsync();
+        Assert.Equal(2, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(tag, Assert.Single(await MapAsync()).TagId);
+    }
+
+    [Fact]
+    public async Task AV70Database_ClimbsToV71_WithTheDatabaseInTheSightingsKey()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "LiteTagV71_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            var dbPath = System.IO.Path.Combine(dir, "lite-v70.duckdb");
+            using (var initializer = new DuckDbInitializer(dbPath))
+            {
+                await initializer.InitializeAsync();
+            }
+
+            using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
+            {
+                await conn.OpenAsync(TestContext.Current.CancellationToken);
+                foreach (var sql in new[]
+                {
+                    "DROP TABLE query_tag_sightings",
+                    @"CREATE TABLE query_tag_sightings (server_id INTEGER NOT NULL, key_kind VARCHAR NOT NULL, key VARCHAR NOT NULL, database_name VARCHAR,
+                      object_name VARCHAR, application_name VARCHAR NOT NULL DEFAULT '', login_name VARCHAR NOT NULL DEFAULT '', host_name VARCHAR NOT NULL DEFAULT '',
+                      text_sample VARCHAR, first_seen TIMESTAMP NOT NULL DEFAULT current_timestamp, last_seen TIMESTAMP NOT NULL DEFAULT current_timestamp,
+                      seen_count BIGINT NOT NULL DEFAULT 1, PRIMARY KEY (server_id, key_kind, key, application_name, login_name, host_name))",
+                    "INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (7, 'hash', '0x1')",
+                    "DELETE FROM schema_version",
+                    "INSERT INTO schema_version (version) VALUES (70)",
+                })
+                {
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = sql;
+                    await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+                }
+            }
+
+            using (var upgraded = new DuckDbInitializer(dbPath))
+            {
+                await upgraded.InitializeAsync();
+            }
+
+            using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
+            {
+                await conn.OpenAsync(TestContext.Current.CancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT MAX(version) FROM schema_version";
+                Assert.Equal((long)DuckDbInitializer.CurrentSchemaVersion, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+
+                cmd.CommandText = "INSERT INTO query_tag_sightings (server_id, key_kind, key, database_name) VALUES (7, 'hash', '0x1', 'A'), (7, 'hash', '0x1', 'B')";
+                Assert.Equal(2, await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
+                cmd.CommandText = "SELECT COUNT(*) FROM query_tag_sightings";
+                Assert.Equal(2L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+            }
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(dir, true); } catch (Exception) { /* temp cleanup */ }
+        }
     }
 }

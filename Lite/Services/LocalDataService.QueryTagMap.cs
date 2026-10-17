@@ -77,7 +77,8 @@ public partial class LocalDataService
         var names = new TagNameList(tags.Select(t => new KeyValuePair<string, long>(t.Name, t.Id)));
         var assignments = (await GetQueryTagAssignmentsAsync()).Select(ToHandAssignment).ToList();
         var rules = (await GetQueryTagRulesAsync()).Select(ToRule).ToList();
-        var (sightings, nextCursors) = await ReadQuerySightingsAsync(connection, cursors, keyCap, rebuild, clock);
+        var rebuiltServers = new HashSet<int>();
+        var (sightings, nextCursors) = await ReadQuerySightingsAsync(connection, cursors, keyCap, rebuild, clock, rebuiltServers);
 
         var resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
         var removed = new List<(int ServerId, string Kind, string Key)>();
@@ -112,6 +113,14 @@ public partial class LocalDataService
             }
             else
             {
+                foreach (var serverId in rebuiltServers)
+                {
+                    using var clearServer = connection.CreateCommand();
+                    clearServer.CommandText = "DELETE FROM query_tag_map WHERE server_id = $1";
+                    clearServer.Parameters.Add(new DuckDBParameter { Value = serverId });
+                    await clearServer.ExecuteNonQueryAsync();
+                }
+
                 await DeleteMapRowsAsync(connection, removed);
             }
 
@@ -167,7 +176,7 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
     /// minus <see cref="QueryTagMapCursor.Overlap"/>.
     /// </summary>
     private static async Task<(List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> Rows, Dictionary<int, QueryTagMapCursor> Next)>
-        ReadQuerySightingsAsync(LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, int cap, bool rebuild, DateTime clock)
+        ReadQuerySightingsAsync(LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, int cap, bool rebuild, DateTime clock, HashSet<int> rebuiltServers)
     {
         var serverIds = new List<int>();
         using (var servers = connection.CreateCommand())
@@ -184,8 +193,17 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
         var next = new Dictionary<int, QueryTagMapCursor>();
         foreach (var serverId in serverIds)
         {
-            var cursor = !rebuild && cursors is not null && cursors.TryGetValue(serverId, out var known) ? known : QueryTagMapCursor.Epoch;
-            var serverCap = rebuild ? int.MaxValue : cap;
+            /* A server with no cursor (a fresh process, a newly listed server) gets ONE full rebuild, not an epoch drain
+               paged by the cap; its cursor is then the pass clock minus the overlap. */
+            var cursor = QueryTagMapCursor.Epoch;
+            var serverRebuild = rebuild || cursors is null || !cursors.TryGetValue(serverId, out cursor!);
+            if (serverRebuild)
+            {
+                rebuiltServers.Add(serverId);
+                cursor = QueryTagMapCursor.Epoch;
+            }
+
+            var serverCap = serverRebuild ? int.MaxValue : cap;
             using var command = connection.CreateCommand();
             command.CommandText = @"
 SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample, c.ls
@@ -234,7 +252,7 @@ ORDER BY c.ls, c.key_kind, c.key, s.application_name, s.login_name, s.host_name"
                 }
             }
 
-            next[serverId] = !rebuild && keys >= cap
+            next[serverId] = !serverRebuild && keys >= cap
                 ? new QueryTagMapCursor(lastSeen, lastKind!, lastKey!)
                 : new QueryTagMapCursor(clock - QueryTagMapCursor.Overlap, string.Empty, string.Empty);
         }
