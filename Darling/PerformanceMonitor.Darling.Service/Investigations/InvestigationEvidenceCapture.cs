@@ -356,7 +356,9 @@ LIMIT 10";
             if (ran.Contains(SectionCollectors[section]))
             {
                 var rows = await ReadSectionAsync(section, request, from, to, cancellationToken).ConfigureAwait(false);
-                writes.Add(new InvestigationEvidenceWrite(section, "ready", Fit(from, to, rows.Rows, rows.DatabasesDropped)));
+                writes.Add(new InvestigationEvidenceWrite(section, "ready", rows.ReportXml is null
+                    ? Fit(from, to, rows.Rows, rows.DatabasesDropped)
+                    : FitReportXml(from, to, rows.Rows, rows.ReportXml)));
             }
             else
             {
@@ -416,7 +418,8 @@ LIMIT 10";
     }
 
     /// <summary>What one section read found: its ranked rows and, for <c>query_store</c> only, how many databases the cap left out.</summary>
-    private sealed record SectionRead(List<JsonObject> Rows, int? DatabasesDropped = null);
+    /// <remarks><c>blocking_chains</c> (#6002) also returns each row's report XML, aligned with the rows, for <see cref="FitReportXml"/>.</remarks>
+    private sealed record SectionRead(List<JsonObject> Rows, int? DatabasesDropped = null, IReadOnlyList<string?>? ReportXml = null);
 
     /// <summary>The CPU each database burned in the window, the <c>query_store</c> section's own cost figure to rank by.</summary>
     internal static readonly string WindowCpuByDatabaseSql = $@"
@@ -453,7 +456,7 @@ GROUP BY database_name";
             "jobs" => new SectionRead(await ReadAsync(JobsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "waits" => new SectionRead(await ReadWaitsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "deadlocks" => new SectionRead(await ReadDeadlocksAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
-            "blocking_chains" => new SectionRead(await ReadBlockingChainsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "blocking_chains" => await ReadBlockingChainsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
             "head_blocker" => new SectionRead(await ReadHeadBlockersAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "regression_targets" => new SectionRead(await ReadRegressionTargetsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             _ => new SectionRead(new List<JsonObject>()),

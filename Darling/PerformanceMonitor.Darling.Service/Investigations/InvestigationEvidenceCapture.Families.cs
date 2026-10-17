@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,10 +30,6 @@ namespace PerformanceMonitor.Darling.Service.Investigations;
 /// </summary>
 public sealed partial class InvestigationEvidenceCapture
 {
-    /// <summary>A report's XML is kept on its <c>blocking_chains</c> row up to this many characters; a longer one is left out
-    /// (<c>report_xml_omitted</c>), since a cut XML document no longer parses and one report must not crowd out the others.</summary>
-    public const int ReportXmlMaxChars = 8000;
-
     /// <summary>A deadlock party's statement is kept up to this many characters.</summary>
     public const int DeadlockStatementMaxChars = 1000;
 
@@ -264,7 +262,7 @@ LIMIT $6";
     /// <summary>The session at the head of <paramref name="spid"/>'s chain: follow blocked to blocking through the window's
     /// reports (the newest report per blocked session) until a session that is not itself blocked; a cycle stops where it
     /// closes.</summary>
-    private static int HeadOf(int spid, IReadOnlyDictionary<int, int> blockedBy)
+    private static int HeadOf(int spid, Dictionary<int, int> blockedBy)
     {
         var seen = new HashSet<int> { spid };
         var head = spid;
@@ -275,21 +273,20 @@ LIMIT $6";
 
     /// <summary>
     /// <c>blocking_chains</c>: one row per blocked and blocking pair in the window (its longest wait), longest wait first, each
-    /// with the head of its chain and the report XML (up to <see cref="ReportXmlMaxChars"/>).
+    /// with the head of its chain. Each row's report XML is returned beside the rows, aligned with them, for
+    /// <see cref="FitReportXml"/> to fill in once the rows have their place under the cap.
     /// </summary>
-    private async Task<List<JsonObject>> ReadBlockingChainsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
+    private async Task<SectionRead> ReadBlockingChainsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
         var reports = await ReadBlockedReportsAsync(serverId, from, to, cancellationToken).ConfigureAwait(false);
         var blockedBy = BlockedBy(reports);
-        return reports
+        var chains = reports
             .GroupBy(r => (r.BlockedSpid, r.BlockingSpid))
             .Select(g => g.OrderByDescending(r => r.WaitMs).ThenByDescending(r => r.EventTime).First())
             .OrderByDescending(r => r.WaitMs).ThenBy(r => r.BlockedSpid)
             .Take(SectionRows)
-            .Select(r =>
-            {
-                var keep = r.ReportXml is { Length: > 0 and <= ReportXmlMaxChars };
-                return new JsonObject
+            .ToList();
+        var rows = chains.ConvertAll(r => new JsonObject
                 {
                     ["event_time"] = Value(r.EventTime),
                     ["database_name"] = r.Database,
@@ -308,12 +305,60 @@ LIMIT $6";
                     ["blocking_login_name"] = r.BlockingLogin,
                     ["blocked_host_name"] = r.BlockedHost,
                     ["blocking_host_name"] = r.BlockingHost,
-                    ["report_xml"] = keep ? r.ReportXml : null,
-                    ["report_xml_omitted"] = !keep && !string.IsNullOrEmpty(r.ReportXml),
-                };
-            })
-            .ToList();
+                    ["report_xml"] = null,
+                });
+        return new SectionRead(rows, ReportXml: chains.ConvertAll(r => r.ReportXml));
     }
+
+    /// <summary>
+    /// The <c>blocking_chains</c> content (#6002): the rows are placed first, by <see cref="Fit"/> with no report XML, and each kept
+    /// row's report XML then takes what is left of <see cref="MaxSectionBytes"/>, in row order (longest wait first). A report that
+    /// does not fit whole is cut at the cap and its row says <c>report_xml_truncated: true</c>; once the cap is spent, every later
+    /// report is cut to nothing and says so. A report is never left out silently and never cut at a fixed length. A cut report no
+    /// longer parses as XML, so under <c>maskLiterals</c> or <c>metadataOnly</c> the masker withholds it whole.
+    /// </summary>
+    internal static string FitReportXml(DateTime from, DateTime to, List<JsonObject> rows, IReadOnlyList<string?> reportXml)
+    {
+        var content = JsonNode.Parse(Fit(from, to, rows))!.AsObject();
+        var kept = content["rows"]!.AsArray();
+        for (var i = 0; i < kept.Count && i < reportXml.Count; i++)
+        {
+            var xml = reportXml[i];
+            if (string.IsNullOrEmpty(xml))
+                continue;
+            var row = kept[i]!.AsObject();
+            row["report_xml"] = xml;
+            if (FittedBytes(content) <= MaxSectionBytes)
+                continue;
+
+            /* The longest prefix that fits, by halving: the bytes a prefix takes grow with its length. */
+            row["report_xml_truncated"] = true;
+            int low = 0, high = xml.Length - 1;
+            while (low < high)
+            {
+                var mid = (low + high + 1) / 2;
+                row["report_xml"] = Prefix(xml, mid);
+                if (FittedBytes(content) <= MaxSectionBytes)
+                    low = mid;
+                else
+                    high = mid - 1;
+            }
+
+            row["report_xml"] = Prefix(xml, low);
+        }
+
+        return content.ToJsonString(Relaxed);
+    }
+
+    /// <summary>XML kept as written (<c>&lt;</c>, not its <c><</c> escape), as the jsonb column prints it, so the cap counts
+    /// what is stored.</summary>
+    private static readonly JsonSerializerOptions Relaxed = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    private static int FittedBytes(JsonObject content) => StoredBytes(content.ToJsonString(Relaxed));
+
+    /// <summary>The first <paramref name="length"/> characters, one fewer when that would split a surrogate pair.</summary>
+    private static string Prefix(string text, int length) =>
+        length > 0 && char.IsHighSurrogate(text[length - 1]) ? text[..(length - 1)] : text[..length];
 
     /// <summary>The newest report's blocking session per blocked session.</summary>
     private static Dictionary<int, int> BlockedBy(IEnumerable<BlockedReport> reports)
