@@ -75,8 +75,11 @@ public static class InvestigationEvents
     /// <summary>The once key of an expired request's fallback.</summary>
     public static string FallbackOnceKey(Guid requestId) => "fallback:" + requestId.ToString("D");
 
+    /// <summary>The once key of a follow-up's event (#6008): one <c>follow_up</c> row per earlier request, whatever replays the sweep.</summary>
+    public static string FollowUpOnceKey(Guid earlierRequestId) => "follow_up:" + earlierRequestId.ToString("D");
+
     /* #6003 review: the detail members each event kind may carry out to the agent route and the long-poll. The writers are
-       the service's own, but deadlock_digest and follow_up have none yet (#6005, #6008), and a member nobody listed here is
+       the service's own, but deadlock_digest has none yet (#6005); follow_up's writer is the follow-up sweep (#6008), and a member nobody listed here is
        dropped at the read, so a later writer cannot put text that was never meant to leave the store on the wire. */
     private static readonly Dictionary<string, string[]> DetailMembers = new(StringComparer.Ordinal)
     {
@@ -84,8 +87,12 @@ public static class InvestigationEvents
         [Expired] = ["unclaimed"],
         [ClaimsExhausted] = ["unclaimed"],
         [EvidenceReady] = ["sections", "not_collected", "pending"],
+<<<<<<< HEAD
         /* #6005: the digest names signatures (a hash) and counts, never object names or statements. */
         [DeadlockDigest] = ["window_hours", "total", "signatures"],
+=======
+        [FollowUp] = ["follow_up_of"],
+>>>>>>> origin/dev
     };
 
     /// <summary>

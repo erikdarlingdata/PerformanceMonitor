@@ -141,10 +141,56 @@ FROM config.investigation_requests
 WHERE request_id = $1";
 
     internal const string SubmitLockSql = @"
-SELECT state, claim_id, server_id, first_metric, first_dedup_key, story_path_hash
+SELECT state, claim_id, server_id, first_metric, first_dedup_key, story_path_hash, route_id
 FROM config.investigation_requests
 WHERE request_id = $1
 FOR UPDATE";
+
+    /* #6008: the pending follow-ups of a route: reported requests that set follow_up_at and whose follow-up has not opened. $1 route. */
+    internal const string PendingFollowUpsSql = @"
+SELECT count(*)
+FROM config.investigation_requests AS r
+WHERE r.route_id = $1
+  AND r.state = 'reported'
+  AND r.practice_of IS NULL
+  AND r.follow_up_at IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM config.investigation_requests AS f WHERE f.follow_up_of = r.request_id)";
+
+    /* #6008: written only when the report set a time, so a store whose mcp role has no grant on the column still takes every other report. */
+    internal const string SetFollowUpSql = @"
+UPDATE config.investigation_requests SET follow_up_at = $2 WHERE request_id = $1";
+
+    /* #6008: the reported requests whose follow-up is due and not yet opened, oldest first. Locked, so two passes never open one twice. $1 now. */
+    internal const string DueFollowUpsSql = @"
+SELECT r.request_id
+FROM config.investigation_requests AS r
+WHERE r.follow_up_at <= $1
+  AND r.state = 'reported'
+  AND r.practice_of IS NULL
+  AND NOT EXISTS (SELECT 1 FROM config.investigation_requests AS f WHERE f.follow_up_of = r.request_id)
+ORDER BY r.follow_up_at, r.request_id
+LIMIT 50
+FOR UPDATE OF r SKIP LOCKED";
+
+    /* #6008: the follow-up request copies its source's route, server, family, metric, story path, alert times, life and level, and
+       names the source in follow_up_of, as a practice request names its case in practice_of. $1 new id, $2 source, $3 now. */
+    internal const string OpenFollowUpSql = @"
+INSERT INTO config.investigation_requests
+    (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, follow_up_of)
+SELECT $1, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.story_path_hash, r.first_alert_at, r.last_alert_at,
+       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, r.request_id
+FROM config.investigation_requests AS r
+WHERE r.request_id = $2
+RETURNING route_id, server_id";
+
+    /* #6008: the source's alert rows, without the dedup key, so the brief's alerts section reads what the source's read. $1 new, $2 source. */
+    internal const string CopyFollowUpAlertsSql = @"
+INSERT INTO config.investigation_request_alerts
+    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+SELECT $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json
+FROM config.investigation_request_alerts
+WHERE request_id = $2";
 
     internal const string ReportInsertSql = @"
 INSERT INTO config.investigation_reports
@@ -699,6 +745,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         /* #6004: and the queries_run caps, never clamped. */
         InvestigationReportFields.ThrowIfInvalid(report.QueriesRunJson, nameof(report));
         var now = Now();
+
         var actor = "agent:" + report.AgentId;
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -708,6 +755,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         Guid? currentClaim = null;
         int serverId = 0;
         string? metric = null, dedupKey = null, story = null;
+        var routeId = 0;
         await using (var command = Command(connection, transaction, SubmitLockSql, P(report.RequestId)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -719,6 +767,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 metric = reader.GetString(3);
                 dedupKey = reader.IsDBNull(4) ? null : reader.GetString(4);
                 story = reader.IsDBNull(5) ? null : reader.GetString(5);
+                routeId = reader.GetInt32(6);
             }
         }
 
@@ -759,6 +808,23 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             return outcome;
         }
 
+        /* #6008: a follow-up time over the route's pending cap refuses the whole report, before anything is written. The route lock
+           makes concurrent submits on one route count in turn. */
+        if (report.FollowUpAtUtc is not null)
+        {
+            await ExecAsync(connection, transaction, RouteLockSql, cancellationToken, P(RouteLockKey), P(routeId));
+            long pending;
+            await using (var count = Command(connection, transaction, PendingFollowUpsSql, P(routeId)))
+            {
+                pending = (long)(await count.ExecuteScalarAsync(cancellationToken))!;
+            }
+
+            if (pending >= InvestigationReportFields.MaxPendingFollowUpsPerRoute)
+            {
+                return InvestigationSubmitOutcome.FollowUpLimit;
+            }
+        }
+
         await ExecAsync(connection, transaction, ReportInsertSql, cancellationToken,
             P(report.RequestId), P(report.ReportFormat), P(report.AgentId), P(report.ClaimId), P(now), P(report.Verdict),
             P(report.RootCause), P(report.RootCauseFound), PNullable(report.Summary), P(report.EvidenceJson), P(serverId),
@@ -770,6 +836,11 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         }
 
         await ExecAsync(connection, transaction, ReportedSql, cancellationToken, P(report.RequestId), P(now));
+        if (report.FollowUpAtUtc is { } followUpAt)
+        {
+            await ExecAsync(connection, transaction, SetFollowUpSql, cancellationToken, P(report.RequestId), P(followUpAt));
+        }
+
         await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
         /* #5914: each link is a link_recorded row under the agent's actor, once per request and URL (the once-key). A
@@ -1214,7 +1285,51 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var resolvedTransaction = await connection.BeginTransactionAsync(cancellationToken);
         var resolved = await SweepResolvedAsync(connection, resolvedTransaction, now, cancellationToken);
         await resolvedTransaction.CommitAsync(cancellationToken);
-        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved };
+        /* #6008: its own transaction too, so a follow-up that cannot open holds back neither the expiry nor the resolved journal. */
+        await using var followUpTransaction = await connection.BeginTransactionAsync(cancellationToken);
+        var followUps = await SweepFollowUpsAsync(connection, followUpTransaction, now, cancellationToken);
+        await followUpTransaction.CommitAsync(cancellationToken);
+        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps };
+    }
+
+    /// <summary>
+    /// The follow-up sweep (#6008, D16): for each reported request whose <c>follow_up_at</c> has come and that has no follow-up
+    /// yet, opens a new request that names it in <c>follow_up_of</c> (the way a practice request names its case) and journals one
+    /// <c>follow_up</c> event for the new request, once per earlier request. It runs as the store owner: the journal's trigger
+    /// refuses event rows from every other role. The new request's brief reads the earlier report as it reads any earlier report
+    /// of the same server and family. Returns the follow-ups opened.
+    /// </summary>
+    private async Task<int> SweepFollowUpsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        CancellationToken cancellationToken)
+    {
+        var due = new List<Guid>();
+        await using (var candidates = Command(connection, transaction, DueFollowUpsSql, P(now)))
+        await using (var reader = await candidates.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                due.Add(reader.GetGuid(0));
+            }
+        }
+
+        foreach (var earlier in due)
+        {
+            var followUpId = Guid.NewGuid();
+            int routeId, serverId;
+            await using (var insert = Command(connection, transaction, OpenFollowUpSql, P(followUpId), P(earlier), P(now)))
+            await using (var returned = await insert.ExecuteReaderAsync(cancellationToken))
+            {
+                await returned.ReadAsync(cancellationToken);
+                routeId = returned.GetInt32(0);
+                serverId = returned.GetInt32(1);
+            }
+
+            await ExecAsync(connection, transaction, CopyFollowUpAlertsSql, cancellationToken, P(followUpId), P(earlier));
+            await JournalAsync(connection, transaction, now, followUpId, routeId, serverId, InvestigationEvents.FollowUp, "service",
+                null, "{\"follow_up_of\":\"" + earlier.ToString("D") + "\"}", InvestigationEvents.FollowUpOnceKey(earlier), cancellationToken);
+        }
+
+        return due.Count;
     }
 
     /// <summary>

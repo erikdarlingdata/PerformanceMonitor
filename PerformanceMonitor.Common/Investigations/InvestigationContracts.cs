@@ -135,12 +135,17 @@ public enum InvestigationSubmitOutcome
     /// <summary>The request already holds <see cref="InvestigationRules.MaxAgentJournalRows"/> journal rows
     /// written by agents: the report is refused and one <c>journal_capped</c> row says so.</summary>
     JournalCapped,
+
+    /// <summary>The report set a <c>follow_up_at</c> and the request's route already holds
+    /// <see cref="InvestigationReportFields.MaxPendingFollowUpsPerRoute"/> pending follow-ups (#6008): nothing was stored.</summary>
+    FollowUpLimit,
 }
 
 /// <summary>A report an agent returns under its claim. <see cref="EvidenceJson"/> is a JSON array of at least one item.
 /// <see cref="Links"/> (#5914) are checked by <see cref="InvestigationReportLinks.Validate"/> and stored once per URL.
 /// <see cref="FamilyOf"/> (#6004) is the first report's request id, which must name a request; <see cref="QueriesRunJson"/>
-/// is a JSON array of statement strings within <see cref="InvestigationReportFields"/>'s caps.</summary>
+/// is a JSON array of statement strings within <see cref="InvestigationReportFields"/>'s caps. <see cref="FollowUpAtUtc"/>
+/// (#6008) is when Darling opens a follow-up request; the store keeps it on the report's request (Lite ignores it, #6012).</summary>
 public sealed record InvestigationReportSubmission(
     Guid RequestId,
     Guid ClaimId,
@@ -154,7 +159,8 @@ public sealed record InvestigationReportSubmission(
     string? ProposedNote = null,
     IReadOnlyList<InvestigationReportLink>? Links = null,
     Guid? FamilyOf = null,
-    string? QueriesRunJson = null);
+    string? QueriesRunJson = null,
+    DateTime? FollowUpAtUtc = null);
 
 /// <summary>What a lease renewal answered (#5632 Phase A, a claim made with the caller's own claim id).</summary>
 /// <param name="Renewed">True when the claim still held a live lease and the lease moved on.</param>
@@ -266,6 +272,9 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
 {
     /// <summary>#6003: how many requests this pass journaled <c>resolved</c> for (D7).</summary>
     public int Resolved { get; init; }
+
+    /// <summary>#6008: how many follow-up requests this pass opened (each with its <c>follow_up</c> event).</summary>
+    public int FollowUps { get; init; }
 }
 
 /// <summary>

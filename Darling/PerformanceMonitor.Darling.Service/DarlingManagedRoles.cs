@@ -1759,6 +1759,18 @@ GRANT SELECT ON {config}.investigation_requests, {config}.investigation_request_
    TO {mcp};
 GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at)
    ON {config}.investigation_requests TO {mcp};
+-- #6008 (V193): submit_investigation_report writes follow_up_at onto the report's own request. Guarded on the column,
+-- as the #6036 fallback grant is, so a store below V193 still commits the rest; provision-roles.sql step 3i mirrors it.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('{config}.investigation_requests')
+                AND attname = 'follow_up_at' AND NOT attisdropped) THEN
+      EXECUTE $v193u$
+GRANT UPDATE (follow_up_at) ON {config}.investigation_requests TO {mcp};
+$v193u$;
+   END IF;
+END $$;
 GRANT INSERT ON {config}.investigation_reports TO {mcp};
 GRANT INSERT ({JournalWriterColumns}) ON {config}.investigation_journal TO {mcp};
 GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id)
