@@ -16,7 +16,7 @@ using System.Text.Json.Nodes;
 
 namespace PerformanceMonitor.Common;
 
-/// <summary>One link a report carries (#5914): a Jira ticket, a pull request or a bug report the agent opened or found.
+/// <summary>One link a report carries (#5914): a Jira ticket, a pull request, a bug report, a commit or a release the agent opened or found.
 /// <paramref name="Key"/> is the ticket or PR key the agent gave (<c>OPS-123</c>, <c>#42</c>), or null.</summary>
 public sealed record InvestigationReportLink(string Kind, string Url, string? Key);
 
@@ -44,7 +44,30 @@ public static class InvestigationReportLinks
     public const string JournalEvent = "link_recorded";
 
     /// <summary>The kinds a link may be.</summary>
-    public static IReadOnlyList<string> Kinds { get; } = new[] { "jira", "pull_request", "bug_report" };
+    public static IReadOnlyList<string> Kinds { get; } = new[] { KindJira, KindPullRequest, KindBugReport, KindCommit, KindRelease };
+
+    /// <summary>A Jira ticket.</summary>
+    public const string KindJira = "jira";
+
+    /// <summary>A pull request.</summary>
+    public const string KindPullRequest = "pull_request";
+
+    /// <summary>A bug report.</summary>
+    public const string KindBugReport = "bug_report";
+
+    /// <summary>A commit that fixes it (#6004, D17).</summary>
+    public const string KindCommit = "commit";
+
+    /// <summary>The release that carries the fix (#6004, D17).</summary>
+    public const string KindRelease = "release";
+
+    /// <summary>The kinds as a refusal names them (<c>jira, pull_request, bug_report, commit or release</c>), built from the kind
+    /// constants so the two error messages cannot drift from <see cref="Kinds"/> (#6004; #3684: alias, do not copy). A const,
+    /// so a tool description can use it.</summary>
+    public const string KindsText = KindJira + ", " + KindPullRequest + ", " + KindBugReport + ", " + KindCommit + " or " + KindRelease;
+
+    /// <summary>The kinds as a tool description writes the argument: <c>jira|pull_request|bug_report|commit|release</c>.</summary>
+    public const string KindsAlternation = KindJira + "|" + KindPullRequest + "|" + KindBugReport + "|" + KindCommit + "|" + KindRelease;
 
     /// <summary>The URL rule, as a refusal names it.</summary>
     public const string UrlRule =
@@ -130,7 +153,7 @@ public static class InvestigationReportLinks
             var bad = false;
             if (kind is null || !Kinds.Contains(kind, StringComparer.Ordinal))
             {
-                problems.Add($"item {i} kind '{kind}' is not jira, pull_request or bug_report.");
+                problems.Add($"item {i} kind '{kind}' is not {KindsText}.");
                 bad = true;
             }
 
@@ -169,7 +192,7 @@ public static class InvestigationReportLinks
         foreach (var link in links)
         {
             if (!Kinds.Contains(link.Kind, StringComparer.Ordinal))
-                throw new ArgumentException($"links: kind '{link.Kind}' is not jira, pull_request or bug_report.", paramName);
+                throw new ArgumentException($"links: kind '{link.Kind}' is not {KindsText}.", paramName);
             if (UrlProblem(link.Url) is { } problem)
                 throw new ArgumentException("links: url " + problem + " " + UrlRule, paramName);
             if (link.Key is { Length: > MaxKeyChars })

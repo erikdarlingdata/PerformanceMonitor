@@ -129,7 +129,9 @@ public enum InvestigationSubmitOutcome
 }
 
 /// <summary>A report an agent returns under its claim. <see cref="EvidenceJson"/> is a JSON array of at least one item.
-/// <see cref="Links"/> (#5914) are checked by <see cref="InvestigationReportLinks.Validate"/> and stored once per URL.</summary>
+/// <see cref="Links"/> (#5914) are checked by <see cref="InvestigationReportLinks.Validate"/> and stored once per URL.
+/// <see cref="FamilyOf"/> (#6004) is the first report's request id, which must name a request; <see cref="QueriesRunJson"/>
+/// is a JSON array of statement strings within <see cref="InvestigationReportFields"/>'s caps.</summary>
 public sealed record InvestigationReportSubmission(
     Guid RequestId,
     Guid ClaimId,
@@ -141,7 +143,9 @@ public sealed record InvestigationReportSubmission(
     string? Summary,
     string EvidenceJson,
     string? ProposedNote = null,
-    IReadOnlyList<InvestigationReportLink>? Links = null);
+    IReadOnlyList<InvestigationReportLink>? Links = null,
+    Guid? FamilyOf = null,
+    string? QueriesRunJson = null);
 
 /// <summary>What a lease renewal answered (#5632 Phase A, a claim made with the caller's own claim id).</summary>
 /// <param name="Renewed">True when the claim still held a live lease and the lease moved on.</param>
@@ -149,7 +153,8 @@ public sealed record InvestigationReportSubmission(
 public sealed record InvestigationRenewResult(bool Renewed, DateTime? LeaseUntilUtc);
 
 /// <summary>One stored report as <see cref="IInvestigationRequestStore.ReadReportsAsync"/> reads it. <see cref="Links"/> are
-/// the request's <c>link_recorded</c> journal rows (#5914), oldest first; null or empty when it has none.</summary>
+/// the request's <c>link_recorded</c> journal rows (#5914), oldest first; null or empty when it has none. <see cref="FamilyOf"/>
+/// and <see cref="QueriesRunJson"/> (#6004) are null on a report that gave none, and on every report Lite stores.</summary>
 public sealed record InvestigationReportRow(
     Guid RequestId,
     short ReportFormat,
@@ -160,7 +165,9 @@ public sealed record InvestigationReportRow(
     bool RootCauseFound,
     string? Summary,
     string EvidenceJson,
-    IReadOnlyList<InvestigationReportLink>? Links = null);
+    IReadOnlyList<InvestigationReportLink>? Links = null,
+    Guid? FamilyOf = null,
+    string? QueriesRunJson = null);
 
 /// <summary>One journal row as <see cref="IInvestigationRequestStore.ReadReportsAsync"/> reads it.</summary>
 public sealed record InvestigationJournalRow(
