@@ -1,0 +1,160 @@
+<Window x:Class="PerformanceMonitorLite.Windows.ManageQueryTagsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Manage Query Tags"
+        Height="640" Width="980"
+        WindowStartupLocation="CenterOwner"
+        Icon="/EDD.ico"
+        ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundDarkBrush}">
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Margin="0,0,0,10" TextWrapping="Wrap"
+                   Text="Tag queries by hand or by rule. A hand assignment beats any rule; rules apply by priority, lowest first. Nesting goes up to four levels. A change reaches the grids when the tag map next runs."
+                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+        <Grid Grid.Row="1" x:Name="WorkArea">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="280"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <DockPanel Grid.Column="0">
+                <TextBlock DockPanel.Dock="Top" Text="Query tags" FontWeight="Bold" Margin="0,0,0,6"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <WrapPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                    <Button Content="_New Tag" Width="78" Margin="0,0,6,6" Click="NewRoot_Click"/>
+                    <Button Content="New C_hild" Width="78" Margin="0,0,6,6" Click="NewChild_Click"/>
+                    <Button Content="_Rename" Width="72" Margin="0,0,6,6" Click="Rename_Click"/>
+                    <Button Content="_Colour…" Width="72" Margin="0,0,6,6" Click="Colour_Click"/>
+                    <Button Content="_Move…" Width="72" Margin="0,0,6,6" Click="Move_Click"/>
+                    <Button Content="_Delete" Width="66" Margin="0,0,6,6" Click="Delete_Click"/>
+                </WrapPanel>
+                <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                    <TreeView x:Name="TagTree" Background="{DynamicResource BackgroundBrush}" BorderThickness="0"
+                              SelectedItemChanged="TagTree_SelectedItemChanged">
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="11" Height="11" CornerRadius="2" Margin="0,0,6,0" VerticalAlignment="Center"
+                                            Background="{Binding Swatch}"
+                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+                                    <TextBlock Text="{Binding Name}" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </StackPanel>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                        <TreeView.ItemContainerStyle>
+                            <Style TargetType="TreeViewItem">
+                                <Setter Property="IsExpanded" Value="True"/>
+                                <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+                            </Style>
+                        </TreeView.ItemContainerStyle>
+                    </TreeView>
+                </Border>
+            </DockPanel>
+
+            <TabControl Grid.Column="2">
+                <TabItem Header="Hand assignments">
+                    <DockPanel Margin="8">
+                        <TextBlock x:Name="AssignHeader" DockPanel.Dock="Top" Text="Select a tag" FontWeight="Bold" Margin="0,0,0,6"
+                                   Foreground="{DynamicResource ForegroundBrush}"/>
+                        <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                <TextBlock Text="Query hash:" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBox x:Name="HashBox" Width="230" Margin="0,0,6,0"/>
+                                <Button Content="Tag this _hash" Click="AddHash_Click"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                <TextBlock Text="Object:" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBox x:Name="ObjDbBox" Width="100" Margin="0,0,4,0" ToolTip="Database"/>
+                                <TextBox x:Name="ObjSchemaBox" Width="70" Margin="0,0,4,0" ToolTip="Schema"/>
+                                <TextBox x:Name="ObjNameBox" Width="140" Margin="0,0,6,0" ToolTip="Name"/>
+                                <Button Content="Tag this _object" Click="AddObject_Click"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Applies to:" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ComboBox x:Name="AssignServerBox" Width="220" DisplayMemberPath="Name" Margin="0,0,12,0"/>
+                                <Button Content="Re_move selected" Click="RemoveAssignment_Click"/>
+                            </StackPanel>
+                        </StackPanel>
+                        <DataGrid x:Name="AssignGrid" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
+                                  SelectionMode="Single" Background="{DynamicResource BackgroundBrush}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="60"/>
+                                <DataGridTextColumn Header="Key" Binding="{Binding Key}" Width="*"/>
+                                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="140"/>
+                                <DataGridTextColumn Header="By" Binding="{Binding CreatedBy}" Width="70"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+                </TabItem>
+
+                <TabItem Header="Rules">
+                    <DockPanel Margin="8">
+                        <Grid DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Text="Field:" Margin="0,0,6,6" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <ComboBox x:Name="FieldBox" Grid.Column="1" Margin="0,0,12,6" SelectionChanged="FieldBox_SelectionChanged"/>
+                            <TextBlock Grid.Column="2" Text="Tag:" Margin="0,0,6,6" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <ComboBox x:Name="RuleTagBox" Grid.Column="3" Margin="0,0,0,6" DisplayMemberPath="Name"/>
+                            <TextBlock Grid.Row="1" Text="Pattern:" Margin="0,0,6,6" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBox x:Name="PatternBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Margin="0,0,0,6"
+                                     ToolTip="* is the only wildcard; ignores case; 1-400 characters"/>
+                            <TextBlock Grid.Row="2" Text="Priority:" Margin="0,0,6,6" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBox x:Name="PriorityBox" Grid.Row="2" Grid.Column="1" Text="100" Width="80" HorizontalAlignment="Left" Margin="0,0,12,6"/>
+                            <TextBlock Grid.Row="2" Grid.Column="2" Text="Server:" Margin="0,0,6,6" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <ComboBox x:Name="RuleServerBox" Grid.Row="2" Grid.Column="3" DisplayMemberPath="Name" Margin="0,0,0,6"/>
+                            <CheckBox x:Name="EnabledBox" Grid.Row="3" Grid.Column="1" Content="Enabled" IsChecked="True" Margin="0,0,0,6"
+                                      Foreground="{DynamicResource ForegroundBrush}"/>
+                            <WrapPanel Grid.Row="4" Grid.ColumnSpan="4">
+                                <Button Content="_Add rule" Margin="0,0,6,0" Padding="8,2" Click="AddRule_Click"/>
+                                <Button Content="_Save edit" Margin="0,0,6,0" Padding="8,2" Click="SaveRule_Click"/>
+                                <Button Content="_Test" Margin="0,0,6,0" Padding="8,2" Click="TestRule_Click"/>
+                                <Button Content="Enable/_disable" Margin="0,0,6,0" Padding="8,2" Click="ToggleRule_Click"/>
+                                <Button Content="Delete rule" Margin="0,0,6,0" Padding="8,2" Click="DeleteRule_Click"/>
+                            </WrapPanel>
+                        </Grid>
+                        <TextBox x:Name="TestOutput" DockPanel.Dock="Bottom" Height="90" IsReadOnly="True" TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto" Margin="0,8,0,0"/>
+                        <DataGrid x:Name="RuleGrid" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
+                                  SelectionMode="Single" Background="{DynamicResource BackgroundBrush}"
+                                  SelectionChanged="RuleGrid_SelectionChanged">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Pri" Binding="{Binding Priority}" Width="40"/>
+                                <DataGridTextColumn Header="Field" Binding="{Binding Field}" Width="80"/>
+                                <DataGridTextColumn Header="Pattern" Binding="{Binding Pattern}" Width="*"/>
+                                <DataGridTextColumn Header="Tag" Binding="{Binding TagName}" Width="110"/>
+                                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="110"/>
+                                <DataGridTextColumn Header="On" Binding="{Binding EnabledText}" Width="40"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+                </TabItem>
+            </TabControl>
+        </Grid>
+
+        <TextBlock Grid.Row="2" x:Name="StatusText" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,12,100,0"
+                   TextWrapping="Wrap" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="_Close" Width="80" IsCancel="True" Click="Close_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
