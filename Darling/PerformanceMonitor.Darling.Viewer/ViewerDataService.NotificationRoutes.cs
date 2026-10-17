@@ -276,7 +276,7 @@ WHERE route_id = $1";
             {
                 clear.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
                 clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-                await Task.CompletedTask;
+                await clear.ExecuteNonQueryAsync(cancellationToken);
             }
 
             await using (var delete = new NpgsqlCommand(NotificationRouteDeleteSql, connection, transaction))
