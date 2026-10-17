@@ -56,8 +56,12 @@ public sealed class LiteInvestigationEvidenceTests : IDisposable
 
     private LiteInvestigationEvidenceCapture Capture() => new(_db, _store, null, () => _now);
 
-    private Task<InvestigationOpenResult> Open(string metric, string family) =>
-        _store.OpenOrJoinAsync(new InvestigationAlert(1, Server, "srv", family, metric, T0, new[] { "k-" + metric }, null, 20, 100, 15, 240), Ct);
+    private async Task<(Guid RequestId, int X)> Open(string metric, string family)
+    {
+        var result = await _store.OpenOrJoinAsync(
+            new InvestigationAlert(1, Server, "srv", family, metric, T0, new[] { "k-" + metric }, null, 20, 100, 15, 240), Ct);
+        return (result.RequestId!.Value, 0);
+    }
 
     private void Exec(string sql)
     {
@@ -182,7 +186,7 @@ VALUES (1, '{Ts(T0)}', '{Ts(T0.AddSeconds(-20))}', {Server}, 'srv', 'AppDb', 60,
 
         /* Roll the file back to what a v71 database holds: no evidence table, no evidence_state column. */
         var path = Path.Combine(_tempDir, "old.duckdb");
-        await using (var old = new DuckDbInitializer(path))
+        using (var old = new DuckDbInitializer(path))
         {
             await old.InitializeAsync();
             Exec2(old, "DROP TABLE investigation_evidence");
@@ -193,14 +197,14 @@ VALUES (1, '{Ts(T0)}', '{Ts(T0.AddSeconds(-20))}', {Server}, 'srv', 'AppDb', 60,
         string Shape(DuckDbInitializer db) =>
             Scalar2(db, "SELECT string_agg(table_name || '.' || column_name, ',' ORDER BY table_name, column_name) FROM information_schema.columns WHERE table_name IN ('investigation_evidence', 'investigation_requests')")!;
 
-        await using var upgraded = new DuckDbInitializer(path);
+        using var upgraded = new DuckDbInitializer(path);
         await upgraded.InitializeAsync();
         var first = Shape(upgraded);
         Assert.Contains("investigation_evidence.section", first);
         Assert.Contains("investigation_requests.evidence_state", first);
         Assert.Equal("72", Scalar2(upgraded, "SELECT max(version) FROM schema_version"));
 
-        await using var again = new DuckDbInitializer(path);
+        using var again = new DuckDbInitializer(path);
         await again.InitializeAsync();
         Assert.Equal(first, Shape(again));
         Assert.Equal("72", Scalar2(again, "SELECT max(version) FROM schema_version"));
