@@ -49,6 +49,17 @@ internal static class McpWritePolicy
            switch serves them only when mcp_allow_writes is true. get_notification_routes is a read. */
         "set_notification_route_enabled",
         "delete_notification_route",
+
+        /* #5991: the query-tag and query-tag-rule writes, Darling's twins. The three reads (list_query_tags,
+           list_query_tag_rules, test_query_tag_rule) are ordinary reads. */
+        "create_query_tag",
+        "update_query_tag",
+        "delete_query_tag",
+        "assign_query_tag",
+        "unassign_query_tag",
+        "create_query_tag_rule",
+        "update_query_tag_rule",
+        "delete_query_tag_rule",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);

@@ -142,7 +142,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 202 tools. 96 are the same names Lite exposes. The remaining 106 are unique to Darling: " +
+        "This server exposes 202 tools. 107 are the same names Lite exposes. The remaining 95 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
@@ -154,6 +154,7 @@ internal static class DarlingMcpInstructions
     /// </summary>
     internal static readonly IReadOnlySet<string> LiteToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
+        "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule", "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
         "analyze_server", "audit_config", "claim_investigation_request", "compare_analysis", "delete_notification_route", "get_active_queries",
         "get_alert_history", "get_alert_settings", "get_analysis_facts", "get_analysis_findings",
@@ -178,6 +179,9 @@ internal static class DarlingMcpInstructions
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",
         "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_servers",
         "mute_analysis_finding", "set_notification_route_enabled", "submit_investigation_report", "unmute_analysis_finding",
+        /* #5991: Lite's query-tag tools, the same names as Darling's. */
+        "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule",
+        "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
     };
 
     private const string Preamble = """

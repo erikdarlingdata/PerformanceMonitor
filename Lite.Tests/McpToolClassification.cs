@@ -45,6 +45,7 @@ internal static class McpToolClassification
         "get_server_properties", "get_server_summary", "get_session_stats", "get_spinlock_stats",
         "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",
-        "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_servers",
+        "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_query_tag_rules", "list_query_tags", "list_servers",
+        "test_query_tag_rule",
     };
 }

@@ -107,9 +107,73 @@ public sealed class DarlingSelfAlertTests
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 
+    /// <summary>
+    /// #6034: the outcomes a <see cref="RecordingDeliverer"/> has seen. The fleet pass adds from its own thread while a test
+    /// polls the list from the test thread; a bare <c>List&lt;T&gt;</c> bumps its size before it stores the element, so
+    /// that poll could see a null <see cref="AlertOutcome"/> (a NullReferenceException in the poll lambda). Every write and
+    /// every read here holds one lock, and an enumeration walks a snapshot, so a poll sees whole outcomes only and never
+    /// throws "collection was modified".
+    /// </summary>
+    internal sealed class OutcomeLog : IReadOnlyList<AlertOutcome>
+    {
+        private readonly object _gate = new();
+        private readonly List<AlertOutcome> _items = new();
+
+        public void Add(AlertOutcome outcome)
+        {
+            lock (_gate)
+            {
+                _items.Add(outcome);
+            }
+        }
+
+        public void Clear()
+        {
+            lock (_gate)
+            {
+                _items.Clear();
+            }
+        }
+
+        public int Count
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _items.Count;
+                }
+            }
+        }
+
+        public AlertOutcome this[int index]
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _items[index];
+                }
+            }
+        }
+
+        public IEnumerator<AlertOutcome> GetEnumerator()
+        {
+            AlertOutcome[] snapshot;
+            lock (_gate)
+            {
+                snapshot = _items.ToArray();
+            }
+
+            return ((IEnumerable<AlertOutcome>)snapshot).GetEnumerator();
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
     internal sealed class RecordingDeliverer : IAlertDeliverer
     {
-        public List<AlertOutcome> Outcomes { get; } = new();
+        public OutcomeLog Outcomes { get; } = new();
 
         /// <summary>#5481 round 2: when set, every outcome is also handed to this deliverer (a live test gives it the
         /// production <c>DarlingAlertDeliverer</c> over the real history writer), and its report is returned.</summary>

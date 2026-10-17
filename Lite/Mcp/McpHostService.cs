@@ -200,6 +200,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpPlanCacheSchedulerTools>()
             .WithGeminiCompatibleTools<McpConfigHistoryTools>()
             .WithGeminiCompatibleTools<McpDefaultTraceTools>()
+            /* #5991: the query-tag and query-tag-rule tools; twin of Darling's DarlingMcpQueryTagTools and DarlingMcpQueryTagRuleTools. */
+            .WithGeminiCompatibleTools<McpQueryTagTools>()
             .WithGeminiCompatibleTools<McpHealthParserTools>()
             .WithGeminiCompatibleTools<McpAnalysisTools>()
             /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off

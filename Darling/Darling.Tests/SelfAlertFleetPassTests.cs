@@ -198,6 +198,55 @@ public sealed class SelfAlertFleetPassTests
     }
 
     /// <summary>
+    /// #6034: the harness deliverer's outcome list is written by the pass thread while a test polls it from its own
+    /// (<c>Outcomes.Any(...)</c> inside <c>BecomesTrueAsync</c>). A bare <c>List&lt;T&gt;</c> bumps its size before it stores
+    /// the element, so a concurrent reader saw a null <c>AlertOutcome</c> and the poll lambda threw. Every outcome is a
+    /// non-null record, so a reader must never see anything else however the writer is interleaved.
+    /// </summary>
+    [Fact]
+    public async Task TheRecordingDelivererOutcomeList_NeverShowsAReaderANullOutcome_WhileAnotherThreadAdds()
+    {
+        var outcome = new AlertOutcome(
+            "key", "example-sql-01", "Collection Stopped", "v", "t", null, null, null, null, false, null);
+
+        /* The window is the instant a first outcome is being added to a list a reader is already scanning, so the writer
+           hands the reader a fresh deliverer over and over and adds two outcomes to each, as the pass does. */
+        DarlingSelfAlertTests.RecordingDeliverer? current = new();
+        var stop = false;
+        var rounds = 0;
+        var writer = Task.Run(() =>
+        {
+            var until = DateTime.UtcNow.AddSeconds(2);
+            while (DateTime.UtcNow < until && !Volatile.Read(ref stop))
+            {
+                var next = new DarlingSelfAlertTests.RecordingDeliverer();
+                Volatile.Write(ref current, next);
+                next.Outcomes.Add(outcome);
+                next.Outcomes.Add(outcome);
+                rounds++;
+            }
+
+            Volatile.Write(ref stop, true);
+        }, TestContext.Current.CancellationToken);
+
+        try
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                var seen = Volatile.Read(ref current);
+                Assert.DoesNotContain(seen!.Outcomes, o => o.MetricName == "no such metric");
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref stop, true);
+            await writer;
+        }
+
+        Assert.True(rounds > 0);
+    }
+
+    /// <summary>
     /// A server whose body never finishes is evaluated on its cadence all the same: the pass does not look at the body.
     /// </summary>
     [Fact]

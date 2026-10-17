@@ -13,6 +13,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Investigations;
 
@@ -45,8 +46,16 @@ namespace PerformanceMonitor.Darling.Service.Investigations;
 ///
 /// <para><b>Size.</b> Each section's content is held to <see cref="MaxSectionBytes"/>, the report evidence's own cap (aliased,
 /// not copied): rows are dropped from the tail until it fits, and the content says how many.</para>
+///
+/// <para><b>Families (#6002).</b> The sections a request gets follow EVERY metric linked to it, not only the one it opened on
+/// (<see cref="SectionsByKey"/>): High CPU brings the five above, <c>Deadlocks Detected</c> brings <c>deadlocks</c>,
+/// <c>Blocking Detected</c> and <c>Blocking Wait Time</c> bring <c>blocking_chains</c> and <c>head_blocker</c>, and the
+/// <c>query_performance</c> family brings <c>regression_targets</c>. A metric's sections read the window around that metric's
+/// first linked alert, and their grace counts from that alert when it came after the open, so a metric that joins after the
+/// other sections froze gets its sections on the next pass under the same readiness rules. The family reads live in
+/// <c>InvestigationEvidenceCapture.Families.cs</c>.</para>
 /// </summary>
-public sealed class InvestigationEvidenceCapture
+public sealed partial class InvestigationEvidenceCapture
 {
     /// <summary>The cap on one section's content, in bytes: the report evidence's cap, aliased (#3684).</summary>
     public const int MaxSectionBytes = InvestigationToolCore.MaxEvidenceBytes;
@@ -70,6 +79,16 @@ public sealed class InvestigationEvidenceCapture
 
     /// <summary>A request older than this is left as it is: its window is long past.</summary>
     public static readonly TimeSpan CaptureHorizon = TimeSpan.FromHours(6);
+
+    /// <summary>A section's grace ends at the latest this long before <see cref="CaptureHorizon"/> (#6002 review), so a pass (every
+    /// 20 seconds) still sees the request after the grace is over and settles the section: a section of a metric that joined
+    /// late would otherwise keep its grace past the horizon and stay <c>pending</c> for good.</summary>
+    public static readonly TimeSpan HorizonMargin = TimeSpan.FromMinutes(5);
+
+    /// <summary>All of ONE SECTION's reads share this deadline (#6002 review, per section since round 2), on top of each command's
+    /// own <see cref="CommandTimeoutSeconds"/>. A section that runs past it is settled like any failed read (pending while its
+    /// grace lasts, then frozen unavailable) and the next section is read: one slow section never starves the ones after it.</summary>
+    public static readonly TimeSpan RequestDeadline = TimeSpan.FromMinutes(2);
 
     /// <summary>Statements kept in <c>top_statements</c>.</summary>
     public const int TopStatements = 10;
@@ -96,8 +115,37 @@ public sealed class InvestigationEvidenceCapture
     private const int CommandTimeoutSeconds = 30;
     private const int BatchRequests = 25;
 
-    /// <summary>The section names, in the order they are written.</summary>
+    /// <summary>The High CPU section names, in the order they are written.</summary>
     public static readonly IReadOnlyList<string> Sections = new[] { "top_statements", "active_requests", "query_store", "jobs", "waits" };
+
+    /// <summary>The deadlock alert's metric (#6002).</summary>
+    public const string DeadlockMetric = AlertEngine.DeadlockWatermarkMetric;
+
+    /// <summary>The two blocking alerts' metrics (#6002): the blocked-process report alert and the blocking wait alert.</summary>
+    public static readonly IReadOnlyList<string> BlockingMetrics = new[] { AlertEngine.BlockingWatermarkMetric, AlertEngine.BlockingWaitPersistenceMetric };
+
+    /// <summary>The sections each scope key brings (#6002), in the order they are written: a linked metric, or a family as
+    /// <see cref="InvestigationEvidenceScope.FamilyKey"/>.</summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> SectionsByKey = BuildSectionsByKey();
+
+    /// <summary>The scope the request store lists candidates by: every key of <see cref="SectionsByKey"/> with each of its sections.</summary>
+    public static readonly InvestigationEvidenceScope Scope = new(
+        SectionsByKey.SelectMany(k => k.Value.Select(_ => k.Key)).ToArray(),
+        SectionsByKey.SelectMany(k => k.Value).ToArray());
+
+    private static Dictionary<string, IReadOnlyList<string>> BuildSectionsByKey()
+    {
+        var blocking = new[] { "blocking_chains", "head_blocker" };
+        var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+        {
+            [HighCpuMetric] = Sections,
+            [DeadlockMetric] = new[] { "deadlocks" },
+            [InvestigationEvidenceScope.FamilyKey(InvestigationFamily.QueryPerformance)] = new[] { "regression_targets" },
+        };
+        foreach (var metric in BlockingMetrics)
+            map[metric] = blocking;
+        return map;
+    }
 
     /// <summary>The collector (<c>collect.collection_log.collector_name</c>) that feeds each section. A section is ready when its
     /// collector has completed a run at or after the window end, whether or not that run found anything.</summary>
@@ -108,6 +156,10 @@ public sealed class InvestigationEvidenceCapture
         ["query_store"] = "query_store_health",
         ["jobs"] = "running_jobs",
         ["waits"] = "wait_stats",
+        ["deadlocks"] = "deadlocks",
+        ["blocking_chains"] = "blocked_process_report",
+        ["head_blocker"] = "blocked_process_report",
+        ["regression_targets"] = "query_store",
     };
 
     /// <summary>The collectors that have a successful run at or after <c>$3</c> for server <c>$1</c> ($2 the collector names).
@@ -197,6 +249,7 @@ LIMIT 10";
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
     private readonly Func<string, int, int> _collectorIntervalMinutes;
+    private readonly TimeSpan _sectionDeadline;
 
     /// <param name="store">The monitoring store's data source: the only connection the capture holds.</param>
     /// <param name="requests">The request store, over the same store (it should share <paramref name="utcNow"/>).</param>
@@ -204,10 +257,12 @@ LIMIT 10";
     /// <param name="utcNow">The one clock the grace is judged by (a test supplies its own).</param>
     /// <param name="collectorIntervalMinutes">A collector's configured interval in minutes on one server, as (collector name, server id):
     /// the worker passes the schedule it runs the collector by, overrides included. Without it the code defaults are used.</param>
+    /// <param name="sectionDeadline">How long one section's reads may take (default <see cref="RequestDeadline"/>; a test supplies a short one).</param>
     public InvestigationEvidenceCapture(
         NpgsqlDataSource store, InvestigationRequestStore requests, ILogger logger, Func<DateTime>? utcNow = null,
-        Func<string, int, int>? collectorIntervalMinutes = null)
+        Func<string, int, int>? collectorIntervalMinutes = null, TimeSpan? sectionDeadline = null)
     {
+        _sectionDeadline = sectionDeadline ?? RequestDeadline;
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _requests = requests ?? throw new ArgumentNullException(nameof(requests));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -232,8 +287,8 @@ LIMIT 10";
         return grace > CaptureHorizon ? CaptureHorizon : grace;
     }
 
-    /// <summary>One pass: every High CPU request still needing evidence gets its sections looked at. A failed request is
-    /// logged and the next is tried. Returns how many requests it recorded.</summary>
+    /// <summary>One pass: every request in <see cref="Scope"/> still needing evidence gets its sections looked at. A failed
+    /// request is logged and the next is tried. Returns how many requests it recorded.</summary>
     public async Task<int> CaptureOnceAsync(CancellationToken cancellationToken)
     {
         var now = _utcNow();
@@ -244,7 +299,7 @@ LIMIT 10";
         while (looked < CandidatesPerTick)
         {
             var page = await _requests.ListEvidenceCandidatesAsync(
-                now - CaptureHorizon, Math.Min(BatchRequests, CandidatesPerTick - looked), HighCpuMetric, after, cancellationToken)
+                now - CaptureHorizon, Math.Min(BatchRequests, CandidatesPerTick - looked), Scope, after, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var candidate in page)
             {
@@ -282,52 +337,184 @@ LIMIT 10";
                 settled.Add(row.Section);
         }
 
-        var age = now - request.OpenedAtUtc;
-        var from = request.FirstAlertAtUtc - BreachLeadIn;
-        var to = request.FirstAlertAtUtc + BreachTail;
         var writes = new List<InvestigationEvidenceWrite>();
         var slow = new HashSet<string>(StringComparer.Ordinal);
-        HashSet<string>? ran = null;
-        foreach (var section in Sections)
+        var runsByWindowEnd = new Dictionary<DateTime, HashSet<string>>();
+        /* #6002 review round 2: once the request is inside the last HorizonMargin of its horizon this is the final pass that can see
+           it, so every section still unsettled is frozen on this pass. A section whose grace starts late (a late or skewed link)
+           can otherwise still be pending, with a negative age, when the request ages out of the candidate query for good. */
+        var finalPass = now >= request.OpenedAtUtc + CaptureHorizon - HorizonMargin;
+        foreach (var (section, anchor) in SectionsOf(request))
         {
             if (settled.Contains(section))
                 continue;
+
+            /* #6002: each section reads the window around its own key's first alert, and its grace counts from that alert when
+               it came after the open (a metric that joined later), so a joined family is judged on its own window. */
+            var from = anchor - BreachLeadIn;
+            var to = anchor + BreachTail;
+            var graceStart = anchor > request.OpenedAtUtc ? anchor : request.OpenedAtUtc;
+            var age = now - graceStart;
             if (request.IsPostgres)
             {
                 writes.Add(new InvestigationEvidenceWrite(section, "not_collected", null));
                 continue;
             }
 
+            var grace = CappedGrace(GraceFor(section, request.ServerId), graceStart, request.OpenedAtUtc);
+            var over = finalPass || age >= grace;
+
+            /* #6002 review round 2: each section has its own deadline, so one that runs past it is settled below like any other
+               failed read and the loop goes on to the next section. */
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(_sectionDeadline);
+            var readToken = deadline.Token;
+            try
+            {
+
             /* #6001 review: ready means the section's collector COMPLETED a run at or after the window end, whether or not the run
                found anything (an empty window is a true "nothing found", not a missing collection), so rows in the window
                never freeze a section early. A collector with no run since the window end keeps the section pending until the
                grace is over, and only then is it not_collected. */
-            ran ??= await ReadCollectorRunsAsync(request.ServerId, to, cancellationToken).ConfigureAwait(false);
-            if (ran.Contains(SectionCollectors[section]))
-            {
-                var rows = await ReadSectionAsync(section, request, from, to, cancellationToken).ConfigureAwait(false);
-                writes.Add(new InvestigationEvidenceWrite(section, "ready", Fit(from, to, rows.Rows, rows.DatabasesDropped)));
+                if (!runsByWindowEnd.TryGetValue(to, out var ran))
+                {
+                    ran = await ReadCollectorRunsAsync(request.ServerId, to, readToken).ConfigureAwait(false);
+                    runsByWindowEnd[to] = ran;
+                }
+
+                if (ran.Contains(SectionCollectors[section]))
+                {
+                    var rows = await ReadSectionAsync(section, request, from, to, readToken).ConfigureAwait(false);
+                    var scrubbed = ScrubRows(rows.Rows, readToken);
+                    writes.Add(new InvestigationEvidenceWrite(section, "ready", rows.ReportXml is null
+                        ? Fit(from, to, scrubbed, rows.DatabasesDropped)
+                        : FitReportXml(from, to, scrubbed, rows.ReportXml)));
+                }
+                else
+                {
+                    /* A slow collector (its grace is above the base) does not hold evidence_ready back, and keeps its own, longer
+                       grace before it is called not_collected. */
+                    if (grace > PendingGrace)
+                        slow.Add(section);
+                    writes.Add(new InvestigationEvidenceWrite(section, over ? "not_collected" : "pending", null));
+                }
             }
-            else
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
-                /* A slow collector (its grace is above the base) does not hold evidence_ready back, and keeps its own, longer
-                   grace before it is called not_collected. */
-                var grace = GraceFor(section, request.ServerId);
+                /* #6002 review: one section that fails does not cost the others their write. It is read again on the next pass
+                   while its grace lasts, and is then frozen as unavailable with the error's class (never its message, which can
+                   carry collected text). A section that ran past its own deadline is the same, whatever the read threw: a
+                   cancelled command can surface as a PostgresException (57014) instead of an OperationCanceledException, so the
+                   deadline token decides, and it is logged and recorded as a timeout, never as a fault of the read. */
+                var timedOut = deadline.IsCancellationRequested;
+                if (timedOut)
+                {
+                    _logger.LogWarning(
+                        "Evidence section {Section} for investigation {RequestId} ran past its {Deadline} deadline; the next section is read",
+                        section, request.RequestId, _sectionDeadline);
+                }
+                else
+                {
+                    _logger.LogWarning(ex, "Evidence section {Section} failed for investigation {RequestId}", section, request.RequestId);
+                }
+
                 if (grace > PendingGrace)
                     slow.Add(section);
-                writes.Add(new InvestigationEvidenceWrite(section, age >= grace ? "not_collected" : "pending", null));
+                writes.Add(over
+                    ? new InvestigationEvidenceWrite(section, "ready", Unavailable(from, to, timedOut ? new TimeoutException() : ex))
+                    : new InvestigationEvidenceWrite(section, "pending", null));
             }
         }
 
         if (writes.Count > 0)
         {
             await _requests.RecordEvidenceAsync(
-                request.RequestId, request.ServerId, writes, slow, age >= PendingGrace, cancellationToken).ConfigureAwait(false);
+                request.RequestId, request.ServerId, writes, slow, now - request.OpenedAtUtc >= PendingGrace, cancellationToken).ConfigureAwait(false);
         }
     }
 
+    /// <summary>A section's grace, ended no later than <see cref="HorizonMargin"/> before the request's
+    /// <see cref="CaptureHorizon"/>: the grace counts from <paramref name="graceStart"/>, which is after the open for a metric
+    /// that joined late (#6002 review).</summary>
+    internal static TimeSpan CappedGrace(TimeSpan grace, DateTime graceStart, DateTime openedAt)
+    {
+        var latest = openedAt + CaptureHorizon - HorizonMargin - graceStart;
+        if (latest < TimeSpan.Zero)
+            latest = TimeSpan.Zero;
+        return grace > latest ? latest : grace;
+    }
+
+    /// <summary>The content of a section whose read failed past its grace: no rows, <c>status: unavailable</c>, and the error's
+    /// class name only.</summary>
+    internal static string Unavailable(DateTime from, DateTime to, Exception error) => new JsonObject
+    {
+        ["window_start"] = from.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+        ["window_end"] = to.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+        ["rows"] = new JsonArray(),
+        ["status"] = "unavailable",
+        ["error"] = error.GetType().Name,
+    }.ToJsonString();
+
+    /// <summary>
+    /// #4348 (#6002 review): each row through <see cref="DerivedStoreScrub.Json"/> BEFORE it is fitted, so the bytes the cap
+    /// measures are the bytes stored (the store runs the same scrub at the write, and finds these rows clean). A row the filter
+    /// cannot read is kept as <c>{"withheld": true}</c>, so the rows stay aligned with any report XML beside them.
+    /// </summary>
+    internal static List<JsonObject> ScrubRows(List<JsonObject> rows, CancellationToken cancellationToken = default) =>
+        rows.ConvertAll(row =>
+        {
+            /* #6002 review round 2: the statement filter is synchronous work (up to its own 10 s per call), so a section past its
+               deadline stops between rows instead of finishing every row first. */
+            cancellationToken.ThrowIfCancellationRequested();
+            var json = row.ToJsonString();
+            var scrubbed = DerivedStoreScrub.Json(json);
+            if (ReferenceEquals(scrubbed, json))
+                return row;
+            return scrubbed is null ? new JsonObject { ["withheld"] = true } : JsonNode.Parse(scrubbed)!.AsObject();
+        });
+
+    /// <summary>
+    /// The sections <paramref name="request"/> gets (#6002), each with the alert time its window is built around: the sections of
+    /// every linked metric in <see cref="SectionsByKey"/> (at that metric's first linked alert; the opening metric at the
+    /// request's first alert) and of its family (at the first alert). A section two keys bring (the two blocking metrics) is
+    /// listed once, at the earlier alert. High CPU's sections come first, in their written order.
+    /// </summary>
+    internal static IReadOnlyList<(string Section, DateTime Anchor)> SectionsOf(InvestigationEvidenceCandidate request)
+    {
+        var anchors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var order = new List<string>();
+        void Add(string key, DateTime anchor)
+        {
+            if (!SectionsByKey.TryGetValue(key, out var sections))
+                return;
+            foreach (var section in sections)
+            {
+                if (!anchors.TryGetValue(section, out var seen))
+                {
+                    order.Add(section);
+                    anchors[section] = anchor;
+                }
+                else if (anchor < seen)
+                {
+                    anchors[section] = anchor;
+                }
+            }
+        }
+
+        Add(request.FirstMetric, request.FirstAlertAtUtc);
+        foreach (var key in SectionsByKey.Keys)
+        {
+            if (request.Metrics is not null && request.Metrics.TryGetValue(key, out var first))
+                Add(key, string.Equals(key, request.FirstMetric, StringComparison.Ordinal) ? request.FirstAlertAtUtc : first);
+        }
+
+        Add(InvestigationEvidenceScope.FamilyKey(request.Family), request.FirstAlertAtUtc);
+        return order.ConvertAll(s => (s, anchors[s]));
+    }
+
     /// <summary>What one section read found: its ranked rows and, for <c>query_store</c> only, how many databases the cap left out.</summary>
-    private sealed record SectionRead(List<JsonObject> Rows, int? DatabasesDropped = null);
+    /// <remarks><c>blocking_chains</c> (#6002) also returns each row's report XML, aligned with the rows, for <see cref="FitReportXml"/>.</remarks>
+    private sealed record SectionRead(List<JsonObject> Rows, int? DatabasesDropped = null, IReadOnlyList<string?>? ReportXml = null);
 
     /// <summary>The CPU each database burned in the window, the <c>query_store</c> section's own cost figure to rank by.</summary>
     internal static readonly string WindowCpuByDatabaseSql = $@"
@@ -363,6 +550,10 @@ GROUP BY database_name";
             "query_store" => await ReadQueryStoreAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
             "jobs" => new SectionRead(await ReadAsync(JobsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "waits" => new SectionRead(await ReadWaitsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "deadlocks" => new SectionRead(await ReadDeadlocksAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "blocking_chains" => await ReadBlockingChainsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
+            "head_blocker" => new SectionRead(await ReadHeadBlockersAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "regression_targets" => new SectionRead(await ReadRegressionTargetsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             _ => new SectionRead(new List<JsonObject>()),
         };
 
@@ -494,6 +685,9 @@ GROUP BY database_name";
                 ["window_end"] = to.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
                 ["rows"] = new JsonArray(rows.GetRange(0, rows.Count - dropped).ConvertAll(r => (JsonNode?)r.DeepClone()).ToArray()),
             };
+            /* #6002: a ready section that found nothing says so: a frozen true negative, never a dropped section. */
+            if (rows.Count == 0)
+                content["status"] = "empty";
             if (dropped > 0)
                 content["rows_dropped"] = dropped;
             if (databasesDropped is not null)
