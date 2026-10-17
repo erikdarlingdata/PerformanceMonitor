@@ -67,5 +67,8 @@ FROM generate_series(1, 50) AS s CROSS JOIN generate_series(1, 4000) AS q", ct);
 
         var after = await ExplainAsync(connection, ct);
         Assert.Contains(NewIndex, after, StringComparison.Ordinal);
+
+        /* The index must serve the server equality as a seek, not as a filter over another index's entries. */
+        Assert.Matches(@"Index Cond: .*server_id = 7", after);
     }
 }
