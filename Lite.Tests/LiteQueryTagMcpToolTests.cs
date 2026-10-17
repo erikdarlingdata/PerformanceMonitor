@@ -244,7 +244,8 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
     public async Task ResourceUse_OnAnAzureSqlDatabaseServer_AnsweringNoRows_SaysNotCollectedForTheSectionsItsCollectorsSkip()
     {
         await ExecAsync(
-            "INSERT INTO server_properties (server_id, collection_time, engine_edition) VALUES ($1, $2, 5)", _idA, Ago(5));
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition) VALUES ($1, $2, $3, 'x', 'Edition', '12.0.2000.8', 'RTM', 5)",
+            _nextId++, Ago(5), _idA);
 
         var root = Parse(await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerA, 24));
 
