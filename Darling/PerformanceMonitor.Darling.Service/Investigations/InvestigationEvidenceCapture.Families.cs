@@ -564,6 +564,9 @@ LIMIT $6";
 
         foreach (var target in targets)
         {
+            /* #6002 review round 2: the plan filter below is synchronous (up to 10 s a call, two calls a target), so the
+               section's deadline is checked between targets. */
+            cancellationToken.ThrowIfCancellationRequested();
             var database = target["database_name"]?.GetValue<string>() ?? "";
             var good = target["good_plan_id"]!.GetValue<long>();
             var bad = target["bad_plan_id"]!.GetValue<long>();
@@ -572,6 +575,7 @@ LIMIT $6";
                before a compiled value is read from it: a value inside a statement the filter names comes back withheld, and
                CompiledValues returns null for a plan with a withheld value or the withheld placeholder. */
             target["good_compiled"] = Compiled(SensitiveStatements.Xml(plans.GetValueOrDefault(good)));
+            cancellationToken.ThrowIfCancellationRequested();
             target["bad_compiled"] = Compiled(SensitiveStatements.Xml(plans.GetValueOrDefault(bad)));
             target["stopped_running"] = target["window_executions"]?.GetValue<long>() == 0;
         }

@@ -405,6 +405,155 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
         });
     }
 
+    /* #6002 review round 2: one slow section must not starve the one after it. query_stats is locked, so top_statements (the first
+       High CPU section) runs into its own deadline; active_requests, read after it, is still recorded on the same pass, and the
+       slow section freezes unavailable once its grace is over (a TimeoutException, never a collected message). */
+    [Fact]
+    public async Task ASlowSection_RunsIntoItsOwnDeadline_AndTheNextSectionIsStillRead()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert("resources", InvestigationEvidenceCapture.HighCpuMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "query_stats", WindowEnd.AddSeconds(5));
+            await PlantRunAsync(setup.Connection, ct, "query_snapshots", WindowEnd.AddSeconds(5));
+
+            await using var locker = await setup.DataSource.OpenConnectionAsync(ct);
+            await new NpgsqlCommand("BEGIN", locker).ExecuteNonQueryAsync(ct);
+            await new NpgsqlCommand("LOCK TABLE query_stats IN ACCESS EXCLUSIVE MODE", locker).ExecuteNonQueryAsync(ct);
+            try
+            {
+                await setup.Capture.CaptureOnceAsync(ct);
+                var first = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+                Assert.Equal("pending", Assert.Single(first, r => r.Section == "top_statements").State);
+                Assert.Equal("ready", Assert.Single(first, r => r.Section == "active_requests").State);
+
+                setup.Clock.Advance(TimeSpan.FromMinutes(25));
+                await setup.Capture.CaptureOnceAsync(ct);
+                var later = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+                var slow = Assert.Single(later, r => r.Section == "top_statements");
+                Assert.Equal("ready", slow.State);
+                var content = JsonNode.Parse(slow.ContentJson!)!;
+                Assert.Equal("unavailable", content["status"]!.GetValue<string>());
+                Assert.Equal("TimeoutException", content["error"]!.GetValue<string>());
+                Assert.Empty(content["rows"]!.AsArray());
+                Assert.Equal("ready", Assert.Single(later, r => r.Section == "active_requests").State);
+            }
+            finally
+            {
+                await new NpgsqlCommand("ROLLBACK", locker).ExecuteNonQueryAsync(CancellationToken.None);
+            }
+        }, sectionDeadline: TimeSpan.FromSeconds(1));
+    }
+
+    /* #6002 review round 2: a section whose grace starts so late that it is capped to nothing has a negative age until its anchor
+       passes, so the grace never ends before the request ages out of the candidate query. A request takes a link only within
+       half an hour of its open, so the late anchor is planted on the stored link (an alert stamped ahead of the service's clock).
+       The pass inside the last HorizonMargin freezes the section. */
+    [Fact]
+    public async Task ALateLink_InsideTheLastMinutesOfTheHorizon_FreezesNotCollected_InsteadOfStayingPending()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, AlertEngine.BlockingWatermarkMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "blocked_process_report", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var joinedAt = AlertAt.AddMinutes(2);
+            Assert.Equal(requestId, (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, InvestigationEvidenceCapture.DeadlockMetric, joinedAt), ct)).RequestId);
+
+            /* Five hours fifty-six minutes in, the pass sees the deadlocks link stamped two minutes ahead of its clock. */
+            setup.Clock.Advance(TimeSpan.FromHours(5) + TimeSpan.FromMinutes(55));
+            await DarlingMcpTestData.ExecAsync(setup.Connection, ct,
+                "UPDATE config.investigation_request_alerts SET alert_time = $1 WHERE request_id = $2 AND metric_name = $3",
+                DateTime.SpecifyKind(setup.Clock.Now.AddMinutes(2), DateTimeKind.Utc), requestId, InvestigationEvidenceCapture.DeadlockMetric);
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var deadlocks = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "deadlocks");
+            Assert.Equal("not_collected", deadlocks.State);
+        });
+    }
+
+    /* #6002 review round 2: the write-time scrub can swap a short value for the 34-character placeholder where the capture's judge
+       let it through, growing content the capture filled to the cap. The section is stored unavailable, the check never fires and the
+       other section of the batch commits. */
+    [Fact]
+    public async Task ContentThatTheWriteScrubGrowsPastTheCap_IsStoredUnavailable_AndTheBatchCommits()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, AlertEngine.BlockingWatermarkMetric, AlertAt), ct)).RequestId!.Value;
+            Assert.Equal(InvestigationToolCore.MaxEvidenceBytes, InvestigationRequestStore.EvidenceContentCapBytes);
+            var rowCount = 1;
+            string Content(int rows) => new JsonObject
+            {
+                ["window_start"] = "2026-01-01T00:00:00Z",
+                ["window_end"] = "2026-01-01T00:10:00Z",
+                ["rows"] = new JsonArray(Enumerable.Range(0, rows).Select(_ => (JsonNode?)new JsonObject { ["s"] = "pwdencrypt" }).ToArray()),
+            }.ToJsonString();
+            while (InvestigationEvidenceCapture.StoredBytes(Content(rowCount + 1)) <= InvestigationToolCore.MaxEvidenceBytes)
+                rowCount++;
+            var content = Content(rowCount);
+            Assert.True(InvestigationEvidenceCapture.StoredBytes(content) <= InvestigationToolCore.MaxEvidenceBytes);
+            var scrubbed = DerivedStoreScrub.Json(content)!;
+            Assert.True(InvestigationEvidenceCapture.StoredBytes(scrubbed) > InvestigationToolCore.MaxEvidenceBytes);
+
+            await setup.Requests.RecordEvidenceAsync(requestId, ServerId, new[]
+            {
+                new InvestigationEvidenceWrite("blocking_chains", "ready", content),
+                new InvestigationEvidenceWrite("head_blocker", "ready", Content(0)),
+            }, ct);
+
+            var stored = await setup.Requests.ReadEvidenceAsync(requestId, ct);
+            var big = Assert.Single(stored, r => r.Section == "blocking_chains");
+            Assert.Equal("ready", big.State);
+            var node = JsonNode.Parse(big.ContentJson!)!;
+            Assert.Equal("unavailable", node["status"]!.GetValue<string>());
+            Assert.Equal("EvidenceTooLarge", node["error"]!.GetValue<string>());
+            Assert.Equal("2026-01-01T00:10:00Z", node["window_end"]!.GetValue<string>());
+            Assert.Empty(node["rows"]!.AsArray());
+            Assert.DoesNotContain("pwdencrypt", big.ContentJson!, StringComparison.Ordinal);
+            Assert.Equal("ready", Assert.Single(stored, r => r.Section == "head_blocker").State);
+        });
+    }
+
+    /* #6002 review round 2: content the write scrub withholds whole comes back null; a ready row is stored unavailable, never null. */
+    [Fact]
+    public async Task ContentThatTheWriteScrubWithholds_IsStoredUnavailable_NeverAsNullOnAReadyRow()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, AlertEngine.BlockingWatermarkMetric, AlertAt), ct)).RequestId!.Value;
+            const string unreadable = "{\"window_start\": ";
+            Assert.Null(DerivedStoreScrub.Json(unreadable));
+
+            await setup.Requests.RecordEvidenceAsync(requestId, ServerId, new[]
+            {
+                new InvestigationEvidenceWrite("blocking_chains", "ready", unreadable),
+            }, ct);
+
+            var row = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "blocking_chains");
+            Assert.Equal("ready", row.State);
+            Assert.NotNull(row.ContentJson);
+            Assert.Equal("EvidenceWithheld", JsonNode.Parse(row.ContentJson!)!["error"]!.GetValue<string>());
+        });
+    }
+
+    /* #6002 review round 2: the statement filter is synchronous, so the rows loop stops at cancellation instead of finishing. */
+    [Fact]
+    public void FilterWork_StopsAtCancellation_BetweenRows()
+    {
+        var rows = Enumerable.Range(0, 3).Select(i => new JsonObject { ["n"] = i }).ToList();
+        Assert.Equal(3, InvestigationEvidenceCapture.ScrubRows(rows, CancellationToken.None).Count);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        Assert.Throws<OperationCanceledException>(() => InvestigationEvidenceCapture.ScrubRows(rows, cancelled.Token));
+    }
+
     private static List<JsonNode> Rows(IReadOnlyList<InvestigationEvidenceRow> evidence, string section)
     {
         var row = Assert.Single(evidence, r => r.Section == section);
@@ -550,7 +699,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $9, $10, '0xQH' || 
         NpgsqlDataSource DataSource, NpgsqlConnection Connection, InvestigationRequestStore Requests,
         InvestigationEvidenceCapture Capture, TestClock Clock);
 
-    private static async Task RunAsync(Func<Setup, CancellationToken, Task> body)
+    private static async Task RunAsync(Func<Setup, CancellationToken, Task> body, TimeSpan? sectionDeadline = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -566,7 +715,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $9, $10, '0xQH' || 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var clock = new TestClock();
         var requests = new InvestigationRequestStore(dataSource, 30, () => clock.Now);
-        var capture = new InvestigationEvidenceCapture(dataSource, requests, NullLogger.Instance, () => clock.Now, (_, _) => 5);
+        var capture = new InvestigationEvidenceCapture(dataSource, requests, NullLogger.Instance, () => clock.Now, (_, _) => 5, sectionDeadline);
         await body(new Setup(dataSource, connection, requests, capture, clock), ct);
     }
 }

@@ -179,6 +179,58 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
         return rows;
     }
 
+    /// <summary>The cap <c>ck_investigation_evidence_content</c> holds <c>octet_length(content::text)</c> to; it equals the capture's
+    /// <c>InvestigationToolCore.MaxEvidenceBytes</c>, which this project cannot see (a test pins the two together).</summary>
+    internal const int EvidenceContentCapBytes = 32768;
+
+    /// <summary>The bytes <paramref name="json"/> takes as PostgreSQL prints a jsonb (<c>octet_length(content::text)</c>, which
+    /// the table's check holds to <see cref="EvidenceContentCapBytes"/>): a space follows every structural colon and
+    /// comma, so each colon and comma is counted twice, strings included, which only over-counts. The capture's own
+    /// <c>StoredBytes</c> is the same count; the Storage project cannot see the Service.</summary>
+    internal static int StoredEvidenceBytes(string json)
+    {
+        var extra = 0;
+        foreach (var c in json)
+        {
+            if (c == ':' || c == ',')
+                extra++;
+        }
+
+        return System.Text.Encoding.UTF8.GetByteCount(json) + extra;
+    }
+
+    /// <summary>
+    /// The content a <c>ready</c> section is stored with (#6002 review round 2): <paramref name="contentJson"/> through
+    /// <see cref="DerivedStoreScrub.Json"/>, unless the scrub withheld it whole (null) or grew it past
+    /// <see cref="EvidenceContentCapBytes"/> (the write judge replaced a short value with the placeholder after the
+    /// capture filled the section to the cap). Then the section is stored as <c>status: unavailable</c> with the reason's name and
+    /// no collected text, so <c>ck_investigation_evidence_content</c> never fires and no ready row has null content.
+    /// </summary>
+    internal static string StoredEvidenceContent(string? contentJson)
+    {
+        var scrubbed = contentJson is null ? null : DerivedStoreScrub.Json(contentJson);
+        if (scrubbed is not null && StoredEvidenceBytes(scrubbed) <= EvidenceContentCapBytes)
+            return scrubbed;
+
+        var unavailable = new JsonObject();
+        try
+        {
+            var original = contentJson is null ? null : JsonNode.Parse(contentJson) as JsonObject;
+            unavailable["window_start"] = original?["window_start"]?.GetValue<string>();
+            unavailable["window_end"] = original?["window_end"]?.GetValue<string>();
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        {
+            unavailable["window_start"] = null;
+            unavailable["window_end"] = null;
+        }
+
+        unavailable["rows"] = new JsonArray();
+        unavailable["status"] = "unavailable";
+        unavailable["error"] = scrubbed is null ? "EvidenceWithheld" : "EvidenceTooLarge";
+        return unavailable.ToJsonString();
+    }
+
     /// <summary>
     /// Settles <paramref name="sections"/> for a request in one transaction (#6001, D9): a section that is still <c>pending</c>
     /// (or new) takes the written state and content; a section already <c>ready</c> or <c>not_collected</c> is left alone, so a
@@ -212,8 +264,11 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
             await ExecAsync(connection, transaction, EvidenceUpsertSql, cancellationToken,
                 P(requestId), P(section.Section), P(section.State),
                 /* #4348 (#6002 review): the statement filter at the write, as the finding and alert stores have it. The capture
-                   already scrubbed each row before fitting it under the cap, so clean content comes back the same instance. */
-                new NpgsqlParameter<string?> { TypedValue = section.State == "ready" ? DerivedStoreScrub.Json(section.ContentJson) : null, NpgsqlDbType = NpgsqlDbType.Text },
+                   already scrubbed each row before fitting it under the cap, so clean content comes back the same instance. When the
+                   write's judge disagrees with the capture's, the scrub can grow the content past the table's size check (a short value
+                   becomes the placeholder) or withhold it whole; either stores the section as unavailable, so the check never aborts
+                   the batch and a ready row never carries null content (#6002 review round 2). */
+                new NpgsqlParameter<string?> { TypedValue = section.State == "ready" ? StoredEvidenceContent(section.ContentJson) : null, NpgsqlDbType = NpgsqlDbType.Text },
                 section.State == "pending"
                     ? new NpgsqlParameter<DateTime?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.TimestampTz }
                     : new NpgsqlParameter<DateTime?> { TypedValue = DateTime.SpecifyKind(now, DateTimeKind.Utc), NpgsqlDbType = NpgsqlDbType.TimestampTz });

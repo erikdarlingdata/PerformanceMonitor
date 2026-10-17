@@ -85,9 +85,9 @@ public sealed partial class InvestigationEvidenceCapture
     /// late would otherwise keep its grace past the horizon and stay <c>pending</c> for good.</summary>
     public static readonly TimeSpan HorizonMargin = TimeSpan.FromMinutes(5);
 
-    /// <summary>All of one request's reads share this deadline (#6002 review), on top of each command's own
-    /// <see cref="CommandTimeoutSeconds"/>. Sections read before it ran out are recorded; the rest stay as they were and are read
-    /// on the next pass.</summary>
+    /// <summary>All of ONE SECTION's reads share this deadline (#6002 review, per section since round 2), on top of each command's
+    /// own <see cref="CommandTimeoutSeconds"/>. A section that runs past it is settled like any failed read (pending while its
+    /// grace lasts, then frozen unavailable) and the next section is read: one slow section never starves the ones after it.</summary>
     public static readonly TimeSpan RequestDeadline = TimeSpan.FromMinutes(2);
 
     /// <summary>Statements kept in <c>top_statements</c>.</summary>
@@ -249,6 +249,7 @@ LIMIT 10";
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
     private readonly Func<string, int, int> _collectorIntervalMinutes;
+    private readonly TimeSpan _sectionDeadline;
 
     /// <param name="store">The monitoring store's data source: the only connection the capture holds.</param>
     /// <param name="requests">The request store, over the same store (it should share <paramref name="utcNow"/>).</param>
@@ -256,10 +257,12 @@ LIMIT 10";
     /// <param name="utcNow">The one clock the grace is judged by (a test supplies its own).</param>
     /// <param name="collectorIntervalMinutes">A collector's configured interval in minutes on one server, as (collector name, server id):
     /// the worker passes the schedule it runs the collector by, overrides included. Without it the code defaults are used.</param>
+    /// <param name="sectionDeadline">How long one section's reads may take (default <see cref="RequestDeadline"/>; a test supplies a short one).</param>
     public InvestigationEvidenceCapture(
         NpgsqlDataSource store, InvestigationRequestStore requests, ILogger logger, Func<DateTime>? utcNow = null,
-        Func<string, int, int>? collectorIntervalMinutes = null)
+        Func<string, int, int>? collectorIntervalMinutes = null, TimeSpan? sectionDeadline = null)
     {
+        _sectionDeadline = sectionDeadline ?? RequestDeadline;
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _requests = requests ?? throw new ArgumentNullException(nameof(requests));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -337,9 +340,10 @@ LIMIT 10";
         var writes = new List<InvestigationEvidenceWrite>();
         var slow = new HashSet<string>(StringComparer.Ordinal);
         var runsByWindowEnd = new Dictionary<DateTime, HashSet<string>>();
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(RequestDeadline);
-        var readToken = deadline.Token;
+        /* #6002 review round 2: once the request is inside the last HorizonMargin of its horizon this is the final pass that can see
+           it, so every section still unsettled is frozen on this pass. A section whose grace starts late (a late or skewed link)
+           can otherwise still be pending, with a negative age, when the request ages out of the candidate query for good. */
+        var finalPass = now >= request.OpenedAtUtc + CaptureHorizon - HorizonMargin;
         foreach (var (section, anchor) in SectionsOf(request))
         {
             if (settled.Contains(section))
@@ -358,6 +362,13 @@ LIMIT 10";
             }
 
             var grace = CappedGrace(GraceFor(section, request.ServerId), graceStart, request.OpenedAtUtc);
+            var over = finalPass || age >= grace;
+
+            /* #6002 review round 2: each section has its own deadline, so one that runs past it is settled below like any other
+               failed read and the loop goes on to the next section. */
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(_sectionDeadline);
+            var readToken = deadline.Token;
             try
             {
 
@@ -374,7 +385,7 @@ LIMIT 10";
                 if (ran.Contains(SectionCollectors[section]))
                 {
                     var rows = await ReadSectionAsync(section, request, from, to, readToken).ConfigureAwait(false);
-                    var scrubbed = ScrubRows(rows.Rows);
+                    var scrubbed = ScrubRows(rows.Rows, readToken);
                     writes.Add(new InvestigationEvidenceWrite(section, "ready", rows.ReportXml is null
                         ? Fit(from, to, scrubbed, rows.DatabasesDropped)
                         : FitReportXml(from, to, scrubbed, rows.ReportXml)));
@@ -385,27 +396,32 @@ LIMIT 10";
                        grace before it is called not_collected. */
                     if (grace > PendingGrace)
                         slow.Add(section);
-                    writes.Add(new InvestigationEvidenceWrite(section, age >= grace ? "not_collected" : "pending", null));
+                    writes.Add(new InvestigationEvidenceWrite(section, over ? "not_collected" : "pending", null));
                 }
-            }
-            catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                /* The request's deadline ran out: what was read is recorded, the rest is read on the next pass. */
-                _logger.LogWarning(
-                    "Evidence capture for investigation {RequestId} ran past its {Deadline} deadline at section {Section}; the sections not read are tried again next pass",
-                    request.RequestId, RequestDeadline, section);
-                break;
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 /* #6002 review: one section that fails does not cost the others their write. It is read again on the next pass
                    while its grace lasts, and is then frozen as unavailable with the error's class (never its message, which can
-                   carry collected text). */
-                _logger.LogWarning(ex, "Evidence section {Section} failed for investigation {RequestId}", section, request.RequestId);
+                   carry collected text). A section that ran past its own deadline is the same, whatever the read threw: a
+                   cancelled command can surface as a PostgresException (57014) instead of an OperationCanceledException, so the
+                   deadline token decides, and it is logged and recorded as a timeout, never as a fault of the read. */
+                var timedOut = deadline.IsCancellationRequested;
+                if (timedOut)
+                {
+                    _logger.LogWarning(
+                        "Evidence section {Section} for investigation {RequestId} ran past its {Deadline} deadline; the next section is read",
+                        section, request.RequestId, _sectionDeadline);
+                }
+                else
+                {
+                    _logger.LogWarning(ex, "Evidence section {Section} failed for investigation {RequestId}", section, request.RequestId);
+                }
+
                 if (grace > PendingGrace)
                     slow.Add(section);
-                writes.Add(age >= grace
-                    ? new InvestigationEvidenceWrite(section, "ready", Unavailable(from, to, ex))
+                writes.Add(over
+                    ? new InvestigationEvidenceWrite(section, "ready", Unavailable(from, to, timedOut ? new TimeoutException() : ex))
                     : new InvestigationEvidenceWrite(section, "pending", null));
             }
         }
@@ -444,9 +460,12 @@ LIMIT 10";
     /// measures are the bytes stored (the store runs the same scrub at the write, and finds these rows clean). A row the filter
     /// cannot read is kept as <c>{"withheld": true}</c>, so the rows stay aligned with any report XML beside them.
     /// </summary>
-    internal static List<JsonObject> ScrubRows(List<JsonObject> rows) =>
+    internal static List<JsonObject> ScrubRows(List<JsonObject> rows, CancellationToken cancellationToken = default) =>
         rows.ConvertAll(row =>
         {
+            /* #6002 review round 2: the statement filter is synchronous work (up to its own 10 s per call), so a section past its
+               deadline stops between rows instead of finishing every row first. */
+            cancellationToken.ThrowIfCancellationRequested();
             var json = row.ToJsonString();
             var scrubbed = DerivedStoreScrub.Json(json);
             if (ReferenceEquals(scrubbed, json))
