@@ -93,11 +93,11 @@ public sealed class InvestigationFollowUpLiveTests
             var at = At(DateTime.UtcNow.AddDays(1));
             for (var i = 0; i < InvestigationReportFields.MaxPendingFollowUpsPerRoute; i++)
             {
-                var request = await ClaimedAsync(store, "family-" + i, ct);
+                var request = await ClaimedAsync(store, "blocking", ct);
                 Assert.Equal("reported", Root(await SubmitAsync(store, request, at, ct)).GetProperty("status").GetString());
             }
 
-            var twentyFirst = await ClaimedAsync(store, "family-extra", ct);
+            var twentyFirst = await ClaimedAsync(store, "blocking", ct);
             var refused = Root(await SubmitAsync(store, twentyFirst, at, ct));
             Assert.Equal("refused", refused.GetProperty("status").GetString());
             Assert.Contains("pending follow-ups", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
