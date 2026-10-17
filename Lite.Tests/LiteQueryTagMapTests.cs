@@ -187,11 +187,11 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         var tag = await _service.CreateQueryTagAsync("Orders", null);
         await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
         Sight(Snapshot(HashA, "SELECT * FROM Orders"));
-        await _service.BuildQueryTagMapAsync();
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors);
 
-        var since = DateTime.UtcNow.AddSeconds(-1);
         Sight(Snapshot(HashB, "SELECT * FROM Orders"));
-        var pass = await _service.BuildQueryTagMapAsync(since);
+        var pass = await _service.BuildQueryTagMapAsync(cursors);
 
         Assert.False(pass.Rebuilt);
         Assert.Equal(2, (await MapAsync()).Count);
@@ -248,5 +248,59 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         }
 
         Assert.Equal(expected.Count(e => e.TagId is not null), actual.Count);
+    }
+
+    private async Task SetLastSeenAsync(string key, DateTime lastSeen)
+    {
+        using var connection = _fixture.DuckDb.CreateConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE query_tag_sightings SET last_seen = $1 WHERE key = $2";
+        command.Parameters.Add(new DuckDBParameter { Value = lastSeen });
+        command.Parameters.Add(new DuckDBParameter { Value = key });
+        await command.ExecuteNonQueryAsync();
+    }
+
+    [Fact]
+    public async Task ASightingSeenJustBeforeThePassClock_IsStillPickedUpByTheNextExtendPass()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        await _service.BuildQueryTagMapAsync(cursors);
+        await _service.BuildQueryTagMapAsync(cursors);
+
+        /* Stamped a minute before the previous pass ended: inside the two-minute overlap, so the next pass still reads it. */
+        Sight(Snapshot(HashA, "SELECT * FROM Orders"));
+        await SetLastSeenAsync(HashA, DateTime.UtcNow.AddMinutes(-1));
+        var pass = await _service.BuildQueryTagMapAsync(cursors);
+
+        Assert.False(pass.Rebuilt);
+        Assert.Single(await MapAsync());
+    }
+
+    [Fact]
+    public async Task APassThatHitsTheCap_ContinuesAfterItsLastKey_SoTwoPassesCoverEveryKeyOnce()
+    {
+        var tag = await _service.CreateQueryTagAsync("Orders", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Text, "*orders*", tag));
+        await _service.BuildQueryTagMapAsync();
+        var keys = Enumerable.Range(1, 5).Select(n => $"0x{n:X16}").ToList();
+        Sight(keys.Select(k => Snapshot(k, "SELECT * FROM Orders")).ToArray());
+        var start = DateTime.UtcNow.AddHours(-1);
+        for (var i = 0; i < keys.Count; i++)
+        {
+            await SetLastSeenAsync(keys[i], start.AddSeconds(i));
+        }
+
+        var cursors = new Dictionary<int, QueryTagMapCursor>();
+        var first = await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
+        var afterFirst = (await MapAsync()).Select(r => r.Key).OrderBy(k => k).ToList();
+        var second = await _service.BuildQueryTagMapAsync(cursors, keyCap: 3);
+
+        Assert.Equal(3, first.KeysResolved);
+        Assert.Equal(keys.Take(3), afterFirst);
+        Assert.Equal(2, second.KeysResolved);
+        Assert.Equal(keys, (await MapAsync()).Select(r => r.Key).OrderBy(k => k).ToList());
     }
 }

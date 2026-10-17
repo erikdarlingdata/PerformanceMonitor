@@ -21,6 +21,21 @@ namespace PerformanceMonitorLite.Services;
 /// <summary>What one map pass did: whether it rebuilt, how many keys it resolved and how many of them got a tag.</summary>
 public sealed record QueryTagMapPass(bool Rebuilt, int KeysResolved, int KeysTagged);
 
+/// <summary>
+/// One server's extend cursor, held in memory by the caller (nothing is stored). Keys are read strictly after
+/// (<see cref="Since"/>, <see cref="AfterKind"/>, <see cref="AfterKey"/>) in (last_seen, key_kind, key) order. After a pass that
+/// finished under the cap it is the pass clock minus <see cref="Overlap"/> with empty kind and key; after a pass that hit the
+/// cap it is the last key read, so the next pass continues after it.
+/// </summary>
+public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string AfterKey)
+{
+    /// <summary>How far behind the pass clock a finished pass sets the cursor, so a sighting stamped just before the read is seen.</summary>
+    public static readonly TimeSpan Overlap = TimeSpan.FromMinutes(2);
+
+    /// <summary>A server with no cursor (a fresh process) starts from the epoch.</summary>
+    public static QueryTagMapCursor Epoch { get; } = new(DateTime.UnixEpoch, string.Empty, string.Empty);
+}
+
 public partial class LocalDataService
 {
     /// <summary>
@@ -29,13 +44,17 @@ public partial class LocalDataService
     /// ahead of <c>built_version</c> the pass REBUILDS: it replaces every map row in one transaction and sets
     /// <c>built_version</c> to the version it built from, so a rule written meanwhile makes the next pass rebuild again.
     /// Otherwise it EXTENDS: it resolves only the keys whose sighting was last seen at or after
-    /// <paramref name="changedSince"/> (null = every key) and upserts or removes their map rows. Each server resolves at
-    /// most <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/> keys, the most recently seen first.
+    /// <paramref name="cursors"/> (per server; a missing server starts at the epoch) and upserts or removes their map rows.
+    /// Each server resolves at most <paramref name="keyCap"/> keys (default <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>),
+    /// oldest first, and its cursor moves on past the last key read. The method updates <paramref name="cursors"/> once the
+    /// pass has committed.
     /// A key that resolves to no tag has no map row (it reads as untagged). The write takes effect in this pass, never
     /// inside the rule or assignment write.
     /// </summary>
-    public async Task<QueryTagMapPass> BuildQueryTagMapAsync(DateTime? changedSince = null)
+    public async Task<QueryTagMapPass> BuildQueryTagMapAsync(
+        IDictionary<int, QueryTagMapCursor>? cursors = null, int keyCap = QueryTagLimits.MaxKeysPerServerPerPass)
     {
+        var clock = DateTime.UtcNow;
         using var connection = await OpenWriteConnectionAsync();
 
         long rulesVersion = 1;
@@ -52,14 +71,13 @@ public partial class LocalDataService
         }
 
         var rebuild = rulesVersion > builtVersion;
-        var since = rebuild ? null : changedSince;
 
         var tags = await ReadQueryTagsAsync(connection);
         var tagIds = tags.Select(t => (long)t.Id).ToHashSet();
         var names = new TagNameList(tags.Select(t => new KeyValuePair<string, long>(t.Name, t.Id)));
         var assignments = (await GetQueryTagAssignmentsAsync()).Select(ToHandAssignment).ToList();
         var rules = (await GetQueryTagRulesAsync()).Select(ToRule).ToList();
-        var sightings = await ReadQuerySightingsAsync(connection, since);
+        var (sightings, nextCursors) = await ReadQuerySightingsAsync(connection, cursors, keyCap, rebuild, clock);
 
         var resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
         var removed = new List<(int ServerId, string Kind, string Key)>();
@@ -131,44 +149,97 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
             throw;
         }
 
+        if (cursors is not null)
+        {
+            foreach (var (serverId, cursor) in nextCursors)
+            {
+                cursors[serverId] = cursor;
+            }
+        }
+
         return new QueryTagMapPass(rebuild, byKey.Count, resolved.Count);
     }
 
-    private static async Task<List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)>> ReadQuerySightingsAsync(
-        LockedConnection connection, DateTime? since)
+    /// <summary>
+    /// Reads the sightings of the keys a pass resolves, one server at a time. A rebuild reads every key. An extend reads up to
+    /// <paramref name="cap"/> keys per server, oldest first by (last_seen, key_kind, key), strictly after the server's cursor, and
+    /// returns the cursor for that server's next pass: the last key read when the page was full, otherwise the pass clock
+    /// minus <see cref="QueryTagMapCursor.Overlap"/>.
+    /// </summary>
+    private static async Task<(List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> Rows, Dictionary<int, QueryTagMapCursor> Next)>
+        ReadQuerySightingsAsync(LockedConnection connection, IDictionary<int, QueryTagMapCursor>? cursors, int cap, bool rebuild, DateTime clock)
     {
-        using var command = connection.CreateCommand();
-        /* Per server, the newest keys first, up to the shared cap. */
-        command.CommandText = @"
-SELECT server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample
-FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY last_seen DESC, key, application_name, login_name, host_name) AS rn
-    FROM query_tag_sightings
-    WHERE $1 IS NULL OR (server_id, key_kind, key) IN
-        (SELECT server_id, key_kind, key FROM query_tag_sightings WHERE last_seen >= $1)
-)
-WHERE rn <= $2";
-        command.Parameters.Add(new DuckDBParameter { Value = (object?)since ?? DBNull.Value });
-        command.Parameters.Add(new DuckDBParameter { Value = QueryTagLimits.MaxKeysPerServerPerPass });
-
-        var rows = new List<(int, QueryTagKeyKind, string, QueryTagSighting)>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        var serverIds = new List<int>();
+        using (var servers = connection.CreateCommand())
         {
-            string? Text(int i) => reader.IsDBNull(i) || reader.GetString(i).Length == 0 ? null : reader.GetString(i);
-            var serverId = reader.GetInt32(0);
-            var kind = reader.GetString(1) switch
+            servers.CommandText = "SELECT DISTINCT server_id FROM query_tag_sightings ORDER BY server_id";
+            using var serverReader = await servers.ExecuteReaderAsync();
+            while (await serverReader.ReadAsync())
             {
-                "hash" => QueryTagKeyKind.Hash,
-                "object" => QueryTagKeyKind.Object,
-                _ => QueryTagKeyKind.Caller,
-            };
-            var key = reader.GetString(2);
-            rows.Add((serverId, kind, key, new QueryTagSighting(
-                kind, key, Text(3), ParseObject(Text(4)), Text(5), Text(6), Text(7), Text(8))));
+                serverIds.Add(serverReader.GetInt32(0));
+            }
         }
 
-        return rows;
+        var rows = new List<(int, QueryTagKeyKind, string, QueryTagSighting)>();
+        var next = new Dictionary<int, QueryTagMapCursor>();
+        foreach (var serverId in serverIds)
+        {
+            var cursor = !rebuild && cursors is not null && cursors.TryGetValue(serverId, out var known) ? known : QueryTagMapCursor.Epoch;
+            var serverCap = rebuild ? int.MaxValue : cap;
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample, c.ls
+FROM query_tag_sightings s
+JOIN (
+    SELECT key_kind, key, ls FROM (
+        SELECT key_kind, key, MAX(last_seen) AS ls FROM query_tag_sightings WHERE server_id = $1 GROUP BY key_kind, key)
+    WHERE (ls, key_kind, key) > ($2, $3, $4)
+    ORDER BY ls, key_kind, key
+    LIMIT $5) c ON s.key_kind = c.key_kind AND s.key = c.key
+WHERE s.server_id = $1
+ORDER BY c.ls, c.key_kind, c.key, s.application_name, s.login_name, s.host_name";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = cursor.Since });
+            command.Parameters.Add(new DuckDBParameter { Value = cursor.AfterKind });
+            command.Parameters.Add(new DuckDBParameter { Value = cursor.AfterKey });
+            command.Parameters.Add(new DuckDBParameter { Value = serverCap });
+
+            var keys = 0;
+            string? lastKind = null;
+            string? lastKey = null;
+            var lastSeen = DateTime.MinValue;
+            using (var reader = await command.ExecuteReaderAsync())
+            {
+                while (await reader.ReadAsync())
+                {
+                    string? Text(int i) => reader.IsDBNull(i) || reader.GetString(i).Length == 0 ? null : reader.GetString(i);
+                    var kindText = reader.GetString(0);
+                    var kind = kindText switch
+                    {
+                        "hash" => QueryTagKeyKind.Hash,
+                        "object" => QueryTagKeyKind.Object,
+                        _ => QueryTagKeyKind.Caller,
+                    };
+                    var key = reader.GetString(1);
+                    if (kindText != lastKind || key != lastKey)
+                    {
+                        keys++;
+                        lastKind = kindText;
+                        lastKey = key;
+                        lastSeen = reader.GetDateTime(8);
+                    }
+
+                    rows.Add((serverId, kind, key, new QueryTagSighting(
+                        kind, key, Text(2), ParseObject(Text(3)), Text(4), Text(5), Text(6), Text(7))));
+                }
+            }
+
+            next[serverId] = !rebuild && keys >= cap
+                ? new QueryTagMapCursor(lastSeen, lastKind!, lastKey!)
+                : new QueryTagMapCursor(clock - QueryTagMapCursor.Overlap, string.Empty, string.Empty);
+        }
+
+        return (rows, next);
     }
 
     /// <summary>Splits <c>database.schema.name</c> (<see cref="QueryTagObject.Qualified"/>) back into an object. The name is

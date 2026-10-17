@@ -132,12 +132,9 @@ ON CONFLICT (server_id, key_kind, key, application_name, login_name, host_name) 
     {
         try
         {
-            var passStart = DateTime.UtcNow;
-            var changedSince = _queryTagMapWatermarkUtc;
-            var result = await new LocalDataService(_duckDb).BuildQueryTagMapAsync(changedSince);
-            /* Only a pass that finished moves the watermark. The margin covers a write that stamped its time just
-               before the pass read, and re-resolving a few keys twice does no harm. */
-            _queryTagMapWatermarkUtc = passStart - QueryTagMapWatermarkMargin;
+            /* The cursors live in memory, per server, and only a pass that committed moves them (the pass updates the
+               dictionary after its commit). A fresh process starts from the epoch. */
+            var result = await new LocalDataService(_duckDb).BuildQueryTagMapAsync(_queryTagMapCursors);
             if (result.KeysResolved > 0)
             {
                 AppLogger.Debug("QueryTags", $"Tag map {(result.Rebuilt ? "rebuilt" : "extended")}: {result.KeysResolved} keys resolved, {result.KeysTagged} tagged");
@@ -149,6 +146,5 @@ ON CONFLICT (server_id, key_kind, key, application_name, login_name, host_name) 
         }
     }
 
-    private DateTime? _queryTagMapWatermarkUtc;
-    private static readonly TimeSpan QueryTagMapWatermarkMargin = TimeSpan.FromMinutes(5);
+    private readonly Dictionary<int, QueryTagMapCursor> _queryTagMapCursors = new();
 }
