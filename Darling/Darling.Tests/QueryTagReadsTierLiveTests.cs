@@ -72,7 +72,7 @@ public sealed class QueryTagReadsTierLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The hourly tier needs TimescaleDB.");
+        Assert.SkipWhen(!await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "The hourly tier needs TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
         await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
