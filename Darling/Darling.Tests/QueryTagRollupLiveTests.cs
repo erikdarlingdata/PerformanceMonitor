@@ -347,6 +347,46 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>With a tag set, the fleet line is the sum of the servers' tagged totals: the untagged work and the other tags on every
+    /// server stay out of it, as they stay out of each server's own total (#5983).</summary>
+    [Fact]
+    public async Task UnderATagFilter_TheFleetTotal_IsTheSumOfTheServersTaggedTotals_NotEveryFact()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var a = await TagAsync(c, "A");
+            var b = await TagAsync(c, "B");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await MapAsync(c, ServerOne, "hash", "0xB1", b);
+            await MapAsync(c, ServerTwo, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 2_000_000);
+            await PlanCacheAsync(c, ServerOne, "0xB1", 30, 1_000_000);
+            await PlanCacheAsync(c, ServerOne, "0xU1", 30, 4_000_000);
+            await PlanCacheAsync(c, ServerTwo, "0xA1", 30, 3_000_000);
+            await PlanCacheAsync(c, ServerTwo, "0xU1", 30, 8_000_000);
+
+            await MapAsync(c, ServerOne, "caller", Caller("appA", "lg", "h", "db1"), a);
+            await MapAsync(c, ServerOne, "caller", Caller("appB", "lg", "h", "db1"), b);
+            await MapAsync(c, ServerTwo, "caller", Caller("appA", "lg", "h", "db1"), a);
+            await DeadlockAsync(c, ServerOne, "appA", "appB");
+            await DeadlockAsync(c, ServerTwo, "appA", "appA");
+            await DeadlockAsync(c, ServerTwo, "appU", "appU");
+
+            using var doc = await ReadAsync(c, null, tag: "A");
+            var plan = Section(doc, "plan_cache");
+            var servers = plan.GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal(2_000, Figure(servers["srv-one"].GetProperty("total"), "cpu_ms"));
+            Assert.Equal(3_000, Figure(servers["srv-two"].GetProperty("total"), "cpu_ms"));
+            Assert.False(servers["srv-one"].TryGetProperty("untagged", out _));
+            Assert.Equal(5_000, Figure(plan.GetProperty("fleet_total"), "cpu_ms"));
+            Assert.Equal(2, Figure(plan.GetProperty("fleet_total"), "executions"));
+
+            var deadlocks = Section(doc, "deadlocks");
+            Assert.Equal(2, Figure(deadlocks.GetProperty("fleet_total"), "deadlocks"));
+            Assert.Equal(3, Figure(deadlocks.GetProperty("fleet_total"), "processes"));
+        });
+    }
+
     [Fact]
     public async Task AWindowWithNoRows_AnswersEmpty()
     {
@@ -377,6 +417,75 @@ public sealed class QueryTagRollupLiveTests
             Assert.Contains("24-hour minimum", qs.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal("empty", Section(doc, "plan_cache").GetProperty("status").GetString());
             Assert.Equal("empty", Section(doc, "deadlocks").GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>Fleet ask, server one has no Query Store coverage row, server two is covered, and every section is quiet. The answer is empty
+    /// (not a bare status that drops the refusal): the sections ride along and the Query Store section names server one's refusal.</summary>
+    [Fact]
+    public async Task AFleetAskWhereOneServerIsRefusedByTheQueryStoreGate_AndEverySectionIsQuiet_AnswersEmptyWithTheRefusalNamed()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await CoverQueryStoreAsync(c, ServerTwo);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            Assert.True(doc.RootElement.TryGetProperty("sections", out _));
+            Assert.Contains("query_store", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            var qs = Section(doc, "query_store");
+            var message = qs.GetProperty("message").GetString();
+            Assert.Contains("srv-one", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("srv-two", message, StringComparison.Ordinal);
+            Assert.Contains("no coverage row", message, StringComparison.Ordinal);
+            var servers = qs.GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("unavailable", servers["srv-one"].GetProperty("status").GetString());
+            Assert.Equal("empty", servers["srv-two"].GetProperty("status").GetString());
+            Assert.Equal("empty", Section(doc, "plan_cache").GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>The Query Store gate and the read it authorizes share ONE repeatable-read snapshot (QueryStoreIntervalWide.ResolveReadAsync's
+    /// contract, as get_query_store_top). The read is held at its table lock after the gate has decided; a batch committed meanwhile must not
+    /// show in the read. A read through a fresh command (the old shape) takes its snapshot after the lock is released and counts it.</summary>
+    [Fact]
+    public async Task TheQueryStoreGateAndItsRead_ShareOneSnapshot_ABatchCommittedBetweenThemIsNotSeen()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var now = DateTime.UtcNow;
+            await CoverQueryStoreAsync(c, ServerOne);
+            await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
+
+            await using var holder = new NpgsqlConnection(c.Store.ConnectionString);
+            await holder.OpenAsync(c.Ct);
+            await ExecAsync(holder, "BEGIN", c.Ct);
+            /* The gate does not touch the tag map; the table read joins it, so the read waits here once the gate has decided. */
+            await ExecAsync(holder, "LOCK TABLE config.query_tag_map IN ACCESS EXCLUSIVE MODE", c.Ct);
+
+            var read = DarlingQueryTagRollupReader.ReadQueryStoreAsync(c.Source, [ServerOne], now.AddHours(-24), now, null, c.Ct);
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (true)
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%query_store_interval_wide AS q%'", c.Store);
+                if (Convert.ToInt32(await probe.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture) > 0)
+                {
+                    break;
+                }
+
+                Assert.False(read.IsCompleted, "the read finished before it waited on the table lock: the gate refused, or the read does not join the tag map");
+                Assert.True(DateTime.UtcNow < deadline, "the Query Store read never waited on the tag map lock");
+                await Task.Delay(50, c.Ct);
+            }
+
+            await QueryStoreAsync(c, ServerOne, "0xA1", 2, 4_000_000, 5);
+            await ExecAsync(holder, "COMMIT", c.Ct);
+
+            var result = await read;
+            Assert.True(result.Allowed.ContainsKey(ServerOne));
+            var executions = QueryTagRollupSection.QueryStore.Measures.ToList().FindIndex(m => m.Name == "executions");
+            Assert.Equal(7, result.Facts.Sum(f => f.Values[executions]));
         });
     }
 

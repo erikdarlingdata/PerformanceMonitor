@@ -127,19 +127,26 @@ internal static class DarlingQueryTagRollupReader
         return (plan, procedures);
     }
 
+    /// <summary>What <see cref="ReadQueryStoreAsync"/> decided and read: the servers the gate allowed with the start the table provably holds
+    /// for them, the servers it refused with why, the facts read for the allowed ones, and whether the interval table itself was missing.</summary>
+    internal readonly record struct QueryStoreRead(
+        Dictionary<int, DateTime> Allowed, Dictionary<int, string> Refused, List<QueryTagRollupFact> Facts, bool TableMissing);
+
     /// <summary>
-    /// The Query Store gate, per server: the interval table is read only where the same gate every other reader of it applies lets it be
-    /// (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>, then <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>: coverage exists,
-    /// no pending batch, the window is long enough). There is no raw fallback and that is deliberate: raw <c>query_store_stats</c> re-collects
-    /// an open interval every pass, so summing raw counts one interval many times; <c>get_query_store_top</c> dedupes raw, a roll-up that
-    /// sums cannot. A server the gate refuses is reported <c>unavailable</c> with the reason, never <c>empty</c> (#3553). Servers the gate
-    /// allows come back with the start the table provably holds for them.
+    /// The Query Store gate and the read it authorizes, per server: the interval table is read only where the same gate every other reader of
+    /// it applies lets it be (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>, then <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>:
+    /// coverage exists, no pending batch, the window is long enough). The gate's decision and the read share ONE connection in ONE read-only
+    /// REPEATABLE READ transaction, as <c>get_query_store_top</c> does (<see cref="QueryStoreIntervalWide.ResolveReadAsync"/>'s contract): a compose
+    /// pass that applies a batch between the decision and the read cannot be half-seen. There is no raw fallback and that is deliberate: raw
+    /// <c>query_store_stats</c> re-collects an open interval every pass, so summing raw counts one interval many times; <c>get_query_store_top</c>
+    /// dedupes raw, a roll-up that sums cannot. A server the gate refuses is reported <c>unavailable</c> with the reason, never <c>empty</c> (#3553).
     /// </summary>
-    internal static async Task<(Dictionary<int, DateTime> ReadStart, Dictionary<int, string> Refused)> ResolveQueryStoreGateAsync(
+    internal static async Task<QueryStoreRead> ReadQueryStoreAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime windowStart, DateTime windowEnd, ILogger? logger, CancellationToken cancellationToken)
     {
         var allowed = new Dictionary<int, DateTime>();
         var refused = new Dictionary<int, string>();
+        var facts = new List<QueryTagRollupFact>();
         if (!DarlingDataReader.QueryStoreTopMayReadTable(windowStart, windowEnd))
         {
             var why = $"the window is under the {DarlingDataReader.QueryStoreTopMinWindow.TotalHours:0}-hour minimum the Query Store interval table is read for (ask for hours_back of {DarlingDataReader.QueryStoreTopMinWindow.TotalHours:0} or more)";
@@ -148,33 +155,53 @@ internal static class DarlingQueryTagRollupReader
                 refused[serverId] = why;
             }
 
-            return (allowed, refused);
+            return new QueryStoreRead(allowed, refused, facts, false);
         }
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        await using (var readOnly = new NpgsqlCommand(DarlingDataReader.SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+        {
+            await readOnly.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         foreach (var serverId in serverIds)
         {
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, windowStart, windowEnd, windowEnd, DarlingDataReader.QueryStoreTopMinWindow,
                 McpCommandDeadlines.ReadSeconds, logger, cancellationToken);
-            if (plan.UseTable)
-            {
-                allowed[serverId] = plan.ReadStart;
-            }
-            else
+            if (!plan.UseTable)
             {
                 refused[serverId] = plan.DecisionFailed
                     ? "the interval table's coverage could not be decided just now"
                     : "the interval table does not provably hold this window for the server yet (no coverage row, a pending batch, or the window ends before the composed range)";
+                continue;
+            }
+
+            allowed[serverId] = plan.ReadStart;
+            try
+            {
+                await using var command = Command(connection, QueryTagRollupSql.QueryStoreSql, [serverId], plan.ReadStart, windowEnd);
+                facts.AddRange(await ReadFactsFromAsync(command, QueryTagRollupSection.QueryStore, cancellationToken));
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            {
+                /* The failed statement aborted the transaction: nothing more can be read on it. */
+                return new QueryStoreRead(allowed, refused, [], true);
             }
         }
 
-        return (allowed, refused);
+        return new QueryStoreRead(allowed, refused, facts, false);
     }
 
     private static NpgsqlCommand Command(NpgsqlDataSource postgres, string sql, int[] serverIds, DateTime startUtc, DateTime endUtc)
+        => WithWindow(postgres.CreateCommand(sql), serverIds, startUtc, endUtc);
+
+    private static NpgsqlCommand Command(NpgsqlConnection connection, string sql, int[] serverIds, DateTime startUtc, DateTime endUtc)
+        => WithWindow(new NpgsqlCommand(sql, connection), serverIds, startUtc, endUtc);
+
+    private static NpgsqlCommand WithWindow(NpgsqlCommand command, int[] serverIds, DateTime startUtc, DateTime endUtc)
     {
-        var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
@@ -205,13 +232,19 @@ internal static class DarlingQueryTagRollupReader
         DateTime? ceiling, CancellationToken cancellationToken)
     {
         var text = sql.Replace(QueryTagRollupSql.CeilingPlaceholder, ceiling is null ? string.Empty : QueryTagRollupSql.CeilingClause, StringComparison.Ordinal);
-        var facts = new List<QueryTagRollupFact>();
         await using var command = Command(postgres, text, serverIds, startUtc, endUtc);
         if (ceiling is not null && sql.Contains(QueryTagRollupSql.CeilingPlaceholder, StringComparison.Ordinal))
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(ceiling.Value, DateTimeKind.Unspecified) });
         }
 
+        return await ReadFactsFromAsync(command, section, cancellationToken);
+    }
+
+    /// <summary>Reads the grouped statement's rows from a prepared command, on whatever connection (and transaction) it carries.</summary>
+    private static async Task<List<QueryTagRollupFact>> ReadFactsFromAsync(NpgsqlCommand command, QueryTagRollupSection section, CancellationToken cancellationToken)
+    {
+        var facts = new List<QueryTagRollupFact>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         /* The measure columns are aliased with the section's measure names in every statement, and read by name: the statement's column
            order and QueryTagRollupSection.Measures are no longer two copies of one ordering. */
@@ -523,19 +556,54 @@ internal static class DarlingQueryTagRollupReader
         return result;
     }
 
-    /// <summary>The totals across a fleet's facts, for the fleet line of a section.</summary>
-    internal static Dictionary<string, object> FleetTotal(QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts)
+    /// <summary>
+    /// The totals across a fleet's facts, for the fleet line of a section. It is the sum of the per-server totals (<see cref="Assemble"/>), so
+    /// under a <paramref name="tagFilter"/> it is the tag's subtree on every server (untagged work and other tags left out), exactly as each
+    /// server's own <c>total</c> is (#5983).
+    /// </summary>
+    internal static Dictionary<string, object> FleetTotal(
+        QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts, IReadOnlyList<QueryTagNode> tags, int? tagFilter)
     {
+        var byId = tags.ToDictionary(t => t.Id);
         var total = new double[section.Measures.Count];
         foreach (var fact in facts)
         {
+            if (tagFilter is int filter && !(fact.TagId is int tagId && byId.ContainsKey(tagId) && IsUnder(tagId, filter, byId)))
+            {
+                continue;
+            }
+
             total = Combine(total, fact.Values, section);
         }
 
         return Figures(total, section);
     }
 
-    /// <summary>The fleet line of the deadlock section: graphs and processes across the servers.</summary>
-    internal static Dictionary<string, object> FleetDeadlockTotal(IReadOnlyList<QueryTagDeadlockFact> facts) =>
-        Figures([facts.Count, facts.Sum(f => (double)(f.ProcessesByTag.Values.Sum() + f.UntaggedProcesses))], QueryTagRollupSection.Deadlocks);
+    /// <summary>
+    /// The fleet line of the deadlock section: graphs and processes across the servers. Under a <paramref name="tagFilter"/> a graph counts
+    /// where one of its processes carries the tag or a tag under it, and its processes are those under the tag, as each server's total does.
+    /// </summary>
+    internal static Dictionary<string, object> FleetDeadlockTotal(
+        IReadOnlyList<QueryTagDeadlockFact> facts, IReadOnlyList<QueryTagNode> tags, int? tagFilter)
+    {
+        if (tagFilter is not int filter)
+        {
+            return Figures([facts.Count, facts.Sum(f => (double)(f.ProcessesByTag.Values.Sum() + f.UntaggedProcesses))], QueryTagRollupSection.Deadlocks);
+        }
+
+        var byId = tags.ToDictionary(t => t.Id);
+        double graphs = 0;
+        double processes = 0;
+        foreach (var fact in facts)
+        {
+            var under = fact.ProcessesByTag.Where(p => byId.ContainsKey(p.Key) && IsUnder(p.Key, filter, byId)).Sum(p => (double)p.Value);
+            if (under > 0)
+            {
+                graphs += 1;
+                processes += under;
+            }
+        }
+
+        return Figures([graphs, processes], QueryTagRollupSection.Deadlocks);
+    }
 }

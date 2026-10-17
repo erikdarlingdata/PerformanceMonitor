@@ -38,7 +38,7 @@ public sealed class DarlingMcpQueryTagRollupTools
     internal const int DefaultLimit = 25;
     private const int MaxLimit = 200;
 
-    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet or, for query_store, that the window is under the 24-hour minimum its interval table is read for (ask for hours_back 24 or more). The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
+    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet or, for query_store, one of three things: its table is missing, the window is under the 24-hour minimum its interval table is read for (ask for hours_back 24 or more), or the interval table's gate refused a server (no coverage row, a pending batch, or a failed decision; the section names that server). The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
     public static Task<string> GetResourceUseByTag(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit for the whole fleet.")] string? server_name = null,
@@ -138,22 +138,17 @@ public sealed class DarlingMcpQueryTagRollupTools
             /* Query Store reads the composed interval table only, and only where the gate every other reader of it applies lets it. There is
                no raw fallback: raw query_store_stats re-collects an open interval every pass, so summing raw counts one interval many times
                (get_query_store_top dedupes raw; a roll-up that sums cannot). A server the gate refuses is "unavailable" with the reason, not
-               "empty" (#3553): its Query Store work may be sitting in raw. */
+               "empty" (#3553): its Query Store work may be sitting in raw. The gate and the read share one snapshot (the reader). A section that
+               ANY server refuses is not fully served, so it is named in notServed even when other servers were read (a fleet answer of
+               "empty" must not hide the refusal). */
             {
-                var (allowed, refused) = await DarlingQueryTagRollupReader.ResolveQueryStoreGateAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
-                var facts = new List<QueryTagRollupFact>();
-                var unavailable = false;
-                try
+                var read = await DarlingQueryTagRollupReader.ReadQueryStoreAsync(postgres, serverIds, windowStart, windowEnd, logger, cancellationToken);
+                var allowed = read.Allowed;
+                var refused = read.Refused;
+                var facts = read.Facts;
+                var unavailable = read.TableMissing;
+                if (unavailable)
                 {
-                    foreach (var (serverId, readStart) in allowed)
-                    {
-                        facts.AddRange(await DarlingQueryTagRollupReader.ReadFactsAsync(
-                            postgres, QueryTagRollupSql.QueryStoreSql, QueryTagRollupSection.QueryStore, [serverId], readStart, windowEnd, null, cancellationToken));
-                    }
-                }
-                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
-                {
-                    unavailable = true;
                     facts.Clear();
                 }
 
@@ -166,20 +161,33 @@ public sealed class DarlingMcpQueryTagRollupTools
                 }
 
                 anyData |= facts.Count > 0;
+                var refusalNote = refused.Count == 0
+                    ? null
+                    : "Query Store is read from the composed interval table only, and it is not readable for " + string.Join("; ",
+                        refused.OrderBy(r => r.Key).Select(r => $"{names[r.Key]} ({r.Value})")) + ".";
                 if (unavailable || allowed.Count == 0)
                 {
                     var reason = unavailable
                         ? "collect.query_store_interval_wide does not exist in this store yet."
-                        : "Query Store is read from the composed interval table only, and it is not readable here: " + refused.Values.First() + ".";
+                        : fleet
+                            ? refusalNote!
+                            : "Query Store is read from the composed interval table only, and it is not readable here: " + refused.Values.First() + ".";
                     notServed.Add((QueryTagRollupSection.QueryStore.Name, reason));
                     sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
                         [], "unavailable", reason, refused), reach));
                 }
                 else
                 {
-                    var refusedNote = refused.Count == 0 ? null : "Some servers are unavailable: the interval table does not hold the window for them yet.";
+                    if (refusalNote is not null)
+                    {
+                        notServed.Add((QueryTagRollupSection.QueryStore.Name, refusalNote));
+                    }
+
+                    var message = facts.Count == 0
+                        ? (refusalNote is null ? "No rows in the window." : "No rows in the window for the servers that were read. " + refusalNote)
+                        : refusalNote;
                     sections.Add(Merge(Wrap(QueryTagRollupSection.QueryStore, "collect.query_store_interval_wide", fleet, scope, names, tags, tagFilter, limit,
-                        facts, facts.Count == 0 ? "empty" : "ok", facts.Count == 0 ? "No rows in the window." : refusedNote, refused), reach));
+                        facts, facts.Count == 0 ? "empty" : "ok", message, refused), reach));
                 }
             }
 
@@ -322,7 +330,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             ["status"] = status,
             ["message"] = message,
             ["servers"] = servers,
-            ["fleet_total"] = DarlingQueryTagRollupReader.FleetTotal(section, facts),
+            ["fleet_total"] = DarlingQueryTagRollupReader.FleetTotal(section, facts, tags, tagFilter),
         };
     }
 
@@ -371,7 +379,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             ["rows_add_up_to_total"] = false,
             ["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.",
             ["servers"] = servers,
-            ["fleet_total"] = DarlingQueryTagRollupReader.FleetDeadlockTotal(facts),
+            ["fleet_total"] = DarlingQueryTagRollupReader.FleetDeadlockTotal(facts, tags, tagFilter),
         };
     }
 }
