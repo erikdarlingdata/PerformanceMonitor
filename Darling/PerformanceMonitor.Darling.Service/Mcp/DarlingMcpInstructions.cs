@@ -125,7 +125,7 @@ internal static class DarlingMcpInstructions
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
         var families = adminServed
-            ? "Custom Views, custom-alert-rule, alert-tuning, server/query-tag, onboarding and investigation-wait and investigation-evidence tools"
+            ? "Custom Views, custom-alert-rule, alert-tuning, server/query-tag, onboarding and investigation-wait tools"
             : writesServed
                 ? "Custom Views, custom-alert-rule, alert-tuning, server/query-tag and investigation-wait tools"
                 : "the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool";
