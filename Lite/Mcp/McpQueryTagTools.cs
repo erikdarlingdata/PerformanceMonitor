@@ -1,0 +1,128 @@
+using System.ComponentModel;
+using System.Globalization;
+using System.Text.Json;
+using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Services;
+
+#pragma warning disable CA1707 // MCP tools use snake_case naming convention
+
+namespace PerformanceMonitorLite.Mcp;
+
+/// <summary>
+/// <c>get_resource_use_by_tag</c> (#5992): who is using what, rolled up by query tag. The Lite twin of Darling's tool (#5983), with the
+/// same name, parameters, sections and output shape. A STORED read over the materialised tag map (<c>query_tag_map</c>): nothing
+/// evaluates a rule at read time. Thin over <see cref="LocalDataService.GetQueryTagRollupDataAsync"/> and <see cref="QueryTagRollup"/>,
+/// the readers the Lite UI (#5993) calls too. Omit server_name for the all-servers view.
+/// </summary>
+[McpServerToolType]
+public sealed class McpQueryTagTools
+{
+    private const int DefaultLimit = 25;
+    private const int MaxLimit = 200;
+
+    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for all servers. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. The all-servers answer lists each server and gives fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window.")]
+    public static async Task<string> GetResourceUseByTag(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name. Omit for all servers.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("A tag name or id: shows only that tag's subtree (the tag and its children), with no untagged row.")] string? tag = null,
+        [Description("Maximum tag rows per section (per server in the all-servers view). Default 25. Read truncated to know whether a section held more.")] int limit = DefaultLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var windowError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        if (windowError != null) return windowError;
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return limitError;
+        if (limit > MaxLimit)
+        {
+            return McpHelpers.Refusal("limit", $"limit must be at most {MaxLimit}.");
+        }
+
+        try
+        {
+            var allServers = string.IsNullOrWhiteSpace(server_name);
+            List<(int Id, string Name)> scope;
+            if (allServers)
+            {
+                scope = serverManager.GetEnabledServers()
+                    .Select(s => (RemoteCollectorService.GetServerId(s), RemoteCollectorService.GetServerNameForStorage(s))).ToList();
+                if (scope.Count == 0)
+                {
+                    return McpHelpers.Status("empty", "No servers are registered, so there is no resource use to roll up.");
+                }
+            }
+            else
+            {
+                var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+                if (error != null) return error;
+                scope = [(resolved.ServerId, resolved.ServerName)];
+            }
+
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var data = await dataService.GetQueryTagRollupDataAsync(scope.Select(s => s.Id).ToList(), windowStart, windowEnd);
+
+            int? tagFilter = null;
+            if (!string.IsNullOrWhiteSpace(tag))
+            {
+                var (found, problem) = ResolveTag(data.Tags, tag.Trim());
+                if (problem != null) return McpHelpers.Refusal("tag", problem);
+                tagFilter = found;
+            }
+
+            var sections = new List<object>();
+            var anyData = data.Deadlocks.Count > 0;
+            foreach (var section in new[]
+            {
+                QueryTagRollupSection.PlanCache, QueryTagRollupSection.QueryStore, QueryTagRollupSection.Procedures,
+                QueryTagRollupSection.BlockingReports, QueryTagRollupSection.BlockingSnapshots,
+            })
+            {
+                var facts = data.Sections[section.Name];
+                anyData |= facts.Count > 0;
+                sections.Add(QueryTagRollup.Section(section, facts, scope, allServers, data.Tags, tagFilter, limit));
+            }
+
+            sections.Add(QueryTagRollup.DeadlockSection(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated));
+
+            if (!anyData)
+            {
+                return McpHelpers.Status("empty", "No resource use was collected in the window" + (allServers ? " on any server." : " on this server."));
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                scope = allServers ? "all_servers" : "server",
+                server = allServers ? null : scope[0].Name,
+                hours_back,
+                window_start = windowStart.ToString("o", CultureInfo.InvariantCulture),
+                window_end = windowEnd.ToString("o", CultureInfo.InvariantCulture),
+                tag = tagFilter is int id ? data.Tags.First(t => t.Id == id).Name : null,
+                sections_additive = false,
+                note = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.",
+                sections,
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_resource_use_by_tag", ex);
+        }
+    }
+
+    private static (int? Id, string? Problem) ResolveTag(IReadOnlyList<QueryTagRow> tags, string text)
+    {
+        if (int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && tags.Any(t => t.Id == id))
+        {
+            return (id, null);
+        }
+
+        var matches = tags.Where(t => string.Equals(t.Name, text, StringComparison.OrdinalIgnoreCase)).ToList();
+        return matches.Count switch
+        {
+            1 => (matches[0].Id, null),
+            0 => (null, $"No query tag is named or numbered '{text}'."),
+            _ => (null, $"{matches.Count} query tags are named '{text}'; pass the tag id instead ({string.Join(", ", matches.Select(m => m.Id))})."),
+        };
+    }
+}

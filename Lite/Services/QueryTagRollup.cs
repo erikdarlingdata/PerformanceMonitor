@@ -1,0 +1,287 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace PerformanceMonitorLite.Services;
+
+/// <summary>
+/// The shaping half of the Lite resource-use-by-tag roll-up (#5992): grouped facts in, tag rows (own and subtree figure), an
+/// <c>untagged</c> row and a section total out. Pure, so the tree maths is the same for every section, for one server and for the
+/// all-servers view, and the Lite UI (#5993) can call it. The output keys match Darling's reader (#5983). Sections are never
+/// added together: each is assembled from its own source's facts only.
+/// </summary>
+public static class QueryTagRollup
+{
+    /// <summary>The caller key of one process or blocking side, as the sighting hook builds it: application, login, host, database joined by U+001F.</summary>
+    public static string CallerKey(string? application, string? login, string? host, string? database) =>
+        (application ?? string.Empty) + '\u001F' + (login ?? string.Empty) + '\u001F' + (host ?? string.Empty) + '\u001F' + (database ?? string.Empty);
+
+    public static double[] Combine(double[] a, double[] b, QueryTagRollupSection section)
+    {
+        var result = new double[a.Length];
+        for (var i = 0; i < a.Length; i++)
+        {
+            result[i] = section.Measures[i].Peak ? Math.Max(a[i], b[i]) : a[i] + b[i];
+        }
+
+        return result;
+    }
+
+    private static IEnumerable<int> SelfAndAncestors(int tagId, Dictionary<int, QueryTagRow> byId)
+    {
+        var current = (int?)tagId;
+        var guard = 0;
+        while (current is int id && byId.TryGetValue(id, out var node) && guard++ < 64)
+        {
+            yield return id;
+            current = node.ParentId;
+        }
+    }
+
+    private static string PathOf(int tagId, Dictionary<int, QueryTagRow> byId) =>
+        string.Join(" > ", SelfAndAncestors(tagId, byId).Reverse().Select(id => byId[id].Name));
+
+    private static Dictionary<string, object> Figures(double[] values, QueryTagRollupSection section)
+    {
+        var map = new Dictionary<string, object>();
+        for (var i = 0; i < section.Measures.Count; i++)
+        {
+            map[section.Measures[i].Name] = Math.Round(values[i] / section.Measures[i].Scale, 3);
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Shapes one additive section for one scope. Within the section the tag rows' own figures plus <c>untagged</c> add up to
+    /// <c>total</c> (the map holds one tag per key). With <paramref name="tagFilter"/> the rows hold only that tag's subtree, there is
+    /// no <c>untagged</c> row, and <c>total</c> is the filtered tag's subtree figure.
+    /// </summary>
+    public static Dictionary<string, object?> Assemble(
+        QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts, IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit)
+    {
+        var zero = new double[section.Measures.Count];
+        var byId = tags.ToDictionary(t => t.Id);
+        var own = new Dictionary<int, double[]>();
+        var subtree = new Dictionary<int, double[]>();
+        var untagged = zero;
+        var total = zero;
+        foreach (var fact in facts)
+        {
+            total = Combine(total, fact.Values, section);
+            if (fact.TagId is not int tagId || !byId.ContainsKey(tagId))
+            {
+                untagged = Combine(untagged, fact.Values, section);
+                continue;
+            }
+
+            own[tagId] = Combine(own.GetValueOrDefault(tagId) ?? zero, fact.Values, section);
+            foreach (var ancestor in SelfAndAncestors(tagId, byId))
+            {
+                subtree[ancestor] = Combine(subtree.GetValueOrDefault(ancestor) ?? zero, fact.Values, section);
+            }
+        }
+
+        return Shape(section, own, subtree, untagged, total, tags, tagFilter, limit);
+    }
+
+    /// <summary>
+    /// The deadlock section. A deadlock counts once for each tag among its processes (and once as untagged when a process has none),
+    /// so the rows do not add up to <c>total</c>; the output says so. A subtree figure counts a graph once however many processes sit under the tag.
+    /// </summary>
+    public static Dictionary<string, object?> AssembleDeadlocks(
+        IReadOnlyList<QueryTagDeadlockFact> facts, IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit)
+    {
+        var section = QueryTagRollupSection.Deadlocks;
+        var byId = tags.ToDictionary(t => t.Id);
+        var own = new Dictionary<int, double[]>();
+        var subtree = new Dictionary<int, double[]>();
+        var untagged = new double[2];
+        var total = new double[2];
+        foreach (var fact in facts)
+        {
+            total[0] += 1;
+            total[1] += fact.ProcessesByTag.Values.Sum() + fact.UntaggedProcesses;
+            if (fact.UntaggedProcesses > 0)
+            {
+                untagged[0] += 1;
+                untagged[1] += fact.UntaggedProcesses;
+            }
+
+            var reached = new HashSet<int>();
+            foreach (var (tagId, count) in fact.ProcessesByTag)
+            {
+                if (!byId.ContainsKey(tagId))
+                {
+                    continue;
+                }
+
+                own.TryAdd(tagId, new double[2]);
+                own[tagId][0] += 1;
+                own[tagId][1] += count;
+                foreach (var ancestor in SelfAndAncestors(tagId, byId))
+                {
+                    subtree.TryAdd(ancestor, new double[2]);
+                    subtree[ancestor][1] += count;
+                    if (reached.Add(ancestor))
+                    {
+                        subtree[ancestor][0] += 1;
+                    }
+                }
+            }
+        }
+
+        var shaped = Shape(section, own, subtree, untagged, total, tags, tagFilter, limit);
+        shaped["rows_add_up_to_total"] = false;
+        shaped["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.";
+        return shaped;
+    }
+
+    private static Dictionary<string, object?> Shape(
+        QueryTagRollupSection section, Dictionary<int, double[]> own, Dictionary<int, double[]> subtree,
+        double[] untagged, double[] total, IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit)
+    {
+        var byId = tags.ToDictionary(t => t.Id);
+        var orderIndex = section.Measures.ToList().FindIndex(m => m.Name == section.OrderMeasure);
+        var candidates = subtree.Keys
+            .Where(id => tagFilter is not int filter || SelfAndAncestors(id, byId).Contains(filter))
+            .OrderByDescending(id => subtree[id][orderIndex])
+            .ThenBy(id => byId[id].Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(id => id)
+            .ToList();
+        var page = candidates.Take(limit).Select(id => new Dictionary<string, object?>
+        {
+            ["tag_id"] = id,
+            ["tag"] = byId[id].Name,
+            ["path"] = PathOf(id, byId),
+            ["parent_id"] = byId[id].ParentId,
+            ["own"] = Figures(own.GetValueOrDefault(id) ?? new double[section.Measures.Count], section),
+            ["subtree"] = Figures(subtree[id], section),
+        }).ToList();
+
+        var result = new Dictionary<string, object?>
+        {
+            ["section"] = section.Name,
+            ["status"] = "ok",
+            ["order"] = section.OrderMeasure + "_desc",
+            ["tag_rows"] = page,
+            ["tag_rows_total"] = candidates.Count,
+            ["truncated"] = candidates.Count > limit,
+        };
+        if (tagFilter is int tagId)
+        {
+            result["total_scope"] = "tag_subtree";
+            result["total"] = Figures(subtree.GetValueOrDefault(tagId) ?? new double[section.Measures.Count], section);
+        }
+        else
+        {
+            result["untagged"] = Figures(untagged, section);
+            result["total"] = Figures(total, section);
+        }
+
+        return result;
+    }
+
+    /// <summary>A section with no rows in the window: all figures zero, status <c>empty</c>.</summary>
+    public static Dictionary<string, object?> Empty(QueryTagRollupSection section, string message)
+    {
+        var zeros = Figures(new double[section.Measures.Count], section);
+        return new Dictionary<string, object?>
+        {
+            ["section"] = section.Name,
+            ["status"] = "empty",
+            ["message"] = message,
+            ["tag_rows"] = new List<object>(),
+            ["tag_rows_total"] = 0,
+            ["truncated"] = false,
+            ["untagged"] = zeros,
+            ["total"] = zeros,
+        };
+    }
+
+    /// <summary>The totals across all of a section's facts, for the fleet line.</summary>
+    public static Dictionary<string, object> FleetTotal(QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts)
+    {
+        var total = new double[section.Measures.Count];
+        foreach (var fact in facts)
+        {
+            total = Combine(total, fact.Values, section);
+        }
+
+        return Figures(total, section);
+    }
+
+    public static Dictionary<string, object> FleetDeadlockTotal(IReadOnlyList<QueryTagDeadlockFact> facts) =>
+        Figures([facts.Count, facts.Sum(f => (double)(f.ProcessesByTag.Values.Sum() + f.UntaggedProcesses))], QueryTagRollupSection.Deadlocks);
+
+    /// <summary>One section for one server's facts, or for the all-servers view (a block per server and a <c>fleet_total</c>).</summary>
+    public static Dictionary<string, object?> Section(
+        QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts, IReadOnlyList<(int Id, string Name)> scope,
+        bool allServers, IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit)
+    {
+        Dictionary<string, object?> One(IReadOnlyList<QueryTagRollupFact> mine) => mine.Count == 0
+            ? Empty(section, "No rows in the window.")
+            : Assemble(section, mine, tags, tagFilter, limit);
+
+        if (!allServers)
+        {
+            return One(facts.ToList());
+        }
+
+        var servers = scope.Select(s =>
+        {
+            var block = One(facts.Where(f => f.ServerId == s.Id).ToList());
+            block["server"] = s.Name;
+            return (object)block;
+        }).ToList();
+        return new Dictionary<string, object?>
+        {
+            ["section"] = section.Name,
+            ["status"] = facts.Count == 0 ? "empty" : "ok",
+            ["servers"] = servers,
+            ["fleet_total"] = FleetTotal(section, facts),
+        };
+    }
+
+    /// <summary>The deadlock section for one server or the all-servers view.</summary>
+    public static Dictionary<string, object?> DeadlockSection(
+        IReadOnlyList<QueryTagDeadlockFact> facts, IReadOnlyList<(int Id, string Name)> scope, bool allServers,
+        IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit, bool scanTruncated)
+    {
+        Dictionary<string, object?> One(IReadOnlyList<QueryTagDeadlockFact> mine) => mine.Count == 0
+            ? Empty(QueryTagRollupSection.Deadlocks, "No deadlock graphs in the window.")
+            : AssembleDeadlocks(mine, tags, tagFilter, limit);
+
+        if (!allServers)
+        {
+            var block = One(facts.ToList());
+            block["scan_truncated"] = scanTruncated;
+            return block;
+        }
+
+        var servers = scope.Select(s =>
+        {
+            var block = One(facts.Where(f => f.ServerId == s.Id).ToList());
+            block["server"] = s.Name;
+            return (object)block;
+        }).ToList();
+        return new Dictionary<string, object?>
+        {
+            ["section"] = QueryTagRollupSection.Deadlocks.Name,
+            ["status"] = facts.Count == 0 ? "empty" : "ok",
+            ["scan_truncated"] = scanTruncated,
+            ["rows_add_up_to_total"] = false,
+            ["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.",
+            ["servers"] = servers,
+            ["fleet_total"] = FleetDeadlockTotal(facts),
+        };
+    }
+}
