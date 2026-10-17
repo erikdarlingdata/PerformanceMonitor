@@ -49,6 +49,7 @@ public sealed class LiteQueryTagRollupStatusTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch (IOException) { /* best-effort cleanup */ }
         catch (UnauthorizedAccessException) { /* best-effort cleanup */ }
