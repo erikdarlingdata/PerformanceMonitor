@@ -108,6 +108,8 @@ public sealed class DarlingWebhookReceiver
     /// <summary>True when the post is from Darling, is fresh, and was not seen before.</summary>
     public bool Verify(string id, string timestamp, string signatureHeader, byte[] body, DateTime nowUtc)
     {
+        if (string.IsNullOrEmpty(id) || signatureHeader is null) return false;
+
         if (!long.TryParse(timestamp, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
             || seconds > 253402300799)
         {

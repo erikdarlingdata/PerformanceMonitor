@@ -42,14 +42,18 @@ UPDATE config_notification SET
     signing_key = $1
 WHERE id = 1 AND generic_url = $2 AND generic_proxy = $3";
 
-    /// <summary>The route form of <see cref="SettingsSigningKeyWriteSql"/>; $5 is the route id, $3 the settings row's generic proxy.</summary>
+    /// <summary>The route form of <see cref="SettingsSigningKeyWriteSql"/>; $5 is the route id, $3 the settings row's generic proxy.
+    /// The proxy subquery takes FOR SHARE on the settings row (#5998), so this waits for a Settings save that holds that row and then
+    /// reads the proxy the save committed. A plain subquery read its pre-commit snapshot and let a key sealed for the old proxy land
+    /// on a keyless route, which the save's own route locks (only routes that already hold a key) do not cover. Both paths take the
+    /// settings row before any route row.</summary>
     public const string RouteSigningKeyWriteSql = @"
 UPDATE config_notification_routes SET
     previous_signing_key = signing_key,
     previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => $4) END,
     signing_key = $1
 WHERE route_id = $5 AND generic_url = $2
-  AND COALESCE((SELECT n.generic_proxy FROM config_notification n WHERE n.id = 1), '') = $3";
+  AND COALESCE((SELECT n.generic_proxy FROM config_notification n WHERE n.id = 1 FOR SHARE), '') = $3";
 
     public const string SettingsSigningKeyClearSql =
         "UPDATE config_notification SET signing_key = '', previous_signing_key = '', previous_signing_key_until = NULL WHERE id = 1";

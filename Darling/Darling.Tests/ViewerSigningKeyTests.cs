@@ -450,6 +450,68 @@ public sealed class ViewerSigningKeyLiveTests
     }
 
     [Fact]
+    public async Task ASettingsSaveThatChangesTheProxy_BlocksARouteGenerate_SoNoKeySealedForTheOldProxyIsStored()
+    {
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live signing key checks.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var private_ = PasswordPrivateKey.Generate();
+        var bodySucceeded = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            await using var other = new ViewerDataService(scratch.ConnectionString);
+            var sealer = new ViewerPasswordSealer(private_.PublicKey);
+            var first = NotificationRow.Defaults();
+            first.GenericUrl = Url;
+            first.GenericProxy = "http://proxy-one:8080";
+            ViewerWebhookSealing.ResolveSettingsRow(first, null, sealer, null);
+            await viewer.UpsertNotificationAsync(first, ct);
+
+            /* A route with no key yet: the save's own locks cover only routes that already hold one, so they do not cover this route. */
+            var routeId = await viewer.SaveNotificationRouteSealedAsync(
+                new NotificationRouteRow { MetricMatch = "High CPU", GenericUrl = Url }, null, first, sealer, null, ct);
+
+            /* A save that moves the generic proxy. Inside its check-then-write window (the callback runs after the save has read and
+               locked the settings row and before it writes) another viewer generates the route's first key. The route write checks
+               the proxy under FOR SHARE on the settings row, so it waits for the save, then sees the new proxy and is refused. With
+               a plain subquery it would read the old proxy, finish inside the window, and store a key sealed for the old proxy. */
+            var second = NotificationRow.Defaults();
+            second.GenericUrl = Url;
+            second.GenericProxy = "http://proxy-two:8080";
+            ViewerWebhookSealing.ResolveSettingsRow(second, null, sealer, null);
+            Task<string>? generate = null;
+            var finishedInsideTheWindow = false;
+            await viewer.UpsertNotificationCheckingSigningKeysAsync(second, (state, ids) =>
+            {
+                generate = Task.Run(() => other.GenerateRouteSigningKeyAsync(routeId, sealer, ct), ct);
+                finishedInsideTheWindow = Task.WhenAny(generate, Task.Delay(TimeSpan.FromSeconds(2), ct)).GetAwaiter().GetResult() == generate;
+                return null;
+            }, ct);
+
+            Assert.False(finishedInsideTheWindow);
+            await Assert.ThrowsAsync<ViewerPasswordRefusedException>(() => generate!);
+            Assert.False((await viewer.GetRouteSigningKeyStateAsync(routeId, ct))!.HasKey);
+            Assert.Equal("http://proxy-two:8080", (await viewer.GetSettingsSigningKeyStateAsync(ct))!.Proxy);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task TheConfigRead_CarriesTheDatabaseClockOffset_OnEachDestinationsKeys()
     {
         var baseConnectionString = BaseConnectionString;

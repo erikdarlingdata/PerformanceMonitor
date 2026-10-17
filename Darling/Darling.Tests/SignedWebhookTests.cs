@@ -125,6 +125,9 @@ public sealed class SignedWebhookSignatureTests
         Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("msg_m", "not-a-number", good, body, now));
         Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("msg_m", "99999999999999999999", good, body, now));
         Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("msg_m", "-5", good, body, now));
+        Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("msg_m", tsText, null!, body, now));
+        Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify("", tsText, good, body, now));
+        Assert.Equal(SampleReceiver.Result.Malformed, receiver.Verify(null!, tsText, good, body, now));
         Assert.Equal(SampleReceiver.Result.BadSignature, receiver.Verify("msg_m", tsText, "v1,!!!not base64!!!", body, now));
         Assert.Equal(SampleReceiver.Result.BadSignature, receiver.Verify("msg_m", tsText, "", body, now));
         Assert.Equal(SampleReceiver.Result.Accepted, receiver.Verify("msg_m", tsText, "v1,%%% " + good, body, now));
@@ -187,6 +190,8 @@ public sealed class SignedWebhookSignatureTests
 
         public Result Verify(string id, string timestamp, string signatureHeader, byte[] body, DateTime nowUtc)
         {
+            if (string.IsNullOrEmpty(id) || signatureHeader is null) return Result.Malformed;
+
             if (!long.TryParse(timestamp, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
                 || seconds > 253402300799)
             {
