@@ -42,7 +42,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 7, // the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
+        ["DarlingWebEndpoints.cs"] = 8, // /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
         ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the dedicated routes record their own samples, #5506 part 3)
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
@@ -238,6 +238,16 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "DELETE \"/api/server-tags/{id:int}\""] = "write",
         [WebFile + "POST \"/api/server-tags/{id:int}/servers\""] = "write",
         [WebFile + "DELETE \"/api/server-tags/{id:int}/servers\""] = "write",
+        [WebFile + "POST \"/api/query-tags\""] = "write",
+        [WebFile + "PATCH \"/api/query-tags/{id:int}\""] = "write",
+        [WebFile + "DELETE \"/api/query-tags/{id:int}\""] = "write",
+        [WebFile + "POST \"/api/query-tags/{id:int}/assignments\""] = "write",
+        [WebFile + "DELETE \"/api/query-tags/{id:int}/assignments\""] = "write",
+        [WebFile + "POST \"/api/query-tag-rules\""] = "write",
+        [WebFile + "PATCH \"/api/query-tag-rules/{id:long}\""] = "write",
+        [WebFile + "DELETE \"/api/query-tag-rules/{id:long}\""] = "write",
+        [WebFile + "GET \"/api/query-tag-rules\""] = "definition read: the query tag rules (one small config table, capped by the rule count; #5986)",
+        [WebFile + "GET \"/api/query-tag-rules/test\""] = null, // #5986: the dry run reads up to 10,000 stored sightings, so it is admitted
     };
 
     /// <summary>The service's own source files, as (path relative to the service folder, text).</summary>

@@ -97,7 +97,7 @@ public sealed class DarlingMcpQueryTagTools
         [Description("A monitored server id (from get_fleet_overview) to limit the assignment to; omit for every server.")] int? server_id = null,
         [Description("A Query Store query_id as last seen, kept for display only.")] long? query_id = null,
         CancellationToken cancellationToken = default) =>
-        AssignQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, kind, query_hash, database_name, schema_name, object_name, server_id, query_id, cancellationToken);
+        AssignQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, kind, query_hash, database_name, schema_name, object_name, server_id, query_id, null, cancellationToken);
 
     [McpServerTool(Name = "unassign_query_tag"), Description(
         "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
@@ -279,6 +279,7 @@ public sealed class DarlingMcpQueryTagTools
         string? objectName,
         int? serverId,
         long? queryId,
+        string? createdBy,
         CancellationToken ct = default)
     {
         try
@@ -309,7 +310,7 @@ public sealed class DarlingMcpQueryTagTools
                 }
             }
 
-            var result = await store.AssignAsync(tagId, key, queryId, CreatedBy, ct);
+            var result = await store.AssignAsync(tagId, key, queryId, createdBy ?? CreatedBy, ct);
             if (result.Outcome == QueryTagAssignOutcome.TagGone || result.Assignment is null)
             {
                 return ConcurrentlyGone(tagId);

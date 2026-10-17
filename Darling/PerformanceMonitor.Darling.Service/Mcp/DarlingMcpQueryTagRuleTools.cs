@@ -85,7 +85,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         [Description("Whether the rule applies; default true.")] bool enabled = true,
         [Description("The server the rule applies to (from get_fleet_overview); omit for every server.")] int? server_id = null,
         CancellationToken cancellationToken = default) =>
-        CreateCore(new QueryTagRuleStore(postgres, CommandSeconds), field, pattern, tag_id, priority, enabled, server_id, cancellationToken);
+        CreateCore(new QueryTagRuleStore(postgres, CommandSeconds), field, pattern, tag_id, priority, enabled, server_id, null, cancellationToken);
 
     [McpServerTool(Name = "update_query_tag_rule"), Description(
         "PARTIAL edit of a query tag rule: send only the fields to change in changes_json, from pattern, priority, enabled, tag_id and server_id. An explicit null for server_id " +
@@ -137,7 +137,7 @@ public sealed class DarlingMcpQueryTagRuleTools
     // ---------------------------------------------------------------- cores
 
     internal static async Task<string> CreateCore(
-        QueryTagRuleStore store, string? field, string? pattern, int? tagId, int priority, bool enabled, int? serverId, CancellationToken ct = default)
+        QueryTagRuleStore store, string? field, string? pattern, int? tagId, int priority, bool enabled, int? serverId, string? createdBy, CancellationToken ct = default)
     {
         try
         {
@@ -153,7 +153,7 @@ public sealed class DarlingMcpQueryTagRuleTools
                 return refusal.Json;
             }
 
-            var row = await store.InsertRuleAsync(parsed, stored!, priority, enabled, tagId, serverId, CreatedBy, ct);
+            var row = await store.InsertRuleAsync(parsed, stored!, priority, enabled, tagId, serverId, createdBy ?? CreatedBy, ct);
             var tags = await store.ReadTagsAsync(ct);
             var state = await store.ReadStateAsync(ct);
             return Serialize(new JsonObject

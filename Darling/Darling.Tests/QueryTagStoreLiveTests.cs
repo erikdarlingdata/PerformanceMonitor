@@ -475,13 +475,15 @@ public sealed class QueryTagStoreGrantLiveTests
             await using var viewer = await LoginAsync(scratch, "viewer", viewerPassword, ct);
             Assert.Equal("Reports", await ScalarAsync(viewer, "SELECT name FROM config.query_tags", ct));
             Assert.Equal("1", await ScalarAsync(viewer, "SELECT count(*) FROM config.query_tag_map", ct));
-            await AssertDeniedAsync(viewer, "INSERT INTO config.query_tags (name) VALUES ('Nope')", ct);
-            await AssertDeniedAsync(viewer, "UPDATE config.query_tags SET name = 'Nope'", ct);
-            await AssertDeniedAsync(viewer, "DELETE FROM config.query_tags", ct);
-            await AssertDeniedAsync(viewer, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({tag}, 'hash', '0x05', 'viewer')", ct);
-            await AssertDeniedAsync(viewer, "UPDATE config.query_tag_assignments SET created_by = 'viewer'", ct);
-            await AssertDeniedAsync(viewer, $"INSERT INTO config.query_tag_rules (tag_id, match_field, pattern, created_by) VALUES ({tag}, 'login', 'x', 'viewer')", ct);
-            await AssertDeniedAsync(viewer, "UPDATE config.query_tag_rules SET enabled = false", ct);
+            /* #5986: the web page that manages query tags runs the MCP cores as viewer, so viewer holds the same three writes mcp does. */
+            var viewerTag = int.Parse(await ScalarAsync(viewer, "INSERT INTO config.query_tags (name) VALUES ('FromWeb') RETURNING id", ct), CultureInfo.InvariantCulture);
+            await ExecAsync(viewer, "UPDATE config.query_tags SET colour = '#445566' WHERE name = 'FromWeb'", ct);
+            await ExecAsync(viewer, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({viewerTag}, 'hash', '0x05', 'viewer')", ct);
+            await ExecAsync(viewer, "UPDATE config.query_tag_assignments SET created_by = 'viewer' WHERE query_hash = '0x05'", ct);
+            await ExecAsync(viewer, $"INSERT INTO config.query_tag_rules (tag_id, match_field, pattern, created_by) VALUES ({viewerTag}, 'login', 'x', 'viewer')", ct);
+            await ExecAsync(viewer, "UPDATE config.query_tag_rules SET enabled = false WHERE pattern = 'x'", ct);
+            await ExecAsync(viewer, "DELETE FROM config.query_tags WHERE name = 'FromWeb'", ct);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.query_tags WHERE name = 'FromWeb'", ct));
             await AssertDeniedAsync(viewer, $"INSERT INTO config.query_tag_map (server_id, key_kind, key, tag_id, source) VALUES (9, 'hash', '0x09', {tag}, 'rule')", ct);
             await AssertDeniedAsync(viewer, "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key) VALUES (9, 'hash', '0x09')", ct);
             await AssertDeniedAsync(viewer, "DELETE FROM collect.query_tag_sightings", ct);

@@ -118,7 +118,7 @@ public sealed class WebRouteStatementCensusTests
     };
 
     private static readonly Regex SweptWriter = new(
-        @"^(?:DarlingWebEndpoints\s*\.\s*)?(?:ToHttpResult|MuteRuleToolResult)\s*\(|^DarlingWebStatementSweep\s*\.\s*(?:Apply|JsonText|Refusal)\s*\(",
+        @"^(?:DarlingWebEndpoints\s*\.\s*)?(?:ToHttpResult|MuteRuleToolResult|QueryTagToolResult)\s*\(|^DarlingWebStatementSweep\s*\.\s*(?:Apply|JsonText|Refusal)\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Any <c>x.Map*(</c> or <c>).Map*(</c> call: <c>MapGet</c>, <c>MapPost</c>, <c>MapPut</c>, <c>MapPatch</c>,
@@ -565,7 +565,7 @@ public sealed class WebRouteStatementCensusTests
     public void TheSharedWriters_CallTheSweepBeforeAnythingElse()
     {
         string endpoints = File.ReadAllText(Path.Combine(ServiceDir(), "DarlingWebEndpoints.cs"));
-        foreach (string method in new[] { "ToHttpResult", "MuteRuleToolResult" })
+        foreach (string method in new[] { "ToHttpResult", "MuteRuleToolResult", "QueryTagToolResult" })
         {
             var bodies = StatementColumnCensusTests.BodiesOf(endpoints, "DarlingWebEndpoints", method);
             Assert.True(bodies.Count > 0, method + " was not found");

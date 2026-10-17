@@ -175,8 +175,9 @@ public static class DarlingWebEndpoints
         "create_query_tag_rule",
         "update_query_tag_rule",
         "delete_query_tag_rule",
-        /* #5982: the rule reads are MCP-only for now. test_query_tag_rule runs the shared resolver over up to 10,000 stored sightings,
-           which is no page read; the rules page (#5986) adds the web route it needs. */
+        /* #5982: the rule reads are not on /api/read. test_query_tag_rule runs the shared resolver over up to 10,000 stored sightings,
+           which is no page read. The rules page (#5986) has its own routes, MapQueryTags: GET /api/query-tag-rules (the list) and
+           GET /api/query-tag-rules/test (the dry run, admitted and recorded under this name). */
         "list_query_tag_rules",
         "test_query_tag_rule",
         "run_collectors_now",
@@ -646,6 +647,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapThresholdOverrides(app, postgres, logger);
         MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapServerTags(app, postgres, logger);
+        MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapAdminServers(app, postgres);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct); return (r.ServerId, err); });
         MapServers(app, postgres, logger);
@@ -3236,6 +3238,335 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
     }
 
+    /// <summary>
+    /// The query-tag web routes (#5986), the same shape as <see cref="MapServerTags"/>: each write route parses its JSON
+    /// body and hands it to the matching <c>DarlingMcpQueryTagTools.*Core</c> or <c>DarlingMcpQueryTagRuleTools.*Core</c> over
+    /// a store on the viewer-role pool, so the page and the MCP tools share one set of rules and one set of answers.
+    /// <c>application/json</c> is required on every write (the CSRF discipline of the other write routes). The admin gate is
+    /// the seat's method gate (<see cref="DarlingWebSeat.IsRequestAllowed"/> refuses every non-GET from a read-only seat);
+    /// the viewer role's grants on the three tag tables are only the floor beneath it. The writer's name is stamped on a
+    /// new assignment or rule as <c>created_by</c> (the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>), not <c>mcp</c>.
+    ///
+    /// <para><b>Tag routes.</b> <c>POST /api/query-tags</c> (<c>{name, parent_id?, colour?}</c>, 201);
+    /// <c>PATCH /api/query-tags/{id}</c> (the body IS the partial <c>changes_json</c>);
+    /// <c>DELETE /api/query-tags/{id}?confirm=true</c> (409 <c>confirm_required</c> with the counts until the flag rides along);
+    /// <c>POST /api/query-tags/{id}/assignments</c> and <c>DELETE /api/query-tags/{id}/assignments</c>
+    /// (<c>{kind, query_hash?, database_name?, schema_name?, object_name?, server_id?}</c>; assign also takes <c>query_id?</c>).
+    /// Unassign is keyed by the assignment's key and server scope, as the MCP tool is: the tag id in the path is not part of
+    /// the key.</para>
+    ///
+    /// <para><b>Rule routes.</b> <c>POST /api/query-tag-rules</c> (<c>{field, pattern?, tag_id?, priority?, enabled?, server_id?}</c>,
+    /// 201); <c>PATCH /api/query-tag-rules/{id}</c> (the partial <c>changes_json</c>); <c>DELETE /api/query-tag-rules/{id}</c>;
+    /// <c>GET /api/query-tag-rules[?server_id=]</c> (the list, in the order the rules apply) and
+    /// <c>GET /api/query-tag-rules/test?...</c> (the dry run: <c>rule_id</c> or a draft's <c>field</c>, <c>pattern</c>,
+    /// <c>tag_id</c>, <c>priority</c>, plus <c>server_id</c> and <c>window_hours</c>). The test is a GET, so a read-only seat
+    /// can run it: it writes nothing, and it is admitted like any other read. Both reads are swept (#4348) because a rule's
+    /// pattern and a sample's matched value are text.</para>
+    /// </summary>
+    internal static void MapQueryTags(WebApplication app, NpgsqlDataSource postgres, ILogger logger,
+        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null)
+    {
+        var tags = new QueryTagStore(postgres, Mcp.DarlingMcpQueryTagTools.WriteCommandSeconds);
+        var rules = new QueryTagRuleStore(postgres, Mcp.DarlingMcpQueryTagRuleTools.CommandSeconds);
+
+        app.MapPost("/api/query-tags", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (body, bodyError) = await ReadJsonObjectAsync(context);
+            if (body is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var reader = new QueryTagBodyReader(body, "A query tag", "name", "parent_id", "colour");
+            var name = reader.String("name");
+            var parentId = reader.Int("parent_id");
+            var colour = reader.String("colour");
+            if (reader.Error is not null)
+            {
+                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagTools.CreateQueryTagCore(tags, name, parentId, colour, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "create", null, result);
+            return QueryTagToolResult(result, "/api/query-tags", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status201Created);
+        });
+
+        app.MapPatch("/api/query-tags/{id:int}", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string changes;
+            try
+            {
+                changes = await ReadBoundedBodyAsync(context, MaxServerTagBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagTools.UpdateQueryTagCore(tags, id, changes, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "update", id, result);
+            return QueryTagToolResult(result, "/api/query-tags/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+
+        app.MapDelete("/api/query-tags/{id:int}", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (confirm, confirmRefusal) = ParseConfirm(context.Request.Query);
+            if (confirmRefusal is not null)
+            {
+                return ErrorResult(confirmRefusal, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagTools.DeleteQueryTagCore(tags, id, confirm, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "delete", id, result);
+            return QueryTagToolResult(result, "/api/query-tags/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+
+        app.MapPost("/api/query-tags/{id:int}/assignments", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (body, bodyError) = await ReadJsonObjectAsync(context);
+            if (body is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var reader = new QueryTagBodyReader(body, "An assignment", "kind", "query_hash", "database_name", "schema_name", "object_name", "server_id", "query_id");
+            var kind = reader.String("kind");
+            var queryHash = reader.String("query_hash");
+            var databaseName = reader.String("database_name");
+            var schemaName = reader.String("schema_name");
+            var objectName = reader.String("object_name");
+            var serverId = reader.Int("server_id");
+            var queryId = reader.Long("query_id");
+            if (reader.Error is not null)
+            {
+                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagTools.AssignQueryTagCore(
+                tags, id, kind, queryHash, databaseName, schemaName, objectName, serverId, queryId,
+                DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "assign", id, result);
+            return QueryTagToolResult(result, "/api/query-tags/{id}/assignments", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+
+        app.MapDelete("/api/query-tags/{id:int}/assignments", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (body, bodyError) = await ReadJsonObjectAsync(context);
+            if (body is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var reader = new QueryTagBodyReader(body, "An unassignment", "kind", "query_hash", "database_name", "schema_name", "object_name", "server_id");
+            var kind = reader.String("kind");
+            var queryHash = reader.String("query_hash");
+            var databaseName = reader.String("database_name");
+            var schemaName = reader.String("schema_name");
+            var objectName = reader.String("object_name");
+            var serverId = reader.Int("server_id");
+            if (reader.Error is not null)
+            {
+                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagTools.UnassignQueryTagCore(
+                tags, kind, queryHash, databaseName, schemaName, objectName, serverId, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "unassign", id, result);
+            return QueryTagToolResult(result, "/api/query-tags/{id}/assignments", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+
+        app.MapPost("/api/query-tag-rules", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (body, bodyError) = await ReadJsonObjectAsync(context);
+            if (body is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var reader = new QueryTagBodyReader(body, "A query tag rule", "field", "pattern", "tag_id", "priority", "enabled", "server_id");
+            var field = reader.String("field");
+            var pattern = reader.String("pattern");
+            var tagId = reader.Int("tag_id");
+            var priority = reader.Int("priority");
+            var enabled = reader.Bool("enabled");
+            var serverId = reader.Int("server_id");
+            if (reader.Error is not null)
+            {
+                return ErrorResult(reader.Error, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagRuleTools.CreateCore(
+                rules, field, pattern, tagId, priority ?? Mcp.DarlingMcpQueryTagRuleTools.DefaultPriority, enabled ?? true, serverId,
+                DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "rule-create", null, result);
+            return QueryTagToolResult(result, "/api/query-tag-rules", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status201Created);
+        });
+
+        app.MapPatch("/api/query-tag-rules/{id:long}", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string changes;
+            try
+            {
+                changes = await ReadBoundedBodyAsync(context, MaxServerTagBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagRuleTools.UpdateCore(rules, id, changes, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "rule-update", id, result);
+            return QueryTagToolResult(result, "/api/query-tag-rules/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+
+        app.MapDelete("/api/query-tag-rules/{id:long}", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagRuleTools.DeleteCore(rules, id, context.RequestAborted);
+            LogQueryTagWrite(logger, context, "rule-delete", id, result);
+            return QueryTagToolResult(result, "/api/query-tag-rules/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+
+        app.MapGet("/api/query-tag-rules", async (HttpContext context) =>
+        {
+            if (!TryReadQueryTagInt(context.Request.Query, "server_id", out var serverId, out var error))
+            {
+                return ErrorResult(error!, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagRuleTools.ListCore(rules, serverId, context.RequestAborted);
+            return ToHttpResult(result, "/api/query-tag-rules", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+
+        app.MapGet("/api/query-tag-rules/test", async (HttpContext context) =>
+        {
+            var query = context.Request.Query;
+            if (!TryReadQueryTagInt(query, "rule_id", out var ruleId, out var error)
+                || !TryReadQueryTagInt(query, "tag_id", out var tagId, out error)
+                || !TryReadQueryTagInt(query, "priority", out var priority, out error)
+                || !TryReadQueryTagInt(query, "server_id", out var serverId, out error)
+                || !TryReadQueryTagInt(query, "window_hours", out var windowHours, out error)
+                || !TrySingleQueryValue(query, "field", out var field)
+                || !TrySingleQueryValue(query, "pattern", out var pattern))
+            {
+                return ErrorResult(error ?? "Each parameter may be given once.", StatusCodes.Status400BadRequest);
+            }
+
+            /* The dry run reads up to 10,000 stored sightings like any collected-data read: admitted and recorded under its MCP twin's name. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, "test_query_tag_rule", ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, "test_query_tag_rule", ReadWindowBand.None, context, readScope.Scope);
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpQueryTagRuleTools.TestCore(
+                rules, ruleId, field.Length == 0 ? null : field, pattern.Length == 0 ? null : pattern, tagId,
+                priority ?? Mcp.DarlingMcpQueryTagRuleTools.DefaultPriority, serverId,
+                windowHours ?? Mcp.DarlingMcpQueryTagRuleTools.DefaultWindowHours, TimeProvider.System, context.RequestAborted);
+            run.Complete(ToolResultOutcome(result, context.RequestAborted));
+            return ToHttpResult(result, "/api/query-tag-rules/test", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        });
+    }
+
+    /// <summary>An optional whole-number query parameter: absent or blank is null, given more than once or not a number is a refusal sentence.</summary>
+    private static bool TryReadQueryTagInt(IQueryCollection query, string key, out int? value, out string? error)
+    {
+        value = null;
+        error = null;
+        if (!TrySingleQueryValue(query, key, out var text))
+        {
+            error = $"{key} must be given once.";
+            return false;
+        }
+
+        if (text.Length == 0)
+        {
+            return true;
+        }
+
+        if (!int.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+        {
+            error = $"{key} must be a whole number.";
+            return false;
+        }
+
+        value = parsed;
+        return true;
+    }
+
+    /// <summary>Who changed a query tag, assignment or rule is on the row only for assignments and rules; this line records the verb for
+    /// every successful write. Verb and id only, never a name, pattern or body text.</summary>
+    private static void LogQueryTagWrite(ILogger logger, HttpContext context, string verb, long? id, string result)
+    {
+        if (ServerTagEnvelopeStatus(result) is < 200 or >= 300)
+        {
+            return;
+        }
+
+        logger.LogInformation("Query tag {Verb} by {Principal}: id {Id}", verb, DarlingWebSeat.FromContext(context).EditorPrincipal, id);
+    }
+
+    /// <summary>The envelope pass-through the query-tag write routes share: the answer is swept first (#4348, a pattern or a
+    /// name echoes text a caller typed), then answered exactly as <see cref="ServerTagToolResult"/> answers.</summary>
+    internal static IResult QueryTagToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
+        int successStatus = StatusCodes.Status200OK)
+    {
+        var swept = DarlingWebStatementSweep.Apply(result);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
+        return ServerTagToolResult(swept.Text, route, logger, elapsedMs, requestAborted, successStatus);
+    }
+
     /// <summary>Parses the request body as one JSON object, or names why it is not.</summary>
     private static async Task<(JsonObject? Body, string? Error)> ReadJsonObjectAsync(HttpContext context)
     {
@@ -3413,7 +3744,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         try
         {
             var status = JsonNode.Parse(result) is JsonObject envelope ? TryGetString(envelope, "status") : null;
-            return status is "created" or "updated" or "unchanged" or "deleted" or "assigned" or "unassigned"
+            return status is "created" or "updated" or "unchanged" or "deleted" or "assigned" or "unassigned" or "moved"
                 ? successStatus
                 : StatusCodes.Status500InternalServerError;
         }

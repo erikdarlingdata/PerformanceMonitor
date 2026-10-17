@@ -1551,12 +1551,17 @@ GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
 --    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
--- #5977: server removal clears that server's query-tag rows (assignments, rules, map), so viewer gets DELETE on
---    those three and nothing else on the query-tag tables: no INSERT or UPDATE, and no write on the tags themselves. Admin
---    (the desktop Viewer's default identity) already holds the config writes through the blanket grant above. Neither holds
---    a write on the sightings in collect: a removed server's sightings are left to retention, like every collect table.
-GRANT DELETE ON {config}.query_tag_assignments TO {viewer};
-GRANT DELETE ON {config}.query_tag_rules TO {viewer};
+-- #5977: server removal clears that server's query-tag rows (assignments, rules, map), so viewer holds DELETE on
+--    those three. #5986: the web page that manages query tags (POST/PATCH/DELETE under /api/query-tags and
+--    /api/query-tag-rules) runs the SAME cores the MCP tools run, as viewer, so viewer also gets the three writes mcp holds
+--    above: INSERT, UPDATE and DELETE on the tags, the hand assignments and the rules. The seat model decides who may call
+--    the routes (a read-only seat is refused every unsafe method); these grants are only the floor beneath that gate. The
+--    map stays DELETE only (the service's map builder writes it), and nobody but the owner writes the sightings or the
+--    state row: the rules_version bump is a SECURITY DEFINER trigger function, so no grant on config.query_tag_state. Admin
+--    (the desktop Viewer's default identity) already holds the config writes through the blanket grant above.
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tags TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {viewer};
 GRANT DELETE ON {config}.query_tag_map TO {viewer};
 -- #4843: the web dashboard's add-server route (POST /api/servers) runs the SAME add_servers core the MCP tool runs, as
 --    viewer, so viewer gets the INSERT that core issues on config_monitored_servers; no DELETE, because no web route

@@ -1949,9 +1949,9 @@ END $do$;
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
 --     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
 --     them), so mcp holds only DELETE on the map, which remove_server runs to clear a removed server's map rows (a server_id is
---     a hash, so orphaned rows would come back when the server is re-added). viewer gets DELETE on the three per-server config
---     tables (assignments, rules, map) for server removal and nothing else on the query-tag tables: no INSERT or UPDATE,
---     and no write on the tags themselves. admin (the desktop Viewer's default identity) already holds the config writes
+--     a hash, so orphaned rows would come back when the server is re-added). viewer gets the same three writes (#5986: the web page that manages
+--     query tags runs the MCP cores as viewer; the read-only seat gate decides who may call it) and DELETE on the map for server
+--     removal, and nothing else on the query-tag tables. admin (the desktop Viewer's default identity) already holds the config writes
 --     through the blanket grant of step 3. No role holds a write on the sightings in collect: like every other collect table,
 --     a removed server's sightings are left to the owner's retention pass. The identity
 --     columns need no sequence grant, and the rules_version bump on a write is a SECURITY DEFINER trigger function, so no
@@ -1972,8 +1972,9 @@ BEGIN
    GRANT INSERT, UPDATE, DELETE ON config.query_tag_assignments TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.query_tag_rules TO mcp;
    GRANT DELETE ON config.query_tag_map TO mcp;
-   GRANT DELETE ON config.query_tag_assignments TO viewer;
-   GRANT DELETE ON config.query_tag_rules TO viewer;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tags TO viewer;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tag_assignments TO viewer;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tag_rules TO viewer;
    GRANT DELETE ON config.query_tag_map TO viewer;
 END $do$;
 

@@ -555,6 +555,23 @@ public sealed class DarlingWebOidcTests
     [InlineData(false, "DELETE", "/api/server-tags/7", false)]
     [InlineData(false, "POST", "/api/server-tags/7/servers", false)]
     [InlineData(false, "DELETE", "/api/server-tags/7/servers", false)]
+    // The query-tag write endpoints (#5986): refused to the read-only seat, allowed to the edit seat.
+    [InlineData(true, "POST", "/api/query-tags", true)]
+    [InlineData(false, "POST", "/api/query-tags", false)]
+    [InlineData(true, "PATCH", "/api/query-tags/7", true)]
+    [InlineData(false, "PATCH", "/api/query-tags/7", false)]
+    [InlineData(true, "DELETE", "/api/query-tags/7", true)]
+    [InlineData(false, "DELETE", "/api/query-tags/7", false)]
+    [InlineData(true, "POST", "/api/query-tags/7/assignments", true)]
+    [InlineData(false, "POST", "/api/query-tags/7/assignments", false)]
+    [InlineData(true, "DELETE", "/api/query-tags/7/assignments", true)]
+    [InlineData(false, "DELETE", "/api/query-tags/7/assignments", false)]
+    [InlineData(true, "POST", "/api/query-tag-rules", true)]
+    [InlineData(false, "POST", "/api/query-tag-rules", false)]
+    [InlineData(true, "PATCH", "/api/query-tag-rules/7", true)]
+    [InlineData(false, "PATCH", "/api/query-tag-rules/7", false)]
+    [InlineData(true, "DELETE", "/api/query-tag-rules/7", true)]
+    [InlineData(false, "DELETE", "/api/query-tag-rules/7", false)]
     public void IsRequestAllowed_Matrix(bool canEdit, string method, string path, bool expected)
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("who", canEdit), method, path));
 
