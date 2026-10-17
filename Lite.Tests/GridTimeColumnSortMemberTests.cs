@@ -317,6 +317,7 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
     private static readonly Dictionary<(string File, string Grid, string Property), string> NotTimeColumns = new()
     {
         { ("Controls/ServerTab.xaml", "QuerySnapshotsGrid", "ElapsedTimeFormatted"), "a duration (how long the request has run), not a time" },
+        { ("Windows/ManageQueryTagsWindow.xaml", "AssignGrid", "CreatedBy"), "the name of who made the assignment, not a time" },
         { ("Windows/WaitDrillDownWindow.xaml", "ResultsDataGrid", "ElapsedTimeFormatted"), "a duration (how long the request has run), not a time" },
         { ("Controls/ServerTab.xaml", "BlockedProcessReportGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTimeMs" },
         { ("Controls/ServerTab.xaml", "DeadlockGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTime" },

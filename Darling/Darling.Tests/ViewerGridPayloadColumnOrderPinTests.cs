@@ -210,6 +210,12 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
         {
             var lite = ColumnHeaders(ReadRepoFile(liteFile), liteGrid);
             var viewer = ColumnHeaders(ReadRepoFile(viewerFile), viewerGrid);
+            // #5993: Lite's Queries grids carry a query-tag column the Viewer does not have yet (the Viewer has none yet); that is not drift.
+            if (!viewer.Contains("Tag"))
+            {
+                lite = lite.Where(h => h != "Tag").ToList();
+            }
+
             if (lite.SequenceEqual(viewer))
             {
                 continue;
