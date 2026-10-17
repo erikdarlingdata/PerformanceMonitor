@@ -255,7 +255,7 @@ public static class QueryStoreBackgroundIndexes
         StatementTextServerLastSeenIndexName,
         "collect.pg_statement_text",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_pg_statement_text_server_last_seen "
-        + "ON collect.pg_statement_text (server_id, last_seen);",
+        + "ON collect.pg_statement_text (last_seen);",
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_pg_statement_text_server_last_seen;",
         IndexDefinition: "(server_id, last_seen)");
 
