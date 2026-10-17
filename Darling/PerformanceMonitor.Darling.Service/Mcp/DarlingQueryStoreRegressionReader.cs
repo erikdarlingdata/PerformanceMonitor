@@ -297,10 +297,6 @@ internal static class DarlingQueryStoreRegressionReader
     /// </summary>
     public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
 
-    /* A named constant, as DarlingMcpQueryStoreHistoryTools spells it, so the store-receiver census reads the
-       construction as `new NpgsqlCommand(<name>, connection)` on a store-pool connection (#5809). */
-    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
-
     /// <summary>
     /// Whether this server has Query Store rows BEFORE the window, and whether it has any INSIDE it.
     /// <para>One round trip for the two facts that decide what an empty result means, and it is run only
@@ -397,7 +393,7 @@ internal static class DarlingQueryStoreRegressionReader
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
-            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            await using (var readOnly = new NpgsqlCommand(DarlingDataReader.SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }

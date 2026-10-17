@@ -141,6 +141,7 @@ internal static class WebReadReach
         ["get_query_store_regressions"] = List("query_store"),
         ["get_query_store_clutter"] = List("query_store"),
         ["get_query_store_query_history"] = List("query_store"),
+        ["get_resource_use_by_tag"] = List("query_stats"),
         ["get_long_query_completions"] = List("long_query_completions"),
         ["get_plan_corrections"] = List("plan_correction"),
         ["get_blocked_process_xml"] = List("blocked_process_report"),

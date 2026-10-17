@@ -1285,6 +1285,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpPlanTools>()
             /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button. */
             .WithGeminiCompatibleTools<DarlingMcpQueryStoreHistoryTools>()
+            /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
+            .WithGeminiCompatibleTools<DarlingMcpQueryTagRollupTools>()
             /* The core data-read tools (resource metrics, query performance, discovery/health —
                get_cpu_utilization / get_wait_stats / get_wait_trend / get_memory_stats /
                get_memory_clerks / get_file_io_stats / get_tempdb_trend / get_perfmon_stats /

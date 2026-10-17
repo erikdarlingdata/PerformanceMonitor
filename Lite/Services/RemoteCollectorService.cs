@@ -342,6 +342,7 @@ public partial class RemoteCollectorService
         InstallIdStore? installIdStore = null)
     {
         _duckDb = duckDb;
+        s_queryTagFlushDb = duckDb;
         _serverManager = serverManager;
         _scheduleManager = scheduleManager;
         _logger = logger;
@@ -625,6 +626,9 @@ public partial class RemoteCollectorService
         {
             return;
         }
+
+        /* #5990: the query-tag map, once per round: rebuilt when the rules moved, otherwise extended for new sightings. */
+        await RunQueryTagMapPassAsync(cancellationToken);
 
         await RunPostCollectionCheckpointAsync(LocalDataService.WriteLockBudget, cancellationToken);
     }

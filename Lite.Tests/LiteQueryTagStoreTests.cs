@@ -283,17 +283,17 @@ public sealed class LiteQueryTagStoreTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task SightingsTable_KeysOnTheCallerTriple_SoADifferentApplicationIsANewRow_AndNoCallerFoldsToOneRow()
+    public async Task SightingsTable_KeysOnTheSevenPartIdentity_SoADifferentApplicationIsANewRow_AndNoCallerFoldsToOneRow()
     {
         /* Darling's ux_query_tag_sightings_key folds the caller fields to ''; here the fold is the column default. */
         const string upsert = @"INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name) VALUES (1, 'hash', '0xAB', 'SSMS')
-ON CONFLICT (server_id, key_kind, key, application_name, login_name, host_name) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1";
+ON CONFLICT (server_id, key_kind, key, database_name, application_name, login_name, host_name) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1";
         await ExecAsync(upsert);
         await ExecAsync(upsert);
         await ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key, application_name) VALUES (1, 'hash', '0xAB', 'ETL.exe')");
         await ExecAsync("INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')");
         await ExecAsync(@"INSERT INTO query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0xAB')
-ON CONFLICT (server_id, key_kind, key, application_name, login_name, host_name) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1");
+ON CONFLICT (server_id, key_kind, key, database_name, application_name, login_name, host_name) DO UPDATE SET seen_count = query_tag_sightings.seen_count + 1");
 
         Assert.Equal(2L, await CountAsync("SELECT seen_count FROM query_tag_sightings WHERE key = '0xAB' AND application_name = 'SSMS'"));
         Assert.Equal(1L, await CountAsync("SELECT seen_count FROM query_tag_sightings WHERE key = '0xAB' AND application_name = 'ETL.exe'"));

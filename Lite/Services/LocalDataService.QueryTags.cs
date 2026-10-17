@@ -453,30 +453,24 @@ WHERE id = $1";
     /// Drops every query-tag row that belongs to one server: its hand assignments and rules (those that name it, never the
     /// every-server ones), its sightings and its map rows. Called when a server is removed, for the reason
     /// <see cref="ClearServerTagsForServerAsync"/> is: the server id is a hash, so a server added again would otherwise get
-    /// its old rows back. Bumps <c>rules_version</c> when it removed an assignment or a rule.
+    /// its old rows back. Always bumps <c>rules_version</c>, so a map pass that was reading meanwhile is corrected by the next rebuild.
     /// </summary>
     public async Task ClearQueryTagsForServerAsync(int serverId)
     {
         using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfQueryTagRestorePending();
 
-        var removedConfig = 0;
         foreach (var table in new[] { "query_tag_assignments", "query_tag_rules", "query_tag_sightings", "query_tag_map" })
         {
             using var command = connection.CreateCommand();
             command.CommandText = $"DELETE FROM {table} WHERE server_id = $1";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            var deleted = await command.ExecuteNonQueryAsync();
-            if (table is "query_tag_assignments" or "query_tag_rules")
-            {
-                removedConfig += deleted;
-            }
+            await command.ExecuteNonQueryAsync();
         }
 
-        if (removedConfig > 0)
-        {
-            await BumpQueryTagRulesVersionAsync(connection);
-        }
+        /* Always bumps: a map pass reading while the server is removed would write its rows back, and only a rebuild
+           (rules_version ahead of built_version) clears them. A removal is rare, so the rebuild costs nothing. */
+        await BumpQueryTagRulesVersionAsync(connection);
     }
 
     /// <summary>Retention for <c>query_tag_sightings</c>: removes rows not seen since <paramref name="retentionDays"/> ago

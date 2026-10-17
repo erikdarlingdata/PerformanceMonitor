@@ -1277,6 +1277,10 @@ public partial class RemoteCollectorService
             }
         }
 
+        /* #5990: the batch's query-tag sightings go to an in-memory buffer. No store write happens here; the map pass
+           flushes the buffer in one upsert. */
+        _queryTagSightings.Append(definition, rows, serverId, s_queryTagFlushDb);
+
         return rowsWritten;
     }
 

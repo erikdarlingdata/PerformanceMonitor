@@ -318,6 +318,9 @@ public class CollectionBackgroundService : BackgroundService
             }
         }
 
+        /* #5990: a round cancelled before its map pass never flushed the query-tag sightings; write them now, briefly. */
+        _collectorService.FlushQueryTagSightingsAtShutdown(CancellationToken.None);
+
         /* A stop before the first round finished still releases the housekeeping loops, which end on the same token. */
         firstRound.TrySetResult();
 

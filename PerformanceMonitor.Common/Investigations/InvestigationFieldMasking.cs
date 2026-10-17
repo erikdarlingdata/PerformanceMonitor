@@ -110,6 +110,17 @@ internal static class InvestigationFieldMasking
             }
         }
 
+        /* #6001: the evidence section's items hold collected rows (query text, logins, hosts) in `content`, masked by key as
+           a whole item, like an alert. */
+        if (briefObject["evidence"] is JsonArray evidenceItems)
+        {
+            for (var i = 0; i < evidenceItems.Count; i++)
+            {
+                if (evidenceItems[i] is JsonObject evidenceItem)
+                    evidenceItems[i] = Mask((JsonObject)evidenceItem.DeepClone(), masker);
+            }
+        }
+
         briefObject["data_detail"] = McpDataDetailModes.Word(mode);
         return briefObject;
     }

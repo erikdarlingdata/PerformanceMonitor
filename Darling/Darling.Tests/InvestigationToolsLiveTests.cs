@@ -37,7 +37,7 @@ public sealed class InvestigationToolsLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private const string Evidence = "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"head blocker 412 s\"}]";
+    private const string Evidence = "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"head blocker 412 s\",\"basis\":\"verified\"}]";
 
     /* The store's clock: the list tool reads with the real clock, so the requests open at the real now. */
     private DateTime _now = DateTime.UtcNow.AddSeconds(-5);
@@ -230,7 +230,7 @@ public sealed class InvestigationToolsLiveTests
 
             var full = await WebRead("get_investigation_reports", "?request_id=" + id);
             var report = Assert.Single(full.GetProperty("reports").EnumerateArray().ToArray());
-            foreach (var key in new[] { "agent_id", "submitted_at", "verdict", "root_cause_found", "root_cause", "summary", "evidence" })
+            foreach (var key in new[] { "agent_id", "submitted_at", "verdict", "root_cause_found", "root_cause", "summary", "evidence_verified", "evidence_inferred" })
                 Assert.True(report.TryGetProperty(key, out _), "the report carries " + key);
             Assert.Equal("see the table SecretOrders for the cause", report.GetProperty("summary").GetString());
             Assert.True(full.GetProperty("brief").ValueKind == JsonValueKind.Object);
@@ -306,6 +306,62 @@ public sealed class InvestigationToolsLiveTests
             var links = read.GetProperty("reports")[0].GetProperty("links");
             Assert.Equal(2, links.GetArrayLength());
             Assert.Equal("https://jira.example.invalid/browse/OPS-7", links[0].GetProperty("url").GetString());
+        });
+    }
+
+    /// <summary>#6004: a family_of that names no request is refused as invalid, naming the id, and nothing is stored; one that
+    /// names a request is stored and served back, with the queries run.</summary>
+    [Fact]
+    public async Task Submit_FamilyOf_MustNameARequest_AndIsServedBack()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var first = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var second = (await store.OpenOrJoinAsync(Alert("resources"), ct)).RequestId!.Value.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var claimId = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, second, "agent-a", null, null, ct))
+                .GetProperty("claim_id").GetString()!;
+
+            var missing = Guid.NewGuid();
+            var refused = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, second, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, family_of: missing.ToString()));
+            Assert.Equal("invalid", refused.GetProperty("status").GetString());
+            Assert.Contains($"family_of: no investigation request has id {missing}", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*)::text FROM config.investigation_reports WHERE request_id = '{second}'", ct));
+
+            var answer = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, second, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, family_of: first.ToString(), queries_run: "[\"SELECT 1\"]"));
+            Assert.Equal("reported", answer.GetProperty("status").GetString());
+
+            var report = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, second, 24, ct))
+                .GetProperty("reports")[0];
+            Assert.Equal(first.ToString(), report.GetProperty("family_of").GetString());
+            Assert.Equal("SELECT 1", report.GetProperty("queries_run")[0].GetString());
+            Assert.Equal(1, report.GetProperty("evidence_verified").GetArrayLength());
+        });
+    }
+
+    /// <summary>#6004: a commit link and a release link are stored as link_recorded rows and read back with their kinds.</summary>
+    [Fact]
+    public async Task Submit_CommitAndReleaseLinks_AreStored_AndReadBack()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var claimId = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct))
+                .GetProperty("claim_id").GetString()!;
+
+            const string Links = "[{\"kind\":\"commit\",\"url\":\"https://git.example.invalid/pm/commit/abc123\",\"key\":\"abc123\"}," +
+                "{\"kind\":\"release\",\"url\":\"https://git.example.invalid/pm/releases/tag/v3.11.0\"}]";
+            var answer = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct, Links));
+            Assert.Equal("reported", answer.GetProperty("status").GetString());
+            Assert.Equal(2, answer.GetProperty("links_recorded").GetInt32());
+
+            var links = Root(await DarlingMcpInvestigationTools.ReportsAsync(dataSource, McpDataDetail.Full, null, id, 24, ct))
+                .GetProperty("reports")[0].GetProperty("links");
+            Assert.Equal(new[] { "commit", "release" }, links.EnumerateArray().Select(l => l.GetProperty("kind").GetString()).ToArray());
         });
     }
 
