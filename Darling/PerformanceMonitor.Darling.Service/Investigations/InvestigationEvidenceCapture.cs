@@ -13,6 +13,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Investigations;
 
@@ -45,8 +46,16 @@ namespace PerformanceMonitor.Darling.Service.Investigations;
 ///
 /// <para><b>Size.</b> Each section's content is held to <see cref="MaxSectionBytes"/>, the report evidence's own cap (aliased,
 /// not copied): rows are dropped from the tail until it fits, and the content says how many.</para>
+///
+/// <para><b>Families (#6002).</b> The sections a request gets follow EVERY metric linked to it, not only the one it opened on
+/// (<see cref="SectionsByKey"/>): High CPU brings the five above, <c>Deadlocks Detected</c> brings <c>deadlocks</c>,
+/// <c>Blocking Detected</c> and <c>Blocking Wait Time</c> bring <c>blocking_chains</c> and <c>head_blocker</c>, and the
+/// <c>query_performance</c> family brings <c>regression_targets</c>. A metric's sections read the window around that metric's
+/// first linked alert, and their grace counts from that alert when it came after the open, so a metric that joins after the
+/// other sections froze gets its sections on the next pass under the same readiness rules. The family reads live in
+/// <c>InvestigationEvidenceCapture.Families.cs</c>.</para>
 /// </summary>
-public sealed class InvestigationEvidenceCapture
+public sealed partial class InvestigationEvidenceCapture
 {
     /// <summary>The cap on one section's content, in bytes: the report evidence's cap, aliased (#3684).</summary>
     public const int MaxSectionBytes = InvestigationToolCore.MaxEvidenceBytes;
@@ -96,8 +105,37 @@ public sealed class InvestigationEvidenceCapture
     private const int CommandTimeoutSeconds = 30;
     private const int BatchRequests = 25;
 
-    /// <summary>The section names, in the order they are written.</summary>
+    /// <summary>The High CPU section names, in the order they are written.</summary>
     public static readonly IReadOnlyList<string> Sections = new[] { "top_statements", "active_requests", "query_store", "jobs", "waits" };
+
+    /// <summary>The deadlock alert's metric (#6002).</summary>
+    public const string DeadlockMetric = AlertEngine.DeadlockWatermarkMetric;
+
+    /// <summary>The two blocking alerts' metrics (#6002): the blocked-process report alert and the blocking wait alert.</summary>
+    public static readonly IReadOnlyList<string> BlockingMetrics = new[] { AlertEngine.BlockingWatermarkMetric, AlertEngine.BlockingWaitPersistenceMetric };
+
+    /// <summary>The sections each scope key brings (#6002), in the order they are written: a linked metric, or a family as
+    /// <see cref="InvestigationEvidenceScope.FamilyKey"/>.</summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> SectionsByKey = BuildSectionsByKey();
+
+    /// <summary>The scope the request store lists candidates by: every key of <see cref="SectionsByKey"/> with each of its sections.</summary>
+    public static readonly InvestigationEvidenceScope Scope = new(
+        SectionsByKey.SelectMany(k => k.Value.Select(_ => k.Key)).ToArray(),
+        SectionsByKey.SelectMany(k => k.Value).ToArray());
+
+    private static Dictionary<string, IReadOnlyList<string>> BuildSectionsByKey()
+    {
+        var blocking = new[] { "blocking_chains", "head_blocker" };
+        var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+        {
+            [HighCpuMetric] = Sections,
+            [DeadlockMetric] = new[] { "deadlocks" },
+            [InvestigationEvidenceScope.FamilyKey(InvestigationFamily.QueryPerformance)] = new[] { "regression_targets" },
+        };
+        foreach (var metric in BlockingMetrics)
+            map[metric] = blocking;
+        return map;
+    }
 
     /// <summary>The collector (<c>collect.collection_log.collector_name</c>) that feeds each section. A section is ready when its
     /// collector has completed a run at or after the window end, whether or not that run found anything.</summary>
@@ -108,6 +146,10 @@ public sealed class InvestigationEvidenceCapture
         ["query_store"] = "query_store_health",
         ["jobs"] = "running_jobs",
         ["waits"] = "wait_stats",
+        ["deadlocks"] = "deadlocks",
+        ["blocking_chains"] = "blocked_process_report",
+        ["head_blocker"] = "blocked_process_report",
+        ["regression_targets"] = "query_store",
     };
 
     /// <summary>The collectors that have a successful run at or after <c>$3</c> for server <c>$1</c> ($2 the collector names).
@@ -232,8 +274,8 @@ LIMIT 10";
         return grace > CaptureHorizon ? CaptureHorizon : grace;
     }
 
-    /// <summary>One pass: every High CPU request still needing evidence gets its sections looked at. A failed request is
-    /// logged and the next is tried. Returns how many requests it recorded.</summary>
+    /// <summary>One pass: every request in <see cref="Scope"/> still needing evidence gets its sections looked at. A failed
+    /// request is logged and the next is tried. Returns how many requests it recorded.</summary>
     public async Task<int> CaptureOnceAsync(CancellationToken cancellationToken)
     {
         var now = _utcNow();
@@ -244,7 +286,7 @@ LIMIT 10";
         while (looked < CandidatesPerTick)
         {
             var page = await _requests.ListEvidenceCandidatesAsync(
-                now - CaptureHorizon, Math.Min(BatchRequests, CandidatesPerTick - looked), HighCpuMetric, after, cancellationToken)
+                now - CaptureHorizon, Math.Min(BatchRequests, CandidatesPerTick - looked), Scope, after, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var candidate in page)
             {
@@ -282,16 +324,19 @@ LIMIT 10";
                 settled.Add(row.Section);
         }
 
-        var age = now - request.OpenedAtUtc;
-        var from = request.FirstAlertAtUtc - BreachLeadIn;
-        var to = request.FirstAlertAtUtc + BreachTail;
         var writes = new List<InvestigationEvidenceWrite>();
         var slow = new HashSet<string>(StringComparer.Ordinal);
-        HashSet<string>? ran = null;
-        foreach (var section in Sections)
+        var runsByWindowEnd = new Dictionary<DateTime, HashSet<string>>();
+        foreach (var (section, anchor) in SectionsOf(request))
         {
             if (settled.Contains(section))
                 continue;
+
+            /* #6002: each section reads the window around its own key's first alert, and its grace counts from that alert when
+               it came after the open (a metric that joined later), so a joined family is judged on its own window. */
+            var from = anchor - BreachLeadIn;
+            var to = anchor + BreachTail;
+            var age = now - (anchor > request.OpenedAtUtc ? anchor : request.OpenedAtUtc);
             if (request.IsPostgres)
             {
                 writes.Add(new InvestigationEvidenceWrite(section, "not_collected", null));
@@ -302,7 +347,12 @@ LIMIT 10";
                found anything (an empty window is a true "nothing found", not a missing collection), so rows in the window
                never freeze a section early. A collector with no run since the window end keeps the section pending until the
                grace is over, and only then is it not_collected. */
-            ran ??= await ReadCollectorRunsAsync(request.ServerId, to, cancellationToken).ConfigureAwait(false);
+            if (!runsByWindowEnd.TryGetValue(to, out var ran))
+            {
+                ran = await ReadCollectorRunsAsync(request.ServerId, to, cancellationToken).ConfigureAwait(false);
+                runsByWindowEnd[to] = ran;
+            }
+
             if (ran.Contains(SectionCollectors[section]))
             {
                 var rows = await ReadSectionAsync(section, request, from, to, cancellationToken).ConfigureAwait(false);
@@ -322,8 +372,47 @@ LIMIT 10";
         if (writes.Count > 0)
         {
             await _requests.RecordEvidenceAsync(
-                request.RequestId, request.ServerId, writes, slow, age >= PendingGrace, cancellationToken).ConfigureAwait(false);
+                request.RequestId, request.ServerId, writes, slow, now - request.OpenedAtUtc >= PendingGrace, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The sections <paramref name="request"/> gets (#6002), each with the alert time its window is built around: the sections of
+    /// every linked metric in <see cref="SectionsByKey"/> (at that metric's first linked alert; the opening metric at the
+    /// request's first alert) and of its family (at the first alert). A section two keys bring (the two blocking metrics) is
+    /// listed once, at the earlier alert. High CPU's sections come first, in their written order.
+    /// </summary>
+    internal static IReadOnlyList<(string Section, DateTime Anchor)> SectionsOf(InvestigationEvidenceCandidate request)
+    {
+        var anchors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var order = new List<string>();
+        void Add(string key, DateTime anchor)
+        {
+            if (!SectionsByKey.TryGetValue(key, out var sections))
+                return;
+            foreach (var section in sections)
+            {
+                if (!anchors.TryGetValue(section, out var seen))
+                {
+                    order.Add(section);
+                    anchors[section] = anchor;
+                }
+                else if (anchor < seen)
+                {
+                    anchors[section] = anchor;
+                }
+            }
+        }
+
+        Add(request.FirstMetric, request.FirstAlertAtUtc);
+        foreach (var key in SectionsByKey.Keys)
+        {
+            if (request.Metrics is not null && request.Metrics.TryGetValue(key, out var first))
+                Add(key, string.Equals(key, request.FirstMetric, StringComparison.Ordinal) ? request.FirstAlertAtUtc : first);
+        }
+
+        Add(InvestigationEvidenceScope.FamilyKey(request.Family), request.FirstAlertAtUtc);
+        return order.ConvertAll(s => (s, anchors[s]));
     }
 
     /// <summary>What one section read found: its ranked rows and, for <c>query_store</c> only, how many databases the cap left out.</summary>
@@ -363,6 +452,10 @@ GROUP BY database_name";
             "query_store" => await ReadQueryStoreAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
             "jobs" => new SectionRead(await ReadAsync(JobsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "waits" => new SectionRead(await ReadWaitsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "deadlocks" => new SectionRead(await ReadDeadlocksAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "blocking_chains" => new SectionRead(await ReadBlockingChainsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "head_blocker" => new SectionRead(await ReadHeadBlockersAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "regression_targets" => new SectionRead(await ReadRegressionTargetsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             _ => new SectionRead(new List<JsonObject>()),
         };
 
@@ -494,6 +587,9 @@ GROUP BY database_name";
                 ["window_end"] = to.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
                 ["rows"] = new JsonArray(rows.GetRange(0, rows.Count - dropped).ConvertAll(r => (JsonNode?)r.DeepClone()).ToArray()),
             };
+            /* #6002: a ready section that found nothing says so: a frozen true negative, never a dropped section. */
+            if (rows.Count == 0)
+                content["status"] = "empty";
             if (dropped > 0)
                 content["rows_dropped"] = dropped;
             if (databasesDropped is not null)

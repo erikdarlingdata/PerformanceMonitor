@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -21,10 +22,23 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>A request that still needs evidence captured (#6001): open or claimed, not a practice replay, with no final
-/// <c>evidence_state</c> yet.</summary>
+/// <c>evidence_state</c> yet. <see cref="Metrics"/> (#6002) is every metric linked to the request
+/// (<c>config.investigation_request_alerts</c>), each with the time of its first linked alert: a join can add a family of
+/// sections to a request that opened on another metric.</summary>
 public sealed record InvestigationEvidenceCandidate(
     Guid RequestId, int ServerId, string ServerName, string Family, string FirstMetric,
-    DateTime FirstAlertAtUtc, DateTime OpenedAtUtc, bool IsPostgres);
+    DateTime FirstAlertAtUtc, DateTime OpenedAtUtc, bool IsPostgres,
+    IReadOnlyDictionary<string, DateTime>? Metrics = null);
+
+/// <summary>Which requests the capture serves (#6002): a request linked to a metric in <see cref="Keys"/>, or in a family named
+/// there as <c>family:&lt;name&gt;</c>, with <see cref="Sections"/> (aligned with <see cref="Keys"/>) the sections that key
+/// brings. A request still open or claimed that lacks one of its keys' sections is a candidate again, so a metric that joins
+/// after the sections froze gets its own sections on the next pass.</summary>
+public sealed record InvestigationEvidenceScope(IReadOnlyList<string> Keys, IReadOnlyList<string> Sections)
+{
+    /// <summary>The scope key of a family's sections.</summary>
+    public static string FamilyKey(string family) => "family:" + family;
+}
 
 /// <summary>One stored evidence section (config.investigation_evidence, #6001).</summary>
 public sealed record InvestigationEvidenceRow(string Section, string State, string? ContentJson, DateTime? CapturedAtUtc);
@@ -49,23 +63,44 @@ public sealed partial class InvestigationRequestStore
 
     /// <summary>Requests that still need evidence, OLDEST first (#6001 review: the oldest are the closest to their grace, so a
     /// backlog reaches them before a newer request). $1 the oldest open time that still counts (a request older than the
-    /// capture window is left as it is), $2 the page size, $3 the first metric the capture serves, $4 and $5 the keyset cursor:
+    /// capture window is left as it is), $2 the page size, $3 and $4 the scope (<see cref="InvestigationEvidenceScope"/>: the
+    /// keys, each a linked metric or <c>family:&lt;name&gt;</c>, and the section each key brings), $5 and $6 the keyset cursor:
     /// the (opened_at, request_id) of the last request the previous page returned, so a request that stays pending is not
-    /// returned again in the same tick. A request is a candidate while it is open or claimed, and also in any other state
-    /// (reported, expired) while one of its sections is still <c>pending</c> (#6001 round 2): a slow section's grace can outlast
-    /// the request, and the section then flips to <c>ready</c> or <c>not_collected</c> on a later pass instead of staying
-    /// <c>pending</c> for good.</summary>
+    /// returned again in the same tick. A request in scope (#6002: ANY linked metric, not only the first, or its family) is a
+    /// candidate while it is open or claimed, and also in any other state (reported, expired) while one of its sections is
+    /// still <c>pending</c> (#6001 round 2): a slow section's grace can outlast the request, and the section then flips to
+    /// <c>ready</c> or <c>not_collected</c> on a later pass instead of staying <c>pending</c> for good. An open or claimed
+    /// request whose evidence is already final is a candidate again when one of its keys' sections has no row yet (#6002): a
+    /// metric that joined after the sections froze.</summary>
     internal const string EvidenceCandidatesSql = @"
-SELECT r.request_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.opened_at, s.engine_kind
+SELECT r.request_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.opened_at, s.engine_kind,
+       m.names, m.firsts
 FROM config.investigation_requests AS r
 LEFT JOIN collect.servers AS s ON s.server_id = r.server_id
+CROSS JOIN LATERAL (
+    SELECT COALESCE(array_agg(a.metric_name ORDER BY a.metric_name), '{}') AS names,
+           COALESCE(array_agg(a.first_at ORDER BY a.metric_name), '{}') AS firsts
+    FROM (SELECT metric_name, MIN(alert_time) AS first_at
+          FROM config.investigation_request_alerts
+          WHERE request_id = r.request_id
+          GROUP BY metric_name) AS a
+) AS m
+CROSS JOIN LATERAL (
+    SELECT count(*) AS sections,
+           COALESCE(bool_or(NOT EXISTS (SELECT 1 FROM config.investigation_evidence AS e
+                                        WHERE e.request_id = r.request_id AND e.section = k.section)), false) AS missing
+    FROM unnest($3::text[], $4::text[]) AS k(key, section)
+    WHERE k.key = 'family:' || r.family
+       OR k.key = ANY(m.names)
+) AS k
 WHERE r.practice_of IS NULL
   AND r.opened_at >= $1
-  AND r.first_metric = $3
-  AND (r.evidence_state IS NULL OR r.evidence_state = 'pending')
-  AND (r.state IN ('open', 'claimed')
-       OR EXISTS (SELECT 1 FROM config.investigation_evidence AS e WHERE e.request_id = r.request_id AND e.state = 'pending'))
-  AND (r.opened_at, r.request_id) > ($4, $5)
+  AND k.sections > 0
+  AND (((r.evidence_state IS NULL OR r.evidence_state = 'pending')
+        AND (r.state IN ('open', 'claimed')
+             OR EXISTS (SELECT 1 FROM config.investigation_evidence AS e WHERE e.request_id = r.request_id AND e.state = 'pending')))
+       OR (r.state IN ('open', 'claimed') AND k.missing))
+  AND (r.opened_at, r.request_id) > ($5, $6)
 ORDER BY r.opened_at, r.request_id
 LIMIT $2";
 
@@ -96,24 +131,32 @@ ORDER BY evidence_id";
 UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = $1";
 
     /// <summary>One page of the requests that still need evidence captured, OLDEST first, opened at or after
-    /// <paramref name="openedSinceUtc"/> whose first alert metric is <paramref name="firstMetric"/>. <paramref name="after"/> is
-    /// the candidate the previous page ended on (null for the first page).</summary>
+    /// <paramref name="openedSinceUtc"/> that <paramref name="scope"/> serves. <paramref name="after"/> is the candidate the
+    /// previous page ended on (null for the first page).</summary>
     public async Task<IReadOnlyList<InvestigationEvidenceCandidate>> ListEvidenceCandidatesAsync(
-        DateTime openedSinceUtc, int limit, string firstMetric, InvestigationEvidenceCandidate? after = null,
+        DateTime openedSinceUtc, int limit, InvestigationEvidenceScope scope, InvestigationEvidenceCandidate? after = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(scope);
         var rows = new List<InvestigationEvidenceCandidate>();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = Command(connection, null, EvidenceCandidatesSql, P(openedSinceUtc), P(limit), P(firstMetric),
+        await using var command = Command(connection, null, EvidenceCandidatesSql, P(openedSinceUtc), P(limit),
+            P(scope.Keys.ToArray()), P(scope.Sections.ToArray()),
             P(after?.OpenedAtUtc ?? DateTime.UnixEpoch), P(after?.RequestId ?? Guid.Empty));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var names = reader.GetFieldValue<string[]>(8);
+            var firsts = reader.GetFieldValue<DateTime[]>(9);
+            var metrics = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            for (var i = 0; i < names.Length && i < firsts.Length; i++)
+                metrics[names[i]] = DateTime.SpecifyKind(firsts[i], DateTimeKind.Utc);
             rows.Add(new InvestigationEvidenceCandidate(
                 reader.GetGuid(0), reader.GetInt32(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
                 DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(5), DateTimeKind.Utc),
                 DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(6), DateTimeKind.Utc),
-                MonitoredEngineKind.IsPostgres(reader.IsDBNull(7) ? null : reader.GetString(7))));
+                MonitoredEngineKind.IsPostgres(reader.IsDBNull(7) ? null : reader.GetString(7)),
+                metrics));
         }
 
         return rows;

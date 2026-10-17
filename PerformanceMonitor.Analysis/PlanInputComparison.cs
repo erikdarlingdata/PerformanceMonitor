@@ -39,8 +39,14 @@ public enum PlanInputOutcome
 /// the output (a newer plan that returns far more rows), the statement can recompile on every call
 /// (<c>OPTION (RECOMPILE)</c>), or the cheap plan can have served only other parameter values; none of those is a plan
 /// that got worse. This class judges a candidate in that order: <see cref="JudgeBeforePlans"/> needs no plan,
-/// <see cref="JudgePlans"/> reads the two stored plans. Only the outcome leaves it: a compiled value is a customer
-/// value, so it is never logged, stored or returned.
+/// <see cref="JudgePlans"/> reads the two stored plans. Only the outcome leaves the judging: a compiled value is a customer
+/// value, so the detector never logs, stores or returns one.
+///
+/// <para><b>The one stored copy (#6002).</b> <see cref="CompiledValues"/> is the single exception: the investigation evidence
+/// capture reads a regression target's good and bad plans through it and freezes their compiled values in the
+/// <c>regression_targets</c> evidence row, the one place a compiled value is stored. Each value sits under the
+/// <c>compiled_value</c> key, which <c>mcp.dataDetail</c> classes as a parameter value, so the served evidence masks it on the
+/// same path as statement text (replaced under <c>maskLiterals</c>, withheld under <c>metadataOnly</c>).</para>
 /// </summary>
 public static class PlanInputComparison
 {
@@ -152,8 +158,9 @@ public static class PlanInputComparison
     /// parameters, or no compiled value on both sides, match) is <see cref="PlanInputOutcome.KeepSameValues"/>.
     /// Different values with a different statistics set, a different statistics update time or a different
     /// cardinality estimator version is <see cref="PlanInputOutcome.KeepStatisticsChanged"/>; different values over
-    /// the same statistics is <see cref="PlanInputOutcome.DropValuesOnly"/>. Only the outcome leaves this class: a
-    /// compiled value is a customer value, so it is never logged, stored or returned.
+    /// the same statistics is <see cref="PlanInputOutcome.DropValuesOnly"/>. Only the outcome leaves this method: a
+    /// compiled value is a customer value, so the detector never logs, stores or returns one (the class remarks name the
+    /// one stored copy, #6002).
     /// </summary>
     public static PlanInputOutcome JudgePlans(string? latestPlanXml, string? bestPlanXml)
     {
@@ -194,6 +201,15 @@ public static class PlanInputComparison
             ? PlanInputOutcome.DropValuesOnly
             : PlanInputOutcome.KeepStatisticsChanged;
     }
+
+    /// <summary>
+    /// The parameter compiled values of one plan, in plan order (#6002): each parameter column with its compiled value (null
+    /// when the parameter has none). Null when the plan cannot be read, under the same rules as <see cref="JudgePlans"/>
+    /// (missing, unparseable, the withheld placeholder, a withheld compiled value, or one parameter listed twice with
+    /// different values). The investigation evidence is the only caller: see the class remarks on the one stored copy.
+    /// </summary>
+    public static IReadOnlyList<KeyValuePair<string, string?>>? CompiledValues(string? planXml) =>
+        ReadInputs(planXml) is { } inputs ? new List<KeyValuePair<string, string?>>(inputs.Parameters) : null;
 
     /// <summary>True for the three outcomes that drop the candidate.</summary>
     public static bool IsDrop(PlanInputOutcome outcome) =>
