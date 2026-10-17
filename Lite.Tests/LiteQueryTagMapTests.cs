@@ -93,6 +93,20 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task ADifferentApplicationOnTheSameKey_IsANewSightingRow_AndOneTagStillResolvesTheKey()
+    {
+        Sight(Snapshot(HashA, "SELECT 1", "Reports"), Snapshot(HashA, "SELECT 1", "Admin"), Snapshot(HashA, "SELECT 1", "Admin"));
+        Assert.Equal(2, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(2, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}' AND application_name = 'Admin'"));
+
+        var tag = await _service.CreateQueryTagAsync("Admin", null);
+        await _service.AddQueryTagRuleAsync(new QueryTagRuleInput(QueryTagRuleField.Application, "admin", tag));
+        await _service.BuildQueryTagMapAsync();
+
+        Assert.Equal(tag, Assert.Single(await MapAsync()).TagId);
+    }
+
+    [Fact]
     public async Task AFailingSightingsWrite_DoesNotThrow_AndTheCollectionIsUnaffected()
     {
         using (var connection = _fixture.DuckDb.CreateConnection())

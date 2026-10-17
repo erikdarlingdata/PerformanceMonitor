@@ -63,9 +63,11 @@ public partial class LocalDataService
 
         var resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
         var removed = new List<(int ServerId, string Kind, string Key)>();
-        foreach (var (serverId, kind, key, sighting) in sightings)
+        var byKey = sightings.GroupBy(x => (x.ServerId, x.Kind, x.Key)).ToList();
+        foreach (var group in byKey)
         {
-            var result = QueryTagResolver.Resolve(serverId, [sighting], assignments, rules, names);
+            var (serverId, kind, key) = group.Key;
+            var result = QueryTagResolver.Resolve(serverId, group.Select(g => g.Sighting).ToList(), assignments, rules, names);
             if (result.HasTag && tagIds.Contains(result.TagId!.Value))
             {
                 resolved.Add((serverId, kind, key, result));
@@ -129,7 +131,7 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
             throw;
         }
 
-        return new QueryTagMapPass(rebuild, sightings.Count, resolved.Count);
+        return new QueryTagMapPass(rebuild, byKey.Count, resolved.Count);
     }
 
     private static async Task<List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)>> ReadQuerySightingsAsync(
@@ -140,9 +142,10 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
         command.CommandText = @"
 SELECT server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample
 FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY last_seen DESC, key) AS rn
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY last_seen DESC, key, application_name, login_name, host_name) AS rn
     FROM query_tag_sightings
-    WHERE $1 IS NULL OR last_seen >= $1
+    WHERE $1 IS NULL OR (server_id, key_kind, key) IN
+        (SELECT server_id, key_kind, key FROM query_tag_sightings WHERE last_seen >= $1)
 )
 WHERE rn <= $2";
         command.Parameters.Add(new DuckDBParameter { Value = (object?)since ?? DBNull.Value });
@@ -152,7 +155,7 @@ WHERE rn <= $2";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            string? Text(int i) => reader.IsDBNull(i) || reader.GetString(i).Length == 0 ? null : reader.GetString(i);
             var serverId = reader.GetInt32(0);
             var kind = reader.GetString(1) switch
             {

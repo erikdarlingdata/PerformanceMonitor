@@ -35,7 +35,7 @@ public partial class RemoteCollectorService
     {
         try
         {
-            var folded = new Dictionary<(QueryTagKeyKind Kind, string Key), (QueryTagSighting First, long Count)>();
+            var folded = new Dictionary<(QueryTagKeyKind Kind, string Key, string App, string Login, string Host), (QueryTagSighting First, long Count)>();
             foreach (var row in rows)
             {
                 var sightings = definition.DescribeQueryTagSightings(row);
@@ -46,7 +46,7 @@ public partial class RemoteCollectorService
 
                 foreach (var s in sightings)
                 {
-                    var id = (s.KeyKind, s.Key);
+                    var id = (s.KeyKind, s.Key, s.Application ?? string.Empty, s.Login ?? string.Empty, s.Host ?? string.Empty);
                     if (folded.TryGetValue(id, out var seen))
                     {
                         folded[id] = (seen.First, seen.Count + 1);
@@ -72,7 +72,7 @@ public partial class RemoteCollectorService
             var hosts = new List<string>(folded.Count);
             var samples = new List<string>(folded.Count);
             var counts = new List<long>(folded.Count);
-            foreach (var ((kind, key), (first, count)) in folded)
+            foreach (var ((kind, key, _, _, _), (first, count)) in folded)
             {
                 kinds.Add(KindText(kind));
                 keys.Add(key);
@@ -92,10 +92,10 @@ public partial class RemoteCollectorService
 INSERT INTO query_tag_sightings
     (server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample,
      first_seen, last_seen, seen_count)
-SELECT $1, k, c_key, NULLIF(d, ''), NULLIF(o, ''), NULLIF(a, ''), NULLIF(l, ''), NULLIF(h, ''), NULLIF(t, ''), $11, $11, n
+SELECT $1, k, c_key, NULLIF(d, ''), NULLIF(o, ''), a, l, h, NULLIF(t, ''), $11, $11, n
 FROM (SELECT UNNEST($2) AS k, UNNEST($3) AS c_key, UNNEST($4) AS d, UNNEST($5) AS o, UNNEST($6) AS a,
              UNNEST($7) AS l, UNNEST($8) AS h, UNNEST($9) AS t, UNNEST($10) AS n)
-ON CONFLICT (server_id, key_kind, key) DO UPDATE SET
+ON CONFLICT (server_id, key_kind, key, application_name, login_name, host_name) DO UPDATE SET
     seen_count = query_tag_sightings.seen_count + excluded.seen_count,
     last_seen = excluded.last_seen";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
