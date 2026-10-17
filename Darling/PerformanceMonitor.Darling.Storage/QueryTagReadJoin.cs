@@ -214,7 +214,7 @@ public static class QueryTagReadJoin
     /// <summary>
     /// The tag of each key, as its path name (<c>Parent / Child</c>), for a page of rows. A key with no map row is not in the
     /// result. Every key compares exactly (#5984): the map's primary key is (server_id, key_kind, key), so a lower() on either side would
-    /// defeat it. Case is folded once, when the map is built (#5985 writes the sighted key text), never at read time.
+    /// defeat it. Nothing folds case: the map holds the sighted key text as collected (#5985) and the fact row carries the same collected text, so the two agree with no lower() on either side.
     /// </summary>
     public static async Task<Dictionary<string, string>> LookupAsync(
         NpgsqlDataSource postgres, int serverId, string keyKind, IEnumerable<string?> keys, CancellationToken cancellationToken)
