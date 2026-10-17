@@ -38,12 +38,14 @@ namespace PerformanceMonitor.Darling.Storage;
 public sealed class QueryTagSightingBuffer
 {
     /// <summary>
-    /// The most distinct sightings held before the next append flushes. At 50,000 entries and up to a few hundred bytes
-    /// of text each the buffer is bounded at a few tens of megabytes, which is more than a minute of any real fleet writes
-    /// (a distinct entry is a distinct query and caller, and query_stats alone names a few thousand a minute), so the cap
-    /// is reached only when the map step has been stalled, and then it bounds memory rather than ending the sightings.
+    /// The most distinct sightings held before the next append flushes. The worst case is this cap times
+    /// <see cref="QueryTagSightingWriter.TextSampleChars"/>: 10,000 entries of 4,000 characters is about 80 MB of UTF-16,
+    /// and that is only reached when the map step has stalled, since it flushes every minute anyway. A minute of a large fleet
+    /// is a few thousand distinct entries (a distinct entry is a distinct query and caller, and query_stats alone names a few
+    /// thousand a minute), so in normal running the cap is not reached, and when it is, it bounds memory rather than ending
+    /// the sightings.
     /// </summary>
-    public const int SightingBufferCap = 50_000;
+    public const int SightingBufferCap = 10_000;
 
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;

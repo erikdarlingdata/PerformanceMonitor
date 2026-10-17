@@ -42,10 +42,12 @@ public static class QueryTagSightingWriter
 
     /// <summary>
     /// The longest text sample kept, in characters. A sample is the first text a key was sighted with and the upsert keeps
-    /// only that one, so every later sighting's text is thrown away; cutting it as it is buffered keeps the buffer small.
-    /// Text rules and <c>#tag</c> comments read this sample, so they see the first 500 characters of the first-sighted text.
+    /// only that one, so every later sighting's text is thrown away. Text rules and <c>/* tag:NAME */</c> comments read this
+    /// sample, so they see the first 4,000 characters of the first-sighted text, the same text they saw before sightings were
+    /// buffered and the same cut Lite keeps. The buffer is bounded by entry count instead, see
+    /// <see cref="QueryTagSightingBuffer.SightingBufferCap"/>.
     /// </summary>
-    public const int TextSampleChars = 500;
+    public const int TextSampleChars = 4000;
 
     /// <summary>
     /// The most rows one statement carries. A flush larger than this is several statements, so a buffer at its cap is

@@ -440,12 +440,12 @@ public sealed class QueryTagMapBuilderLiveTests
     }
 
     [Fact]
-    public async Task TheBuffer_SumsCounts_KeepsTheFirstSampleCutAt500_AndFlushesOnceThenHoldsNothing()
+    public async Task TheBuffer_SumsCounts_KeepsTheFirstSampleCutAtTheWritersSampleLength_AndFlushesOnceThenHoldsNothing()
     {
         await WithStoreAsync(async env =>
         {
             var buffer = new QueryTagSightingBuffer(env.Source);
-            string longText = new string('x', 600);
+            string longText = new string('x', QueryTagSightingWriter.TextSampleChars + 100);
             await buffer.AppendAsync(Server, HashSightings("0xAA", "App", longText), env.Ct);
             await buffer.AppendAsync(Server, HashSightings("0xAA", "App", "second"), env.Ct);
             await buffer.AppendAsync(Server, HashSightings("0xBB", "App"), env.Ct);
@@ -458,7 +458,7 @@ public sealed class QueryTagMapBuilderLiveTests
 
             Assert.Equal(0, buffer.Count);
             Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
-            Assert.Equal("500", await ScalarAsync(env, "SELECT char_length(text_sample) FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal(QueryTagSightingWriter.TextSampleChars.ToString(CultureInfo.InvariantCulture), await ScalarAsync(env, "SELECT char_length(text_sample) FROM collect.query_tag_sightings WHERE key = '0xAA'"));
             Assert.Equal(0, await buffer.FlushAsync(env.Ct));
         });
     }
@@ -468,16 +468,16 @@ public sealed class QueryTagMapBuilderLiveTests
     {
         await WithStoreAsync(async env =>
         {
-            var buffer = new QueryTagSightingBuffer(env.Source, cap: 3);
-            await buffer.AppendAsync(Server, HashSightings("0x01", "App"), env.Ct);
-            await buffer.AppendAsync(Server, HashSightings("0x02", "App"), env.Ct);
-            await buffer.AppendAsync(Server, HashSightings("0x03", "App"), env.Ct);
-            Assert.Equal(3, buffer.Count);
+            int cap = QueryTagSightingBuffer.SightingBufferCap;
+            var buffer = new QueryTagSightingBuffer(env.Source);
+            var full = Enumerable.Range(1, cap).SelectMany(i => HashSightings("0x" + i.ToString("X8", CultureInfo.InvariantCulture), "App")).ToList();
+            await buffer.AppendAsync(Server, full, env.Ct);
+            Assert.Equal(cap, buffer.Count);
             Assert.Equal("0", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
 
-            await buffer.AppendAsync(Server, HashSightings("0x04", "App"), env.Ct);
+            await buffer.AppendAsync(Server, HashSightings("0xFFFFFFFF", "App"), env.Ct);
 
-            Assert.Equal("3", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+            Assert.Equal(cap.ToString(CultureInfo.InvariantCulture), await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
             Assert.Equal(1, buffer.Count);
         });
     }
