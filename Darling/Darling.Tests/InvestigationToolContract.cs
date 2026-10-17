@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 
 namespace Darling.Tests;
 
@@ -80,7 +81,7 @@ internal static class InvestigationToolContract
     };
 
     /// <summary>
-    /// The parameters only Darling's tools take, after the shared ones (#5914): Darling's submit takes report <c>links</c>;
+    /// The parameters only Darling's tools take, after the shared ones (#5914, #6004): Darling's submit takes report <c>links</c>, <c>family_of</c> and <c>queries_run</c>;
     /// Lite's submit does not, so Lite's tool text stays as it was. Darling's test passes this table to
     /// <see cref="Differences"/>; Lite's passes none.
     /// </summary>
@@ -89,6 +90,8 @@ internal static class InvestigationToolContract
         ["submit_investigation_report"] = new[]
         {
             P("links", "string?", "null", "Optional JSON array of at most 10 {kind, url, key}; https only. See the guide."),
+            P("family_of", "string?", "null", "Optional. The request_id of the first report in this family; it must exist."),
+            P("queries_run", "string?", "null", "Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + "."),
         },
     };
 

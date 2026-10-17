@@ -73,7 +73,7 @@ public sealed class InvestigationReportLinksTests
         Assert.Null(InvestigationReportLinks.Validate(Many(10), out var ten));
         Assert.Equal(10, ten.Count);
         Assert.Equal("11 links, over 10.", InvestigationReportLinks.Validate(Many(11), out _));
-        Assert.Contains("kind 'ticket' is not jira, pull_request or bug_report",
+        Assert.Contains("kind 'ticket' is not jira, pull_request, bug_report, commit or release",
             InvestigationReportLinks.Validate(One("https://jira.example.invalid/x", "ticket"), out _), StringComparison.Ordinal);
     }
 
