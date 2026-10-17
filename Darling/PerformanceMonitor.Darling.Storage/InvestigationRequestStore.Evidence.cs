@@ -47,8 +47,11 @@ public sealed partial class InvestigationRequestStore
     public static string EvidenceReadyOnceKey(Guid requestId) =>
         "evidence_ready:" + requestId.ToString("D", CultureInfo.InvariantCulture);
 
-    /// <summary>Requests that still need evidence, newest first. $1 the oldest open time that still counts (a request older
-    /// than the capture window is left as it is), $2 the row cap, $3 the first metric the capture serves.</summary>
+    /// <summary>Requests that still need evidence, OLDEST first (#6001 review: the oldest are the closest to their grace, so a
+    /// backlog reaches them before a newer request). $1 the oldest open time that still counts (a request older than the
+    /// capture window is left as it is), $2 the page size, $3 the first metric the capture serves, $4 and $5 the keyset cursor:
+    /// the (opened_at, request_id) of the last request the previous page returned, so a request that stays pending is not
+    /// returned again in the same tick.</summary>
     internal const string EvidenceCandidatesSql = @"
 SELECT r.request_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.opened_at, s.engine_kind
 FROM config.investigation_requests AS r
@@ -58,7 +61,8 @@ WHERE r.state IN ('open', 'claimed')
   AND r.opened_at >= $1
   AND r.first_metric = $3
   AND (r.evidence_state IS NULL OR r.evidence_state = 'pending')
-ORDER BY r.opened_at DESC
+  AND (r.opened_at, r.request_id) > ($4, $5)
+ORDER BY r.opened_at, r.request_id
 LIMIT $2";
 
     internal const string EvidenceRowsSql = @"
@@ -76,21 +80,28 @@ ON CONFLICT (request_id, section) DO UPDATE
 SET state = EXCLUDED.state, content = EXCLUDED.content, captured_at = EXCLUDED.captured_at
 WHERE config.investigation_evidence.state = 'pending'";
 
+    /* Every section of the request after this call's writes, so the journal names the ready ones and the not_collected ones
+       whatever this call wrote (#6001 review). */
     internal const string EvidenceTallySql = @"
-SELECT count(*) FILTER (WHERE state = 'pending'), count(*) FILTER (WHERE state = 'ready')
+SELECT section, state
 FROM config.investigation_evidence
-WHERE request_id = $1";
+WHERE request_id = $1
+ORDER BY evidence_id";
 
     internal const string EvidenceStateSql = @"
 UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = $1";
 
-    /// <summary>The requests that still need evidence captured, opened at or after <paramref name="openedSinceUtc"/> whose first alert metric is <paramref name="firstMetric"/>.</summary>
+    /// <summary>One page of the requests that still need evidence captured, OLDEST first, opened at or after
+    /// <paramref name="openedSinceUtc"/> whose first alert metric is <paramref name="firstMetric"/>. <paramref name="after"/> is
+    /// the candidate the previous page ended on (null for the first page).</summary>
     public async Task<IReadOnlyList<InvestigationEvidenceCandidate>> ListEvidenceCandidatesAsync(
-        DateTime openedSinceUtc, int limit, string firstMetric, CancellationToken cancellationToken = default)
+        DateTime openedSinceUtc, int limit, string firstMetric, InvestigationEvidenceCandidate? after = null,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<InvestigationEvidenceCandidate>();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = Command(connection, null, EvidenceCandidatesSql, P(openedSinceUtc), P(limit), P(firstMetric));
+        await using var command = Command(connection, null, EvidenceCandidatesSql, P(openedSinceUtc), P(limit), P(firstMetric),
+            P(after?.OpenedAtUtc ?? DateTime.UnixEpoch), P(after?.RequestId ?? Guid.Empty));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -146,13 +157,29 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
                     : new NpgsqlParameter<DateTime?> { TypedValue = DateTime.SpecifyKind(now, DateTimeKind.Utc), NpgsqlDbType = NpgsqlDbType.TimestampTz });
         }
 
-        long pending, ready;
+        long pending = 0, ready = 0;
+        var readySections = new JsonArray();
+        var notCollectedSections = new JsonArray();
         await using (var tally = Command(connection, transaction, EvidenceTallySql, P(requestId)))
         await using (var reader = await tally.ExecuteReaderAsync(cancellationToken))
         {
-            await reader.ReadAsync(cancellationToken);
-            pending = reader.GetInt64(0);
-            ready = reader.GetInt64(1);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var name = reader.GetString(0);
+                switch (reader.GetString(1))
+                {
+                    case "pending":
+                        pending++;
+                        break;
+                    case "ready":
+                        ready++;
+                        readySections.Add(name);
+                        break;
+                    default:
+                        notCollectedSections.Add(name);
+                        break;
+                }
+            }
         }
 
         var state = pending > 0 ? "pending" : ready > 0 ? "ready" : "not_collected";
@@ -160,10 +187,9 @@ UPDATE config.investigation_requests SET evidence_state = $2 WHERE request_id = 
         var journaled = false;
         if (state == "ready")
         {
-            var names = new JsonArray();
-            foreach (var section in sections)
-                names.Add(section.Section);
-            var detail = new JsonObject { ["sections"] = names }.ToJsonString();
+            /* #6001 review: `sections` names the READY sections and `not_collected` the ones that never landed, read from the
+               rows the request holds now, not from this call's writes (the grace-expiry call writes only the not_collected ones). */
+            var detail = new JsonObject { ["sections"] = readySections, ["not_collected"] = notCollectedSections }.ToJsonString();
             journaled = await JournalAsync(connection, transaction, now, requestId, null, serverId, EvidenceReadyEvent, "service",
                 null, detail, EvidenceReadyOnceKey(requestId), cancellationToken) > 0;
         }
