@@ -5581,6 +5581,28 @@ public sealed class DarlingSelfAlertTests
         Assert.Empty(h.History.Records);
     }
 
+    /* #6042: capture-down is a SQL Server Extended Events judgment; a PostgreSQL target never writes those
+       collectors, so the read only probed every chunk to answer "none". */
+    [Theory]
+    [InlineData(PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql, 0)]
+    [InlineData(PerformanceMonitor.Collectors.CollectorTargetEngine.SqlServer, 1)]
+    public async Task EvaluateStoreAlerts_CaptureDownRead_RunsOnlyForSqlServerTargets(
+        PerformanceMonitor.Collectors.CollectorTargetEngine engine, int expectedReads)
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var reads = 0;
+        e.CaptureDownReadOverride = (_, _, _) =>
+        {
+            reads++;
+            return Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+        };
+
+        await e.EvaluateStoreAlertsAsync(null!, ServerId, Name, connected: true, Ct, engine);
+
+        Assert.Equal(expectedReads, reads);
+    }
+
     /* ---------------- resolution-record shape + engine wiring (finding #4) ---------------- */
 
     [Fact]

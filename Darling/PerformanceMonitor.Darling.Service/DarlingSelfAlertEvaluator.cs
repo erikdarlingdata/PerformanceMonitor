@@ -1407,7 +1407,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// run then). Failure-isolated per condition so a bad store read never breaks the loop.
     /// </summary>
     public async Task EvaluateStoreAlertsAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, bool connected, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, string serverName, bool connected, CancellationToken cancellationToken,
+        CollectorTargetEngine engine = CollectorTargetEngine.SqlServer)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -1460,7 +1461,12 @@ internal sealed class DarlingSelfAlertEvaluator
         var captureReadClock = Stopwatch.StartNew();
         try
         {
-            var missing = await ReadMissingCaptureSessionsAsync(postgres, serverId, cancellationToken);
+            /* #6042: the three capture-down collectors are SQL Server Extended Events collectors that a
+               PostgreSQL target never writes, so the read can only ever answer "none" - and it probes every
+               collection_log chunk to say so. Apply the empty answer (which reads no store) instead. */
+            var missing = engine == CollectorTargetEngine.PostgreSql
+                ? (IReadOnlyList<string>)Array.Empty<string>()
+                : await (CaptureDownReadOverride ?? ReadMissingCaptureSessionsAsync)(postgres, serverId, cancellationToken);
             captureReadClock.Restart();
             await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);
         }
@@ -8514,7 +8520,10 @@ ORDER BY x.collector_name";
     /// interval-hourly refresh starved the store for I/O. The same question asked per collector as
     /// <c>ORDER BY collection_time DESC LIMIT 1</c> lets ChunkAppend order the chunks newest-first and stop
     /// at the first row: 14 buffers, the newest chunk only, 120 of 122 chunk scans never executed — and the
-    /// property is horizon-independent, so a longer retention cannot regress it. Two literal arms rather than
+    /// property is horizon-independent, so a longer retention cannot regress it. (#6042: "horizon-independent"
+    /// holds only when the collector HAS rows. A collector with no rows for the server, as all three are on a
+    /// PostgreSQL target, gives ChunkAppend nothing to stop at, so each arm probes every chunk. The service
+    /// therefore never runs this read for a PostgreSQL target.) Two literal arms rather than
     /// a LATERAL over a VALUES list because the collector names are a closed set the alert owns, and a plan
     /// with a literal predicate is the one the gated test can pin.</para>
     ///
@@ -8527,6 +8536,9 @@ ORDER BY x.collector_name";
     /// <c>(server_id, collection_time)</c> cannot serve the second key, and each arm top-N-heapsorts the
     /// server's whole newest chunk (1,158 buffers) instead of stopping at its first hit (5).</para>
     /// </summary>
+
+    /// <summary>Test seam (#6042): replaces the capture-down store read so a pin can count calls.</summary>
+    internal Func<NpgsqlDataSource, int, CancellationToken, Task<IReadOnlyList<string>>>? CaptureDownReadOverride { get; set; }
 
     internal Task<IReadOnlyList<string>> ReadMissingCaptureSessionsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)

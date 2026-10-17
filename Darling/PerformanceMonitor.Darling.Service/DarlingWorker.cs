@@ -12613,7 +12613,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                             server.Config.ServerId,
                             server.Config.DisplayName,
                             connected: server.Runtime is not null,
-                            stoppingToken);
+                            stoppingToken,
+                            engine: server.Runtime?.Target.Engine ?? CollectorTargetEngine.SqlServer);
                     }
                 }
 
