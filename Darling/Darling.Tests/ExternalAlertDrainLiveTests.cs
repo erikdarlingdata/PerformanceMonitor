@@ -86,6 +86,32 @@ public sealed class ExternalAlertDrainLiveTests
         });
     }
 
+    /// <summary>#6003, D7: the clear's resolution row names the metric that fired in <c>Resolves</c>, which is what the
+    /// investigation <c>resolved</c> detector matches, and it resolves a request linked to that metric on the same server.</summary>
+    [Fact]
+    public async Task AClearsResolutionRow_NamesTheFiredMetric_AndResolvesALinkedInvestigationRequest()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            var at = DateTime.UtcNow.AddMinutes(-10);
+            var requests = new InvestigationRequestStore(rig.DataSource, 30, () => at);
+            var id = (await requests.OpenOrJoinAsync(new InvestigationAlert(1, 7, "SQL01", "resources", "External:nagios:cpu", at,
+                Array.Empty<string>(), null, 50, 500, LeaseMinutes: 15, ExpiryMinutes: 240), rig.Ct)).RequestId!.Value;
+
+            await rig.SubmitAsync("fire", "cpu", server: "SQL01");
+            await rig.SubmitAsync("clear", "cpu", server: "SQL01");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal("External:nagios:cpu", await rig.ScalarAsync(
+                "SELECT context_json::jsonb ->> 'Resolves' FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'"));
+            at = DateTime.UtcNow;
+            Assert.Equal(1, (await requests.SweepAsync(rig.Ct)).Resolved);
+            Assert.Equal("resolved", await rig.ScalarAsync(
+                $"SELECT event FROM config.investigation_journal WHERE request_id = '{id}' ORDER BY journal_id DESC LIMIT 1"));
+        });
+    }
+
     [Fact]
     public async Task OneKeyFiredForTwoUnregisteredNames_IsTwoIncidents_AndEachClearResolvesItsOwn()
     {
@@ -535,6 +561,7 @@ public sealed class ExternalAlertDrainLiveTests
         {
             _seed = seed;
             Ct = ct;
+            DataSource = dataSource;
             History = new PgAlertHistoryStore(dataSource, NullLogger.Instance);
             Store = new ExternalAlertStore(dataSource, 30);
             Drain = new ExternalAlertDrain(
@@ -564,6 +591,7 @@ public sealed class ExternalAlertDrainLiveTests
         }
 
         public CancellationToken Ct { get; }
+        public NpgsqlDataSource DataSource { get; }
         public PgAlertHistoryStore History { get; }
         public ExternalAlertStore Store { get; }
         public ExternalAlertDrain Drain { get; }

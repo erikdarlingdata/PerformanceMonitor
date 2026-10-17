@@ -80,8 +80,9 @@ public sealed class InvestigationRequestStoreLiveTests
             Assert.Equal("2|3", await ScalarAsync(connection, $@"
 SELECT alert_count || '|' || (SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{first.RequestId}')
 FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct));
+            /* #6003, D6: both joins bring the request's own metric at its own severity, so each is journaled quiet. */
             Assert.Equal("2", await ScalarAsync(connection,
-                "SELECT count(*) FROM config.investigation_journal WHERE event = 'joined'", ct));
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'joined_quiet'", ct));
         });
     }
 

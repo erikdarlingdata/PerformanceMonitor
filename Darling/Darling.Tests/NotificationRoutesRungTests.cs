@@ -242,7 +242,8 @@ public sealed class NotificationRoutesRungTests
         /* The scope columns (V181, #5750) follow, then the agent columns (V184, #5632), both set by init so the constructor
            below is unchanged. */
         /* V193 (#5998): the signing key columns come last on the service read; the viewer reads them by their own statements. */
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until" }), serviceSelect);
+        /* #6003 (D8): fallback_route_id follows them, set by init like the agent columns; the viewer neither reads nor writes it. */
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id" }), serviceSelect);
         Assert.EndsWith("ORDER BY route_id", StoreConfigProvider.NotificationRoutesSelectSql, StringComparison.Ordinal);
 
         /* The constructor's parameter order IS the SELECT's order, so a reader ordinal cannot re-map a column. */

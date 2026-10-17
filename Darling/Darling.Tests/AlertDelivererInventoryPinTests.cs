@@ -11,6 +11,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -196,15 +199,23 @@ public sealed class AlertDelivererInventoryPinTests
         Assert.Contains("filtered.DetailText", call, StringComparison.Ordinal);
     }
 
+    /// <summary>A resolution row's message goes through the statement filter, and (#6003, D7) its context names the metric
+    /// the row resolves beside the caller's own context: the investigation <c>resolved</c> detector matches that member,
+    /// since the row's metric_name is the resolution's title.</summary>
     [Fact]
     public void EveryResolutionRowIsBuiltThroughTheFilteredRecordBuilder()
     {
-        var evaluator = CSharpSourceWalker.StripCommentsAndStrings(
-            ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"));
-        var start = evaluator.IndexOf("AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution)", StringComparison.Ordinal);
-        Assert.True(start > 0, "BuildResolutionRecord not found");
-        var end = evaluator.IndexOf(';', start);
-        Assert.Contains("SensitiveStatements.Text(resolution.Message)", evaluator[start..end], StringComparison.Ordinal);
+        var resolution = new AlertResolution("7", "srv", "High CPU", "CPU Resolved", "CREATE LOGIN [a] WITH PASSWORD = 'p'");
+
+        var record = DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution, "{\"Source\":\"nagios\"}");
+        Assert.Equal("CPU Resolved", record.MetricName);
+        Assert.Equal(SensitiveStatements.PlaceholderText, record.DetailText);
+        var context = System.Text.Json.Nodes.JsonNode.Parse(record.ContextJson!)!;
+        Assert.Equal("High CPU", (string)context[DarlingSelfAlertEvaluator.ResolvesMember]!);
+        Assert.Equal("nagios", (string)context["Source"]!);
+
+        Assert.Equal("High CPU", (string)System.Text.Json.Nodes.JsonNode.Parse(
+            DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution).ContextJson!)![DarlingSelfAlertEvaluator.ResolvesMember]!);
     }
 
     [Fact]

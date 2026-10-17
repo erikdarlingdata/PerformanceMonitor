@@ -135,7 +135,7 @@ public sealed class DarlingMcpInvestigationTools
         "same cursor. Each row: request_id, route_id, server_name, family, opened_at, event, event_id, event_time and the " +
         "event's detail; no lease and no brief. joined comes only for a new metric or a higher severity. evidence_ready's " +
         "detail names the evidence sections ready, not_collected and pending: the brief is composed at claim, so evidence that " +
-        "lands later reaches a claimed agent only through this detail (#6003 handoff: no evidence read tool yet). The claim stays pull: " +
+        "lands later reaches a claimed agent only through this detail. The claim stays pull: " +
         "the first claim_investigation_request call wins, exactly as for a request found by listing, so one request can wake " +
         "several agents and only one claims it. route_ids: the agent routes to wait on (get_notification_routes, agent_level " +
         "1); omit them for every route. There is one shared bearer token, so every token holder can wait on every route; a " +
