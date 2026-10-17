@@ -44,15 +44,23 @@ public sealed class DarlingMcpQueryTagRuleTools
     /// <summary>The most samples <c>test_query_tag_rule</c> returns.</summary>
     internal const int MaxSamples = 25;
 
-    /// <summary>The most sighting rows one test reads: the per-pass key cap the collectors share. A longer window is cut, newest kept.</summary>
-    internal const int MaxSightingRows = QueryTagLimits.MaxKeysPerServerPerPass;
+    /// <summary>The most sighting ROWS one <c>test_query_tag_rule</c> reads, across every server when <c>server_id</c> is omitted. It bounds
+    /// the work of one dry run; it is not the collectors' per-pass key cap (a key seen under several caller shapes is several rows). A longer
+    /// window is cut, newest kept, and the cut falls on a key boundary: the key the cut lands in is left out, so no key is resolved from a
+    /// partial set of its sightings. The read asks for one more row than this so a window of exactly this many rows is not called cut.</summary>
+    internal const int TestSightingRows = 10000;
+
+    /// <summary>The most of the <see cref="MaxSamples"/> slots held keys (a hand assignment, or a rule that ranks ahead, already holds
+    /// them) may reserve, so a rule with hundreds of matches still shows why some will not change.</summary>
+    internal const int MaxHeldSamples = 5;
 
     internal const int DefaultWindowHours = 168;
     internal const int MaxWindowHours = 8760;
     internal const int DefaultPriority = 100;
 
-    /// <summary>The pattern a <c>text_tag</c> rule stores: the column is NOT NULL and non-blank, and the matcher ignores it for that field.</summary>
-    internal const string TextTagPlaceholderPattern = "tag:*";
+    /// <summary>The pattern text a <c>text_tag</c> rule stores, as Lite stores it: the column is NOT NULL and non-blank, the matcher ignores it
+    /// for that field, and a rule list shows it as the comment the rule reads.</summary>
+    internal const string TextTagPattern = "/* tag:NAME */";
 
     private const string CreatedBy = "mcp";
     private const string TakesEffectNote = "The tag map is rebuilt on the next collector pass; this call changed no map row.";
@@ -65,7 +73,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         "the next time the collector rebuilds the tag map (this call changes no map row). field is one of application, login, host, database, object, text, text_tag. " +
         "A pattern ignores case and uses * as its only wildcard (no regular expressions); application, login, host, database and object match the whole value " +
         "(an object is matched as database.schema.name, so start with *. to ignore the database), text matches anywhere in the first 4,000 characters of the query text. " +
-        "text_tag reads a /* tag:NAME */ or -- tag:NAME comment in the query text and uses NAME as the tag: it takes no tag_id and its pattern is unused; every other field needs a tag_id " +
+        "text_tag reads a /* tag:NAME */ or -- tag:NAME comment in the query text and uses NAME as the tag: it takes no tag_id and no pattern (it is stored as /* tag:NAME */); every other field needs a tag_id " +
         "(from the query tag tools) and a pattern of 1-400 characters. Rules apply by priority (lower first), then id; the first match wins, but a hand assignment beats any rule. " +
         "server_id limits the rule to one server (omit it for every server). Test a rule first with test_query_tag_rule.")]
     public static Task<string> CreateQueryTagRule(
@@ -138,7 +146,7 @@ public sealed class DarlingMcpQueryTagRuleTools
                 return Refusal("invalid", "invalid_field", "field must be one of application, login, host, database, object, text, text_tag.");
             }
 
-            var stored = parsed == QueryTagRuleField.TextTag ? TextTagPlaceholderPattern : pattern;
+            var stored = parsed == QueryTagRuleField.TextTag ? TextTagPattern : pattern;
             var refusal = await CheckAsync(store, parsed, stored, tagId, serverId, priority, enabled, ct);
             if (refusal is not null)
             {
@@ -151,7 +159,7 @@ public sealed class DarlingMcpQueryTagRuleTools
             return Serialize(new JsonObject
             {
                 ["status"] = "created",
-                ["rule"] = RuleNode(row, tags),
+                ["rule"] = RuleNode(row, ById(tags)),
                 ["rules_version"] = state.RulesVersion,
                 ["map_refresh"] = TakesEffectNote,
             });
@@ -172,48 +180,31 @@ public sealed class DarlingMcpQueryTagRuleTools
                 return error.Json;
             }
 
-            var current = await store.GetRuleAsync(ruleId, ct);
-            if (current is null)
+            // The store holds the rule lock, reads the rule under it and runs this check on that read: the validation sees the row it
+            // is about to change. A tag or server this edit does not touch is not re-checked, so a rule stays editable (pausable)
+            // after its tag was removed elsewhere.
+            var result = await store.UpdateRuleAsync<Refused>(ruleId, changes!, async current =>
             {
-                return NotFound(ruleId);
-            }
-
-            var pattern = current.Pattern;
-            if (changes!.HasPattern)
-            {
-                if (current.Field == QueryTagRuleField.TextTag)
+                if (changes!.HasPattern && current.Field == QueryTagRuleField.TextTag)
                 {
-                    return Refusal("invalid", "text_tag_has_no_pattern", "A text_tag rule reads its tag from the query text and has no pattern to change.");
+                    return new Refused(Refusal("invalid", "text_tag_has_no_pattern", "A text_tag rule reads its tag from the query text and has no pattern to change."));
                 }
 
-                pattern = changes.Pattern!;
-            }
+                var after = changes.ApplyTo(current);
+                return await CheckAsync(
+                    store, current.Field, after.Pattern, after.TagId, after.ServerId, after.Priority, after.Enabled, ct,
+                    checkTag: changes.HasTagId && after.TagId != current.TagId,
+                    checkServer: changes.HasServerId && after.ServerId != current.ServerId);
+            }, ct);
 
-            var priority = changes.HasPriority ? changes.Priority : current.Priority;
-            var enabled = changes.HasEnabled ? changes.Enabled : current.Enabled;
-            var tagId = changes.HasTagId ? changes.TagId : current.TagId;
-            var serverId = changes.HasServerId ? changes.ServerId : current.ServerId;
-
-            if (pattern == current.Pattern && priority == current.Priority && enabled == current.Enabled && tagId == current.TagId && serverId == current.ServerId)
+            switch (result.Outcome)
             {
-                var tagsNow = await store.ReadTagsAsync(ct);
-                return Serialize(new JsonObject { ["status"] = "unchanged", ["rule"] = RuleNode(current, tagsNow) });
-            }
-
-            // A tag or server this edit does not touch is not re-checked: a rule must stay editable (pausable) after its tag was removed elsewhere.
-            var refusal = await CheckAsync(
-                store, current.Field, pattern, tagId, serverId, priority, enabled, ct,
-                checkTag: changes.HasTagId && tagId != current.TagId,
-                checkServer: changes.HasServerId && serverId != current.ServerId);
-            if (refusal is not null)
-            {
-                return refusal.Json;
-            }
-
-            var row = await store.UpdateRuleAsync(ruleId, pattern, priority, enabled, tagId, serverId, ct);
-            if (row is null)
-            {
-                return NotFound(ruleId);
+                case QueryTagRuleUpdateOutcome.NotFound:
+                    return NotFound(ruleId);
+                case QueryTagRuleUpdateOutcome.Refused:
+                    return result.Refusal!.Json;
+                case QueryTagRuleUpdateOutcome.Unchanged:
+                    return Serialize(new JsonObject { ["status"] = "unchanged", ["rule"] = RuleNode(result.Row!, ById(await store.ReadTagsAsync(ct))) });
             }
 
             var tags = await store.ReadTagsAsync(ct);
@@ -221,7 +212,7 @@ public sealed class DarlingMcpQueryTagRuleTools
             return Serialize(new JsonObject
             {
                 ["status"] = "updated",
-                ["rule"] = RuleNode(row, tags),
+                ["rule"] = RuleNode(result.Row!, ById(tags)),
                 ["rules_version"] = state.RulesVersion,
                 ["map_refresh"] = TakesEffectNote,
             });
@@ -263,6 +254,7 @@ public sealed class DarlingMcpQueryTagRuleTools
             var rules = await store.ListRulesAsync(ct);
             var tags = await store.ReadTagsAsync(ct);
             var state = await store.ReadStateAsync(ct);
+            var tagById = ById(tags);
             var shown = rules.Where(r => serverId is null || r.ServerId is null || r.ServerId == serverId).ToList();
             return Serialize(new JsonObject
             {
@@ -270,7 +262,7 @@ public sealed class DarlingMcpQueryTagRuleTools
                 ["count"] = shown.Count,
                 ["rules_version"] = state.RulesVersion,
                 ["built_version"] = state.BuiltVersion,
-                ["rules"] = new JsonArray(shown.Select(r => (JsonNode?)RuleNode(r, tags)).ToArray()),
+                ["rules"] = new JsonArray(shown.Select(r => (JsonNode?)RuleNode(r, tagById)).ToArray()),
             });
         }
         catch (Exception ex)
@@ -294,6 +286,7 @@ public sealed class DarlingMcpQueryTagRuleTools
             QueryTagRule testRule;
             JsonObject ruleNode;
             var tags = await store.ReadTagsAsync(ct);
+            var tagById = ById(tags);
             var draft = ruleId is null;
             if (ruleId is int id)
             {
@@ -305,7 +298,7 @@ public sealed class DarlingMcpQueryTagRuleTools
 
                 // A paused rule is tested as if it were on: the question is what it would tag.
                 testRule = saved.ToRule() with { Enabled = true };
-                ruleNode = RuleNode(saved, tags);
+                ruleNode = RuleNode(saved, tagById);
             }
             else
             {
@@ -314,7 +307,7 @@ public sealed class DarlingMcpQueryTagRuleTools
                     return Refusal("invalid", "invalid_field", "Give rule_id, or a draft with field one of application, login, host, database, object, text, text_tag.");
                 }
 
-                var stored = parsed == QueryTagRuleField.TextTag ? TextTagPlaceholderPattern : pattern;
+                var stored = parsed == QueryTagRuleField.TextTag ? TextTagPattern : pattern;
                 var refusal = await CheckAsync(store, parsed, stored, tagId, null, priority, true, ct);
                 if (refusal is not null)
                 {
@@ -327,10 +320,10 @@ public sealed class DarlingMcpQueryTagRuleTools
                 {
                     ["draft"] = true,
                     ["field"] = QueryTagRuleStore.FieldName(parsed),
-                    ["pattern"] = parsed == QueryTagRuleField.TextTag ? null : stored,
+                    ["pattern"] = stored,
                     ["priority"] = priority,
                     ["tag_id"] = tagId,
-                    ["tag"] = tagId is int t ? TagPath(tags, t) : null,
+                    ["tag"] = tagId is int t ? TagPath(tagById, t) : null,
                 };
             }
 
@@ -340,10 +333,12 @@ public sealed class DarlingMcpQueryTagRuleTools
             }
 
             var since = clock.GetUtcNow().AddHours(-windowHours);
-            var rows = await store.ReadSightingsAsync(serverId, since, MaxSightingRows, ct);
+            // One row more than the bound: the extra row is how a cut is observed (a window of exactly the bound is not cut).
+            var fetched = await store.ReadSightingsAsync(serverId, since, TestSightingRows + 1, ct);
+            var truncated = fetched.Count > TestSightingRows;
+            var rows = truncated ? CutAtKeyBoundary(fetched) : fetched;
             var assignments = await store.ReadAssignmentsAsync(ct);
             var names = new TagNames(tags);
-            var tagById = tags.ToDictionary(t => t.Id);
 
             // Only the other rules compete with the one under test; the tested rule is the tested copy.
             var competing = allRules.Where(r => r.Id != testRule.Id).Select(r => r.ToRule()).ToList();
@@ -377,7 +372,7 @@ public sealed class DarlingMcpQueryTagRuleTools
                     ["key_kind"] = group.Key.KeyKind,
                     ["key"] = group.Key.Key,
                     ["tag_id"] = hit.TagId,
-                    ["tag"] = hit.TagId is long tid && tagById.ContainsKey((int)tid) ? TagPath(tags, (int)tid) : null,
+                    ["tag"] = hit.TagId is long tid ? TagPath(tagById, (int)tid) : null,
                     ["matched_field"] = hit.MatchedField is QueryTagRuleField f ? QueryTagRuleStore.FieldName(f) : null,
                     ["matched_value"] = hit.MatchedValue,
                 };
@@ -403,36 +398,56 @@ public sealed class DarlingMcpQueryTagRuleTools
                 }
 
                 sample["held_tag_id"] = full.TagId;
-                sample["held_tag"] = full.TagId is long ht && tagById.ContainsKey((int)ht) ? TagPath(tags, (int)ht) : null;
+                sample["held_tag"] = full.TagId is long ht ? TagPath(tagById, (int)ht) : null;
                 held.Add(sample);
             }
 
-            var all = tagged.Concat(held).ToList();
+            // Held keys answer "why will this rule not take effect", so up to MaxHeldSamples slots are theirs when any key is held; the
+            // rest go to the keys that would be tagged, and a slot the tagged keys do not need goes back to the held ones.
+            var taggedShown = Math.Min(tagged.Count, MaxSamples - Math.Min(held.Count, MaxHeldSamples));
+            var heldShown = Math.Min(held.Count, MaxSamples - taggedShown);
+            var samples = tagged.Take(taggedShown).Concat(held.Take(heldShown)).ToList();
+            var cutNote = truncated
+                ? string.Create(CultureInfo.InvariantCulture, $" The newest {TestSightingRows:N0} sighting rows were read; the counts are of those.")
+                : string.Empty;
             return Serialize(new JsonObject
             {
-                ["status"] = keys == 0 ? "empty" : "ok",
-                ["message"] = keys == 0
+                ["status"] = keys == 0 && !truncated ? "empty" : "ok",
+                ["message"] = keys == 0 && !truncated
                     ? "No query sightings in the window, so there is nothing to test against. Sightings are recorded by the collectors as they see queries."
-                    : "Nothing was written. Saving the rule changes the tag map on the next collector pass.",
+                    : "Nothing was written. Saving the rule changes the tag map on the next collector pass." + cutNote,
                 ["draft"] = draft,
                 ["rule"] = ruleNode,
                 ["server_id"] = serverId,
                 ["window_hours"] = windowHours,
                 ["keys_examined"] = keys,
                 ["sightings_read"] = rows.Count,
-                ["sightings_truncated"] = rows.Count >= MaxSightingRows,
+                ["sightings_truncated"] = truncated,
                 ["keys_matched"] = matched,
                 ["would_tag"] = wouldTag,
                 ["held_by_hand_assignment"] = heldByAssignment,
                 ["held_by_higher_rule"] = heldByRule,
-                ["samples_truncated"] = all.Count > MaxSamples,
-                ["samples"] = new JsonArray(all.Take(MaxSamples).Select(s => (JsonNode?)s).ToArray()),
+                ["samples_truncated"] = tagged.Count + held.Count > MaxSamples,
+                ["samples"] = new JsonArray(samples.Select(s => (JsonNode?)s).ToArray()),
             });
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("test_query_tag_rule", ex);
         }
+    }
+
+    /// <summary>
+    /// The first <see cref="TestSightingRows"/> rows of a read that was cut, less every row of the key the cut landed in (the key of the
+    /// extra row): that key's older sightings were not read, so resolving it would judge it on a partial set. The rows come newest first.
+    /// </summary>
+    private static List<QueryTagSightingRow> CutAtKeyBoundary(IReadOnlyList<QueryTagSightingRow> fetched)
+    {
+        var edge = fetched[TestSightingRows];
+        return fetched
+            .Take(TestSightingRows)
+            .Where(r => !(r.ServerId == edge.ServerId && r.KeyKind == edge.KeyKind && r.Key == edge.Key))
+            .ToList();
     }
 
     // ---------------------------------------------------------------- checks
@@ -486,11 +501,7 @@ public sealed class DarlingMcpQueryTagRuleTools
     /// <summary>A refusal already rendered as the tool's JSON answer.</summary>
     private sealed record Refused(string Json);
 
-    private sealed record Changes(
-        bool HasPattern, string? Pattern, bool HasPriority, int Priority, bool HasEnabled, bool Enabled,
-        bool HasTagId, int? TagId, bool HasServerId, int? ServerId);
-
-    private static (Changes? Changes, Refused? Error) ParseChanges(string? json)
+    private static (QueryTagRuleEdit? Changes, Refused? Error) ParseChanges(string? json)
     {
         if (string.IsNullOrWhiteSpace(json))
         {
@@ -514,7 +525,7 @@ public sealed class DarlingMcpQueryTagRuleTools
                 return (null, new Refused(Refusal("invalid", "invalid", "changes_json must be a JSON object.")));
             }
 
-            var c = new Changes(false, null, false, 0, false, false, false, null, false, null);
+            var c = new QueryTagRuleEdit(false, null, false, 0, false, false, false, null, false, null);
             var seen = 0;
             foreach (var prop in doc.RootElement.EnumerateObject())
             {
@@ -560,24 +571,26 @@ public sealed class DarlingMcpQueryTagRuleTools
 
     // ---------------------------------------------------------------- output
 
-    private static JsonObject RuleNode(QueryTagRuleRow rule, IReadOnlyList<QueryTagNameRow> tags) => new()
+    private static JsonObject RuleNode(QueryTagRuleRow rule, IReadOnlyDictionary<int, QueryTagNameRow> tagById) => new()
     {
         ["id"] = rule.Id,
         ["field"] = QueryTagRuleStore.FieldName(rule.Field),
-        ["pattern"] = rule.Field == QueryTagRuleField.TextTag ? null : rule.Pattern,
+        ["pattern"] = rule.Pattern,
         ["priority"] = rule.Priority,
         ["enabled"] = rule.Enabled,
         ["tag_id"] = rule.TagId,
-        ["tag"] = rule.TagId is int t ? TagPath(tags, t) : null,
+        ["tag"] = rule.TagId is int t ? TagPath(tagById, t) : null,
         ["server_id"] = rule.ServerId,
         ["created_by"] = rule.CreatedBy,
         ["created_at"] = rule.CreatedAt.UtcDateTime.ToString("o", CultureInfo.InvariantCulture),
     };
 
+    /// <summary>The tags by id, built once per call (#5982 review): a path is then a few lookups, not a dictionary per key.</summary>
+    private static Dictionary<int, QueryTagNameRow> ById(IReadOnlyList<QueryTagNameRow> tags) => tags.ToDictionary(t => t.Id);
+
     /// <summary>The tag's path from the root (<c>Parent/Child</c>), or null when the tag is gone.</summary>
-    private static string? TagPath(IReadOnlyList<QueryTagNameRow> tags, int tagId)
+    private static string? TagPath(IReadOnlyDictionary<int, QueryTagNameRow> byId, int tagId)
     {
-        var byId = tags.ToDictionary(t => t.Id);
         var names = new List<string>();
         int? at = tagId;
         for (var steps = 0; at is int id && byId.TryGetValue(id, out var row) && steps < 16; steps++)

@@ -370,4 +370,154 @@ public sealed class DarlingMcpQueryTagRuleToolsLiveTests
             Assert.Equal(1, (int)forServer["count"]!);
         });
     }
+
+    /// <summary>Plants <paramref name="count"/> one-row keys 'bulk' (server A), the newest first, one second apart.</summary>
+    private static Task PlantBulkKeysAsync(NpgsqlDataSource source, int count, CancellationToken ct) =>
+        ExecAsync(source,
+            "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, application_name, last_seen) " +
+            $"SELECT {ServerA}, 'hash', '0x' || lpad(to_hex(g), 8, '0'), 'bulk', now() - (g * interval '1 second') FROM generate_series(1, {count}) g", ct);
+
+    [Fact]
+    public async Task AWindowOfExactlyTheRowBound_IsNotTruncated()
+    {
+        await WithStoreAsync(async (source, ct) =>
+        {
+            var tag = await NewTagAsync(source, "Bulk", null, ct);
+            await PlantBulkKeysAsync(source, DarlingMcpQueryTagRuleTools.TestSightingRows, ct);
+
+            var result = Parse(await DarlingMcpQueryTagRuleTools.TestQueryTagRule(source, field: "application", pattern: "bulk", tag_id: tag, cancellationToken: ct));
+
+            Assert.False((bool)result["sightings_truncated"]!);
+            Assert.Equal(DarlingMcpQueryTagRuleTools.TestSightingRows, (int)result["sightings_read"]!);
+            Assert.Equal(DarlingMcpQueryTagRuleTools.TestSightingRows, (int)result["keys_matched"]!);
+            Assert.DoesNotContain("were read", (string)result["message"]!, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task OneRowPastTheBound_IsTruncated_AndTheKeyTheCutLandsInIsInNoCountOrSample()
+    {
+        await WithStoreAsync(async (source, ct) =>
+        {
+            var tag = await NewTagAsync(source, "Bulk", null, ct);
+            var single = DarlingMcpQueryTagRuleTools.TestSightingRows - 1;
+            await PlantBulkKeysAsync(source, single, ct);
+
+            // The boundary key has two sightings, the oldest two rows: row `bound` is read, row `bound + 1` is the extra row.
+            await ExecAsync(source,
+                "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, application_name, last_seen) VALUES " +
+                $"({ServerA}, 'hash', '0xB0UND', 'bulk', now() - interval '20000 seconds'), ({ServerA}, 'hash', '0xB0UND', 'other', now() - interval '20001 seconds')", ct);
+
+            var result = Parse(await DarlingMcpQueryTagRuleTools.TestQueryTagRule(source, field: "application", pattern: "bulk", tag_id: tag, cancellationToken: ct));
+
+            Assert.True((bool)result["sightings_truncated"]!);
+            Assert.Equal(single, (int)result["keys_examined"]!);
+            Assert.Equal(single, (int)result["sightings_read"]!);
+            Assert.Equal(single, (int)result["keys_matched"]!);
+            Assert.DoesNotContain(result["samples"]!.AsArray(), s => (string)s!["key"]! == "0xB0UND");
+            Assert.Contains("The newest 10,000 sighting rows were read; the counts are of those.", (string)result["message"]!, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task HeldSamples_KeepTheirReservedSlots_WhenManyMoreKeysWouldBeTagged()
+    {
+        await WithStoreAsync(async (source, ct) =>
+        {
+            var tag = await NewTagAsync(source, "Many", null, ct);
+            var pinned = await NewTagAsync(source, "Pinned", null, ct);
+            for (var i = 0; i < 60; i++)
+            {
+                await SightAsync(source, ServerA, $"0x{i:X2}", "many-loader", null, ct);
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                await ExecAsync(source, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({pinned}, 'hash', '0x{i:X2}', 'test')", ct);
+            }
+
+            var result = Parse(await DarlingMcpQueryTagRuleTools.TestQueryTagRule(source, field: "application", pattern: "many*", tag_id: tag, cancellationToken: ct));
+
+            Assert.Equal(60, (int)result["keys_matched"]!);
+            Assert.Equal(4, (int)result["held_by_hand_assignment"]!);
+            var samples = result["samples"]!.AsArray();
+            Assert.Equal(DarlingMcpQueryTagRuleTools.MaxSamples, samples.Count);
+            Assert.Equal(4, samples.Count(s => (string)s!["outcome"]! == "held_by_hand_hash"));
+            Assert.Equal(DarlingMcpQueryTagRuleTools.MaxSamples - 4, samples.Count(s => (string)s!["outcome"]! == "would_tag"));
+            Assert.True((bool)result["samples_truncated"]!);
+        });
+    }
+
+    [Fact]
+    public async Task TwoEditsToOneRule_OneNamingEnabledAndOneNamingPattern_BothSurvive_AndTheSecondWaitsForTheFirst()
+    {
+        await WithStoreAsync(async (source, ct) =>
+        {
+            var tag = await NewTagAsync(source, "Billing", null, ct);
+            var id = (int)Parse(await DarlingMcpQueryTagRuleTools.CreateQueryTagRule(source, "application", "billing", tag, cancellationToken: ct))["rule"]!["id"]!;
+
+            var store = new QueryTagRuleStore(source);
+            var firstHasRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // The first edit holds the rule lock after it has read the rule, as a slow validation would.
+            var first = store.UpdateRuleAsync<string>(
+                id, new QueryTagRuleEdit(false, null, false, 0, true, false, false, null, false, null),
+                async _ =>
+                {
+                    firstHasRead.SetResult();
+                    await releaseFirst.Task;
+                    return null;
+                },
+                ct);
+            await firstHasRead.Task.WaitAsync(TimeSpan.FromSeconds(30), ct);
+
+            var second = DarlingMcpQueryTagRuleTools.UpdateQueryTagRule(source, id, "{\"pattern\":\"billing-*\"}", ct);
+            await Task.Delay(500, ct);
+            Assert.False(second.IsCompleted, "the second edit must wait on the rule lock while the first holds it");
+
+            releaseFirst.SetResult();
+            Assert.Equal(QueryTagRuleUpdateOutcome.Updated, (await first).Outcome);
+            Assert.Equal("updated", Status(await second));
+
+            var listed = Parse(await DarlingMcpQueryTagRuleTools.ListQueryTagRules(source, cancellationToken: ct))["rules"]!.AsArray().Single()!;
+            Assert.False((bool)listed["enabled"]!);
+            Assert.Equal("billing-*", (string)listed["pattern"]!);
+        });
+    }
+
+    [Fact]
+    public async Task AnUpdateNamingAFieldThatFailsValidation_ChangesNothing_NotEvenTheFieldsThatWereValid()
+    {
+        await WithStoreAsync(async (source, ct) =>
+        {
+            var tag = await NewTagAsync(source, "Billing", null, ct);
+            var id = (int)Parse(await DarlingMcpQueryTagRuleTools.CreateQueryTagRule(source, "application", "billing", tag, priority: 40, cancellationToken: ct))["rule"]!["id"]!;
+            var before = await RulesVersionAsync(source, ct);
+
+            Assert.Equal("empty_pattern", Refusal(await DarlingMcpQueryTagRuleTools.UpdateQueryTagRule(source, id, "{\"enabled\":false,\"priority\":5,\"pattern\":\"\"}", ct)));
+            Assert.Equal("unknown_tag", Refusal(await DarlingMcpQueryTagRuleTools.UpdateQueryTagRule(source, id, "{\"enabled\":false,\"tag_id\":99999}", ct)));
+
+            var listed = Parse(await DarlingMcpQueryTagRuleTools.ListQueryTagRules(source, cancellationToken: ct))["rules"]!.AsArray().Single()!;
+            Assert.True((bool)listed["enabled"]!);
+            Assert.Equal(40, (int)listed["priority"]!);
+            Assert.Equal("billing", (string)listed["pattern"]!);
+            Assert.Equal(before, await RulesVersionAsync(source, ct));
+        });
+    }
+
+    [Fact]
+    public async Task ATextTagRule_StoresTheCommentItReads_NeedsNoPattern_AndHasNoPatternToEdit()
+    {
+        await WithStoreAsync(async (source, ct) =>
+        {
+            var created = Parse(await DarlingMcpQueryTagRuleTools.CreateQueryTagRule(source, "text_tag", null, null, cancellationToken: ct));
+            Assert.Equal("created", (string)created["status"]!);
+            Assert.Equal("/* tag:NAME */", (string)created["rule"]!["pattern"]!);
+            var id = (int)created["rule"]!["id"]!;
+
+            Assert.Equal("text_tag_has_no_pattern", Refusal(await DarlingMcpQueryTagRuleTools.UpdateQueryTagRule(source, id, "{\"pattern\":\"x\"}", ct)));
+            Assert.Equal("updated", Status(await DarlingMcpQueryTagRuleTools.UpdateQueryTagRule(source, id, "{\"enabled\":false}", ct)));
+        });
+    }
 }

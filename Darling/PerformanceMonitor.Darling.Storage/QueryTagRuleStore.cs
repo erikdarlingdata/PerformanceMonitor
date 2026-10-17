@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -31,6 +32,46 @@ public sealed record QueryTagRuleRow(
     /// <summary>The shared matcher's view of the row.</summary>
     public QueryTagRule ToRule() => new(Id, Field, Pattern, Priority, Enabled, TagId, ServerId);
 }
+
+/// <summary>The fields one partial edit names (#5982): a <c>Has*</c> flag false means the field was not named and is not written.</summary>
+public sealed record QueryTagRuleEdit(
+    bool HasPattern, string? Pattern, bool HasPriority, int Priority, bool HasEnabled, bool Enabled,
+    bool HasTagId, int? TagId, bool HasServerId, int? ServerId)
+{
+    /// <summary>The rule as it would stand after the edit: the named fields over <paramref name="row"/>.</summary>
+    public QueryTagRuleRow ApplyTo(QueryTagRuleRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        return row with
+        {
+            Pattern = HasPattern ? Pattern! : row.Pattern,
+            Priority = HasPriority ? Priority : row.Priority,
+            Enabled = HasEnabled ? Enabled : row.Enabled,
+            TagId = HasTagId ? TagId : row.TagId,
+            ServerId = HasServerId ? ServerId : row.ServerId,
+        };
+    }
+}
+
+/// <summary>How a partial edit ended.</summary>
+public enum QueryTagRuleUpdateOutcome
+{
+    /// <summary>No rule has that id (or it was deleted meanwhile).</summary>
+    NotFound,
+
+    /// <summary>The check refused the edit; nothing was written.</summary>
+    Refused,
+
+    /// <summary>Every named field already had the named value; nothing was written.</summary>
+    Unchanged,
+
+    /// <summary>The named fields that differed were written.</summary>
+    Updated,
+}
+
+/// <summary>The result of a partial edit: <see cref="Row"/> is the rule as stored (before the edit when it was refused or unchanged).</summary>
+public sealed record QueryTagRuleUpdateResult<TRefusal>(QueryTagRuleUpdateOutcome Outcome, QueryTagRuleRow? Row, TRefusal? Refusal)
+    where TRefusal : class;
 
 /// <summary>A query tag (<c>config.query_tags</c>): id, name and parent.</summary>
 public sealed record QueryTagNameRow(int Id, string Name, int? ParentId);
@@ -61,6 +102,10 @@ public sealed record QueryTagSightingRow(
 /// </summary>
 public sealed class QueryTagRuleStore
 {
+    /// <summary>The advisory-lock key for rule edits ("DARLRULE"). Distinct from the migration lock, the server-tag tree lock
+    /// (<see cref="ServerTagStore.TreeLockKey"/>) and the custom-alert-rule cap lock, so the four never collide in Postgres's 64-bit key space.</summary>
+    public const long RuleLockKey = 0x4441524C_52554C45;
+
     private const string RuleColumns = "id, match_field, pattern, priority, enabled, tag_id, server_id, created_by, created_at";
 
     private readonly NpgsqlDataSource _dataSource;
@@ -134,20 +179,103 @@ public sealed class QueryTagRuleStore
         return rows[0];
     }
 
-    /// <summary>Writes the four editable columns of one rule and returns the row as stored, or null when the rule is gone.</summary>
-    public async Task<QueryTagRuleRow?> UpdateRuleAsync(
-        long id, string pattern, int priority, bool enabled, int? tagId, int? serverId, CancellationToken ct = default)
+    /// <summary>
+    /// A partial edit of one rule, under a lock and writing only the fields it names (#5982 review). The shape is the server-tag
+    /// store's: <see cref="RuleLockKey"/> is held for the transaction, the rule is read under it, <paramref name="check"/> (the
+    /// validation) runs on that fresh read, and the <c>SET</c> list holds only the named fields whose value differs. Two edits to one
+    /// rule, one naming <c>enabled</c> and one naming <c>pattern</c>, therefore both survive: neither writes back a value it read.
+    /// <paramref name="check"/> returns a refusal to stop with nothing written, or null to go on.
+    /// </summary>
+    public async Task<QueryTagRuleUpdateResult<TRefusal>> UpdateRuleAsync<TRefusal>(
+        long id, QueryTagRuleEdit edit, Func<QueryTagRuleRow, Task<TRefusal?>> check, CancellationToken ct = default)
+        where TRefusal : class
     {
-        await using var command = Command(
-            $"UPDATE config.query_tag_rules SET pattern = $2, priority = $3, enabled = $4, tag_id = $5, server_id = $6 WHERE id = $1 RETURNING {RuleColumns}");
-        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = pattern });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = priority });
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });
-        command.Parameters.Add(Nullable(tagId));
-        command.Parameters.Add(Nullable(serverId));
-        var rows = await ReadRulesAsync(command, ct);
-        return rows.Count == 0 ? null : rows[0];
+        ArgumentNullException.ThrowIfNull(edit);
+        ArgumentNullException.ThrowIfNull(check);
+        await using var connection = await _dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        await using (var acquire = new NpgsqlCommand(ServerTagStore.AcquireTreeLockSql, connection, transaction) { CommandTimeout = _commandTimeoutSeconds })
+        {
+            acquire.Parameters.Add(new NpgsqlParameter<long> { TypedValue = RuleLockKey });
+            await acquire.ExecuteNonQueryAsync(ct);
+        }
+
+        QueryTagRuleRow? current;
+        await using (var read = new NpgsqlCommand($"SELECT {RuleColumns} FROM config.query_tag_rules WHERE id = $1", connection, transaction) { CommandTimeout = _commandTimeoutSeconds })
+        {
+            read.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
+            var found = await ReadRulesAsync(read, ct);
+            current = found.Count == 0 ? null : found[0];
+        }
+
+        if (current is null)
+        {
+            return new QueryTagRuleUpdateResult<TRefusal>(QueryTagRuleUpdateOutcome.NotFound, null, null);
+        }
+
+        var refusal = await check(current);
+        if (refusal is not null)
+        {
+            return new QueryTagRuleUpdateResult<TRefusal>(QueryTagRuleUpdateOutcome.Refused, current, refusal);
+        }
+
+        var merged = edit.ApplyTo(current);
+        var sets = new List<string>();
+        var parameters = new List<NpgsqlParameter> { new NpgsqlParameter<long> { TypedValue = id } };
+        if (edit.HasPattern && merged.Pattern != current.Pattern)
+        {
+            parameters.Add(new NpgsqlParameter<string> { TypedValue = merged.Pattern });
+            sets.Add(string.Create(CultureInfo.InvariantCulture, $"pattern = ${parameters.Count}"));
+        }
+
+        if (edit.HasPriority && merged.Priority != current.Priority)
+        {
+            parameters.Add(new NpgsqlParameter<int> { TypedValue = merged.Priority });
+            sets.Add(string.Create(CultureInfo.InvariantCulture, $"priority = ${parameters.Count}"));
+        }
+
+        if (edit.HasEnabled && merged.Enabled != current.Enabled)
+        {
+            parameters.Add(new NpgsqlParameter<bool> { TypedValue = merged.Enabled });
+            sets.Add(string.Create(CultureInfo.InvariantCulture, $"enabled = ${parameters.Count}"));
+        }
+
+        if (edit.HasTagId && merged.TagId != current.TagId)
+        {
+            parameters.Add(Nullable(merged.TagId));
+            sets.Add(string.Create(CultureInfo.InvariantCulture, $"tag_id = ${parameters.Count}"));
+        }
+
+        if (edit.HasServerId && merged.ServerId != current.ServerId)
+        {
+            parameters.Add(Nullable(merged.ServerId));
+            sets.Add(string.Create(CultureInfo.InvariantCulture, $"server_id = ${parameters.Count}"));
+        }
+
+        if (sets.Count == 0)
+        {
+            return new QueryTagRuleUpdateResult<TRefusal>(QueryTagRuleUpdateOutcome.Unchanged, current, null);
+        }
+
+        QueryTagRuleRow? written;
+        await using (var update = new NpgsqlCommand(
+            $"UPDATE config.query_tag_rules SET {string.Join(", ", sets)} WHERE id = $1 RETURNING {RuleColumns}", connection, transaction)
+        { CommandTimeout = _commandTimeoutSeconds })
+        {
+            foreach (var parameter in parameters)
+            {
+                update.Parameters.Add(parameter);
+            }
+
+            var rows = await ReadRulesAsync(update, ct);
+            written = rows.Count == 0 ? null : rows[0];
+        }
+
+        await transaction.CommitAsync(ct);
+        return written is null
+            ? new QueryTagRuleUpdateResult<TRefusal>(QueryTagRuleUpdateOutcome.NotFound, null, null)
+            : new QueryTagRuleUpdateResult<TRefusal>(QueryTagRuleUpdateOutcome.Updated, written, null);
     }
 
     /// <summary>Deletes one rule; false when there was none.</summary>
