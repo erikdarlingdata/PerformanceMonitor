@@ -46,9 +46,10 @@ internal static class DarlingInvestigationBriefTools
         [InvestigationFamily.Other] = new[] { "get_pg_wait_stats", "get_pg_top_queries" },
     };
 
-    /// <summary>The only tools a brief may name in <c>next_calls</c>: the analysis recommendation tables, both engines.</summary>
+    /// <summary>The only tools a brief may name in <c>next_calls</c>: the analysis recommendation tables, both engines, and
+    /// <c>get_query_store_regressions</c>, which the plan-change hint (#6007) names.</summary>
     internal static IReadOnlyCollection<string> NameableTools { get; } =
-        new HashSet<string>(ToolRecommendations.AllToolNames.Concat(PgTargetToolRecommendations.AllToolNames), StringComparer.Ordinal);
+        new HashSet<string>(ToolRecommendations.AllToolNames.Concat(PgTargetToolRecommendations.AllToolNames).Append("get_query_store_regressions"), StringComparer.Ordinal);
 
     /// <summary>The three tables as the composer takes them.</summary>
     internal static InvestigationBriefTools Tools { get; } = new(SqlServerFamilyCalls, PostgresFamilyCalls, NameableTools);
