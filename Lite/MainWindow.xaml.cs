@@ -1812,6 +1812,18 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ManageQueryTagsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService == null)
+        {
+            return;
+        }
+
+        var dialog = new PerformanceMonitorLite.Windows.ManageQueryTagsWindow(
+            _dataService, _serverManager.GetAllServers()) { Owner = this };
+        dialog.ShowDialog();
+    }
+
     private async void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var window = new SettingsWindow(_scheduleManager, _serverManager, _backgroundService, _mcpService, _muteRuleService, NotificationRouteStore, _dataService, InvestigationNoteStore) { Owner = this };
