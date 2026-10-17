@@ -161,6 +161,8 @@ public sealed class LiteQueryTagGridTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(6, view.Tables.Count);
         Assert.Equal("empty", view.Tables.Single(t => t.Section == "query_store").Status);
         Assert.DoesNotContain(view.Tables, t => t.Title.Contains("all sections", StringComparison.OrdinalIgnoreCase));
+        /* The by-tag view writes a child's path with the same separator as the grids' Tag column and the reads (#6037 review). */
+        Assert.Contains(plan.Rows, r => r.Kind == "tag" && r.Label == "A" + QueryTagReadScope.PathSeparator + "A2");
     }
 
     private static double OwnCpu(QueryTagUsageRow row, QueryTagUsageTable table) =>

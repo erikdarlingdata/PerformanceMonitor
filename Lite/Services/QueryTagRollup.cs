@@ -47,7 +47,7 @@ public static class QueryTagRollup
     }
 
     private static string PathOf(int tagId, Dictionary<int, QueryTagRow> byId) =>
-        string.Join(" > ", SelfAndAncestors(tagId, byId).Reverse().Select(id => byId[id].Name));
+        string.Join(QueryTagReadScope.PathSeparator, SelfAndAncestors(tagId, byId).Reverse().Select(id => byId[id].Name));
 
     private static Dictionary<string, object> Figures(double[] values, QueryTagRollupSection section)
     {

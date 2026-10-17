@@ -376,7 +376,7 @@ internal static class DarlingQueryTagRollupReader
     }
 
     private static string PathOf(int tagId, Dictionary<int, QueryTagNode> byId) =>
-        string.Join(" > ", SelfAndAncestors(tagId, byId).Reverse().Select(id => byId[id].Name));
+        string.Join(QueryTagReadJoin.PathSeparator, SelfAndAncestors(tagId, byId).Reverse().Select(id => byId[id].Name));
 
     /// <summary>Whether <paramref name="tagId"/> is <paramref name="ancestor"/> or sits under it.</summary>
     internal static bool IsUnder(int tagId, int ancestor, Dictionary<int, QueryTagNode> byId) =>
