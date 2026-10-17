@@ -14,6 +14,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -580,4 +581,12 @@ DROP TABLE #req;
             .Value(row.TranStartTime)
             .Value(row.RequestId);
     }
+
+    /// <summary>
+    /// #5980: one hash sighting for an active-query row, carrying the application, login, host and database it
+    /// ran under and a sample of its text. Null when the row has no query_hash.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(QueryTagSightings.Hash(
+            row.QueryHash, row.DatabaseName, null, row.ProgramName, row.LoginName, row.HostName, row.QueryText));
 }

@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -389,4 +390,13 @@ SELECT
             .Value(row.StatementFingerprint)
             .Value(row.StatementText);
     }
+
+    /// <summary>
+    /// #5980: one caller sighting for the row's client application, client host and database, with its statement
+    /// text. The row carries no query_hash, and no login, so there is no hash sighting. Null when the row names
+    /// no application or host.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(
+            QueryTagSightings.Caller(row.DatabaseName, row.ClientAppName, null, row.ClientHostName, row.StatementText));
 }

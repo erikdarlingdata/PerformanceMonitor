@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -822,5 +823,32 @@ OUTER APPLY
         {
             return (null, null);
         }
+    }
+
+    /// <summary>
+    /// #5980: one caller sighting per process in the deadlock graph, from the application, login, host and database
+    /// each process carries. Null when the graph is absent or does not parse (the victim-only fallback has no caller
+    /// fields to describe), and a process that names no application, login or host is left out.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+    {
+        if (!DeadlockGraphProcessParser.TryParseGraph<DeadlockProcessInfo>(
+                new DeadlockGraphProcessParser.DeadlockGraphInput(row.GraphXml, row.DeadlockTime, row.VictimSqlText, null),
+                out var processes))
+        {
+            return null;
+        }
+
+        List<QueryTagSighting>? sightings = null;
+        foreach (var p in processes)
+        {
+            var s = QueryTagSightings.Caller(p.DatabaseName, p.ClientApp, p.LoginName, p.HostName, p.SqlText);
+            if (s is not null)
+            {
+                (sightings ??= new List<QueryTagSighting>(processes.Count)).Add(s);
+            }
+        }
+
+        return sightings;
     }
 }

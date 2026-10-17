@@ -592,6 +592,30 @@ public sealed class McpDataDetailMaskerTests
         Assert.Same(clean, McpDataDetailFilter.Mask(clean, McpDataDetail.MetadataOnly));
     }
 
+    /// <summary>#5999 review: the investigation answers carry the monitored server's own instance name as <c>instance_name</c>, not
+    /// <c>host_name</c>, because the host filter numbers <c>host_name</c> (a client machine everywhere else in the product) to
+    /// <c>host#N</c> at <c>metadataOnly</c>. A request row passed through the filter at that level keeps the real instance name and
+    /// display name while a client <c>host_name</c> beside them is numbered.</summary>
+    [Fact]
+    public void InvestigationRequestPayload_KeepsItsInstanceName_AtMetadataOnly_WhileAClientHostNameIsNumbered()
+    {
+        var row = new InvestigationRequestRow(
+            Guid.NewGuid(), 5, 42, "srv", "blocking", "Deadlocks Detected",
+            new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 15, 12, 5, 0, DateTimeKind.Utc), 2,
+            "open", new DateTime(2026, 10, 15, 12, 0, 1, DateTimeKind.Utc), new DateTime(2026, 10, 15, 16, 0, 1, DateTimeKind.Utc),
+            null, null, 0, null, null, "Prod OLTP", "SQLPROD01\\INST1");
+        var payload = JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(row))!.AsObject();
+        payload["host_name"] = "CLIENT-PC-7";
+        var answer = new JsonObject { ["status"] = "ok", ["requests"] = new JsonArray(payload) };
+        var result = new CallToolResult { Content = new List<ContentBlock> { new TextContentBlock { Text = answer.ToJsonString() } } };
+
+        var masked = JsonNode.Parse(((TextContentBlock)McpDataDetailFilter.Mask(result, McpDataDetail.MetadataOnly).Content[0]).Text)!;
+        var request = masked["requests"]![0]!;
+        Assert.Equal("SQLPROD01\\INST1", (string?)request["instance_name"]);
+        Assert.Equal("Prod OLTP", (string?)request["display_name"]);
+        Assert.Equal("host#1", (string?)request["host_name"]);
+    }
+
     [Fact]
     public void Filter_RefusesABlockItCannotRead()
     {

@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -1862,4 +1863,13 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
             .Value(row.IntervalStartTimeUtc)
             .Value(row.IntervalEndTimeUtc);
     }
+
+    /// <summary>
+    /// #5980: one hash sighting carrying the database, the module (<c>schema.name</c>, none for an ad hoc or
+    /// unresolved module) and the query text. Null when the row has no query_hash.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(QueryTagSightings.Hash(
+            row.QueryHash, row.DatabaseName, QueryTagSightings.ModuleObject(row.DatabaseName, row.ModuleName),
+            null, null, null, row.QueryText));
 }
