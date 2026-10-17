@@ -539,7 +539,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         var release = new System.Threading.ManualResetEventSlim();
         var holder = Task.Run(() =>
         {
-            using var writeLock = _fixture.DuckDb.AcquireWriteLock();
+            using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: TimeSpan.FromSeconds(30));
             held.Set();
             release.Wait(TestContext.Current.CancellationToken);
         }, TestContext.Current.CancellationToken);
