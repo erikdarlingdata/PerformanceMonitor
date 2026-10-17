@@ -38,6 +38,9 @@ public sealed record QueryTagMapCursor(DateTime Since, string AfterKind, string 
 
 public partial class LocalDataService
 {
+    /* Test seam: runs between the pass's read (under the read lock) and its write (under the write lock). */
+    internal Action? AfterQueryTagMapReadForTests { get; set; }
+
     /// <summary>
     /// #5990: the tag map pass. Reads the tags, hand assignments, rules and sightings and gives every sighted key its one
     /// tag with the shared <see cref="QueryTagResolver"/> (Lite has no matching of its own). When <c>rules_version</c> is
@@ -54,49 +57,68 @@ public partial class LocalDataService
     public async Task<QueryTagMapPass> BuildQueryTagMapAsync(
         IDictionary<int, QueryTagMapCursor>? cursors = null, int keyCap = QueryTagLimits.MaxKeysPerServerPerPass)
     {
+        /* The clock and the rules version are captured BEFORE the read. The read and the resolve run under the READ lock, so
+           the UI's reads are not stalled by a rebuild; only the write takes the write lock. A sightings flush or a rule write
+           that lands between the read and the write cannot leave the map stale past the next pass: the cursor is the captured
+           clock minus the overlap, so the next extend pass reads what the flush added, and built_version is stamped with the
+           CAPTURED rules_version, so a rule written meanwhile (a higher rules_version) makes the next pass rebuild. */
         var clock = DateTime.UtcNow;
-        using var connection = await OpenWriteConnectionAsync();
 
         long rulesVersion = 1;
         long builtVersion = 0;
-        using (var state = connection.CreateCommand())
+        HashSet<long> tagIds;
+        List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)> resolved;
+        List<(int ServerId, string Kind, string Key)> removed;
+        HashSet<int> rebuiltServers;
+        Dictionary<int, QueryTagMapCursor> nextCursors;
+        int keysSeen;
+        bool rebuild;
+        using (var readConnection = await OpenConnectionAsync())
         {
-            state.CommandText = "SELECT rules_version, built_version FROM query_tag_state WHERE id = 1";
-            using var reader = await state.ExecuteReaderAsync();
-            if (await reader.ReadAsync())
+            using (var state = readConnection.CreateCommand())
             {
-                rulesVersion = reader.GetInt64(0);
-                builtVersion = reader.GetInt64(1);
+                state.CommandText = "SELECT rules_version, built_version FROM query_tag_state WHERE id = 1";
+                using var reader = await state.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    rulesVersion = reader.GetInt64(0);
+                    builtVersion = reader.GetInt64(1);
+                }
+            }
+
+            rebuild = rulesVersion > builtVersion;
+
+            var tags = await ReadQueryTagsAsync(readConnection);
+            tagIds = tags.Select(t => (long)t.Id).ToHashSet();
+            var names = new TagNameList(tags.Select(t => new KeyValuePair<string, long>(t.Name, t.Id)));
+            var assignments = (await GetQueryTagAssignmentsAsync()).Select(ToHandAssignment).ToList();
+            var rules = (await GetQueryTagRulesAsync()).Select(ToRule).ToList();
+            rebuiltServers = new HashSet<int>();
+            List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagSighting Sighting)> sightings;
+            (sightings, nextCursors) = await ReadQuerySightingsAsync(readConnection, cursors, keyCap, rebuild, clock, rebuiltServers);
+
+            resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
+            removed = new List<(int ServerId, string Kind, string Key)>();
+            var byKey = sightings.GroupBy(x => (x.ServerId, x.Kind, x.Key)).ToList();
+            keysSeen = byKey.Count;
+            foreach (var group in byKey)
+            {
+                var (serverId, kind, key) = group.Key;
+                var result = QueryTagResolver.Resolve(serverId, group.Select(g => g.Sighting).ToList(), assignments, rules, names);
+                if (result.HasTag && tagIds.Contains(result.TagId!.Value))
+                {
+                    resolved.Add((serverId, kind, key, result));
+                }
+                else
+                {
+                    removed.Add((serverId, KeyKindText(kind), key));
+                }
             }
         }
 
-        var rebuild = rulesVersion > builtVersion;
+        AfterQueryTagMapReadForTests?.Invoke();
 
-        var tags = await ReadQueryTagsAsync(connection);
-        var tagIds = tags.Select(t => (long)t.Id).ToHashSet();
-        var names = new TagNameList(tags.Select(t => new KeyValuePair<string, long>(t.Name, t.Id)));
-        var assignments = (await GetQueryTagAssignmentsAsync()).Select(ToHandAssignment).ToList();
-        var rules = (await GetQueryTagRulesAsync()).Select(ToRule).ToList();
-        var rebuiltServers = new HashSet<int>();
-        var (sightings, nextCursors) = await ReadQuerySightingsAsync(connection, cursors, keyCap, rebuild, clock, rebuiltServers);
-
-        var resolved = new List<(int ServerId, QueryTagKeyKind Kind, string Key, QueryTagResolution Result)>();
-        var removed = new List<(int ServerId, string Kind, string Key)>();
-        var byKey = sightings.GroupBy(x => (x.ServerId, x.Kind, x.Key)).ToList();
-        foreach (var group in byKey)
-        {
-            var (serverId, kind, key) = group.Key;
-            var result = QueryTagResolver.Resolve(serverId, group.Select(g => g.Sighting).ToList(), assignments, rules, names);
-            if (result.HasTag && tagIds.Contains(result.TagId!.Value))
-            {
-                resolved.Add((serverId, kind, key, result));
-            }
-            else
-            {
-                removed.Add((serverId, KeyKindText(kind), key));
-            }
-        }
-
+        using var connection = await OpenWriteConnectionAsync();
         using (var begin = connection.CreateCommand())
         {
             begin.CommandText = "BEGIN TRANSACTION";
@@ -166,7 +188,7 @@ ON CONFLICT (id) DO UPDATE SET built_version = excluded.built_version";
             }
         }
 
-        return new QueryTagMapPass(rebuild, byKey.Count, resolved.Count);
+        return new QueryTagMapPass(rebuild, keysSeen, resolved.Count);
     }
 
     /// <summary>
@@ -215,7 +237,7 @@ JOIN (
     ORDER BY ls, key_kind, key
     LIMIT $5) c ON s.key_kind = c.key_kind AND s.key = c.key
 WHERE s.server_id = $1
-ORDER BY c.ls, c.key_kind, c.key, s.application_name, s.login_name, s.host_name";
+ORDER BY c.ls, c.key_kind, c.key, s.database_name, s.application_name, s.login_name, s.host_name, s.object_name, s.text_sample";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = cursor.Since });
             command.Parameters.Add(new DuckDBParameter { Value = cursor.AfterKind });

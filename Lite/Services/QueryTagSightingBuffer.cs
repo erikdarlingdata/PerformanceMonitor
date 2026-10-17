@@ -9,7 +9,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.QueryTags;
@@ -20,14 +22,16 @@ namespace PerformanceMonitorLite.Services;
 /// #5990: the in-memory buffer between the collectors and <c>query_tag_sightings</c>. A collection batch only appends here,
 /// so the per-batch path makes no store write. The buffer is keyed by the seven-part identity (server, key kind, key,
 /// database, application, login, host): <c>seen_count</c> is summed, the first text sample is kept (cut to
-/// <see cref="SampleCap"/> characters) and <c>last_seen</c> is the latest. The map pass flushes it in ONE upsert before it
-/// reads changed keys. A buffer over <see cref="MaxEntries"/> entries flushes at the next append. A failed flush is logged
+/// <see cref="QueryTagLimits.TextSampleCap"/> characters by <see cref="QueryTagLimits.CutText"/>) and <c>last_seen</c> is the latest. The map pass flushes it in ONE upsert before it
+/// reads changed keys. A buffer holding <see cref="MaxEntries"/> entries flushes at the next append. A flush takes the WRITE lock (an
+/// upsert can collide with another writer, DuckDbInitializer's lock rule) and opens its own connection. A flush that is
+/// cancelled, or cannot get the lock in time, writes nothing and leaves its entries buffered. A write that fails is logged
 /// and its entries are dropped, with no retry: the keys are tagged a pass later, when they are sighted again.
 /// </summary>
 internal sealed class QueryTagSightingBuffer
 {
-    internal const int SampleCap = 500;
-    internal const int MaxEntries = 50_000;
+    /* Darling's SightingBufferCap. */
+    internal const int MaxEntries = 10_000;
 
     private readonly object _gate = new();
     private Dictionary<Identity, Entry> _entries = new();
@@ -48,13 +52,13 @@ internal sealed class QueryTagSightingBuffer
         get { lock (_gate) { return _entries.Count; } }
     }
 
-    internal void Append<TRow>(ICollectorDefinition<TRow> definition, List<TRow> rows, int serverId, DuckDBConnection? overflowConnection = null)
+    internal void Append<TRow>(ICollectorDefinition<TRow> definition, List<TRow> rows, int serverId, DuckDbInitializer? overflowDb = null)
     {
         try
         {
-            if (overflowConnection is not null && Count > MaxEntries)
+            if (overflowDb is not null && Count >= MaxEntries)
             {
-                Flush(overflowConnection);
+                Flush(overflowDb);
             }
 
             var now = DateTime.UtcNow;
@@ -75,7 +79,7 @@ internal sealed class QueryTagSightingBuffer
                         if (!_entries.TryGetValue(id, out var entry))
                         {
                             var sample = QueryTagLimits.CutText(s.TextSample) ?? string.Empty;
-                            entry = new Entry(s.ObjectRef?.Qualified ?? string.Empty, sample.Length > SampleCap ? sample[..SampleCap] : sample, now);
+                            entry = new Entry(s.ObjectRef?.Qualified ?? string.Empty, sample, now);
                             _entries[id] = entry;
                         }
 
@@ -91,24 +95,60 @@ internal sealed class QueryTagSightingBuffer
         }
     }
 
-    /// <summary>Writes the buffered sightings in one upsert and empties the buffer. A failure is logged and the entries are dropped.</summary>
-    internal void Flush(DuckDBConnection connection)
+    /// <summary>
+    /// Writes the buffered sightings in one upsert under the write lock and empties the buffer. A cancelled token, or a write
+    /// lock not free within <paramref name="lockBudget"/> (default <see cref="LocalDataService.WriteLockBudget"/>), writes
+    /// nothing and leaves the entries buffered. A failed write is logged and its entries are dropped.
+    /// </summary>
+    internal void Flush(DuckDbInitializer duckDb, TimeSpan? lockBudget = null, CancellationToken cancellationToken = default)
     {
-        Dictionary<Identity, Entry> taken;
-        lock (_gate)
+        if (Count == 0)
         {
-            if (_entries.Count == 0)
-            {
-                return;
-            }
-
-            taken = _entries;
-            _entries = new Dictionary<Identity, Entry>();
+            return;
         }
 
+        IDisposable writeLock;
         try
         {
-            var list = taken.ToList();
+            cancellationToken.ThrowIfCancellationRequested();
+            writeLock = duckDb.AcquireWriteLock(timeout: lockBudget ?? LocalDataService.WriteLockBudget);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+        {
+            AppLogger.Debug("QueryTags", $"The query-tag sightings flush did not run ({ex.GetType().Name}); its entries stay buffered");
+            return;
+        }
+
+        using (writeLock)
+        {
+            Dictionary<Identity, Entry> taken;
+            lock (_gate)
+            {
+                if (cancellationToken.IsCancellationRequested || _entries.Count == 0)
+                {
+                    return;
+                }
+
+                taken = _entries;
+                _entries = new Dictionary<Identity, Entry>();
+            }
+
+            WriteTaken(duckDb, taken);
+        }
+    }
+
+    private static void WriteTaken(DuckDbInitializer duckDb, Dictionary<Identity, Entry> taken)
+    {
+        try
+        {
+            /* One order for every flush (the seven-part identity), as Darling sorts its rows; Lite's single writer under the
+               write lock cannot deadlock, the sort keeps the two stores alike. */
+            var list = taken.OrderBy(e => e.Key.ServerId).ThenBy(e => e.Key.Kind)
+                .ThenBy(e => e.Key.Key, StringComparer.Ordinal).ThenBy(e => e.Key.Database, StringComparer.Ordinal)
+                .ThenBy(e => e.Key.App, StringComparer.Ordinal).ThenBy(e => e.Key.Login, StringComparer.Ordinal)
+                .ThenBy(e => e.Key.Host, StringComparer.Ordinal).ToList();
+            using var connection = duckDb.CreateConnection();
+            connection.Open();
             using var command = connection.CreateCommand();
             /* Empty text stands for NULL in the lists (a list parameter cannot be relied on to carry NULL elements); the
                timestamps are explicit UTC, never now(), which is local time. */

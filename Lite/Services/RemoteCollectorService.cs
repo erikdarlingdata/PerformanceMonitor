@@ -342,6 +342,7 @@ public partial class RemoteCollectorService
         InstallIdStore? installIdStore = null)
     {
         _duckDb = duckDb;
+        s_queryTagFlushDb = duckDb;
         _serverManager = serverManager;
         _scheduleManager = scheduleManager;
         _logger = logger;

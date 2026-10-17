@@ -1369,6 +1369,7 @@ public partial class DuckDbInitializer : IDisposable
             if (existingVersion > 0 && existingVersion < CurrentSchemaVersion)
             {
                 _logger?.LogInformation("Schema upgrade needed: v{Old} -> v{New}", existingVersion, CurrentSchemaVersion);
+                _versionHeldBackAt = null;
                 await RunMigrationsAsync(connection, existingVersion);
             }
 
@@ -1398,7 +1399,7 @@ public partial class DuckDbInitializer : IDisposable
 
             if (existingVersion < CurrentSchemaVersion)
             {
-                await SetSchemaVersionAsync(connection, CurrentSchemaVersion);
+                await SetSchemaVersionAsync(connection, _versionHeldBackAt ?? CurrentSchemaVersion);
             }
 
             /* Exact duplicate deadlock rows an older build stored twice (a master-registered Azure database's own
@@ -3011,19 +3012,34 @@ public partial class DuckDbInitializer : IDisposable
             /* v71 (#5990): query_tag_sightings gains database_name in its primary key (one hash seen in two databases is two
                rows). DuckDB cannot change a primary key in place, and the table is DERIVED data: the collectors refill it on
                their next rounds and the map pass rebuilds from it, so the old rows are dropped rather than migrated.
-               Non-fatal: a failure leaves the table as it was, and the CREATE retries on the next start. */
+               Non-fatal, but the version is stamped v71 ONLY when both the DROP and the CREATE succeeded. A failed DROP leaves
+               the old six-part table in place (CREATE TABLE IF NOT EXISTS would then do nothing and every flush would fail
+               on the missing column), so the stamp stays at v70 and this step retries at the next start. */
             _logger?.LogInformation("Running migration to v71: recreating query_tag_sightings with the database in its key");
             try
             {
+                BeforeV71SightingsDropForTests?.Invoke();
                 await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS query_tag_sightings");
+                BeforeV71SightingsCreateForTests?.Invoke();
                 await ExecuteNonQueryAsync(connection, Schema.CreateQueryTagSightingsTable);
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning("Migration to v71 query_tag_sightings encountered an error (non-fatal): {Error}", ex.Message);
+                _versionHeldBackAt = 70;
+                _logger?.LogWarning("Migration to v71 query_tag_sightings encountered an error (non-fatal; the version stays at v70 and the step retries at the next start): {Error}", ex.Message);
             }
         }
     }
+
+    /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
+       version instead of CurrentSchemaVersion. */
+    private int? _versionHeldBackAt;
+
+    /* Test seams: run before the v71 DROP, and between it and the CREATE; a test throws from one to fail that statement. */
+    internal Action? BeforeV71SightingsDropForTests { get; set; }
+
+    /* (second seam) runs between the v71 DROP and its CREATE, so a test can fail the CREATE after a good DROP. */
+    internal Action? BeforeV71SightingsCreateForTests { get; set; }
 
     /// <summary>
     /// #4727: the 16 columns that schema versions 60 to 66 add to existing tables, in ONE list. Each migration
