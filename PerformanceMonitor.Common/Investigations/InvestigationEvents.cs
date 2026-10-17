@@ -87,12 +87,9 @@ public static class InvestigationEvents
         [Expired] = ["unclaimed"],
         [ClaimsExhausted] = ["unclaimed"],
         [EvidenceReady] = ["sections", "not_collected", "pending"],
-<<<<<<< HEAD
         /* #6005: the digest names signatures (a hash) and counts, never object names or statements. */
         [DeadlockDigest] = ["window_hours", "total", "signatures"],
-=======
         [FollowUp] = ["follow_up_of"],
->>>>>>> origin/dev
     };
 
     /// <summary>
