@@ -98,6 +98,7 @@ An agent route (a notification route set to investigate) gets one signed post fo
 - `joined`: `new_metric` (true or false) and `severity` (`warning` or `critical`).
 - `expired` and `claims_exhausted`: `unclaimed`, true when no agent was working on the request.
 - `evidence_ready`: `sections` (ready), `not_collected` and `pending`, each a list of section names.
+- Any event of a practice request (a replay of a judged case that the Viewer opens) also carries `practice_of`, the request id of the case it replays, so you can tell a replay from a live request. A live request never has it.
 
 Each event is posted at most once. Darling writes the event's delivery mark before it sends, so a post that fails is logged and not sent again. A route with no generic URL gets no post. A post that answers with a redirect is not followed. Your receiver should still keep each `webhook-id` it accepted, as described above.
 

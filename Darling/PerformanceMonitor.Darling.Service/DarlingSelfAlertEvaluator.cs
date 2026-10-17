@@ -8812,17 +8812,8 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
 
         node[ResolvesMember] = metricName;
-        return node.ToJsonString(ResolutionContextJsonOptions);
+        return node.ToJsonString();
     }
-
-    /// <summary>
-    /// #6003 review: the store's resolved sweep finds <see cref="ResolvesMember"/> as text, the metric name encoded by
-    /// PostgreSQL's <c>to_json</c>, which escapes only a quote, a backslash and the control characters. The default encoder
-    /// also escapes <c>&lt;</c>, <c>&gt;</c>, <c>&amp;</c>, <c>'</c> and <c>+</c>, so a rule named "CPU &gt; 90%" would never
-    /// match; this one escapes what <c>to_json</c> escapes. The column is stored data, read by a JSON parser.
-    /// </summary>
-    private static readonly JsonSerializerOptions ResolutionContextJsonOptions =
-        new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     /// <summary>
     /// The explicit "this metric has no measurement" value for the history stores' NOT NULL

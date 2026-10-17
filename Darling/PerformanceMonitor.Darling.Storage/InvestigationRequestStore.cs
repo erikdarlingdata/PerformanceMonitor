@@ -187,7 +187,7 @@ WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
     internal static readonly string OpenedSinceSql = $@"
 SELECT r.request_id, r.route_id, r.server_name, r.family, r.opened_at,
        {RegistryNamesSelect("r", "sv")},
-       j.event_id, j.event, j.event_time, j.detail::text
+       j.event_id, j.event, j.event_time, j.detail::text, r.practice_of
 FROM config.investigation_journal AS j
 JOIN config.investigation_requests AS r ON r.request_id = j.request_id
 LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
@@ -201,7 +201,7 @@ LIMIT $3";
        once its delivery mark (once key delivered:<event_id>) exists, so a replay of the same event id is never sent again. */
     internal const string PendingDeliverySql = @"
 SELECT j.journal_id, j.event_id, j.event, j.event_time, r.request_id, r.route_id, r.server_id, r.server_name, r.family,
-       j.reason, j.detail::text
+       j.reason, j.detail::text, r.practice_of
 FROM config.investigation_journal AS j
 JOIN config.investigation_requests AS r ON r.request_id = j.request_id
 WHERE j.event_time > $1
@@ -228,29 +228,36 @@ LIMIT $2";
     /* #6003, D7: a live request is resolved when EVERY metric linked to it has a resolution row after that metric's last
        alert on the same server. A resolution row is stored under its title ("CPU Resolved"); its context_json names the
        metric it resolves (Resolves, written by DarlingSelfAlertEvaluator.BuildResolutionRecord on every clear, whatever the
-       route's SendResolutions says). The member is matched as text, the metric name JSON-encoded as the writer encodes it
-       (DarlingSelfAlertEvaluator.ResolutionContextJson), never cast: one context_json a text column holds but jsonb refuses
-       (a \u0000 escape) would fail every sweep (#6003 review). Journaled once per request (once key resolved:<request_id>). */
-    internal const string SweepResolvedSql = @"
+       route's SendResolutions says). The member is NOT matched as text (#6003 review round 2): every alert-log write goes
+       through DerivedStoreScrub, which re-serializes a context it changed with an encoder that escapes < > & ' + and every
+       non-ASCII character, so no one encoding of a metric name is the stored one. The candidate rows come back and C# parses
+       each context_json (System.Text.Json reads every escaping); one a text column holds but jsonb refuses (a NUL
+       escape) is no problem there. The prefilter is the member's key, which no encoder escapes. A metric with no candidate
+       comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved. */
+    internal const string ResolveCandidatesSql = @"
+SELECT m.request_id, m.metric_name, h.context_json
+FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
+      FROM config.investigation_request_alerts AS a
+      WHERE a.request_id IN (SELECT r.request_id
+                             FROM config.investigation_requests AS r
+                             WHERE r.state IN ('open', 'claimed', 'reported')
+                               AND r.practice_of IS NULL
+                               AND r.opened_at > $1 - interval '2 days')
+      GROUP BY a.request_id, a.server_id, a.metric_name) AS m
+LEFT JOIN config.config_alert_log AS h
+       ON h.server_id = m.server_id
+      AND h.alert_time > m.last_alert
+      AND strpos(h.context_json, 'Resolves') > 0";
+
+    /* Journals resolved once per request (once key resolved:<request_id>). The state is checked again: the candidates were
+       read a moment ago. */
+    internal const string ResolveInsertSql = @"
 INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, once_key)
 SELECT $1, r.request_id, r.route_id, r.server_id, 'resolved', 'service', 'resolved:' || r.request_id::text
 FROM config.investigation_requests AS r
-WHERE r.state IN ('open', 'claimed', 'reported')
+WHERE r.request_id = ANY($2)
+  AND r.state IN ('open', 'claimed', 'reported')
   AND r.practice_of IS NULL
-  AND r.opened_at > $1 - interval '2 days'
-  AND EXISTS (SELECT 1 FROM config.investigation_request_alerts AS a0 WHERE a0.request_id = r.request_id)
-  AND NOT EXISTS (
-        SELECT 1
-        FROM (SELECT a.server_id, a.metric_name, max(a.alert_time) AS last_alert
-              FROM config.investigation_request_alerts AS a
-              WHERE a.request_id = r.request_id
-              GROUP BY a.server_id, a.metric_name) AS m
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM config.config_alert_log AS h
-            WHERE h.server_id = m.server_id
-              AND h.alert_time > m.last_alert
-              AND strpos(h.context_json, '""Resolves"":' || to_json(m.metric_name)::text) > 0))
 ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     internal static readonly string ListSql = $@"
@@ -1095,7 +1102,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 Event = reader.GetString(8),
                 EventTimeUtc = reader.GetFieldValue<DateTime>(9),
                 /* #6003 review: only the members the event's kind lists leave the store. */
-                DetailJson = InvestigationEvents.PublicDetail(reader.GetString(8), reader.IsDBNull(10) ? null : reader.GetString(10)),
+                DetailJson = InvestigationEvents.PublicDetail(reader.GetString(8), reader.IsDBNull(10) ? null : reader.GetString(10),
+                    reader.IsDBNull(11) ? null : reader.GetGuid(11)),
             });
         }
 
@@ -1125,7 +1133,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.GetInt64(0), reader.GetGuid(1), kind, reader.GetFieldValue<DateTime>(3),
                 reader.GetGuid(4), reader.GetInt32(5), reader.GetInt32(6), reader.GetString(7), reader.GetString(8),
                 InvestigationEvents.PublicReason(kind, reader.IsDBNull(9) ? null : reader.GetString(9)),
-                InvestigationEvents.PublicDetail(kind, reader.IsDBNull(10) ? null : reader.GetString(10))));
+                InvestigationEvents.PublicDetail(kind, reader.IsDBNull(10) ? null : reader.GetString(10),
+                    reader.IsDBNull(11) ? null : reader.GetGuid(11))));
         }
 
         return rows;
@@ -1191,7 +1200,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// The expiry sweep: journals each lapsed lease once per claim, then moves every request past its expiry, or out of
     /// claims (its last claim's lease lapsed, or released), to <c>expired</c> and journals that once: <c>expired</c> past the
     /// expiry, <c>claims_exhausted</c> before it. It never reopens a lease. Then, in a transaction of its own, it journals
-    /// each live request whose every metric has cleared (<see cref="SweepResolvedSql"/>), so a failure there cannot hold
+    /// each live request whose every metric has cleared (<see cref="ResolveCandidatesSql"/>), so a failure there cannot hold
     /// back the expiry and its fallback (#6003 review).
     /// </summary>
     public async Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default)
@@ -1203,9 +1212,72 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         var expired = await ExecAsync(connection, transaction, SweepExpireSql, cancellationToken, P(now));
         await transaction.CommitAsync(cancellationToken);
         await using var resolvedTransaction = await connection.BeginTransactionAsync(cancellationToken);
-        var resolved = await ExecAsync(connection, resolvedTransaction, SweepResolvedSql, cancellationToken, P(now));
+        var resolved = await SweepResolvedAsync(connection, resolvedTransaction, now, cancellationToken);
         await resolvedTransaction.CommitAsync(cancellationToken);
         return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved };
+    }
+
+    /// <summary>
+    /// The resolved sweep (#6003, D7): reads each live request's linked metrics with the resolution rows logged since each
+    /// metric's last alert, parses their <c>context_json</c> here, and journals <c>resolved</c> for every request whose
+    /// metrics all have a row whose top-level <c>Resolves</c> names them. Returns the
+    /// journal rows written.
+    /// </summary>
+    private async Task<int> SweepResolvedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        CancellationToken cancellationToken)
+    {
+        /* Per request: each linked metric, and whether a parsed row names it. */
+        var requests = new Dictionary<Guid, Dictionary<string, bool>>();
+        await using (var candidates = Command(connection, transaction, ResolveCandidatesSql, P(now)))
+        await using (var reader = await candidates.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var requestId = reader.GetGuid(0);
+                var metric = reader.GetString(1);
+                if (!requests.TryGetValue(requestId, out var metrics))
+                {
+                    metrics = new Dictionary<string, bool>(StringComparer.Ordinal);
+                    requests[requestId] = metrics;
+                }
+
+                metrics.TryAdd(metric, false);
+                if (!reader.IsDBNull(2) && !metrics[metric] && ResolvesMetric(reader.GetString(2), metric))
+                {
+                    metrics[metric] = true;
+                }
+            }
+        }
+
+        var cleared = requests.Where(r => r.Value.Values.All(done => done)).Select(r => r.Key).ToArray();
+        if (cleared.Length == 0)
+        {
+            return 0;
+        }
+
+        return await ExecAsync(connection, transaction, ResolveInsertSql, cancellationToken, P(now),
+            new NpgsqlParameter<Guid[]> { TypedValue = cleared, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Uuid });
+    }
+
+    /// <summary>The member of a resolution row's context that names the metric it resolves (<c>DarlingSelfAlertEvaluator.ResolvesMember</c>).</summary>
+    private const string ResolvesMember = "Resolves";
+
+    /// <summary>True when <paramref name="contextJson"/> is a JSON object whose own <c>Resolves</c> string is <paramref name="metric"/>.</summary>
+    private static bool ResolvesMetric(string contextJson, string metric)
+    {
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(contextJson);
+            return document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                && document.RootElement.TryGetProperty(ResolvesMember, out var member)
+                && member.ValueKind == System.Text.Json.JsonValueKind.String
+                && string.Equals(member.GetString(), metric, StringComparison.Ordinal);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            /* A context that is not JSON names nothing; the row is stored data, not a store read. */
+            return false;
+        }
     }
 
     private Task<int> InsertAlertRowsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid requestId,

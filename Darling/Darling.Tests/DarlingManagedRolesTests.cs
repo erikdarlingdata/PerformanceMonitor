@@ -562,7 +562,10 @@ public sealed class DarlingManagedRolesTests
         /* mcp: the claim and report columns only, and a note without its state, so an agent's note stays pending. */
         Assert.Contains("GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at) ON config.investigation_requests TO mcp;", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT ON config.investigation_reports TO mcp;", flat, StringComparison.Ordinal);
-        Assert.Contains("GRANT INSERT ON config.investigation_journal TO mcp;", flat, StringComparison.Ordinal);
+        /* #6003 review round 2: the journal grant names its columns and leaves out journal_id and event_id. */
+        Assert.Contains($"GRANT INSERT ({DarlingManagedRoles.JournalWriterColumns}) ON config.investigation_journal TO mcp;", flat, StringComparison.Ordinal);
+        Assert.Contains($"GRANT INSERT ({DarlingManagedRoles.JournalWriterColumns}) ON config.investigation_journal TO admin;", flat, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT INSERT ON config.investigation_journal", flat, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id) ON config.investigation_notes TO mcp;", flat, StringComparison.Ordinal);
 
         /* admin (the WPF viewer): close a request, write the profiles, write and decide notes, journal it. */

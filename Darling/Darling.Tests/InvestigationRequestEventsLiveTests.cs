@@ -67,10 +67,18 @@ public sealed class InvestigationRequestEventsLiveTests
         /// <summary>The error the next post answers; null for a delivered post.</summary>
         public string? PostError { get; set; }
 
-        public Task<string?> PostEventAsync(int routeId, string url, string payload, string eventId, CancellationToken cancellationToken)
+        /// <summary>Runs while a post is in flight, before it answers: a gate that lets a test look at the world mid-send.</summary>
+        public Func<CancellationToken, Task>? WhileSending { get; set; }
+
+        public async Task<string?> PostEventAsync(int routeId, string url, string payload, string eventId, CancellationToken cancellationToken)
         {
             Posts.Add((routeId, url, eventId, payload));
-            return Task.FromResult(PostError);
+            if (WhileSending is not null)
+            {
+                await WhileSending(cancellationToken);
+            }
+
+            return PostError;
         }
 
         public Task<IReadOnlyList<string>> SendNoticeAsync(
@@ -298,6 +306,62 @@ public sealed class InvestigationRequestEventsLiveTests
         });
     }
 
+    /// <summary>#6003 review round 2: the alert-log write scrubs a context and re-serializes it with an encoder that escapes
+    /// &lt; &gt; &amp; ' + and every non-ASCII character (an emoji as a surrogate pair). The detector parses the stored
+    /// text, so a metric name any of those characters is in still resolves its request.</summary>
+    [Theory]
+    [InlineData("CPU > 90%")]
+    [InlineData("Latence élevée")]
+    [InlineData("Hot \U0001F525 alert")]
+    [InlineData("a+b & <c> 'd' \"e\"")]
+    public async Task AClearWhoseContextWasRewrittenByTheScrub_StillResolves(string metric)
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var id = (await store.OpenOrJoinAsync(Alert(T0, metric), ct)).RequestId!.Value;
+            var record = Clear(metric, metric + " Resolved", T0.AddMinutes(3));
+            record = record with
+            {
+                ContextJson = DarlingSelfAlertEvaluator.ResolutionContextJson(
+                    "{\"query_text\":\"" + StatementScrubCanary.CanaryStatement + "\"}", metric),
+            };
+            await history.RecordAlertAsync(record);
+
+            /* The scrub did rewrite it, and the metric name reads back whole from the stored text. */
+            Assert.Contains(SensitiveStatements.PlaceholderText, await ScalarAsync(connection,
+                "SELECT context_json FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'", ct), StringComparison.Ordinal);
+            Assert.Equal(metric, await ScalarAsync(connection,
+                "SELECT context_json::jsonb ->> 'Resolves' FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'", ct));
+
+            _now = T0.AddMinutes(4);
+            Assert.Equal(1, (await store.SweepAsync(ct)).Resolved);
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE event = 'resolved' AND request_id = '{id}'", ct));
+        });
+    }
+
+    /// <summary>A <c>Resolves</c> that is not the row's own top-level member (text inside another member's value, or a
+    /// member of a nested object) clears nothing.</summary>
+    [Theory]
+    [InlineData("{\"Resolves\":\"Other Metric\",\"note\":\"\\\"Resolves\\\":\\\"High CPU\\\"\"}")]
+    [InlineData("{\"Resolves\":\"Other Metric\",\"inner\":{\"Resolves\":\"High CPU\"}}")]
+    [InlineData("{\"note\":\"High CPU\"}")]
+    [InlineData("[\"Resolves\",\"High CPU\"]")]
+    [InlineData("not json, Resolves High CPU")]
+    public async Task AResolvesThatIsNotTheRowsOwnMember_ClearsNothing(string context)
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct);
+            await history.RecordAlertAsync(Clear("Other Metric", "Other Resolved", T0.AddMinutes(3)) with { ContextJson = context });
+
+            _now = T0.AddMinutes(4);
+            Assert.Equal(0, (await store.SweepAsync(ct)).Resolved);
+        });
+    }
+
     /// <summary>#6003 review: a claim whose lease lapsed with no report leaves the request claimed, but no agent is on it, so
     /// its expiry is unclaimed and sends the fallback.</summary>
     [Fact]
@@ -329,7 +393,11 @@ public sealed class InvestigationRequestEventsLiveTests
         {
             var signal = new InvestigationOpenSignal();
             var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
-            var delivery = new InvestigationEventDelivery(store, () => [Route(1)], new FakeSends(), signal, NullLogger.Instance, () => _now);
+            /* A route with a URL, so the pass makes a post, and a post that stays in flight until the test has looked: the waiter
+               must already be awake by then, which holds only if the pass wakes it before the first POST (#6003 review). */
+            var sends = new FakeSends();
+            var delivery = new InvestigationEventDelivery(store, () => [Route(1, generic: "https://agent.example/hook")], sends, signal,
+                NullLogger.Instance, () => _now);
             Task<string> Wait(string? after, int seconds) =>
                 DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, [1], after, seconds, ct);
 
@@ -352,7 +420,21 @@ public sealed class InvestigationRequestEventsLiveTests
             await Task.Delay(300, ct);
             Assert.False(wait.IsCompleted);
 
+            var wokeBeforeTheSendAnswered = false;
+            sends.WhileSending = async token =>
+            {
+                try
+                {
+                    await wait.WaitAsync(TimeSpan.FromSeconds(5), token);
+                    wokeBeforeTheSendAnswered = true;
+                }
+                catch (TimeoutException)
+                {
+                }
+            };
             await delivery.RunOnceAsync(ct);
+            Assert.NotEmpty(sends.Posts);
+            Assert.True(wokeBeforeTheSendAnswered, "the long-poll was not woken before the first POST answered");
             var woke = JsonNode.Parse(await wait.WaitAsync(TimeSpan.FromSeconds(10), ct))!;
             var resolved = Assert.Single(woke["requests"]!.AsArray())!;
             Assert.Equal((InvestigationEvents.Resolved, id.ToString("D")), ((string)resolved["event"]!, (string)resolved["request_id"]!));
@@ -389,9 +471,11 @@ public sealed class InvestigationRequestEventsLiveTests
 
     /// <summary>
     /// #6003 review: the journal trigger (managed provisioning's <see cref="DarlingManagedRoles.BuildJournalEventRulesSql"/>)
-    /// refuses, from a role holding the mcp role's journal grants, an event row, a delivery or fallback mark, a once key an
-    /// event or a mark uses, and a row dated in the future, and lets in the role's own audit rows and a practice request's
-    /// one opened row. The service's own writers (open, the sweep, the delivery and fallback marks) still write.
+    /// refuses, from a role holding the mcp role's journal grants (the column list of
+    /// <see cref="DarlingManagedRoles.JournalWriterColumns"/>), an event row, a delivery or fallback mark, any once key but the
+    /// ones the tools write, and an insert that sets the identity or the event id; clamps a future date to the store's clock;
+    /// and lets in the role's own audit rows and a practice request's one opened row (exact reason, once key set by the
+    /// trigger). The service's own writers (open, the sweep, the delivery and fallback marks) still write.
     /// </summary>
     [Fact]
     public async Task TheJournalTrigger_RefusesForgedEventsAndMarks_FromTheMcpRole_AndTheServiceStillWrites()
@@ -411,34 +495,31 @@ public sealed class InvestigationRequestEventsLiveTests
             await ExecAsync(connection,
                 $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'; GRANT USAGE ON SCHEMA config TO {roleName}; "
                 + $"GRANT SELECT ON config.investigation_requests, config.investigation_journal TO {roleName}; "
-                + $"GRANT INSERT ON config.investigation_journal TO {roleName};", ct);
+                + $"GRANT INSERT ({DarlingManagedRoles.JournalWriterColumns}) ON config.investigation_journal TO {roleName};", ct);
             try
             {
                 var asMcp = new NpgsqlConnectionStringBuilder(connection.ConnectionString) { Username = roleName, Password = rolePassword }.ConnectionString;
                 await using var mcp = new NpgsqlConnection(asMcp);
                 await mcp.OpenAsync(ct);
-                string Row(string journalEvent, string? onceKey = null, string time = "now()", Guid? request = null) =>
-                    "INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, once_key) "
-                    + $"VALUES ({time}, '{request ?? id}', 1, {ServerId}, '{journalEvent}', 'agent:forger', "
-                    + (onceKey is null ? "NULL)" : $"'{onceKey}')");
+                await AssertForgeriesRefusedAsync(mcp, id, practiceId, ct);
 
-                foreach (var forged in new[]
-                {
-                    Row(InvestigationEvents.Resolved), Row(InvestigationEvents.Expired), Row(InvestigationEvents.Opened),
-                    Row(InvestigationEvents.EvidenceReady), Row(InvestigationEvents.Delivered), Row(InvestigationEvents.FallbackSent),
-                    Row("claimed", "delivered:" + Guid.NewGuid().ToString("D")), Row("claimed", InvestigationEvents.FallbackOnceKey(id)),
-                    Row("claimed", "resolved:" + id.ToString("D")), Row("claimed", "expired:" + id.ToString("D")),
-                    Row("claimed", "evidence_ready:" + id.ToString("D")), Row("claimed", time: "now() + interval '1 day'"),
-                })
-                {
-                    Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(mcp, forged, ct))).SqlState);
-                }
+                await ExecAsync(mcp, JournalRow(id, "claimed"), ct);
+                await ExecAsync(mcp, JournalRow(id, "refused", onceKey: "refused:" + id.ToString("D")), ct);
+                await ExecAsync(mcp, JournalRow(id, "journal_cap", onceKey: "journal_capped:" + id.ToString("D")), ct);
+                await ExecAsync(mcp, JournalRow(id, "refused", onceKey: "agent_refused:" + id.ToString("D") + ":tool"), ct);
+                await ExecAsync(mcp, JournalRow(id, "link_recorded", onceKey: "link:" + id.ToString("D") + ":abc"), ct);
 
-                await ExecAsync(mcp, Row("claimed"), ct);
-                await ExecAsync(mcp, Row("refused", "refused:" + id.ToString("D")), ct);
-                await ExecAsync(mcp, Row(InvestigationEvents.Opened, request: practiceId), ct);
-                Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(
-                    () => ExecAsync(mcp, Row(InvestigationEvents.Opened, request: practiceId), ct))).SqlState);
+                /* A future date is clamped to the store's clock, not refused: a fast clock cannot move a cursor ahead. */
+                await ExecAsync(mcp, JournalRow(id, "claimed", time: "now() + interval '1 day'"), ct);
+                Assert.Equal("True", await ScalarAsync(connection,
+                    "SELECT bool_and(event_time <= now()) FROM config.investigation_journal WHERE actor = 'agent:forger'", ct));
+
+                /* The practice request's one opened row: the exact reason, once. The trigger sets its once key. */
+                await ExecAsync(mcp, JournalRow(practiceId, InvestigationEvents.Opened, reason: "practice of " + id.ToString("D")), ct);
+                Assert.Equal("practice_opened:" + practiceId.ToString("D"), await ScalarAsync(connection,
+                    $"SELECT once_key FROM config.investigation_journal WHERE request_id = '{practiceId}' AND event = 'opened'", ct));
+                Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(mcp,
+                    JournalRow(practiceId, InvestigationEvents.Opened, reason: "practice of " + id.ToString("D")), ct))).SqlState);
             }
             finally
             {
@@ -459,6 +540,160 @@ public sealed class InvestigationRequestEventsLiveTests
             Assert.Equal(
                 new[] { InvestigationEvents.Opened, InvestigationEvents.Opened, InvestigationEvents.Joined, InvestigationEvents.Resolved },
                 sends.Posts.Select(p => (string)JsonNode.Parse(p.Payload)!["event"]!));
+        });
+    }
+
+    private static string JournalRow(Guid request, string journalEvent, string? onceKey = null, string time = "now()", string? reason = null,
+        string columns = "event_time, request_id, route_id, server_id, event, actor, reason, once_key", string? idValues = null) =>
+        $"INSERT INTO config.investigation_journal ({columns}) {(idValues is null ? "" : "OVERRIDING SYSTEM VALUE ")}"
+        + $"VALUES ({idValues}{time}, '{request}', 1, {ServerId}, '{journalEvent}', 'agent:forger', "
+        + (reason is null ? "NULL, " : $"'{reason}', ")
+        + (onceKey is null ? "NULL)" : $"'{onceKey}')");
+
+    /// <summary>Every insert a non-owner journal writer must not make, each refused with 42501.</summary>
+    private static async Task AssertForgeriesRefusedAsync(NpgsqlConnection writer, Guid id, Guid practiceId, CancellationToken ct)
+    {
+        var forged = new List<string>();
+        foreach (var kind in InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent))
+        {
+            forged.Add(JournalRow(id, kind));
+        }
+
+        /* A practice request's opened row with a reason that is not the exact sentence. */
+        forged.Add(JournalRow(practiceId, InvestigationEvents.Opened, reason: "because I said so"));
+        forged.Add(JournalRow(practiceId, InvestigationEvents.Opened, reason: "practice of " + Guid.NewGuid().ToString("D")));
+        /* A once key the service uses, and any other prefix the tools do not write. */
+        foreach (var prefix in new[] { "delivered", "fallback", "resolved", "expired", "evidence_ready", "lease_expired", "limit_reached", "practice_opened", "anything" })
+        {
+            forged.Add(JournalRow(id, "claimed", onceKey: prefix + ":" + id.ToString("D")));
+        }
+
+        /* The identity and the event id are the service's: naming either is a column the role holds no INSERT on. */
+        forged.Add(JournalRow(id, "claimed", columns: "journal_id, event_time, request_id, route_id, server_id, event, actor, reason, once_key", idValues: "9000000000, "));
+        forged.Add(JournalRow(id, "claimed", columns: "event_id, event_time, request_id, route_id, server_id, event, actor, reason, once_key", idValues: $"'{Guid.NewGuid()}', "));
+
+        foreach (var sql in forged)
+        {
+            var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(writer, sql, ct));
+            Assert.True(refused.SqlState == "42501", sql + " -> " + refused.SqlState);
+        }
+    }
+
+    /// <summary>A practice request's event carries <c>practice_of</c> in its detail, on the delivery read and the long-poll read, so
+    /// a receiver can tell a replay from a live request; a live request's event does not.</summary>
+    [Fact]
+    public async Task APracticeRequestsEvent_CarriesPracticeOf_AndALiveRequestsDoesNot()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            var practiceId = Guid.NewGuid();
+            await ExecAsync(connection,
+                $"CREATE TEMP TABLE practice AS SELECT * FROM config.investigation_requests WHERE request_id = '{id}'; "
+                + $"UPDATE practice SET request_id = '{practiceId}', practice_of = '{id}'; "
+                + "INSERT INTO config.investigation_requests SELECT * FROM practice; "
+                + $"INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason) "
+                + $"VALUES ('{T0:O}', '{practiceId}', 1, {ServerId}, 'opened', 'person:viewer', 'practice of {id}')", ct);
+
+            var pending = await store.PendingDeliveriesAsync(T0.AddMinutes(-1), 100, ct);
+            var polled = await store.OpenedSinceAsync(T0.AddMinutes(-1), null, 100, ct);
+            Assert.Equal(id.ToString("D"), (string)JsonNode.Parse(pending.Single(p => p.RequestId == practiceId).DetailJson!)!["practice_of"]!);
+            Assert.Equal(id.ToString("D"), (string)JsonNode.Parse(polled.Single(p => p.RequestId == practiceId).DetailJson!)!["practice_of"]!);
+            Assert.DoesNotContain("practice_of", pending.Single(p => p.RequestId == id).DetailJson ?? "", StringComparison.Ordinal);
+            Assert.DoesNotContain("practice_of", polled.Single(p => p.RequestId == id).DetailJson ?? "", StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// The alert links (managed provisioning's <see cref="DarlingManagedRoles.BuildRequestAlertLinkRulesSql"/>): a role holding
+    /// admin's INSERT on them is refused a link to a live request and takes one to a practice request.
+    /// </summary>
+    [Fact]
+    public async Task TheAlertLinkTrigger_RefusesALinkToALiveRequest_FromAdmin_AndTakesAPracticeRequestsCopy()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            var practiceId = Guid.NewGuid();
+            await ExecAsync(connection,
+                $"CREATE TEMP TABLE practice AS SELECT * FROM config.investigation_requests WHERE request_id = '{id}'; "
+                + $"UPDATE practice SET request_id = '{practiceId}', practice_of = '{id}'; "
+                + "INSERT INTO config.investigation_requests SELECT * FROM practice;", ct);
+            await ExecAsync(connection, DarlingManagedRoles.BuildRequestAlertLinkRulesSql("config"), ct);
+
+            var roleName = "inv_lnk_" + Guid.NewGuid().ToString("N")[..8];
+            var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            await ExecAsync(connection,
+                $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'; GRANT USAGE ON SCHEMA config TO {roleName}; "
+                + $"GRANT SELECT ON config.investigation_requests, config.investigation_request_alerts TO {roleName}; "
+                + $"GRANT INSERT ON config.investigation_request_alerts TO {roleName};", ct);
+            try
+            {
+                var asAdmin = new NpgsqlConnectionStringBuilder(connection.ConnectionString) { Username = roleName, Password = rolePassword }.ConnectionString;
+                await using var admin = new NpgsqlConnection(asAdmin);
+                await admin.OpenAsync(ct);
+                string Link(Guid request) =>
+                    "INSERT INTO config.investigation_request_alerts (request_id, alert_time, server_id, metric_name) "
+                    + $"VALUES ('{request}', now(), {ServerId}, 'Memory Pressure')";
+
+                Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(admin, Link(id), ct))).SqlState);
+                Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(admin, Link(Guid.NewGuid()), ct))).SqlState);
+                await ExecAsync(admin, Link(practiceId), ct);
+
+                Assert.Equal("1|0", await ScalarAsync(connection,
+                    $"SELECT (SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{practiceId}' AND metric_name = 'Memory Pressure') || '|' || "
+                    + $"(SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{id}' AND metric_name = 'Memory Pressure')", ct));
+            }
+            finally
+            {
+                await ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
+            }
+        });
+    }
+
+    /// <summary>
+    /// F: the self-managed script's own text (provision-roles.sql step 3i, run here as its DO block) refuses every event kind
+    /// and both marks from a role with the script's column grant, so a kind added to <see cref="InvestigationEvents.Kinds"/>
+    /// without the script's list is caught here rather than forgeable on a self-managed store.
+    /// </summary>
+    [Fact]
+    public async Task TheScriptsJournalTrigger_RefusesEveryEventKindAndMark_FromTheMcpRole()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            var practiceId = Guid.NewGuid();
+            await ExecAsync(connection,
+                $"CREATE TEMP TABLE practice AS SELECT * FROM config.investigation_requests WHERE request_id = '{id}'; "
+                + $"UPDATE practice SET request_id = '{practiceId}', practice_of = '{id}'; "
+                + "INSERT INTO config.investigation_requests SELECT * FROM practice;", ct);
+            var script = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql"));
+            var start = script.IndexOf("-- 3i (continued)", StringComparison.Ordinal);
+            var end = script.IndexOf("-- 3j.", StringComparison.Ordinal);
+            Assert.True(start > 0 && end > start, "the script's journal rules block was not found");
+            await ExecAsync(connection, script[start..end], ct);
+            Assert.Equal("2", await ScalarAsync(connection,
+                "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_investigation_journal_owner_rows', 'trg_investigation_request_alerts_owner_rows')", ct));
+
+            var roleName = "inv_scr_" + Guid.NewGuid().ToString("N")[..8];
+            var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            await ExecAsync(connection,
+                $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'; GRANT USAGE ON SCHEMA config TO {roleName}; "
+                + $"GRANT SELECT ON config.investigation_requests, config.investigation_journal TO {roleName}; "
+                + $"GRANT INSERT ({DarlingManagedRoles.JournalWriterColumns}) ON config.investigation_journal TO {roleName};", ct);
+            try
+            {
+                var asMcp = new NpgsqlConnectionStringBuilder(connection.ConnectionString) { Username = roleName, Password = rolePassword }.ConnectionString;
+                await using var mcp = new NpgsqlConnection(asMcp);
+                await mcp.OpenAsync(ct);
+                await AssertForgeriesRefusedAsync(mcp, id, practiceId, ct);
+                await ExecAsync(mcp, JournalRow(id, "claimed"), ct);
+                await ExecAsync(mcp, JournalRow(practiceId, InvestigationEvents.Opened, reason: "practice of " + id.ToString("D")), ct);
+            }
+            finally
+            {
+                await ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
+            }
         });
     }
 

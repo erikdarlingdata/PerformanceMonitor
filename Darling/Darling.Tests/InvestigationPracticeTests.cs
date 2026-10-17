@@ -638,6 +638,21 @@ public sealed class InvestigationPracticeGrantLiveTests
                     $"SELECT practice_of FROM config.investigation_requests WHERE request_id = '{practice}'", ct));
                 Assert.Equal(alertRows, await ScalarAsync(owner,
                     $"SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{practice}'", ct));
+
+                /* #6003 review round 2, on the real grants: the opened row's once key is the trigger's; admin cannot name the
+                   journal's identity or event id, nor link an alert to a live request. */
+                Assert.Equal("practice_opened:" + practice.ToString("D"), await ScalarAsync(owner,
+                    $"SELECT once_key FROM config.investigation_journal WHERE request_id = '{practice}' AND event = 'opened'", ct));
+                await using var admin = await adminSource.OpenConnectionAsync(ct);
+                foreach (var sql in new[]
+                {
+                    "INSERT INTO config.investigation_journal (journal_id, request_id, event, actor) OVERRIDING SYSTEM VALUE VALUES (9000000000, NULL, 'claimed', 'person:admin')",
+                    "INSERT INTO config.investigation_journal (event_id, request_id, event, actor) VALUES (gen_random_uuid(), NULL, 'claimed', 'person:admin')",
+                    $"INSERT INTO config.investigation_request_alerts (request_id, alert_time, server_id, metric_name) VALUES ('{original}', now(), {ServerId}, 'Blocking')",
+                })
+                {
+                    Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(admin, sql, ct))).SqlState);
+                }
             }
 
             bodySucceeded = true;

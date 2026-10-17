@@ -88,37 +88,40 @@ public static class InvestigationEvents
 
     /// <summary>
     /// The detail an event of kind <paramref name="eventKind"/> sends: only the members its kind lists, as a JSON object, or
-    /// null when none is left (or <paramref name="detailJson"/> is not a JSON object). Read by both event readers.
+    /// null when none is left (or <paramref name="detailJson"/> is not a JSON object). A practice request's event
+    /// (<paramref name="practiceOf"/>, the case it replays) also carries <c>practice_of</c>, so a receiver can tell a replay from
+    /// a live request (#6003 review). Read by both event readers.
     /// </summary>
-    public static string? PublicDetail(string eventKind, string? detailJson)
+    public static string? PublicDetail(string eventKind, string? detailJson, Guid? practiceOf = null)
     {
-        if (string.IsNullOrWhiteSpace(detailJson) || !DetailMembers.TryGetValue(eventKind, out var members))
-        {
-            return null;
-        }
-
-        JsonObject? source;
-        try
-        {
-            source = JsonNode.Parse(detailJson) as JsonObject;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-
-        if (source is null)
-        {
-            return null;
-        }
-
         var kept = new JsonObject();
-        foreach (var member in members)
+        if (!string.IsNullOrWhiteSpace(detailJson) && DetailMembers.TryGetValue(eventKind, out var members))
         {
-            if (source.TryGetPropertyValue(member, out var value))
+            JsonObject? source;
+            try
             {
-                kept[member] = value?.DeepClone();
+                source = JsonNode.Parse(detailJson) as JsonObject;
             }
+            catch (JsonException)
+            {
+                source = null;
+            }
+
+            if (source is not null)
+            {
+                foreach (var member in members)
+                {
+                    if (source.TryGetPropertyValue(member, out var value))
+                    {
+                        kept[member] = value?.DeepClone();
+                    }
+                }
+            }
+        }
+
+        if (practiceOf is Guid practice)
+        {
+            kept["practice_of"] = practice.ToString("D");
         }
 
         return kept.Count == 0 ? null : kept.ToJsonString();

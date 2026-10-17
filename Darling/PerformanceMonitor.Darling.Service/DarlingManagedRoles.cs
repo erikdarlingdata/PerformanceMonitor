@@ -1742,19 +1742,23 @@ GRANT SELECT ON {config}.investigation_requests, {config}.investigation_request_
 GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at)
    ON {config}.investigation_requests TO {mcp};
 GRANT INSERT ON {config}.investigation_reports TO {mcp};
-GRANT INSERT ON {config}.investigation_journal TO {mcp};
+GRANT INSERT ({JournalWriterColumns}) ON {config}.investigation_journal TO {mcp};
 GRANT INSERT (server_id, story_path_hash, dedup_key, metric_name, note_text, author, source_request_id)
    ON {config}.investigation_notes TO {mcp};
 GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON {config}.investigation_requests TO {admin};
-GRANT INSERT ON {config}.investigation_journal TO {admin};
+GRANT INSERT ({JournalWriterColumns}) ON {config}.investigation_journal TO {admin};
 GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
 GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
 -- #6003 review: the journal is the event log the service signs and delivers, and mcp and admin hold INSERT on it, so a
 --     trigger keeps the event rows, their delivery and fallback marks and the time order to the owner (see
 --     BuildJournalEventRulesSql). Created here, not in a migration, as the password rules are; a self-managed store gets
---     the same function and trigger from tools/provision-roles.sql step 3i.
+--     the same function and trigger from tools/provision-roles.sql step 3i. The INSERT grants above name their columns and
+--     leave out journal_id and event_id: a role that could set them (OVERRIDING SYSTEM VALUE) could fill the identity's
+--     next million values and make every service insert fail with a duplicate key. The same trigger idea guards the alert
+--     links (BuildRequestAlertLinkRulesSql): admin's INSERT there is for a practice request's copy only.
 {BuildJournalEventRulesSql(config)}
+{BuildRequestAlertLinkRulesSql(config)}
 
 -- 10e. Level 2 tables (V191, #5909): the threshold overrides an agent sets and the feedback on a report. The default
 --     privileges already give admin INSERT/UPDATE/DELETE and viewer SELECT on a table made after them, but the grants are
@@ -2612,14 +2616,18 @@ REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacy
     /// #6003 review: the journal rows only the store owner writes. <c>config.investigation_journal</c> is the request event
     /// log: the service signs each event row with the agent route's key and posts it, and the MCP long-poll orders its cursor
     /// by <c>event_time</c>. <c>mcp</c> (the claim and submit tools) and <c>admin</c> (the desktop Viewer) hold INSERT on it
-    /// to journal their own actions, so this <c>BEFORE INSERT</c> trigger refuses a row from any role but the owner that
+    /// (the columns of <see cref="JournalWriterColumns"/>) to journal their own actions, so this <c>BEFORE INSERT</c> trigger
+    /// refuses a row from any role but the owner that
     /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>) or a delivery or fallback mark, but for the one
-    /// <c>opened</c> row of a practice request (the Viewer opens those, #5918); (b) carries a once key the service's
-    /// events and marks use (<c>delivered:</c>, <c>fallback:</c>, <c>resolved:</c>, <c>expired:</c>, <c>evidence_ready:</c>),
-    /// which would otherwise let a role pre-empt a real one; or (c) is dated more than five minutes past the store's clock,
-    /// which would move every long-poll cursor past the real events after it. Five minutes, not zero: the tools and the
-    /// Viewer stamp the row with their own clock. The owner (the table's owner or a superuser) is not held to any of this.
-    /// The same text is in <c>tools/provision-roles.sql</c> for a self-managed store.
+    /// <c>opened</c> row of a practice request (the Viewer opens those, #5918), whose reason is exactly
+    /// <c>practice of &lt;the case's request id&gt;</c>; or
+    /// (b) carries a once key other than the prefixes the tools and the Viewer write (<see cref="JournalWriterOnceKeyPrefixes"/>),
+    /// so no role can pre-empt a key the service uses (<c>delivered:</c>, <c>fallback:</c>, <c>resolved:</c>, <c>expired:</c>,
+    /// <c>evidence_ready:</c>, <c>lease_expired:</c>, <c>limit_reached:</c>). A practice <c>opened</c> row gets the once key
+    /// <c>practice_opened:&lt;request id&gt;</c> from the trigger, so a second one for the request fails on the unique index even
+    /// when two inserts race. A row dated ahead of the store's clock is clamped to it (a role's own clock may run fast, and a
+    /// future date would move every long-poll cursor past the real events after it). The owner (the table's owner or a
+    /// superuser) is not held to any of this. The same text is in <c>tools/provision-roles.sql</c> for a self-managed store.
     /// </summary>
     internal static string BuildJournalEventRulesSql(string config) => $@"
 CREATE OR REPLACE FUNCTION {config}.investigation_journal_owner_rows()
@@ -2627,26 +2635,36 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $rules$
+DECLARE
+   v_practice boolean := false;
 BEGIN
    IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ({JournalOwnerEventList})
-      AND NOT (NEW.event = 'opened'
-               AND EXISTS (SELECT 1 FROM {config}.investigation_requests AS r
-                           WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL)
-               AND NOT EXISTS (SELECT 1 FROM {config}.investigation_journal AS j
-                               WHERE j.request_id = NEW.request_id AND j.event = 'opened')) THEN
-      RAISE EXCEPTION 'Only the Darling service journals the request event %.', NEW.event USING ERRCODE = '42501';
+   IF NEW.event IN ({JournalOwnerEventList}) THEN
+      IF NEW.event = 'opened'
+         AND EXISTS (SELECT 1 FROM {config}.investigation_requests AS r
+                     WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
+                       AND NEW.reason = 'practice of ' || r.practice_of::text)
+         AND NOT EXISTS (SELECT 1 FROM {config}.investigation_journal AS j
+                         WHERE j.request_id = NEW.request_id AND j.event = 'opened') THEN
+         v_practice := true;
+      ELSE
+         RAISE EXCEPTION 'Only the Darling service journals the request event %.', NEW.event USING ERRCODE = '42501';
+      END IF;
    END IF;
 
-   IF split_part(NEW.once_key, ':', 1) IN ('delivered', 'fallback', 'resolved', 'expired', 'evidence_ready') THEN
+   IF NEW.once_key IS NOT NULL AND split_part(NEW.once_key, ':', 1) NOT IN ({JournalWriterOnceKeyList}) THEN
       RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'Only the Darling service writes the once keys of request events and their delivery marks.';
    END IF;
 
-   IF NEW.event_time > now() + interval '5 minutes' THEN
-      RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'A journal row cannot be dated in the future.';
+   IF v_practice THEN
+      NEW.once_key := 'practice_opened:' || NEW.request_id::text;
+   END IF;
+
+   IF NEW.event_time > now() THEN
+      NEW.event_time := now();
    END IF;
 
    RETURN NEW;
@@ -2656,6 +2674,54 @@ REVOKE ALL ON FUNCTION {config}.investigation_journal_owner_rows() FROM PUBLIC;
 CREATE OR REPLACE TRIGGER trg_investigation_journal_owner_rows
    BEFORE INSERT ON {config}.investigation_journal
    FOR EACH ROW EXECUTE FUNCTION {config}.investigation_journal_owner_rows();";
+
+    /// <summary>
+    /// The columns of <c>config.investigation_journal</c> that <c>mcp</c> and <c>admin</c> may set on an insert: every column the
+    /// claim, submit and change tools and the Viewer's journal writers name. Not <c>journal_id</c> (the identity: a role that
+    /// set it could fill the next million values and make every service insert fail) and not <c>event_id</c> (the unique
+    /// webhook id): both take their defaults.
+    /// </summary>
+    internal const string JournalWriterColumns = "event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key";
+
+    /// <summary>
+    /// The once-key prefixes (the text before the first colon) a non-owner journal writer uses: the claim row, the refusals
+    /// (<c>refused</c> for claim, submit and the note tools, <c>agent_refused</c> for a Level 2 change), the journal cap row,
+    /// and a report's link rows. Every other prefix is refused (<see cref="BuildJournalEventRulesSql"/>); the trigger itself
+    /// sets <c>practice_opened</c> for a practice request's one opened row.
+    /// </summary>
+    internal static readonly string[] JournalWriterOnceKeyPrefixes = ["claimed", "refused", "agent_refused", "journal_capped", "link"];
+
+    private static string JournalWriterOnceKeyList => string.Join(", ", JournalWriterOnceKeyPrefixes.Select(k => "'" + k + "'"));
+
+    /// <summary>
+    /// The alert links of a request (<c>config.investigation_request_alerts</c>) say which alerts a request waits on to resolve.
+    /// Only the service writes them, but for the Viewer's copy for a practice request (#5918): <c>admin</c> holds INSERT for
+    /// that, so a link to a live request (which would keep it from ever resolving) is refused here, for any role but the owner.
+    /// The same text is in <c>tools/provision-roles.sql</c> for a self-managed store.
+    /// </summary>
+    internal static string BuildRequestAlertLinkRulesSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.investigation_request_alerts_owner_rows()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $rules$
+BEGIN
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   IF NOT EXISTS (SELECT 1 FROM {config}.investigation_requests AS r
+                  WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL) THEN
+      RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'Only the Darling service links an alert to a request, and only a practice request takes a link from anyone else.';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$;
+REVOKE ALL ON FUNCTION {config}.investigation_request_alerts_owner_rows() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
+   BEFORE INSERT ON {config}.investigation_request_alerts
+   FOR EACH ROW EXECUTE FUNCTION {config}.investigation_request_alerts_owner_rows();";
 
     /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
