@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using PerformanceMonitor.Common.QueryTags;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -67,6 +68,9 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
         public string? BlockingStatus { get; set; }
         public string? BlockingIsolationLevel { get; set; }
         public string? BlockingClientApp { get; set; }
+
+        /// <summary>The blocking process's own currentdbname (#5980). Read for the query-tag caller key only; not stored.</summary>
+        public string? BlockingDatabaseName { get; set; }
         public string? BlockingHostName { get; set; }
         public string? BlockingLoginName { get; set; }
         public string? BlockingSqlText { get; set; }
@@ -1120,6 +1124,7 @@ OUTER APPLY
                 BlockingStatus = blockingProcess?.Attribute("status")?.Value,
                 BlockingIsolationLevel = blockingProcess?.Attribute("isolationlevel")?.Value,
                 BlockingClientApp = blockingProcess?.Attribute("clientapp")?.Value,
+                BlockingDatabaseName = blockingProcess?.Attribute("currentdbname")?.Value,
                 BlockingHostName = blockingProcess?.Attribute("hostname")?.Value,
                 BlockingLoginName = blockingProcess?.Attribute("loginname")?.Value,
                 BlockingSqlText = blockingProcess?.Element("inputbuf")?.Value?.Trim(),
@@ -1135,4 +1140,13 @@ OUTER APPLY
             return null;
         }
     }
+
+    /// <summary>
+    /// #5980: a caller sighting for the blocked side and one for the blocking side, each with its own
+    /// application, login, host and statement text. A side that names no application, login or host is left out.
+    /// </summary>
+    public override IReadOnlyList<QueryTagSighting>? DescribeQueryTagSightings(Row row)
+        => QueryTagSightings.Collect(
+            QueryTagSightings.Caller(row.DatabaseName, row.BlockedClientApp, row.BlockedLoginName, row.BlockedHostName, row.BlockedSqlText),
+            QueryTagSightings.Caller(row.BlockingDatabaseName, row.BlockingClientApp, row.BlockingLoginName, row.BlockingHostName, row.BlockingSqlText));
 }

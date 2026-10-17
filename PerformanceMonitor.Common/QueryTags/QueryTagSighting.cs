@@ -72,6 +72,27 @@ public static class QueryTagLimits
     /// <summary>Text rules see at most this many characters of the query text.</summary>
     public const int TextSampleCap = 4000;
 
+    /// <summary>
+    /// Cuts <paramref name="text"/> to <see cref="TextSampleCap"/>. A cut that would split a surrogate pair stops
+    /// one character earlier, so the sample is always valid text for the store. The one cut: the resolver and the
+    /// collectors both call it (#5980, #3684).
+    /// </summary>
+    public static string? CutText(string? text)
+    {
+        if (text is null || text.Length <= TextSampleCap)
+        {
+            return text;
+        }
+
+        int length = TextSampleCap;
+        if (char.IsHighSurrogate(text[length - 1]))
+        {
+            length--;
+        }
+
+        return text.Substring(0, length);
+    }
+
     /// <summary>The most keys one pass resolves for one server. The collectors (#5980) enforce it; this type only
     /// names the value, so the resolver and the matcher never cut a pass short themselves.</summary>
     public const int MaxKeysPerServerPerPass = 10000;

@@ -55,7 +55,8 @@ public sealed class InvestigationWebhookTokenTests
 
     private static async Task<(string? Body, List<InvestigationAlert> Asked)> DeliverAsync(
         string template, AlertOutcome outcome, NotificationRoute[] routes, InvestigationOpenResult? open = null,
-        string? brief = null, McpDataDetail mode = McpDataDetail.MetadataOnly, List<Guid>? reads = null)
+        string? brief = null, McpDataDetail mode = McpDataDetail.MetadataOnly, List<Guid>? reads = null,
+        Func<Guid, InvestigationRequestRow>? row = null)
     {
         using var generic = new CapturingWebhookEndpoint();
         var config = new DarlingConfig();
@@ -77,7 +78,7 @@ public sealed class InvestigationWebhookTokenTests
             (id, _) =>
             {
                 reads?.Add(id);
-                return Task.FromResult<(InvestigationRequestRow Row, string? Brief)?>((Row(id), brief));
+                return Task.FromResult<(InvestigationRequestRow Row, string? Brief)?>(((row ?? (rowId => Row(rowId)))(id), brief));
             },
             mode);
         var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance, investigationDispatcher: dispatcher);
@@ -114,6 +115,23 @@ public sealed class InvestigationWebhookTokenTests
         Assert.Equal(JsonValueKind.Object, brief.ValueKind);
         Assert.DoesNotContain("Alice Liddell", body!, StringComparison.Ordinal);
         Assert.Equal("blocking", brief.GetProperty("findings")[0].GetProperty("category").GetString());
+    }
+
+    /// <summary>
+    /// #5999: the token carries the registry's display name and instance name beside <c>server_name</c> (the name the request was
+    /// opened with), exactly as the request row read back holds them.
+    /// </summary>
+    [Fact]
+    public async Task TheToken_CarriesBothServerNames_BesideServerName()
+    {
+        var (body, _) = await DeliverAsync(
+            BareTemplate, Outcome("Deadlocks Detected"), [Route(5, "Deadlocks Detected")],
+            row: id => Row(id) with { DisplayName = "Prod OLTP", InstanceName = "SQLPROD01\\INST1" });
+
+        var investigation = Investigation(body);
+        Assert.Equal("srv", investigation.GetProperty("server_name").GetString());
+        Assert.Equal("Prod OLTP", investigation.GetProperty("display_name").GetString());
+        Assert.Equal("SQLPROD01\\INST1", investigation.GetProperty("instance_name").GetString());
     }
 
     /// <summary>
