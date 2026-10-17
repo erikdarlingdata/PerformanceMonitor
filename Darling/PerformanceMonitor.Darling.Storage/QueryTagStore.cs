@@ -36,9 +36,6 @@ public sealed record QueryTagAssignmentRow(
     DateTime CreatedAt,
     string CreatedBy);
 
-/// <summary>The one-row map version state: the map is stale while <c>BuiltVersion</c> is below <c>RulesVersion</c>.</summary>
-public sealed record QueryTagState(long RulesVersion, long BuiltVersion);
-
 /// <summary>Every tag, every hand assignment, the rule count (all rules, and the enabled ones the resolver considers) per tag, the registered server names and the map state, read for one answer.</summary>
 public sealed record QueryTagSnapshot(
     IReadOnlyList<QueryTagRow> Tags,

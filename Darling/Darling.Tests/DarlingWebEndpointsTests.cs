@@ -166,10 +166,11 @@ public sealed class DarlingWebEndpointsTests
             new[]
             {
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-                "analyze_server", "assign_query_tag", "assign_server_tag", "backtest_custom_alert_rule", "claim_investigation_request", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_query_tag", "create_server_tag", "delete_custom_alert_rule",
-                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_server_tag", "describe_custom_view_catalog", "edit_server", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
-                "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_collectors_now", "run_custom_view_panel",
-                "set_alert_threshold_override", "set_mute_rule_enabled", "set_notification_route_enabled", "submit_investigation_report", "test_custom_alert_rule", "unassign_query_tag", "unassign_server_tag", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_query_tag", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
+                "analyze_server", "assign_query_tag", "assign_server_tag", "backtest_custom_alert_rule", "claim_investigation_request", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_query_tag", "create_query_tag_rule",
+                "create_server_tag", "delete_custom_alert_rule", "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule", "delete_server_tag", "describe_custom_view_catalog", "edit_server",
+                "get_custom_alert_rule", "get_custom_view", "get_tool_guide", "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_query_tag_rules", "mute_analysis_finding", "remove_server", "run_collectors_now",
+                "run_custom_view_panel", "set_alert_threshold_override", "set_mute_rule_enabled", "set_notification_route_enabled", "submit_investigation_report", "test_custom_alert_rule", "test_query_tag_rule", "unassign_query_tag", "unassign_server_tag", "update_alert_settings",
+                "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_query_tag", "update_query_tag_rule", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
                 "wait_for_investigation_requests",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
