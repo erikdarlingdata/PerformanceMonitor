@@ -53,9 +53,9 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// the tail gained the page / count-row wrapper, and re-taken again for #5420, which deliberately bounded the tail's
     /// inline-text fallback to the read's window (<c>collection_time &gt;= $2</c> and <c>&lt;= $3</c>), and re-taken for #5523, which deliberately added the table read's upper <c>first_execution_time</c> bound (<c>&lt;= $3 + </c>the slack, twelve hours). The split pin is the
     /// tail-sharing assert below. Re-taken for #5815, which deliberately sorted the page's candidates before the text lateral
-    /// so <c>LIMIT $4</c> stops the text lookups at a full page (rows and order unchanged).</summary>
-    private const string RawSqlHash = "FFEB749BC29FF0D7FE9CFBF66BFA2558375D35A1468939F8AC20538A8C5010FA";
-    private const string TableSqlHash = "3A61826D037A9C443633396F5811478028E5EB3EC6CE238005ED6E61AD6D4265";
+    /// so <c>LIMIT $4</c> stops the text lookups at a full page (rows and order unchanged). Re-taken for #5984, which deliberately added the query-tag filter's comment token (a no-op until a read names a tag).</summary>
+    private const string RawSqlHash = "DD0DD535EFADA1E258360AE5C8CBFDCD5E6EC0D21F87BCECEAE7BA76411CF827";
+    private const string TableSqlHash = "0CFFEA04CFB2F5FD8C6C9AE9A21E186C1A6349B3772799B909DB39BC9DCE89D3";
 
     private static string Hash(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));

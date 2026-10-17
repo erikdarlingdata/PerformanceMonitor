@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 69;
+    internal const int CurrentSchemaVersion = 70;
 
     private readonly string _archivePath;
 
@@ -2982,6 +2982,26 @@ public partial class DuckDbInitializer : IDisposable
                 catch (Exception ex)
                 {
                     _logger?.LogWarning("Migration to v69 investigation tables encountered an error (non-fatal): {Error}", ex.Message);
+                }
+            }
+        }
+
+        if (fromVersion < 70)
+        {
+            /* v70 (#5989): the six query-tag tables. New tables with no row to backfill: a database older than v70 has no
+               query tags, which is the state before the feature. Non-fatal, and each table is its own try: a table that
+               fails here leaves query tags unavailable (the store's reads and writes fail, nothing else does), and the
+               table statements that follow retry each CREATE on the next start. */
+            _logger?.LogInformation("Running migration to v70: adding the query-tag tables");
+            foreach (var statement in Schema.QueryTagTableStatements())
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection, statement);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v70 query-tag tables encountered an error (non-fatal): {Error}", ex.Message);
                 }
             }
         }

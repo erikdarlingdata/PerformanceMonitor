@@ -273,6 +273,32 @@ public static class DarlingRetention
     internal const string ClearInvestigationBriefSql =
         "UPDATE config.investigation_requests SET brief = NULL WHERE brief IS NOT NULL AND opened_at < $1";
 
+    /// <summary>The evidence rows of a request (config.investigation_evidence, V193, #5997) are cleared with its brief, at
+    /// <see cref="InvestigationBriefRetentionDays"/>, and the rest of the request keeps <see cref="InvestigationRetentionDays"/>.
+    /// A request that is still open or claimed keeps its evidence however old (<see cref="FinishedInvestigationStates"/>, the
+    /// request purge's own filter): an agent may still be reading it. Evidence also goes with its request at the year
+    /// (<c>ON DELETE CASCADE</c>). The delete is capped at <see cref="InvestigationEvidenceBatchRows"/> rows a statement and
+    /// the drain loop repeats it until a statement deletes nothing. Compile-time constant, never user input; <c>$1</c> is the
+    /// cutoff.</summary>
+    internal static readonly string ClearInvestigationEvidenceSql =
+        "DELETE FROM config.investigation_evidence WHERE evidence_id IN ("
+        + "SELECT e.evidence_id FROM config.investigation_evidence AS e "
+        + "JOIN config.investigation_requests AS r ON r.request_id = e.request_id "
+        + "WHERE r.opened_at < $1 AND r." + FinishedInvestigationStates + $" LIMIT {InvestigationEvidenceBatchRows})";
+
+    /// <summary>The row cap of <see cref="ClearInvestigationEvidenceSql"/>'s statement, also the batchSize the PurgeOneAsync call
+    /// for it passes. Evidence is at most 32 KB a row.</summary>
+    internal const int InvestigationEvidenceBatchRows = 5000;
+
+    /// <summary>The daily deadlock signature counts (config.investigation_signature_days, V193, #5997) keep this many days: the
+    /// 7-day average and the 24-hour count the gate compares need no more, and the rest is a count per day per signature.</summary>
+    internal const int InvestigationSignatureDayRetentionDays = 30;
+
+    /// <summary>Deletes every signature day before the cutoff's date (<c>$1</c>). A second run deletes nothing, so the drain loop
+    /// stops. The table holds one small row per server, signature and day, so one statement is the whole purge.</summary>
+    internal const string PurgeInvestigationSignatureDaysSql =
+        "DELETE FROM config.investigation_signature_days WHERE day < $1::date";
+
     /// <summary>
     /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
     /// (#4250 item 3), shared by both tables rather than sized per table, because both clear it in ONE
@@ -1061,7 +1087,26 @@ public static class DarlingRetention
                 ClearInvestigationBriefSql,
                 utcNow.AddDays(-InvestigationBriefRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
-            foreach (var investigationResult in new[] { investigationsDeleted, investigationJournalDeleted, investigationBriefsCleared })
+            /* config.investigation_evidence and config.investigation_signature_days (V193, #5997): the evidence is cleared with the
+               brief at InvestigationBriefRetentionDays, except for a request still open or claimed; the daily signature counts
+               are purged at InvestigationSignatureDayRetentionDays. config.investigation_signature_merges is a recorded decision
+               and is never aged. Each is failure-isolated like the passes above. */
+            var investigationEvidenceCleared = await PurgeOneAsync(
+                postgres, "config.investigation_evidence",
+                ClearInvestigationEvidenceSql,
+                utcNow.AddDays(-InvestigationBriefRetentionDays), logger, cancellationToken,
+                batchSize: InvestigationEvidenceBatchRows,
+                pacer: walPacer);
+            var investigationSignatureDaysDeleted = await PurgeOneAsync(
+                postgres, "config.investigation_signature_days",
+                PurgeInvestigationSignatureDaysSql,
+                utcNow.AddDays(-InvestigationSignatureDayRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            foreach (var investigationResult in new[]
+            {
+                investigationsDeleted, investigationJournalDeleted, investigationBriefsCleared,
+                investigationEvidenceCleared, investigationSignatureDaysDeleted,
+            })
             {
                 if (investigationResult is not null)
                 {

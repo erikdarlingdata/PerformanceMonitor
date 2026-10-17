@@ -27,7 +27,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 97 tools (89 by default); **Darling** exposes 188 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 97 tools (89 by default); **Darling** exposes 202 on request (168 by default; the write switches serve the rest); the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
 
 By default Lite serves its 89 read tools only. Its four write tools, `mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled` and `delete_notification_route`, are served when `mcp_allow_writes` is `true` in `settings.json`. Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. Lite's MCP endpoint has no token or caller check, so with the setting on, any program on this computer that can reach the port can mute or unmute findings, and disable or delete notification routes. Leave it off unless you trust every program that runs on this computer.
 
@@ -77,7 +77,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | FinOps (Darling) | `get_finops` (picks a view for one server), `get_finops_inventory` (the Server Inventory for the whole fleet), `get_finops_recommendations` |
 | Jobs history (Darling) | `get_job_history` (retained SQL Agent job runs for a server or the fleet) |
 | Trends and store history (Darling) | `get_server_trend` (one trend per `metric`, such as total waits, latch, spinlock, or tempdb size), `get_store_query_history` (the Darling store's own statements, hour by hour), `get_query_repro_script` |
-| Server management (Darling) | `add_servers`, `edit_server`, `remove_server`, and the server tag tools such as `create_server_tag` and `assign_server_tag` |
+| Server management (Darling) | `add_servers`, `edit_server`, `remove_server`, and the server tag tools such as `create_server_tag` and `assign_server_tag`, and the query tag tools such as `create_query_tag` and `assign_query_tag` |
 
 Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. Every tool that takes `hours_back` also takes an optional `as_of` — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (`as_of` its end, `hours_back` its length) rather than a very wide window filtered by hand. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](../Darling/README.md).)
 
