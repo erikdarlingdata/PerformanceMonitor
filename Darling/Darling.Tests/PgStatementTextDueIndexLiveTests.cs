@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// seeded and the table analysed, the statement must read through the <c>(server_id, last_seen)</c> index once the
 /// background step has built it, and must not before.
 /// </summary>
-/* Own-store: reaches DARLING_TEST_PG only to create and drop its own database. */
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. It reaches DARLING_TEST_PG only to create and drop its own database. */
 public sealed class PgStatementTextDueIndexLiveTests
 {
     private const string NewIndex = "ix_pg_statement_text_server_last_seen";
