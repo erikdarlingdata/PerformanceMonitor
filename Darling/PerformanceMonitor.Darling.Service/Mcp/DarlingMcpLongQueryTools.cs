@@ -40,8 +40,8 @@ public sealed class DarlingMcpLongQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
         => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken, tag);

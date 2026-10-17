@@ -59,7 +59,7 @@ public static class QueryTagReadJoin
 
     /// <summary>The description every query read gives its optional <c>tag</c> parameter.</summary>
     public const string TagParameterDescription =
-        "Optional query tag. Keeps only rows whose query carries this tag or a tag beneath it (name or path such as 'Parent / Child', any case), applied in SQL before the row cap. 'untagged' keeps rows with no tag. A name no tag carries answers empty. Each row also carries its tag when it has one.";
+        "Query tag name or path ('Parent / Child'), any case. Keeps rows with that tag or any tag beneath it. 'untagged' keeps rows with no tag. Applied before the top-N cut.";
 
     /// <summary>The separator between a tag and its parent in a path name.</summary>
     public const string PathSeparator = " / ";
