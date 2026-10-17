@@ -210,25 +210,20 @@ WHERE server_id = $1
 QUALIFY row_number() OVER (PARTITION BY database_name ORDER BY capture_time DESC) = 1
 ORDER BY database_name";
 
-    internal const string DeadlocksSql = @"
+    /* Each stored event once (StoredEventCopies): a later batch can store a copy of the same event again. The window
+       filter is the read's own, with no collection_time lower bound. */
+    internal static readonly string DeadlocksSql = @"
 SELECT deadlock_time, database_name, victim_process_id, deadlock_graph_xml
-FROM v_deadlocks
-WHERE server_id = $1
-  AND deadlock_time >= $2
-  AND deadlock_time <= $3
-  AND deadlock_graph_xml IS NOT NULL
-  AND deadlock_graph_xml <> ''
+FROM " + StoredEventCopies.Deadlocks(
+        "server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''") + @" AS dl
 ORDER BY deadlock_time DESC
 LIMIT 10";
 
-    internal const string BlockedReportsSql = @"
+    internal static readonly string BlockedReportsSql = @"
 SELECT event_time, database_name, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode,
        contentious_object, blocked_sql_text, blocking_sql_text, blocked_login_name, blocking_login_name, blocked_host_name,
        blocking_host_name, blocking_client_app, blocking_status, blocked_process_report_xml
-FROM v_blocked_process_reports
-WHERE server_id = $1
-  AND event_time >= $2
-  AND event_time <= $3
+FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
 ORDER BY event_time DESC, wait_time_ms DESC
 LIMIT 500";
 

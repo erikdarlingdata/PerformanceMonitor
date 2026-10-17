@@ -833,6 +833,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("FormatServerTime", ClockFrame.Utc),
         ("FormatStoredUtc", ClockFrame.Utc),
         ("FormatServerClock", ClockFrame.ServerLocal),
+        /* #6010: Lite's investigation evidence capture renders an instant into a frozen section as
+           yyyy-MM-ddTHH:mm:ssZ, so it is a UTC renderer: it states Z and does no conversion. The columns it is handed
+           are deadlocks.deadlock_time and blocked_process_reports.event_time, both naive UTC. */
+        ("Value", ClockFrame.Utc),
     ];
 
     /// <summary>

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -14,6 +15,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Investigations;
 using Xunit;
@@ -166,6 +168,130 @@ VALUES (1, '{Ts(T0)}', '{Ts(T0.AddSeconds(-20))}', {Server}, 'srv', 'AppDb', 60,
         var head = JsonNode.Parse(sections["head_blocker"].ContentJson!)!["rows"]![0]!;
         Assert.Equal(55, head["spid"]!.GetValue<int>());
         Assert.Equal("inferred", head["statement_source"]!.GetValue<string>());
+    }
+
+    private const string BlockedReportXml =
+        "<blocked-process-report><blocked-process><process spid=\"60\"/></blocked-process><blocking-process><process status=\"sleeping\" spid=\"55\"><inputbuf>BEGIN TRAN</inputbuf></process></blocking-process></blocked-process-report>";
+
+    private int _reportId;
+
+    private void BlockedReportRow(DateTime eventAt, DateTime collectedAt) =>
+        Exec($@"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, blocked_spid, blocking_spid, wait_time_ms, blocked_process_report_xml)
+VALUES ({++_reportId}, '{Ts(collectedAt)}', '{Ts(eventAt)}', {Server}, 'srv', 'AppDb', 60, 55, 9000, '{BlockedReportXml}')");
+
+    [Fact]
+    public async Task DeadlockSection_ListsADeadlockStoredInTwoBatchesOnce()
+    {
+        var opened = await Open("Deadlocks Detected", "blocking");
+        var eventAt = T0.AddSeconds(-30);
+        DeadlockRow(eventAt);
+        /* The same event again, collected by a later batch. */
+        Exec($"INSERT INTO deadlocks SELECT {++_deadlockId} AS deadlock_id, TIMESTAMP '{Ts(T0.AddMinutes(1))}' AS collection_time, * EXCLUDE (deadlock_id, collection_time) FROM deadlocks WHERE deadlock_id = 1");
+        Assert.Equal("2", Scalar("SELECT count(*) FROM deadlocks"));
+        CollectorRan("deadlocks", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var ready = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct));
+        Assert.Single(JsonNode.Parse(ready.ContentJson!)!["rows"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task BlockingSections_CountAReportStoredInTwoBatchesOnce()
+    {
+        var opened = await Open("Blocking Detected", "blocking");
+        var eventAt = T0.AddSeconds(-20);
+        BlockedReportRow(eventAt, T0);
+        BlockedReportRow(eventAt, T0.AddMinutes(1));
+        CollectorRan("blocked_process_report", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var sections = (await _store.ReadEvidenceAsync(opened.RequestId, Ct)).ToDictionary(r => r.Section);
+        var head = JsonNode.Parse(sections["head_blocker"].ContentJson!)!["rows"]!.AsArray();
+        Assert.Equal(1, Assert.Single(head)!["reports_in_chain"]!.GetValue<int>());
+    }
+
+    private async Task<Dictionary<string, JsonNode>> HighCpuSections(Action seed)
+    {
+        var opened = await Open("High CPU", "resources");
+        seed();
+        foreach (var collector in new[] { "query_stats", "query_snapshots", "query_store_health", "running_jobs", "wait_stats" })
+            CollectorRan(collector, T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+        var sections = await _store.ReadEvidenceAsync(opened.RequestId, Ct);
+        Assert.All(sections, s => Assert.Equal("ready", s.State));
+        return sections.ToDictionary(s => s.Section, s => JsonNode.Parse(s.ContentJson!)!);
+    }
+
+    private static JsonObject OnlyRow(JsonNode section) => Assert.Single(section["rows"]!.AsArray())!.AsObject();
+
+    [Fact]
+    public async Task HighCpuSections_EachFreezeTheRowCollectedInTheWindow()
+    {
+        var at = T0.AddMinutes(-5);
+        var sections = await HighCpuSections(() =>
+        {
+            Exec($@"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes)
+VALUES (1, '{Ts(at)}', {Server}, 'srv', 'AppDb', '0xQH1', '0xPH1', 10, 5000000, 6000000, 123, 1)");
+            Exec($@"INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id, cpu_time_ms, total_elapsed_time_ms, login_name, host_name, program_name)
+VALUES (2, '{Ts(at)}', {Server}, 'srv', 61, 'AppDb', 'SELECT 1', 'running', 0, 4000, 5000, 'app_login', 'web01', 'AppSvc')");
+            Exec($@"INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
+VALUES (3, '{Ts(at)}', {Server}, 'srv', 'SOS_SCHEDULER_YIELD', 10, 1000, 100, 5, 500, 50)");
+            Exec($@"INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
+VALUES ('{Ts(at)}', {Server}, 'srv', 'Nightly ETL', 'job-1', true, '{Ts(at.AddMinutes(-60))}', 3600, 900, 1200, 42, true, 400.0)");
+            Exec($@"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes)
+VALUES (4, '{Ts(at)}', {Server}, 'srv', 'AppDb', 'READ_ONLY', 'READ_WRITE', 8, 0, 1000, 'AUTO', 30, 200, 60)");
+        });
+
+        Assert.Equal(new[] { "active_requests", "jobs", "query_store", "top_statements", "waits" }, sections.Keys.OrderBy(k => k).ToArray());
+
+        var top = OnlyRow(sections["top_statements"]);
+        Assert.Equal("0xQH1", top["query_hash"]!.GetValue<string>());
+        Assert.Equal(5000000L, top["total_cpu_us"]!.GetValue<long>());
+        Assert.Equal(10L, top["executions"]!.GetValue<long>());
+
+        var active = OnlyRow(sections["active_requests"]);
+        Assert.Equal("app_login", active["login_name"]!.GetValue<string>());
+        Assert.Equal("web01", active["host_name"]!.GetValue<string>());
+        Assert.Equal(4000L, active["total_cpu_ms"]!.GetValue<long>());
+
+        var wait = OnlyRow(sections["waits"]);
+        Assert.Equal("SOS_SCHEDULER_YIELD", wait["wait_type"]!.GetValue<string>());
+        Assert.Equal(500L, wait["total_wait_time_ms"]!.GetValue<long>());
+
+        var job = OnlyRow(sections["jobs"]);
+        Assert.Equal("Nightly ETL", job["job_name"]!.GetValue<string>());
+        Assert.True(job["is_running_long"]!.GetValue<bool>());
+
+        var queryStore = OnlyRow(sections["query_store"]);
+        Assert.Equal("AppDb", queryStore["database_name"]!.GetValue<string>());
+        Assert.Equal("READ_ONLY", queryStore["actual_state"]!.GetValue<string>());
+        Assert.Equal(5000000L, queryStore["window_cpu_us"]!.GetValue<long>());
+    }
+
+    [Fact]
+    public async Task RegressionTargetsSection_FreezesTheRegressedQueryWithItsGoodAndBadPlan()
+    {
+        var opened = await Open("Query Slow", InvestigationFamily.QueryPerformance);
+        var seen = T0.AddMinutes(-5);
+        void Plan(int id, int plan, long avgCpu, long executions) =>
+            Exec($@"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time, execution_count, avg_cpu_time_us, avg_duration_us, query_plan_hash, runtime_stats_interval_id)
+VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', 7, {plan}, 'Regular', '{Ts(seen.AddHours(-1))}', '{Ts(seen.AddMinutes(plan))}', {executions}, {avgCpu}, {avgCpu}, '0xHASH{plan}', {plan})");
+        Plan(1, 1, 100, 50);
+        Plan(2, 2, 1000, 40);
+        CollectorRan("query_store", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var ready = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct));
+        Assert.Equal(("regression_targets", "ready"), (ready.Section, ready.State));
+        var target = OnlyRow(JsonNode.Parse(ready.ContentJson!)!);
+        Assert.Equal(7L, target["query_id"]!.GetValue<long>());
+        Assert.Equal(1L, target["good_plan_id"]!.GetValue<long>());
+        Assert.Equal(2L, target["bad_plan_id"]!.GetValue<long>());
+        Assert.Equal(10.0, target["regression_factor"]!.GetValue<double>(), 3);
     }
 
     [Fact]
