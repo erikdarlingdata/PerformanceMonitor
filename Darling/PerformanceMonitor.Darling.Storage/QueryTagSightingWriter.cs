@@ -44,10 +44,10 @@ public static class QueryTagSightingWriter
     /// The longest text sample kept, in characters. A sample is the first text a key was sighted with and the upsert keeps
     /// only that one, so every later sighting's text is thrown away. Text rules and <c>/* tag:NAME */</c> comments read this
     /// sample, so they see the first 4,000 characters of the first-sighted text, the same text they saw before sightings were
-    /// buffered and the same cut Lite keeps. The buffer is bounded by entry count instead, see
+    /// buffered and the same cut Lite keeps. This is the table's CHECK length itself (#3684): a separate literal that fell behind a lowered CHECK would fail every flush holding a long sample. The buffer is bounded by entry count instead, see
     /// <see cref="QueryTagSightingBuffer.SightingBufferCap"/>.
     /// </summary>
-    public const int TextSampleChars = 4000;
+    public const int TextSampleChars = QueryTagSchema.TextSampleMaxLength;
 
     /// <summary>
     /// The most rows one statement carries. A flush larger than this is several statements, so a buffer at its cap is
@@ -115,20 +115,53 @@ DO UPDATE SET
             return 0;
         }
 
-        return await WriteAsync(postgres, Collapse(serverId, sightings), logger, cancellationToken).ConfigureAwait(false);
+        var rows = Collapse(serverId, sightings);
+        SortByIdentity(rows);
+        return await WriteAsync(postgres, rows, logger, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Upserts already-collapsed rows, <see cref="RowsPerStatement"/> to a statement. The first failing statement is logged
-    /// and ends the write: the rest are dropped with it (a sighting lost is a key tagged a minute later, and a store that
-    /// is down is not retried row group by row group).
+    /// How many rows of a <see cref="WriteAsync"/> are in the store, kept current as each statement lands, so a caller whose
+    /// write was cancelled knows which rows to keep (#5985).
+    /// </summary>
+    internal sealed class WriteProgress
+    {
+        public int Written { get; set; }
+    }
+
+    /// <summary>
+    /// Puts rows in the seven-part identity order (server, kind, key, application, login, host, database; an empty field and
+    /// a missing one are the same, as the unique index reads them). Every writer upserts in this one order, so two flushes
+    /// that overlap on a key take its row lock in the same order and cannot wait on each other (#5985).
+    /// </summary>
+    internal static void SortByIdentity(List<CollapsedSighting> rows)
+    {
+        rows.Sort(static (a, b) =>
+        {
+            int c = a.ServerId.CompareTo(b.ServerId);
+            c = c != 0 ? c : string.CompareOrdinal(a.Kind, b.Kind);
+            c = c != 0 ? c : string.CompareOrdinal(a.Key, b.Key);
+            c = c != 0 ? c : string.CompareOrdinal(a.Application ?? string.Empty, b.Application ?? string.Empty);
+            c = c != 0 ? c : string.CompareOrdinal(a.Login ?? string.Empty, b.Login ?? string.Empty);
+            c = c != 0 ? c : string.CompareOrdinal(a.Host ?? string.Empty, b.Host ?? string.Empty);
+            return c != 0 ? c : string.CompareOrdinal(a.Database ?? string.Empty, b.Database ?? string.Empty);
+        });
+    }
+
+    /// <summary>
+    /// Upserts already-collapsed rows, <see cref="RowsPerStatement"/> to a statement, in the order given (callers pass
+    /// <see cref="SortByIdentity"/> order). The first statement to fail for a reason other than cancellation is logged and ends
+    /// the write: the rest are dropped with it (a sighting lost is a key tagged a minute later, and a store that is down is not
+    /// retried row group by row group). A cancellation is not a failure of the rows: it escapes, and
+    /// <paramref name="progress"/> says how many rows had landed, so the caller can keep the rest.
     /// </summary>
     /// <returns>How many rows were written.</returns>
     internal static async Task<int> WriteAsync(
         NpgsqlDataSource postgres,
         IReadOnlyList<CollapsedSighting> rows,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WriteProgress? progress = null)
     {
         int written = 0;
         for (int start = 0; start < rows.Count; start += RowsPerStatement)
@@ -158,6 +191,10 @@ DO UPDATE SET
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = counts });
                 await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 written += length;
+                if (progress is not null)
+                {
+                    progress.Written = written;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -222,6 +259,26 @@ DO UPDATE SET
         public List<CollapsedSighting> Items { get; } = new();
 
         public int Count => Items.Count;
+
+        /// <summary>
+        /// Folds an already-collapsed row back in (a flush that did not write it, #5985): counts are summed, and the row's
+        /// object and text sample win over a newer entry's, since the row is the older sighting and the first sample is kept.
+        /// </summary>
+        public void Merge(CollapsedSighting row)
+        {
+            var identity = (row.Kind, row.Key, row.Application ?? string.Empty, row.Login ?? string.Empty, row.Host ?? string.Empty, row.Database ?? string.Empty);
+            if (_byIdentity.TryGetValue(identity, out int at))
+            {
+                var held = Items[at];
+                held.Count += row.Count;
+                held.ObjectName = row.ObjectName ?? held.ObjectName;
+                held.TextSample = row.TextSample ?? held.TextSample;
+                return;
+            }
+
+            _byIdentity[identity] = Items.Count;
+            Items.Add(row);
+        }
 
         /// <summary>Adds one sighting; a key already held is counted, and keeps its first object and text sample.</summary>
         public void Add(QueryTagSighting s)

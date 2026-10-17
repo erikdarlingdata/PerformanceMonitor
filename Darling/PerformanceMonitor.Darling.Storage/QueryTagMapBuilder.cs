@@ -130,7 +130,8 @@ public sealed class QueryTagMapBuilder
             }
         }
 
-        if (rebuildAll && allSucceeded)
+        /* An empty server list rebuilt nothing, so there is no version to claim a map was built from. */
+        if (rebuildAll && allSucceeded && serverIds.Count > 0)
         {
             try
             {

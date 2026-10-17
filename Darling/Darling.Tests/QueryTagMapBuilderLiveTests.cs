@@ -500,6 +500,119 @@ public sealed class QueryTagMapBuilderLiveTests
         Assert.Equal(1, log.Warnings);
     }
 
+    [Fact]
+    public async Task ASightingBufferedWhenTheServiceStops_IsInTheStoreAfterTheShutdownDrain()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var buffer = new QueryTagSightingBuffer(env.Source);
+            await buffer.AppendAsync(Server, HashSightings("0xAA", "App"), env.Ct);
+            Assert.Equal("0", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+
+            /* No map pass in flight, the way a stop that lands between two passes finds the worker. */
+            await DarlingWorker.DrainQueryTagSightingsAsync(null, buffer);
+
+            Assert.Equal(0, buffer.Count);
+            Assert.Equal("1", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+        });
+    }
+
+    [Fact]
+    public async Task AFlushCancelledBeforeTheWrite_KeepsItsRows_AndTheNextFlushWritesThemWithTheirCountsAndFirstSample()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var buffer = new QueryTagSightingBuffer(env.Source);
+            await buffer.AppendAsync(Server, HashSightings("0xAA", "App", "first text"), env.Ct);
+            await buffer.AppendAsync(Server, HashSightings("0xBB", "App"), env.Ct);
+
+            using var cancelled = new CancellationTokenSource();
+            await cancelled.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => buffer.FlushAsync(cancelled.Token));
+
+            Assert.Equal(2, buffer.Count);
+            Assert.Equal("0", await ScalarAsync(env, "SELECT count(*) FROM collect.query_tag_sightings"));
+
+            /* Sighted again before the next flush: the counts add and the first text stays. */
+            await buffer.AppendAsync(Server, HashSightings("0xAA", "App", "later text"), env.Ct);
+            Assert.Equal(2, buffer.Count);
+            Assert.Equal(2, await buffer.FlushAsync(env.Ct));
+
+            Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("first text", await ScalarAsync(env, "SELECT text_sample FROM collect.query_tag_sightings WHERE key = '0xAA'"));
+            Assert.Equal("1", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xBB'"));
+        });
+    }
+
+    [Fact]
+    public void AFlushWritesInTheSevenPartIdentityOrder_NotFirstSeenOrder()
+    {
+        var rows = new List<QueryTagSightingWriter.CollapsedSighting>
+        {
+            new() { ServerId = 2, Kind = "hash", Key = "0x01", Application = "A" },
+            new() { ServerId = 1, Kind = "hash", Key = "0x02", Application = "B", Database = "Sales" },
+            new() { ServerId = 1, Kind = "hash", Key = "0x02", Application = "B" },
+            new() { ServerId = 1, Kind = "hash", Key = "0x02", Application = "A", Login = "z" },
+            new() { ServerId = 1, Kind = "caller", Key = "0x09" },
+        };
+
+        QueryTagSightingWriter.SortByIdentity(rows);
+
+        /* Server, kind, key, application, login, host, database; a missing field sorts as an empty one. */
+        Assert.Equal(
+            new[] { "1|caller|0x09|||", "1|hash|0x02|A|z|", "1|hash|0x02|B||", "1|hash|0x02|B||Sales", "2|hash|0x01|A||" },
+            rows.Select(r => $"{r.ServerId}|{r.Kind}|{r.Key}|{r.Application}|{r.Login}|{r.Database}").ToArray());
+    }
+
+    [Fact]
+    public async Task APassOverNoServers_ClaimsNoVersion_AndTheFirstPassOverARealServerStampsIt()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tag = await NewTagAsync(env, "Reports");
+            await NewRuleAsync(env, tag, "application", "Report*");
+            await SightAsync(env, HashSightings("0x01", "Report"));
+            string version = await ScalarAsync(env, "SELECT rules_version FROM config.query_tag_state");
+            var builder = new QueryTagMapBuilder(env.Source);
+
+            Assert.True(await builder.RunMapPassAsync(Array.Empty<int>(), env.Ct));
+
+            Assert.NotEqual(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
+
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
+            Assert.Single(await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task OneHashSightedInTwoDatabases_ResolvesToTheSameRowOnEveryRebuild_WhateverOrderTheyWereWritten()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int archive = await NewTagAsync(env, "Archive");
+            await NewRuleAsync(env, archive, "database", "Archive*");
+
+            /* Archive02 is written first, so a read with no total order tends to return it first; the order is by database. */
+            foreach (string database in new[] { "Archive05", "Archive04", "Archive03", "Archive02", "Archive01" })
+            {
+                await SightAsync(env, HashSightings("0xAA", "App", database: database));
+            }
+
+            var builder = new QueryTagMapBuilder(env.Source);
+
+            Assert.True(await PassAsync(env, builder));
+            string first = await ScalarAsync(env, "SELECT matched_value FROM config.query_tag_map WHERE key = '0xAA'");
+            await ExecAsync(env, "UPDATE config.query_tag_state SET built_version = 0");
+            Assert.True(await PassAsync(env, builder));
+            string second = await ScalarAsync(env, "SELECT matched_value FROM config.query_tag_map WHERE key = '0xAA'");
+
+            Assert.Equal("Archive01", first);
+            Assert.Equal(first, second);
+        });
+    }
+
     private static readonly MethodInfo WriteBatchMethod = typeof(DarlingCollectorRunner)
         .GetMethod("WriteBatchAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
 

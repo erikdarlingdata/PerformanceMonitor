@@ -4410,6 +4410,10 @@ LIMIT 1";
         /* #4938: the daily runs detached from those bodies join the wait inside DrainInFlightAsync. */
         await DrainInFlightAsync(inFlightSweeps);
 
+        /* #5985: the last query-tag sightings flush. The collection bodies have drained, so nothing appends any more; what
+           they sighted since the map step's last pass is still in memory and would be lost with the process. */
+        await DrainQueryTagSightingsAsync(_queryTagMapPass, runner.QueryTagSightings);
+
         /* #4130: drain the in-flight daily purge the same way as the per-server sweeps above, rather than
            abandoning it mid-DELETE. RunTrackedAsync's own try/catch swallows the OperationCanceledException
            that stoppingToken's cancellation raises inside PurgeAsync, so this await completes cleanly
@@ -6158,6 +6162,21 @@ LIMIT 1";
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// #5985: the shutdown drain's query-tag step. Waits (briefly) for the map pass in flight, which on the stop's cancellation
+    /// puts back the sightings its own flush had taken, and then flushes the buffer once more under its own time limit
+    /// (<see cref="QueryTagSightingBuffer.ShutdownFlushLimit"/>), because the service's token is already cancelled. Never throws.
+    /// </summary>
+    internal static async Task DrainQueryTagSightingsAsync(Task? mapPass, QueryTagSightingBuffer sightings)
+    {
+        if (mapPass is { IsCompleted: false })
+        {
+            await Task.WhenAny(mapPass, Task.Delay(QueryTagSightingBuffer.ShutdownFlushLimit, CancellationToken.None));
+        }
+
+        await sightings.FlushOnShutdownAsync(QueryTagSightingBuffer.ShutdownFlushLimit);
     }
 
     /// <summary>

@@ -32,8 +32,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// growing. The cap is a memory bound, not a rate: the entries are distinct identities, and a minute of a large fleet is
 /// a few thousand of them.</para>
 ///
-/// <para><b>A failed flush drops its entries.</b> They are logged and gone: a sighting lost is tagged a minute later,
-/// when its query is sighted again. There is no retry and a failed flush never fails a collection cycle or a map pass.</para>
+/// <para><b>A failed flush drops its entries; a cancelled one keeps them.</b> A store failure is logged and the entries are
+/// gone: a sighting lost is tagged a minute later, when its query is sighted again. There is no retry and a failed flush never
+/// fails a collection cycle or a map pass. A flush cancelled by a stop puts what it had not written back, and the worker's
+/// shutdown drain makes one last flush (<see cref="FlushOnShutdownAsync"/>), so a query that ran only in the last minute is
+/// still sighted.</para>
 /// </summary>
 public sealed class QueryTagSightingBuffer
 {
@@ -109,10 +112,14 @@ public sealed class QueryTagSightingBuffer
     }
 
     /// <summary>
-    /// Writes what is buffered in one upsert and empties the buffer. Never throws on a store failure: the entries are
-    /// dropped and the failure logged. Opens no connection when nothing is buffered. Each flush takes the entries it writes out of the
-    /// buffer under the lock, so two flushes (the map step's and a cap-triggered one) never write the same entry twice; a rare overlap on
-    /// one key can deadlock the two statements, and the loser is a logged, dropped flush like any other failure.
+    /// Writes what is buffered and empties the buffer. Opens no connection when nothing is buffered. Each flush takes the
+    /// entries it writes out of the buffer under the lock, so two flushes (the map step's and a cap-triggered one) never write
+    /// the same entry twice, and it upserts them in the seven-part identity order, so two flushes that overlap on a key lock its
+    /// row in the same order and never wait on each other.
+    ///
+    /// <para>A store failure does not throw: the entries are dropped and the failure logged. A cancellation does throw, and the
+    /// entries not yet written go back into the buffer first (counts summed into any entry sighted since, the first sample
+    /// kept), so a flush cut short by a stop leaves them for the next flush.</para>
     /// </summary>
     /// <returns>How many distinct sightings were written.</returns>
     public async Task<int> FlushAsync(CancellationToken cancellationToken)
@@ -135,6 +142,63 @@ public sealed class QueryTagSightingBuffer
             _entries = 0;
         }
 
-        return await QueryTagSightingWriter.WriteAsync(_postgres, rows, _logger, cancellationToken).ConfigureAwait(false);
+        QueryTagSightingWriter.SortByIdentity(rows);
+        var progress = new QueryTagSightingWriter.WriteProgress();
+        try
+        {
+            return await QueryTagSightingWriter.WriteAsync(_postgres, rows, _logger, cancellationToken, progress).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            PutBack(rows, progress.Written);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The longest the shutdown flush may take. The host allows a stop 30 seconds in all and the in-flight collection bodies
+    /// have already used up to 15 of them, so this is one short statement's worth (a flush is a few thousand rows in one upsert):
+    /// long enough to land a normal buffer, short enough that a store that has stopped answering cannot hold the stop open.
+    /// </summary>
+    public static readonly TimeSpan ShutdownFlushLimit = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The last flush before the service stops (#5985): writes what is buffered, with its own time limit because the service's
+    /// token is already cancelled. A flush that runs out of time keeps its rows in the buffer, which a stopping process then
+    /// loses; this never throws.
+    /// </summary>
+    /// <returns>How many distinct sightings were written.</returns>
+    public async Task<int> FlushOnShutdownAsync(TimeSpan limit)
+    {
+        using var timeout = new CancellationTokenSource(limit);
+        try
+        {
+            return await FlushAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger?.LogWarning("Query-tag sightings: the shutdown flush did not finish within {Limit}; the sightings still buffered are lost with the process", limit);
+            return 0;
+        }
+    }
+
+    private void PutBack(List<QueryTagSightingWriter.CollapsedSighting> rows, int written)
+    {
+        lock (_gate)
+        {
+            for (int i = written; i < rows.Count; i++)
+            {
+                var row = rows[i];
+                if (!_byServer.TryGetValue(row.ServerId, out var set))
+                {
+                    set = new QueryTagSightingWriter.SightingSet(row.ServerId);
+                    _byServer[row.ServerId] = set;
+                }
+
+                int before = set.Count;
+                set.Merge(row);
+                _entries += set.Count - before;
+            }
+        }
     }
 }

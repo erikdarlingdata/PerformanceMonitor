@@ -75,21 +75,25 @@ ORDER BY last_seen, key_kind, key
 LIMIT $5
 """;
 
-    /// <summary>The sighting rows of the listed keys. $1 server_id, $2 kinds, $3 keys (parallel arrays).</summary>
+    /// <summary>
+    /// The sighting rows of the listed keys. $1 server_id, $2 kinds, $3 keys (parallel arrays). The order is total (key, then
+    /// database, application, login, host, as the unique index reads them) because the resolver takes the first matching
+    /// sighting: a tie broken by whatever order the planner returned would let a rebuild change a key's tag (#5985).
+    /// </summary>
     internal const string SightingsOfKeysSql = """
 SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample
 FROM collect.query_tag_sightings AS s
 JOIN unnest($2::text[], $3::text[]) AS k(key_kind, key) ON k.key_kind = s.key_kind AND k.key = s.key
 WHERE s.server_id = $1
-ORDER BY s.key_kind, s.key
+ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.application_name, ''), COALESCE(s.login_name, ''), COALESCE(s.host_name, '')
 """;
 
-    /// <summary>Every sighting row of one server, in key order so a reader can resolve one key at a time. $1 server_id.</summary>
+    /// <summary>Every sighting row of one server, in the same total order as <see cref="SightingsOfKeysSql"/> so a reader can resolve one key at a time. $1 server_id.</summary>
     internal const string AllSightingsSql = """
 SELECT key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample
 FROM collect.query_tag_sightings
 WHERE server_id = $1
-ORDER BY key_kind, key
+ORDER BY key_kind, key, COALESCE(database_name, ''), COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, '')
 """;
 
     internal const string DeleteServerMapSql = "DELETE FROM config.query_tag_map WHERE server_id = $1";
