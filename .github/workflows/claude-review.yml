@@ -78,7 +78,7 @@ name: Claude Auto Review
 #   - The CALLERS RULE: every changed public signature or behaviour has its callers enumerated
 #     with Grep, each judged still-holds or not.
 #   - A STRUCTURED VERDICT: claims graded VERIFIED / UNVERIFIED / REFUTED, the riskiest lines and
-#     the test that pins each, the traps considered, the divergence, a reviewer checklist, and a
+#     the behaviour test that covers each, the traps considered, the divergence, a reviewer checklist, and a
 #     one-line machine-readable ledger so a later pass can compute the miss rate against
 #     post-merge defects. A bare "LGTM" is no longer a valid verdict: the verdict check below
 #     fails the job when the newest verdict lacks the header or the ledger.
@@ -601,15 +601,14 @@ jobs:
               2. CALLERS RULE. For every changed public signature, constant, SQL statement or
                  behaviour, Grep the repository for its callers and readers — both SKUs (Lite and
                  Darling) and both test projects — and, for each caller, decide whether it still
-                 holds under the change. A caller you did not re-read is UNPINNED and is reported
-                 as such.
+                 holds under the change. A caller you did not re-read is reported as NOT RE-READ.
               3. Read `.github/REVIEW-TRAPS.md`. For every trap whose layer or shape this diff is
                  near, decide whether it applies HERE and why. A trap that does not apply is stated
                  as not applying, with the file:line that proves it; a trap that applies is a
                  finding. Quote the trap in its own words.
               4. Write down, for yourself, before Phase 2: what the change does, what it could
-                 break, the three riskiest changed lines, and which test (by name, found with Grep)
-                 pins each of them — or that none does.
+                 break, the three riskiest changed lines, and which behaviour test (by name, found with
+                 Grep) would fail on a defect at each of them — or that none does.
             Conventions to hold the code to: CONTRIBUTING.md, including its T-SQL style section (AS
             on table aliases, column_name = expression aliasing, OPTION(RECOMPILE) on collector
             queries); Lite/Darling parity — this repository ships two apps that must stay in
@@ -623,7 +622,7 @@ jobs:
             for the title and body (and `gh pr view ${{ github.event.pull_request.number }} --json commits`
             for the commit messages if you want them).
             Extract every factual claim the body makes about the code — what changed, what did not,
-            what was measured, what was tested, which test pins what — and grade each against what
+            what was measured, what was tested, which test covers what — and grade each against what
             you found in Phase 1:
               - VERIFIED — you confirmed it from the tree; say how (file:line, test name, or the
                 hunk).
@@ -672,6 +671,14 @@ jobs:
             NEW diff and submit a fresh verdict, and a clean fresh verdict clears an earlier
             changes-requested by itself.
 
+            COVERAGE, for the Riskiest lines below. A line is covered only by a behaviour test that
+            fails on the defect at that line and passes on the fix; name that test. A test that
+            reads source text or asserts how code is spelled (a signature at a line, a SQL
+            fragment's wording, a comment's text, a trait roster, a coverage percentage) is not
+            coverage: never count one, and never recommend adding one, in a finding, a comment or
+            the checklist. An UNCOVERED line is answered by the author with a behaviour test that
+            fails on the defect, or with one sentence in the PR body saying why none is needed.
+
             THE REVIEW BODY, exactly this shape. The `## Verdict:` line is the first line; the
             `### ` headings are read by a machine and appear in this order; the ledger is the LAST
             line and is ONE line, and the review-pass line sits directly above it. Replace every
@@ -683,9 +690,9 @@ jobs:
             - UNVERIFIED — <claim> — <why it could not be checked from a read-only tree>
             - REFUTED — <claim> — <evidence>
             ### Riskiest lines
-            1. <file:line> — <why this line> — pinned by <test name> | UNPINNED
-            2. <file:line> — <why> — pinned by <test name> | UNPINNED
-            3. <file:line> — <why> — pinned by <test name> | UNPINNED
+            1. <file:line> — <why this line> — covered by <test that fails on the defect> | UNCOVERED
+            2. <file:line> — <why> — covered by <test that fails on the defect> | UNCOVERED
+            3. <file:line> — <why> — covered by <test that fails on the defect> | UNCOVERED
             ### Traps near this diff
             - <the trap, quoted from .github/REVIEW-TRAPS.md> — applies | does not apply — <why, with file:line>
             ### Divergence (blind read vs PR body)
@@ -923,7 +930,7 @@ jobs:
             echo "::error title=Review posted an unstructured verdict::The newest verdict by"\
               "$REVIEW_BOT on PR #$PR ($verdict_url) lacks:$missing The prompt promises a"\
               "structured verdict every run -- claims graded VERIFIED/UNVERIFIED/REFUTED, the"\
-              "riskiest lines and their pins, the traps considered, the divergence from the PR body,"\
+              "riskiest lines and the tests that cover them, the traps considered, the divergence from the PR body,"\
               "and a one-line ledger -- because a bare LGTM is what this review posted on several"\
               "hundred PRs while every defect it missed was found by behaviour (#3710). An"\
               "unstructured verdict is a contract breach, not a clean review: it records nothing"\
