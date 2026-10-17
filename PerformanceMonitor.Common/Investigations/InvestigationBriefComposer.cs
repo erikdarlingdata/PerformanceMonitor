@@ -196,6 +196,10 @@ public sealed class InvestigationBriefComposer
         foreach (var (section, _, _) in Sections)
             root[section] = new JsonArray();
 
+        /* #6007: absent, never [], when no hint applies, so a brief without one is byte for byte as before (Lite's golden pin). */
+        if (hints.Count == 0)
+            root.Remove("hints");
+
         // Reserve room for the truncated block itself, so adding it cannot push the brief past the cap.
         const int TruncatedReserve = 900;
         var remaining = TotalCharCap - root.ToJsonString().Length - TruncatedReserve;
@@ -204,6 +208,8 @@ public sealed class InvestigationBriefComposer
         foreach (var (section, cap, fetch) in Sections)
         {
             var list = items[section];
+            if (list.Count == 0 && root[section] is null)
+                continue;
             var array = (JsonArray)root[section]!;
             var budget = Math.Max(0, Math.Min(cap, remaining));
             var used = 0;

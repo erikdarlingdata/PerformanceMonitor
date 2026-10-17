@@ -306,8 +306,8 @@ public sealed class InvestigationBriefComposerTests
     public void PlanHint_TwoTimesCpu_AddsNothing_AndOldEvidenceWithoutPlansIsNotAnError()
     {
         var request = Request(InvestigationFamily.Resources);
-        Assert.Empty(Brief(WithEvidence(Sources(), request, TopStatements(100, 200)))["hints"]!.AsArray());
-        Assert.Empty(Brief(WithEvidence(Sources(), request, TopStatements(100, 900, withPlans: false)))["hints"]!.AsArray());
+        Assert.Null(Brief(WithEvidence(Sources(), request, TopStatements(100, 200)))["hints"]);
+        Assert.Null(Brief(WithEvidence(Sources(), request, TopStatements(100, 900, withPlans: false)))["hints"]);
     }
 
     [Fact]
@@ -327,7 +327,7 @@ public sealed class InvestigationBriefComposerTests
         Assert.Equal("high_cpu_behind_plan_regression", (string?)Assert.Single(brief["hints"]!.AsArray())!["kind"]);
         Assert.Contains(brief["next_calls"]!.AsArray(), c => (string?)c!["tool"] == "get_top_queries_by_cpu");
         var mild = Brief(WithEvidence(Sources(), request, new InvestigationBriefEvidence("regression_targets", "ready", Now, Targets(100, 300))));
-        Assert.Empty(mild["hints"]!.AsArray());
+        Assert.Null(mild["hints"]);
     }
 
     /* ---- budget ---- */
