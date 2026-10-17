@@ -77,7 +77,7 @@ public sealed class DarlingMcpLongQueryTools
             var tagFilter = await QueryTagReadJoin.ResolveAsync(postgres, tag, cancellationToken);
             if (tagFilter.Unknown)
             {
-                return McpHelpers.Status("empty", QueryTagReadJoin.UnknownTagMessage(tagFilter.Requested!));
+                return McpHelpers.StatusForDatabase("empty", QueryTagReadJoin.UnknownTagMessage(tagFilter.Requested!), databaseFilter.Describe());
             }
 
             var now = windowEnd;
@@ -114,7 +114,7 @@ public sealed class DarlingMcpLongQueryTools
                    this server in the window, and only then does the answer send the reader to the opt-in switch. With rows for other
                    databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a
                    filtered answer leaves the sentence off. */
-                var collectorMayBeOff = !tagFilter.Active && databaseFilter.IsAll || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
+                var collectorMayBeOff = (databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
                 return McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
                         + (tagFilter.Active ? $" for query tag '{tagFilter.Requested}'" : "")
@@ -181,6 +181,12 @@ public sealed class DarlingMcpLongQueryTools
                 order = "duration_ms_desc",
                 completions = result
             }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #5984 round 1: the answer names the tag that cut its population, beside the database echo (present only when a tag was sent). */
+            if (tagFilter.Named is { } completionTagName)
+            {
+                payloadNode["tag_filter"] = completionTagName;
+            }
 
             /* #5984: the row's query tag, by its query_hash; an unmapped hash carries no `tag` member. */
             if (payloadNode["completions"] is JsonArray completionRows)

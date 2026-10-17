@@ -31,6 +31,12 @@ public sealed record QueryTagFilter(IReadOnlyList<int> TagIds, bool Untagged, bo
 
     /// <summary>True when the read must narrow its population.</summary>
     public bool Active => Untagged || TagIds.Count > 0;
+
+    /// <summary>
+    /// #5984 round 1: the filter as the answer names it, so a payload that carries rows never hides that a tag cut the population:
+    /// the tag name as the caller gave it, or <c>untagged</c>. Null when no tag shaped the read.
+    /// </summary>
+    public string? Named => !Active ? null : Untagged ? QueryTagReadJoin.UntaggedWord : Requested;
 }
 
 /// <summary>
@@ -87,6 +93,7 @@ public static class QueryTagReadJoin
     {
         var nodes = new List<Node>();
         await using var command = postgres.CreateCommand(TagsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -169,9 +176,19 @@ public static class QueryTagReadJoin
     {
         /* With no active filter the text is returned as it came, so a read without a tag sends the very statement it always sent
            (the tokens are comments), and the statement hashes the diagnostics and tests key on do not move. */
-        if (filter is null || !filter.Active || !sql.Contains("/*TAG:", StringComparison.Ordinal))
+        if (filter is null || !filter.Active)
         {
             return sql;
+        }
+
+        /* #5984 round 1: a requested tag on a statement that lost its token would serve the unfiltered rows under a tag the caller
+           asked for. That is a wrong answer, so it is an error (the tool's error envelope), never a silent fall-through. */
+        if (!sql.Contains("/*TAG:", StringComparison.Ordinal))
+        {
+            var head = sql.TrimStart();
+            throw new InvalidOperationException(
+                "A query tag was requested but the statement carries no /*TAG:...*/ token to apply it at: "
+                + (head.Length > 80 ? head[..80] + "..." : head));
         }
 
         return TokenPattern.Replace(sql, match =>
@@ -212,6 +229,7 @@ public static class QueryTagReadJoin
         var tagByKey = new Dictionary<string, int>(StringComparer.Ordinal);
         await using (var command = postgres.CreateCommand(LookupSql))
         {
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
             command.Parameters.Add(new NpgsqlParameter { Value = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
             command.Parameters.Add(new NpgsqlParameter { Value = keyKind, NpgsqlDbType = NpgsqlDbType.Text });
             command.Parameters.Add(new NpgsqlParameter { Value = wanted, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });

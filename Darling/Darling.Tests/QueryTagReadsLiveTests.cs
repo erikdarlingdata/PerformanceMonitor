@@ -283,4 +283,59 @@ public sealed class QueryTagReadsLiveTests
         var filtered = Rows(await DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, ServerName, 1, tag: "TagReadsProd", cancellationToken: ct), "completions");
         Assert.Equal(Ord, Assert.Single(filtered.EnumerateArray()).GetProperty("query_hash").GetString());
     });
+
+    /* ─── #5984 round 1: the answer that carries rows names the tag that cut its population ─── */
+
+    [Fact]
+    public Task TopQueries_FilterApplied_NamesTheTag_AndStaysNullWithoutOne() => RunAsync(async (pg, ct) =>
+    {
+        var plain = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(pg, ServerName, 1, 10, Db, cancellationToken: ct)).RootElement;
+        Assert.Equal(JsonValueKind.Null, plain.GetProperty("filter_applied").ValueKind);
+
+        var tagged = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(pg, ServerName, 1, 10, Db, tag: "tagreadsbatch", cancellationToken: ct)).RootElement;
+        Assert.Contains("'tagreadsbatch'", tagged.GetProperty("filter_applied").GetString(), StringComparison.Ordinal);
+
+        var untagged = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(pg, ServerName, 1, 10, Db, tag: "untagged", cancellationToken: ct)).RootElement;
+        Assert.Contains("'untagged'", untagged.GetProperty("filter_applied").GetString(), StringComparison.Ordinal);
+    });
+
+    [Fact]
+    public Task TopProcedures_NameTheTag_OnlyWhenOneWasSent() => RunAsync(async (pg, ct) =>
+    {
+        var plain = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(pg, ServerName, 1, 10, Db, cancellationToken: ct)).RootElement;
+        Assert.False(plain.TryGetProperty("tag_filter", out _));
+        var tagged = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(pg, ServerName, 1, 10, Db, tag: "TagReadsProd", cancellationToken: ct)).RootElement;
+        Assert.Equal("TagReadsProd", tagged.GetProperty("tag_filter").GetString());
+        var untagged = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(pg, ServerName, 1, 10, Db, tag: "untagged", cancellationToken: ct)).RootElement;
+        Assert.Equal("untagged", untagged.GetProperty("tag_filter").GetString());
+    });
+
+    [Fact]
+    public Task QueryStoreTop_NamesTheTag_OnlyWhenOneWasSent() => RunAsync(async (pg, ct) =>
+    {
+        var plain = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(pg, ServerName, 1, 10, Db, cancellationToken: ct)).RootElement;
+        Assert.False(plain.TryGetProperty("tag_filter", out _));
+        var tagged = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(pg, ServerName, 1, 10, Db, tag: "TagReadsProd", cancellationToken: ct)).RootElement;
+        Assert.Equal("TagReadsProd", tagged.GetProperty("tag_filter").GetString());
+    });
+
+    [Fact]
+    public Task ActiveQueries_FiltersApplied_NamesTheTag_AndIsUnchangedWithoutOne() => RunAsync(async (pg, ct) =>
+    {
+        var plain = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(pg, ServerName, 1, cancellationToken: ct)).RootElement;
+        Assert.Equal(["database_name", "blocking_only", "wait_type"], plain.GetProperty("filters_applied").EnumerateObject().Select(p => p.Name).ToArray());
+        var tagged = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(pg, ServerName, 1, tag: "TagReadsProd", cancellationToken: ct)).RootElement;
+        Assert.Equal("TagReadsProd", tagged.GetProperty("filters_applied").GetProperty("tag").GetString());
+        var untagged = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(pg, ServerName, 1, tag: "untagged", cancellationToken: ct)).RootElement;
+        Assert.Equal("untagged", untagged.GetProperty("filters_applied").GetProperty("tag").GetString());
+    });
+
+    [Fact]
+    public Task LongQueryCompletions_NameTheTag_BesideTheDatabaseEcho_OnlyWhenOneWasSent() => RunAsync(async (pg, ct) =>
+    {
+        var plain = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, ServerName, 1, cancellationToken: ct)).RootElement;
+        Assert.False(plain.TryGetProperty("tag_filter", out _));
+        var tagged = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, ServerName, 1, tag: "TagReadsProd", cancellationToken: ct)).RootElement;
+        Assert.Equal("TagReadsProd", tagged.GetProperty("tag_filter").GetString());
+    });
 }

@@ -644,9 +644,9 @@ public sealed class DarlingMcpDataTools
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1 (a LIFETIME max_dop; can read stale after a MAXDOP change). See the tool's reading guide.")] bool parallel_only = false,
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
         [Description("Grouping. 'query_hash' (default): one row per (database, query_hash, host_object). 'host_object': rolls a proc's statements into ONE row. See the tool's reading guide.")] string group_by = "query_hash",
+        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (grants, threads, extremes, times), omitting nulls.")] string detail = "summary",
-        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         CancellationToken cancellationToken = default)
         => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag);
 
@@ -712,9 +712,10 @@ public sealed class DarlingMcpDataTools
            is parallel), min_dop when the caller set one above that, 0 (admit all) otherwise; min_dop implies
            parallel filtering, as its description has always said. */
         var minMaxDop = min_dop > 1 ? min_dop : parallel_only ? 2 : 0;
-        var filterApplied = minMaxDop > 0
+        var dopFilterApplied = minMaxDop > 0
             ? $"lifetime max_dop >= {minMaxDop} (applied in SQL before the top-{top} ranking; the page is the top-{top} of the parallel population)"
             : null;
+        string? filterApplied = dopFilterApplied;
 
         try
         {
@@ -723,6 +724,14 @@ public sealed class DarlingMcpDataTools
             if (tagFilter.Unknown)
             {
                 return McpHelpers.Status("empty", QueryTagReadJoin.UnknownTagMessage(tagFilter.Requested!));
+            }
+
+            /* #5984 round 1: a tag that cut the population is named in filter_applied beside the parallel floor, so a tag-only call
+               never publishes null over a population the tag shaped. A call without a tag is unchanged. */
+            if (tagFilter.Named is { } queryTagName)
+            {
+                var tagText = $"query tag '{queryTagName}' (applied in SQL before the top-{top} ranking)";
+                filterApplied = dopFilterApplied is null ? tagText : dopFilterApplied + "; " + tagText;
             }
 
             var now = windowEnd;
@@ -1078,9 +1087,9 @@ public sealed class DarlingMcpDataTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top procedures. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
+        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.")] string detail = "summary",
-        [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
         => GetTopProceduresRanked(postgres, server_name, hours_back, top, database_name, as_of, detail, order_by: null, cancellationToken, logger, tag);
@@ -1298,6 +1307,12 @@ public sealed class DarlingMcpDataTools
             {
                 await QueryTagReadJoin.AttachByKeysAsync(postgres, resolved.ServerId, QueryTagReadJoin.ObjectKind, procedureRows.OfType<JsonObject>().ToList(),
                     rows.Select(r => (string?)QueryTagReadJoin.ObjectKey(r.DatabaseName, r.SchemaName, r.ObjectName)).ToList(), cancellationToken);
+            }
+
+            /* #5984 round 1: the answer names the tag that cut its population (present only when a tag was sent). */
+            if (tagFilter.Named is { } procedureTagName)
+            {
+                proceduresPayload["tag_filter"] = procedureTagName;
             }
 
             return proceduresPayload.ToJsonString(McpHelpers.JsonOptions);
@@ -1583,6 +1598,12 @@ public sealed class DarlingMcpDataTools
             {
                 await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, storeRows.OfType<JsonObject>(),
                     row => row["query_hash"]?.GetValue<string>(), cancellationToken);
+            }
+
+            /* #5984 round 1: the answer names the tag that cut its population (present only when a tag was sent). */
+            if (tagFilter.Named is { } storeTagName)
+            {
+                storePayload["tag_filter"] = storeTagName;
             }
 
             return storePayload.ToJsonString(McpHelpers.JsonOptions);

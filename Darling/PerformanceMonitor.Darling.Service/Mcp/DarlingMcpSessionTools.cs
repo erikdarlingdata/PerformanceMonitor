@@ -302,6 +302,12 @@ public sealed class DarlingMcpSessionTools
                McpResponseBudget.DefaultBytes (they cost ~110 bytes). A cut window carries all three, in place. A failed probe
                has no verdict (WindowTruncated is false), so it carries none either: the rows go out without the notice. */
             var node = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+            /* #5984 round 1: the tag is part of the population `total_snapshots` counts, so filters_applied names it (only when a tag was sent). */
+            if (tagFilter.Named is { } sessionTagName && node["filters_applied"] is JsonObject appliedFilters)
+            {
+                appliedFilters["tag"] = sessionTagName;
+            }
+
             if (!notice.WindowTruncated)
             {
                 node.Remove("effective_start");
