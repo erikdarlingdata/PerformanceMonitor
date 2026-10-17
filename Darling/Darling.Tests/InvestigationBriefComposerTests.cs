@@ -270,6 +270,66 @@ public sealed class InvestigationBriefComposerTests
             Assert.Contains(tool, registered);
     }
 
+    /* ---- #6007: cross-family plan hints ---- */
+
+    private static InvestigationBriefEvidence TopStatements(double olderCpu, double newerCpu, bool withPlans = true) =>
+        new("top_statements", "ready", Now, new JsonObject
+        {
+            ["rows"] = new JsonArray(new JsonObject
+            {
+                ["database_name"] = "SalesDb",
+                ["query_hash"] = "111",
+                ["total_cpu_us"] = 9000,
+                ["plans"] = withPlans
+                    ? new JsonArray(
+                        new JsonObject { ["query_plan_hash"] = "aaa", ["executions"] = 10, ["cpu_per_exec_us"] = olderCpu, ["first_seen"] = "2026-10-14T11:00:00Z" },
+                        new JsonObject { ["query_plan_hash"] = "bbb", ["executions"] = 10, ["cpu_per_exec_us"] = newerCpu, ["first_seen"] = "2026-10-14T11:30:00Z" })
+                    : null,
+            }),
+        }.ToJsonString());
+
+    private static InvestigationBriefSources WithEvidence(InvestigationBriefSources s, InvestigationBriefRequest request, params InvestigationBriefEvidence[] evidence) =>
+        s with { Request = request, Evidence = evidence };
+
+    [Fact]
+    public void PlanHint_FiveTimesCpu_AddsHintAndNextCall()
+    {
+        var request = Request(InvestigationFamily.Resources);
+        var brief = Brief(WithEvidence(Sources(), request, TopStatements(100, 500)));
+        var hint = Assert.Single(brief["hints"]!.AsArray())!;
+        Assert.Equal("plan_change_behind_high_cpu", (string?)hint["kind"]);
+        Assert.Equal("bbb", (string?)hint["newer_plan_hash"]);
+        Assert.Contains(brief["next_calls"]!.AsArray(), c => (string?)c!["tool"] == "get_query_store_regressions");
+    }
+
+    [Fact]
+    public void PlanHint_TwoTimesCpu_AddsNothing_AndOldEvidenceWithoutPlansIsNotAnError()
+    {
+        var request = Request(InvestigationFamily.Resources);
+        Assert.Empty(Brief(WithEvidence(Sources(), request, TopStatements(100, 200)))["hints"]!.AsArray());
+        Assert.Empty(Brief(WithEvidence(Sources(), request, TopStatements(100, 900, withPlans: false)))["hints"]!.AsArray());
+    }
+
+    [Fact]
+    public void PlanHint_RegressionRequest_PointsAtHighCpu()
+    {
+        var request = Request(InvestigationFamily.QueryPerformance);
+        string Targets(double good, double bad) => new JsonObject
+        {
+            ["rows"] = new JsonArray(new JsonObject
+            {
+                ["database_name"] = "SalesDb", ["query_id"] = 42,
+                ["good_plan_hash"] = "g1", ["good_cpu_per_exec_us"] = good,
+                ["bad_plan_hash"] = "b1", ["bad_cpu_per_exec_us"] = bad,
+            }),
+        }.ToJsonString();
+        var brief = Brief(WithEvidence(Sources(), request, new InvestigationBriefEvidence("regression_targets", "ready", Now, Targets(100, 600))));
+        Assert.Equal("high_cpu_behind_plan_regression", (string?)Assert.Single(brief["hints"]!.AsArray())!["kind"]);
+        Assert.Contains(brief["next_calls"]!.AsArray(), c => (string?)c!["tool"] == "get_top_queries_by_cpu");
+        var mild = Brief(WithEvidence(Sources(), request, new InvestigationBriefEvidence("regression_targets", "ready", Now, Targets(100, 300))));
+        Assert.Empty(mild["hints"]!.AsArray());
+    }
+
     /* ---- budget ---- */
 
     [Fact]

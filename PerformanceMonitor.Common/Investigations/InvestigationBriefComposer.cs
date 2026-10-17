@@ -63,6 +63,7 @@ public sealed class InvestigationBriefComposer
     {
         ("alerts", 8_000, "get_alert_history"),
         ("findings", 6_000, "get_analysis_findings"),
+        ("hints", 1_500, null),
         ("next_calls", 2_000, null),
         ("notes", 2_000, null),
         ("environment_profile", 2_000, null),
@@ -114,11 +115,13 @@ public sealed class InvestigationBriefComposer
         // One masker for the whole brief: one login#n and host#n numbering across every alert, note and field.
         var masker = McpDataDetailMasker.ForAnswer(mode);
 
+        var hints = PlanHints(request, sources.Evidence);
         var items = new Dictionary<string, List<JsonObject>>(StringComparer.Ordinal)
         {
             ["alerts"] = sources.Alerts.Select(a => AlertNode(a, masker, cut)).ToList(),
             ["findings"] = sources.Findings.Select(f => FindingNode(f, masker, cut)).ToList(),
-            ["next_calls"] = NextCalls(request, sources.Findings, tools).Select(c => NextCallNode(c, cut)).ToList(),
+            ["hints"] = hints.Select(h => h.Node).ToList(),
+            ["next_calls"] = NextCalls(request, sources.Findings, tools, sources.Evidence).Select(c => NextCallNode(c, cut)).ToList(),
             ["notes"] = sources.Notes.Select(n => NoteNode(n, masker, cut)).ToList(),
             ["environment_profile"] = sources.Profiles.Select(p => Masked(new JsonObject
             {
@@ -343,7 +346,8 @@ public sealed class InvestigationBriefComposer
     /// each tool once, and only tools in <see cref="InvestigationBriefTools.NameableTools"/>. Every call carries the server name.
     /// </summary>
     internal static IReadOnlyList<InvestigationNextCall> NextCalls(
-        InvestigationBriefRequest request, IReadOnlyList<InvestigationBriefFinding> findings, InvestigationBriefTools tools)
+        InvestigationBriefRequest request, IReadOnlyList<InvestigationBriefFinding> findings, InvestigationBriefTools tools,
+        IReadOnlyList<InvestigationBriefEvidence>? evidence = null)
     {
         var table = tools.FamilyCalls(request.IsPostgres);
         var nameable = tools.NameableTools;
@@ -363,6 +367,10 @@ public sealed class InvestigationBriefComposer
             calls.Add(new InvestigationNextCall(tool, merged, why));
         }
 
+        /* #6007: a plan-change hint's pointer goes first, so its reason is the one the agent reads for that tool. */
+        foreach (var hint in PlanHints(request, evidence))
+            Add(hint.Tool(request.IsPostgres), hint.Arguments, hint.Why);
+
         if (table.TryGetValue(request.Family, out var familyTools))
         {
             foreach (var tool in familyTools)
@@ -376,6 +384,123 @@ public sealed class InvestigationBriefComposer
         }
 
         return calls;
+    }
+
+    /// <summary>The CPU-per-execution ratio at which a plan change is called out (#6007): the PLAN_REGRESSION detector's 2x would
+    /// flag every ordinary plan change, so a hint needs the plan to have cost five times as much per execution.</summary>
+    public const double PlanHintFactor = 5.0;
+
+    /// <summary>The most hints a brief carries.</summary>
+    private const int MaxPlanHints = 5;
+
+    internal sealed record PlanHint(JsonObject Node, string SqlServerTool, string PostgresTool, IReadOnlyDictionary<string, string>? Arguments, string Why)
+    {
+        public string Tool(bool isPostgres) => isPostgres ? PostgresTool : SqlServerTool;
+    }
+
+    /// <summary>
+    /// #6007: the cross-family hints, from the request's frozen evidence alone. On a High CPU request (it has a
+    /// <c>top_statements</c> section), a query whose newer plan used at least <see cref="PlanHintFactor"/> times the CPU per
+    /// execution of an earlier plan of the same query points at the plan change. On a plan regression request (it has a
+    /// <c>regression_targets</c> section), a target whose bad plan used at least that much more than its good plan points at the
+    /// High CPU side. Evidence captured before the <c>plans</c> list existed, or a section that is not <c>ready</c> or does not
+    /// parse, gives no hint. The hints hold hashes, names and numbers the engine wrote, never collected text.
+    /// </summary>
+    internal static IReadOnlyList<PlanHint> PlanHints(InvestigationBriefRequest request, IReadOnlyList<InvestigationBriefEvidence>? evidence)
+    {
+        var hints = new List<(double Factor, PlanHint Hint)>();
+        if (evidence is null)
+            return Array.Empty<PlanHint>();
+        foreach (var section in evidence)
+        {
+            if (string.IsNullOrEmpty(section.ContentJson))
+                continue;
+            JsonArray? rows;
+            try { rows = JsonNode.Parse(section.ContentJson)?["rows"] as JsonArray; }
+            catch (System.Text.Json.JsonException) { continue; }
+            if (rows is null)
+                continue;
+
+            foreach (var row in rows.OfType<JsonObject>())
+            {
+                if (string.Equals(section.Section, "top_statements", StringComparison.Ordinal))
+                {
+                    if (row["plans"] is not JsonArray plans)
+                        continue;
+                    var parsed = plans.OfType<JsonObject>()
+                        .Select(p => (Hash: Text(p["query_plan_hash"]), Cpu: Num(p["cpu_per_exec_us"]), At: Text(p["first_seen"])))
+                        .Where(p => p.Hash is not null && p.Cpu is > 0 && p.At is not null)
+                        .ToList();
+                    (double Factor, string Old, string New)? best = null;
+                    foreach (var older in parsed)
+                    {
+                        foreach (var newer in parsed)
+                        {
+                            if (string.CompareOrdinal(newer.At, older.At) <= 0)
+                                continue;
+                            var factor = newer.Cpu!.Value / older.Cpu!.Value;
+                            if (factor >= PlanHintFactor && (best is null || factor > best.Value.Factor))
+                                best = (factor, older.Hash!, newer.Hash!);
+                        }
+                    }
+
+                    if (best is { } b)
+                    {
+                        var node = new JsonObject
+                        {
+                            ["kind"] = "plan_change_behind_high_cpu",
+                            ["database"] = Text(row["database_name"]),
+                            ["query_hash"] = Text(row["query_hash"]),
+                            ["earlier_plan_hash"] = b.Old,
+                            ["newer_plan_hash"] = b.New,
+                            ["cpu_per_exec_factor"] = Math.Round(b.Factor, 1),
+                            ["hint"] = "A newer plan of this query used " + Math.Round(b.Factor, 1).ToString(CultureInfo.InvariantCulture)
+                                + " times the CPU per execution of an earlier plan in the High CPU window. A plan change may be behind the CPU rise.",
+                        };
+                        hints.Add((b.Factor, new PlanHint(node, "get_query_store_regressions", "get_pg_plans", null,
+                            "A newer plan of query " + b.New + " used " + Math.Round(b.Factor, 1).ToString(CultureInfo.InvariantCulture)
+                            + " times the CPU per execution of an earlier plan: look at the plan change.")));
+                    }
+                }
+                else if (string.Equals(section.Section, "regression_targets", StringComparison.Ordinal))
+                {
+                    var good = Num(row["good_cpu_per_exec_us"]);
+                    var bad = Num(row["bad_cpu_per_exec_us"]);
+                    if (good is not > 0 || bad is null || bad.Value / good.Value < PlanHintFactor)
+                        continue;
+                    var factor = bad.Value / good.Value;
+                    var node = new JsonObject
+                    {
+                        ["kind"] = "high_cpu_behind_plan_regression",
+                        ["database"] = Text(row["database_name"]),
+                        ["query_id"] = row["query_id"]?.DeepClone(),
+                        ["good_plan_hash"] = Text(row["good_plan_hash"]),
+                        ["bad_plan_hash"] = Text(row["bad_plan_hash"]),
+                        ["cpu_per_exec_factor"] = Math.Round(factor, 1),
+                        ["hint"] = "The bad plan of this query used " + Math.Round(factor, 1).ToString(CultureInfo.InvariantCulture)
+                            + " times the CPU per execution of the good plan. This may be behind a High CPU alert: look at the High CPU side.",
+                    };
+                    hints.Add((factor, new PlanHint(node, "get_top_queries_by_cpu", "get_pg_top_queries", null,
+                        "The bad plan used " + Math.Round(factor, 1).ToString(CultureInfo.InvariantCulture)
+                        + " times the CPU per execution of the good plan: check whether this query is behind a High CPU rise.")));
+                }
+            }
+        }
+
+        return hints.OrderByDescending(h => h.Factor).Take(MaxPlanHints).Select(h => h.Hint).ToList();
+    }
+
+    private static string? Text(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+
+    private static double? Num(JsonNode? node)
+    {
+        if (node is not JsonValue v)
+            return null;
+        if (v.TryGetValue<double>(out var d))
+            return d;
+        if (v.TryGetValue<long>(out var l))
+            return l;
+        return v.TryGetValue<decimal>(out var m) ? (double)m : null;
     }
 
     /// <summary>

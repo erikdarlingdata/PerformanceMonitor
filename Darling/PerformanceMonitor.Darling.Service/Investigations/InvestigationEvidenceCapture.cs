@@ -172,21 +172,58 @@ WHERE server_id = $1
   AND status = 'SUCCESS'
   AND collection_time >= $3";
 
+    /// <summary>#6007: how many plans one top statement keeps in its <c>plans</c> list: the heaviest by CPU, plus the cheapest per
+    /// execution when that is not among them, so a plan change that made a query costlier shows both sides.</summary>
+    public const int PlansPerStatement = 3;
+
+    /* #6007: the same rows as before, grouped by plan first and by query second, in the one read. Each row keeps every field it had
+       (query_plan_hash is still the query's MAX hash) and gains `plans`: per plan its hash, executions, CPU, CPU per execution and the
+       first collection_time seen in the window. */
     internal static readonly string TopStatementsSql = $@"
-SELECT database_name, query_hash::text AS query_hash, MAX(query_plan_hash)::text AS query_plan_hash,
-       CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-       CAST(SUM(delta_execution_count) AS bigint) AS executions,
-       CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-       CAST(SUM(delta_logical_reads) AS bigint) AS total_reads
-FROM query_stats
-WHERE server_id = $1
-  AND collection_time >= $2
-  AND collection_time <= $3
-  AND {TimescaleSupport.IntervalHonestSourceFilter}
-GROUP BY database_name, query_hash
-HAVING SUM(delta_worker_time) > 0
-ORDER BY SUM(delta_worker_time) DESC NULLS LAST, database_name, query_hash
-LIMIT {TopStatements}";
+WITH per_plan AS (
+    SELECT database_name, query_hash, query_plan_hash,
+           CAST(SUM(delta_worker_time) AS bigint) AS cpu_us,
+           CAST(SUM(delta_execution_count) AS bigint) AS executions,
+           CAST(SUM(delta_elapsed_time) AS bigint) AS elapsed_us,
+           CAST(SUM(delta_logical_reads) AS bigint) AS reads,
+           MIN(collection_time) AS first_seen
+    FROM query_stats
+    WHERE server_id = $1
+      AND collection_time >= $2
+      AND collection_time <= $3
+      AND {TimescaleSupport.IntervalHonestSourceFilter}
+    GROUP BY database_name, query_hash, query_plan_hash
+), top_queries AS (
+    SELECT database_name, query_hash, MAX(query_plan_hash)::text AS query_plan_hash,
+           CAST(SUM(cpu_us) AS bigint) AS total_cpu_us,
+           CAST(SUM(executions) AS bigint) AS executions,
+           CAST(SUM(elapsed_us) AS bigint) AS total_elapsed_us,
+           CAST(SUM(reads) AS bigint) AS total_reads
+    FROM per_plan
+    GROUP BY database_name, query_hash
+    HAVING SUM(cpu_us) > 0
+    ORDER BY SUM(cpu_us) DESC NULLS LAST, database_name, query_hash
+    LIMIT {TopStatements}
+), ranked AS (
+    SELECT p.*,
+           ROW_NUMBER() OVER (PARTITION BY p.database_name, p.query_hash ORDER BY p.cpu_us DESC NULLS LAST, p.query_plan_hash) AS heaviest,
+           ROW_NUMBER() OVER (PARTITION BY p.database_name, p.query_hash
+                              ORDER BY p.cpu_us::numeric / NULLIF(p.executions, 0) ASC NULLS LAST, p.query_plan_hash) AS cheapest
+    FROM per_plan AS p
+    JOIN top_queries AS t ON t.database_name IS NOT DISTINCT FROM p.database_name AND t.query_hash IS NOT DISTINCT FROM p.query_hash
+)
+SELECT t.database_name, t.query_hash::text AS query_hash, t.query_plan_hash, t.total_cpu_us, t.executions, t.total_elapsed_us, t.total_reads,
+       (SELECT jsonb_agg(jsonb_build_object(
+                   'query_plan_hash', r.query_plan_hash::text,
+                   'executions', r.executions,
+                   'cpu_us', r.cpu_us,
+                   'cpu_per_exec_us', round(r.cpu_us::numeric / NULLIF(r.executions, 0), 1),
+                   'first_seen', to_char(r.first_seen, 'YYYY-MM-DD""T""HH24:MI:SS""Z""')) ORDER BY r.first_seen, r.query_plan_hash)
+        FROM ranked AS r
+        WHERE r.database_name IS NOT DISTINCT FROM t.database_name AND r.query_hash IS NOT DISTINCT FROM t.query_hash
+          AND (r.heaviest <= {PlansPerStatement} OR r.cheapest = 1)) AS plans
+FROM top_queries AS t
+ORDER BY t.total_cpu_us DESC NULLS LAST, t.database_name, t.query_hash";
 
     /// <summary>How far two snapshots' derived request start times (snapshot time minus the request's elapsed time) may differ
     /// before they are two requests. <c>collect.query_snapshots</c> does not carry the request's own start time (only the
@@ -545,7 +582,7 @@ GROUP BY database_name";
         string section, InvestigationEvidenceCandidate request, DateTime from, DateTime to, CancellationToken cancellationToken) =>
         section switch
         {
-            "top_statements" => new SectionRead(await ReadAsync(TopStatementsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "top_statements" => new SectionRead(ParsePlans(await ReadAsync(TopStatementsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false))),
             "active_requests" => new SectionRead(await ReadAsync(ActiveRequestsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "query_store" => await ReadQueryStoreAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
             "jobs" => new SectionRead(await ReadAsync(JobsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
@@ -624,6 +661,18 @@ GROUP BY database_name";
         command.CommandTimeout = CommandTimeoutSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, from, to);
         return await ReadRowsAsync(command, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>#6007: the <c>plans</c> column arrives as jsonb text; it becomes a JSON array on the row (null when the query has none).</summary>
+    internal static List<JsonObject> ParsePlans(List<JsonObject> rows)
+    {
+        foreach (var row in rows)
+        {
+            if (row["plans"] is JsonValue value && value.TryGetValue<string>(out var text))
+                row["plans"] = JsonNode.Parse(text);
+        }
+
+        return rows;
     }
 
     private static async Task<List<JsonObject>> ReadRowsAsync(NpgsqlCommand command, CancellationToken cancellationToken)

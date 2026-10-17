@@ -95,6 +95,34 @@ public sealed class InvestigationEvidenceCaptureLiveTests
     }
 
     [Fact]
+    public async Task TopStatements_CarryEachPlansCpuPerExecution_FromTheSameRead()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            const string insert = @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
+                                       sql_handle, plan_handle, query_text, delta_execution_count, delta_worker_time, delta_elapsed_time,
+                                       delta_logical_reads, min_dop, max_dop)
+              VALUES ($1, $2, $3, $4, 'Db', '0xQQQQ', $5, '0xSQLH', '0xPLANH', 'SELECT 1', 10, $6, $6, 100, 1, 1)";
+            await DarlingMcpTestData.ExecAsync(setup.Connection, ct, insert,
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(AlertAt.AddMinutes(-10)), ServerId, ServerName, "0xOLD", 1_000_000L);
+            await DarlingMcpTestData.ExecAsync(setup.Connection, ct, insert,
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(AlertAt.AddMinutes(-4)), ServerId, ServerName, "0xNEW", 5_000_000L);
+            var requestId = (await setup.Requests.OpenOrJoinAsync(HighCpu(), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "query_stats", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var section = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "top_statements");
+            var row = Assert.Single(System.Text.Json.Nodes.JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray())!;
+            Assert.Equal(6_000_000, (long)row["total_cpu_us"]!);
+            var plans = row["plans"]!.AsArray();
+            Assert.Equal(new[] { "0xOLD", "0xNEW" }, plans.Select(p => (string)p!["query_plan_hash"]!));
+            Assert.Equal(100_000d, (double)plans[0]!["cpu_per_exec_us"]!);
+            Assert.Equal(500_000d, (double)plans[1]!["cpu_per_exec_us"]!);
+            Assert.True(string.CompareOrdinal((string)plans[1]!["first_seen"]!, (string)plans[0]!["first_seen"]!) > 0);
+        });
+    }
+
+    [Fact]
     public async Task ASectionThatLandsLater_FlipsFromPendingToReady_AndEvidenceReadyIsJournaledOnce_NamingTheReadyAndTheNotCollectedSections()
     {
         await RunAsync(async (setup, ct) =>
