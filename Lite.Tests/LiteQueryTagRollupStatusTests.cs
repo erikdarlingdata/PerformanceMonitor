@@ -100,7 +100,7 @@ public sealed class LiteQueryTagRollupStatusTests : IDisposable
         await ExecAsync(
             "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes) VALUES ($1, $2, $3, 'x', 'db1', '0x00000000000000AA', 1, 5000, 5000, 10, 1)",
             1L, DateTime.UtcNow.AddMinutes(-30), _serverId);
-        await ExecAsync("ALTER TABLE deadlocks RENAME TO deadlocks_held");
+        await DropDeadlocksAsync();
 
         var json = await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerName, 24);
         using var doc = JsonDocument.Parse(json);
@@ -116,7 +116,7 @@ public sealed class LiteQueryTagRollupStatusTests : IDisposable
     [Fact]
     public async Task OneSectionUnavailable_OthersEmpty_IsEmptyAndStillCarriesTheSections()
     {
-        await ExecAsync("ALTER TABLE deadlocks RENAME TO deadlocks_held");
+        await DropDeadlocksAsync();
 
         var json = await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerName, 24);
         using var doc = JsonDocument.Parse(json);
