@@ -14,7 +14,7 @@ using System.Threading.Tasks;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
-using PerformanceMonitorLite.Tests;
+using PerformanceMonitorLite.Database;
 using Xunit;
 
 namespace Lite.Tests;
@@ -24,23 +24,23 @@ namespace Lite.Tests;
 /// served sections are empty, else data. A section whose table is missing is unavailable, never a tool error. Own class so the table
 /// this drops is not shared with another test's database.
 /// </summary>
-public sealed class LiteQueryTagRollupStatusTests : IClassFixture<SharedDuckDbFixture>, IDisposable
+public sealed class LiteQueryTagRollupStatusTests : IDisposable
 {
     private const string ServerName = "StatusServer";
 
-    private readonly SharedDuckDbFixture _fixture;
+    private readonly string _tempDir;
+    private readonly DuckDbInitializer _duckDb;
     private readonly LocalDataService _service;
     private readonly ServerManager _serverManager;
-    private readonly string _tempDir;
     private readonly int _serverId;
 
-    public LiteQueryTagRollupStatusTests(SharedDuckDbFixture fixture)
+    public LiteQueryTagRollupStatusTests()
     {
-        fixture.ResetData();
-        _fixture = fixture;
-        _service = new LocalDataService(fixture.DuckDb);
         _tempDir = Path.Combine(Path.GetTempPath(), "QueryTagRollupStatus_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(_tempDir);
+        _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "status.duckdb"));
+        _duckDb.InitializeAsync().GetAwaiter().GetResult();
+        _service = new LocalDataService(_duckDb);
         _serverManager = new ServerManager(_tempDir);
         var server = new ServerConnection { ServerName = ServerName, DisplayName = ServerName };
         _serverManager.AddServer(server);
@@ -49,19 +49,6 @@ public sealed class LiteQueryTagRollupStatusTests : IClassFixture<SharedDuckDbFi
 
     public void Dispose()
     {
-        /* Put the renamed table back: the fixture's reset of the next test clears every data table by name. */
-        using (var connection = _fixture.DuckDb.CreateConnection())
-        {
-            connection.Open();
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'deadlocks_held'";
-            if (Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) > 0)
-            {
-                cmd.CommandText = "ALTER TABLE deadlocks_held RENAME TO deadlocks";
-                cmd.ExecuteNonQuery();
-            }
-        }
-
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch (IOException) { /* best-effort cleanup */ }
         catch (UnauthorizedAccessException) { /* best-effort cleanup */ }
@@ -69,7 +56,7 @@ public sealed class LiteQueryTagRollupStatusTests : IClassFixture<SharedDuckDbFi
 
     private async Task ExecAsync(string sql, params object[] values)
     {
-        using var connection = _fixture.DuckDb.CreateConnection();
+        using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
@@ -79,6 +66,13 @@ public sealed class LiteQueryTagRollupStatusTests : IClassFixture<SharedDuckDbFi
         }
 
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>The deadlock source gone: its view first, then the table behind it.</summary>
+    private async Task DropDeadlocksAsync()
+    {
+        await ExecAsync("DROP VIEW IF EXISTS v_deadlocks");
+        await ExecAsync("DROP TABLE IF EXISTS deadlocks");
     }
 
     [Fact]
