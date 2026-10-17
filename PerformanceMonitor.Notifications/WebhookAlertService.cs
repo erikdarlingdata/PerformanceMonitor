@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -391,7 +392,7 @@ public class WebhookAlertService
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, cancellationToken));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -2162,6 +2163,7 @@ public class WebhookAlertService
         string? detailText,
         DateTime nowUtc,
         string? investigationJson = null,
+        WebhookSigningKeys? signing = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -2194,10 +2196,21 @@ public class WebhookAlertService
                 return bodyError;
             }
 
+            /* #5998: a destination with a signing key is signed with that destination's keys (the caller picks them:
+               the settings row's for its URL, a route's for the route's own URL). The timestamp is the send's own
+               instant, not the firing's, because the receiver rejects a timestamp outside its window; the same read
+               decides whether the previous key is still in its overlap. */
+            WebhookSendSigning? signed = null;
+            if (signing is { HasKey: true })
+            {
+                var sendUtc = _utcNow();
+                signed = new WebhookSendSigning(signing.LiveKeys(sendUtc), WebhookSigning.NewMessageId(), WebhookSigning.UnixSeconds(sendUtc));
+            }
+
             /* #3598: the routed endpoint; headers, body template and proxy stay the parent's — a route
                redirects the POST, it does not re-author it. */
             var error = await PostWebhookAsync(
-                webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, cancellationToken);
+                webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, WebhookPostTimeout, signed, cancellationToken);
 
             if (error != null)
             {
@@ -2225,6 +2238,56 @@ public class WebhookAlertService
             _logger.LogError($"Generic webhook error: {ex.Message}");
             return ex.Message;
         }
+    }
+
+    /// <summary>What a generic resolution says when it is not sent because a signing key would not open (#5998).</summary>
+    internal const string GenericSigningKeyUnreadableText =
+        "Not sent: a generic webhook signing key could not be opened, and a signed destination is never sent unsigned.";
+
+    /// <summary>
+    /// The signing keys for a generic send to <paramref name="destination"/> (#5998, decision D2): the route's own keys
+    /// when <paramref name="routeId"/> names the route whose generic URL it is, the settings row's keys when it is the
+    /// settings row's generic URL, and otherwise the keys of the route whose generic URL it is. None when no key is set.
+    /// A route URL is never signed with the settings row's keys.
+    /// </summary>
+    internal static WebhookSigningKeys GenericSigningFor(IAlertSettings settings, int? routeId, string? destination)
+    {
+        var routes = settings.NotificationRoutes ?? Array.Empty<NotificationRoute>();
+        if (routeId is { } id)
+        {
+            foreach (var route in routes)
+            {
+                if (route is not null && route.RouteId == id && !string.IsNullOrWhiteSpace(route.GenericUrl))
+                {
+                    return route.GenericSigning ?? WebhookSigningKeys.None;
+                }
+            }
+        }
+
+        var target = destination?.Trim() ?? "";
+        if (target.Length > 0 && string.Equals(target, settings.GenericWebhookUrl?.Trim(), StringComparison.Ordinal))
+        {
+            return settings.GenericWebhookSigning ?? WebhookSigningKeys.None;
+        }
+
+        foreach (var route in routes)
+        {
+            if (route is not null && target.Length > 0 && string.Equals(target, route.GenericUrl?.Trim(), StringComparison.Ordinal))
+            {
+                return route.GenericSigning ?? WebhookSigningKeys.None;
+            }
+        }
+
+        return WebhookSigningKeys.None;
+    }
+
+    private static bool IsConfiguredGenericUrl(IAlertSettings settings, string? destination)
+    {
+        var target = destination?.Trim() ?? "";
+        return target.Length > 0
+            && (string.Equals(target, settings.GenericWebhookUrl?.Trim(), StringComparison.Ordinal)
+                || (settings.NotificationRoutes ?? Array.Empty<NotificationRoute>())
+                    .Any(r => r is not null && string.Equals(target, r.GenericUrl?.Trim(), StringComparison.Ordinal)));
     }
 
     /// <summary>Whether the generic headers go to <paramref name="routeUrl"/> (#5366): it has the same scheme, host
@@ -2862,9 +2925,14 @@ public class WebhookAlertService
             NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
                 delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
                 displayName: null, cancellationToken),
+            /* #5998: a resolution names its destination, not its route, so its keys are found by URL. A destination that
+               matches no configured generic URL while a signing key would not open may be the one whose key failed: it is
+               not sent, rather than sent unsigned. */
+            NotificationRouter.GenericChannel when delivery.GenericSigningKeyUnreadable && !IsConfiguredGenericUrl(delivery, destination) =>
+                GenericSigningKeyUnreadableText,
             NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
                 delivery, destination, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
-                cancellationToken: cancellationToken),
+                cancellationToken: cancellationToken, signing: GenericSigningFor(delivery, routeId: null, destination)),
             _ => $"{channel} does not carry a resolution post",
         };
     }
@@ -3399,22 +3467,60 @@ public class WebhookAlertService
     /// The post with its timeout stated, so a test can hang an endpoint and wait 200 ms for the answer instead
     /// of <see cref="WebhookPostTimeout"/>. Everything else is the private overload's contract.
     /// </summary>
-    internal static async Task<string?> PostWebhookAsync(
+    internal static Task<string?> PostWebhookAsync(
         string webhookUrl,
         string jsonPayload,
         string? proxyAddress,
         IReadOnlyDictionary<string, string>? headers,
         TimeSpan postTimeout,
         CancellationToken cancellationToken)
+        => PostWebhookAsync(webhookUrl, jsonPayload, proxyAddress, headers, postTimeout, signing: null, cancellationToken);
+
+    /// <summary>
+    /// The post with a signature (#5998): <paramref name="signing"/> null sends exactly the unsigned post.
+    /// </summary>
+    internal static async Task<string?> PostWebhookAsync(
+        string webhookUrl,
+        string jsonPayload,
+        string? proxyAddress,
+        IReadOnlyDictionary<string, string>? headers,
+        TimeSpan postTimeout,
+        WebhookSendSigning? signing,
+        CancellationToken cancellationToken)
     {
         var sendsHeaders = headers is { Count: > 0 };
         var client = GetHttpClient(proxyAddress, followRedirects: !sendsHeaders);
-        using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+
+        /* #5998: a signed send puts these exact bytes on the wire and signs these same bytes, so no re-encoding sits
+           between the signature and the body. An unsigned send is the StringContent it always was. */
+        var bodyBytes = signing is null ? null : Encoding.UTF8.GetBytes(jsonPayload);
+        using HttpContent content = bodyBytes is null
+            ? new StringContent(jsonPayload, Encoding.UTF8, "application/json")
+            : new ByteArrayContent(bodyBytes);
+        if (bodyBytes is not null)
+        {
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+        }
+
         using var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl) { Content = content };
 
         if (headers != null)
         {
             ApplyHeaders(request, content, headers);
+        }
+
+        if (signing is not null && bodyBytes is not null)
+        {
+            /* Set after the operator's headers, so an operator header of the same name cannot replace a signature. */
+            foreach (var name in new[] { WebhookSigning.IdHeader, WebhookSigning.TimestampHeader, WebhookSigning.SignatureHeader })
+            {
+                request.Headers.Remove(name);
+            }
+
+            request.Headers.TryAddWithoutValidation(WebhookSigning.IdHeader, signing.MessageId);
+            request.Headers.TryAddWithoutValidation(WebhookSigning.TimestampHeader, signing.Timestamp.ToString(CultureInfo.InvariantCulture));
+            request.Headers.TryAddWithoutValidation(
+                WebhookSigning.SignatureHeader, WebhookSigning.Sign(signing.Keys, signing.MessageId, signing.Timestamp, bodyBytes));
         }
 
         /* #4752: one token bounds the send and the read of the response. It is linked to the caller's, so

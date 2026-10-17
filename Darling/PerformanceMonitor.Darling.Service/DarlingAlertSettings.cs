@@ -423,6 +423,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool GenericWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.GenericUrl);
     public string GenericWebhookUrl => Opened.Webhooks.GenericUrl;
     public string GenericWebhookHeadersJson => Opened.Webhooks.GenericHeaders;
+
+    /* #5998: the settings row's generic URL's signing keys, opened. */
+    public WebhookSigningKeys GenericWebhookSigning => Opened.Webhooks.GenericSigning ?? WebhookSigningKeys.None;
+    public bool GenericSigningKeyUnreadable => System.Linq.Enumerable.Any(Opened.Failures, f => f.SigningKey);
     public string GenericWebhookBodyTemplate => Opened.Webhooks.GenericBodyTemplate;
     public string GenericWebhookProxyAddress => Opened.Webhooks.GenericProxy;
 

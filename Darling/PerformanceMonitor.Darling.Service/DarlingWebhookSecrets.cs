@@ -16,8 +16,9 @@ using PerformanceMonitor.Notifications;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>A webhook channel that could not be used because one of its saved values would not open (#5366).
-/// <paramref name="Text"/> is the channel's health text, and never carries a value.</summary>
-internal sealed record WebhookOpenFailure(string Channel, string Text);
+/// <paramref name="Text"/> is the channel's health text, and never carries a value.
+/// <para><paramref name="SigningKey"/> is true when the value was a generic webhook signing key (#5998).</para></summary>
+internal sealed record WebhookOpenFailure(string Channel, string Text, bool SigningKey = false);
 
 /// <summary>The webhook settings and routes with every sealed value opened, and the values that would not open.</summary>
 internal sealed class OpenedWebhooks
@@ -74,6 +75,16 @@ internal static class DarlingWebhookSecrets
             PagerDutyProxy = stored.PagerDutyProxy,
         };
 
+        /* #5998: the settings row's signing keys. A key that will not open turns the settings row's generic URL off: a
+           destination that was set up signed is never sent unsigned. */
+        var signingFailuresBefore = failures.Count;
+        opened.GenericSigning = OpenSigning(
+            stored.GenericSigning, stored.GenericUrl, row, stored.GenericProxy, "generic webhook signing key", ring, failures);
+        if (failures.Count > signingFailuresBefore)
+        {
+            opened.GenericUrl = "";
+        }
+
         var openedRoutes = new List<NotificationRoute>(routes.Count);
         foreach (var route in routes)
         {
@@ -84,11 +95,27 @@ internal static class DarlingWebhookSecrets
             var slack = OpenRouteValue(route.SlackUrl, "slack", routeRow, stored.SlackProxy, NotificationRouter.SlackChannel, "Slack webhook URL" + where, ring, failures, off);
             var generic = OpenRouteValue(route.GenericUrl, "generic", routeRow, stored.GenericProxy, NotificationRouter.GenericChannel, "generic webhook URL" + where, ring, failures, off);
             var pagerDuty = OpenRouteValue(route.PagerDutyRoutingKey, "pagerduty", routeRow, stored.PagerDutyProxy, NotificationRouter.PagerDutyChannel, "PagerDuty routing key" + where, ring, failures, off);
+
+            /* #5998: the route's own keys sign the route's own generic URL. One that will not open turns the generic channel
+               off for this route; the route's alerts do not go to the settings row's generic URL instead. */
+            var routeSigningBefore = failures.Count;
+            var routeSigning = OpenSigning(
+                route.GenericSigning, route.GenericUrl, routeRow, stored.GenericProxy, "generic webhook signing key" + where, ring, failures);
+            if (failures.Count > routeSigningBefore)
+            {
+                generic = "";
+                if (!off.Contains(NotificationRouter.GenericChannel, StringComparer.Ordinal))
+                {
+                    off.Add(NotificationRouter.GenericChannel);
+                }
+            }
+
             openedRoutes.Add(route with
             {
                 TeamsUrl = teams,
                 SlackUrl = slack,
                 GenericUrl = generic,
+                GenericSigning = routeSigning,
                 PagerDutyRoutingKey = pagerDuty,
                 OffChannels = off.Count == 0 ? route.OffChannels : off,
             });
@@ -128,6 +155,57 @@ internal static class DarlingWebhookSecrets
         return value;
     }
 
+    /// <summary>
+    /// Opens a destination's signing keys (#5998). No URL or no key is <see cref="WebhookSigningKeys.None"/>: an unsigned
+    /// destination. Each key is bound to <see cref="PasswordBinding.SigningKeySlot"/>, the row, the channel's proxy and the
+    /// stored text of the row's generic URL. A key that is not sealed, will not open, or opens to text that is not a key is
+    /// a failure: it is recorded with <see cref="WebhookOpenFailure.SigningKey"/> set, and the caller turns the destination
+    /// off. The failure text names the key, never its value.
+    /// </summary>
+    private static WebhookSigningKeys OpenSigning(
+        WebhookSigningKeys? stored, string storedUrl, string row, string? proxy, string label,
+        IPasswordKeyRing ring, List<WebhookOpenFailure> failures)
+    {
+        if (stored is null || !stored.HasKey || string.IsNullOrWhiteSpace(storedUrl))
+        {
+            return WebhookSigningKeys.None;
+        }
+
+        var key = OpenSigningValue(stored.Key, storedUrl, row, proxy, label, ring, failures);
+        var previous = string.IsNullOrWhiteSpace(stored.PreviousKey)
+            ? ""
+            : OpenSigningValue(stored.PreviousKey, storedUrl, row, proxy, "previous " + label, ring, failures);
+        return key is null || previous is null ? WebhookSigningKeys.None : new WebhookSigningKeys(key, previous, stored.PreviousUntilUtc);
+    }
+
+    private static string? OpenSigningValue(
+        string stored, string storedUrl, string row, string? proxy, string label, IPasswordKeyRing ring, List<WebhookOpenFailure> failures)
+    {
+        const string Remedy = "Generate a new key in Settings.";
+        if (!PasswordSeal.IsSealed(stored))
+        {
+            /* Darling only ever stores a sealed key, so plain text here was not written by Darling. */
+            failures.Add(new WebhookOpenFailure(NotificationRouter.GenericChannel, $"The {label} could not be opened: it is not sealed. {Remedy}", SigningKey: true));
+            return null;
+        }
+
+        var before = failures.Count;
+        var value = OpenValue(stored, PasswordBinding.SigningKeySlot, row, proxy, storedUrl, NotificationRouter.GenericChannel, label, ring, failures, Remedy);
+        if (failures.Count > before)
+        {
+            failures[^1] = failures[^1] with { SigningKey = true };
+            return null;
+        }
+
+        if (!WebhookSigning.TryDecodeKey(value, out _))
+        {
+            failures.Add(new WebhookOpenFailure(NotificationRouter.GenericChannel, $"The {label} could not be opened: the saved text is not a signing key. {Remedy}", SigningKey: true));
+            return null;
+        }
+
+        return value;
+    }
+
     private static IReadOnlyCollection<string> WithChannel(IReadOnlyCollection<string>? existing, string channel) =>
         existing is not null && existing.Contains(channel, StringComparer.Ordinal)
             ? existing
@@ -137,7 +215,7 @@ internal static class DarlingWebhookSecrets
     /// sealed value that will not open comes back empty with a failure recorded.</summary>
     private static string OpenValue(
         string stored, string slot, string row, string? proxy, string? boundUrl, string channel, string label,
-        IPasswordKeyRing ring, List<WebhookOpenFailure> failures)
+        IPasswordKeyRing ring, List<WebhookOpenFailure> failures, string remedy = "Enter it again in Settings.")
     {
         if (string.IsNullOrWhiteSpace(stored) || !PasswordSeal.IsSealed(stored))
         {
@@ -172,7 +250,7 @@ internal static class DarlingWebhookSecrets
             cause = "its saved settings are not valid text";
         }
 
-        failures.Add(new WebhookOpenFailure(channel, $"The {label} could not be opened: {cause}. Enter it again in Settings."));
+        failures.Add(new WebhookOpenFailure(channel, $"The {label} could not be opened: {cause}. {remedy}"));
         return "";
     }
 
@@ -182,6 +260,14 @@ internal static class DarlingWebhookSecrets
     {
         var text = new StringBuilder();
         void Add(string? part) => text.Append(part ?? "").Append('\u0001');
+
+        /* #5998: the sealed key text and the overlap's end, so a rotation or a new key reopens. */
+        void AddSigning(WebhookSigningKeys? k)
+        {
+            Add(k?.Key);
+            Add(k?.PreviousKey);
+            Add(k?.PreviousUntilUtc?.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
         Add(status.CanSeal ? "1" : "0");
         Add(status.KeyId);
         Add(status.Reason);
@@ -200,6 +286,7 @@ internal static class DarlingWebhookSecrets
         Add(w.TeamsSendResolutions ? "1" : "0");
         Add(w.GenericSendResolutions ? "1" : "0");
         Add(w.PagerDutyProxy);
+        AddSigning(w.GenericSigning);
         foreach (var r in routes ?? Array.Empty<NotificationRoute>())
         {
             Add(r.RouteId.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -219,6 +306,7 @@ internal static class DarlingWebhookSecrets
             Add(r.Orphaned ? "1" : "0");
             Add(r.ScopeTagDepth.ToString(System.Globalization.CultureInfo.InvariantCulture));
             Add(r.ExpandedServerIds is null ? "-" : string.Join(",", r.ExpandedServerIds.OrderBy(id => id)));
+            AddSigning(r.GenericSigning);
         }
 
         return text.ToString();

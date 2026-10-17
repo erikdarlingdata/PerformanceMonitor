@@ -2343,6 +2343,14 @@ public sealed class WebhooksConfig
     [JsonPropertyName("genericProxy")]
     public string GenericProxy { get; set; } = "";
 
+    /// <summary>
+    /// The generic URL's signing keys (#5998, V193 <c>signing_key</c>, <c>previous_signing_key</c> and
+    /// <c>previous_signing_key_until</c>): sealed as the store holds them, opened by <see cref="DarlingWebhookSecrets.Open"/>.
+    /// Store only: Darling generates the key, so darling.json never carries one and this is never written to JSON.
+    /// </summary>
+    [JsonIgnore]
+    public WebhookSigningKeys? GenericSigning { get; set; }
+
     /* PagerDuty webhook — Events API v2. The routing key is a bearer-secret-like opaque token (comparable
        to the Teams/Slack/Generic webhook URLs), so it is stored as a plaintext column in Postgres with a
        column-level REVOKE from the read-only viewer role (DarlingManagedRoles.ViewerRestrictedConfigTables).

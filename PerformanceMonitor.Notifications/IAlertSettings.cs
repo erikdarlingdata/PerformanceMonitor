@@ -59,6 +59,17 @@ public interface IAlertSettings
     string GenericWebhookHeadersJson { get; }
 
     /// <summary>
+    /// The signing keys of the generic URL on the settings row (#5998), opened. A send to that URL is signed while a key
+    /// is set; a route with its own generic URL signs with its own keys (<see cref="NotificationRoute.GenericSigning"/>).
+    /// Defaults to none, so an app that has no signing (Lite) sends exactly what it sent before.
+    /// </summary>
+    WebhookSigningKeys GenericWebhookSigning => WebhookSigningKeys.None;
+
+    /// <summary>Whether a generic webhook signing key could not be opened (#5998). The destination it signs is already off;
+    /// a send that names a generic URL by itself (a resolution) checks this so it never reaches that destination unsigned.</summary>
+    bool GenericSigningKeyUnreadable => false;
+
+    /// <summary>
     /// The JSON request body, with <c>{{metric}}</c>, <c>{{server}}</c>, <c>{{value}}</c>,
     /// <c>{{threshold}}</c>, <c>{{severity}}</c>, <c>{{context}}</c> and <c>{{timestamp}}</c>
     /// placeholders substituted per alert, plus the #2302 automation tokens:

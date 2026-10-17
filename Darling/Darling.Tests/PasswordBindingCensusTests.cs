@@ -257,7 +257,7 @@ public sealed class PasswordBindingCensusTests
             PasswordBinding.ForWebhook("slack", "notification", null, null).EncodeAad(KeyId),
             PasswordBinding.ForWebhook("slack", "notification", "", "").EncodeAad(KeyId));
         Assert.Equal(
-            new[] { "teams", "slack", "generic", "pagerduty", "generic_headers" }, PasswordBinding.WebhookSlots.ToArray());
+            new[] { "teams", "slack", "generic", "pagerduty", "generic_headers", "signing_key" }, PasswordBinding.WebhookSlots.ToArray());
         Assert.Throws<ArgumentException>(() => PasswordBinding.ForWebhook("smtp", "notification", "", ""));
 
         /* Every field is part of what the value belongs to. */

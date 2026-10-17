@@ -1748,7 +1748,8 @@ SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_passwor
        smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy,
        generic_url, generic_headers, generic_body_template, generic_proxy,
        pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
-       slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions
+       slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions,
+       signing_key, previous_signing_key, previous_signing_key_until
 FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1787,6 +1788,9 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             SlackSendResolutions = reader.GetBoolean(20),
             TeamsSendResolutions = reader.GetBoolean(21),
             GenericSendResolutions = reader.GetBoolean(22),
+            /* V193 (#5998): the generic URL's signing keys, sealed. DarlingWebhookSecrets.Open opens them. */
+            GenericSigning = new WebhookSigningKeys(
+                reader.GetString(24), reader.GetString(25), reader.IsDBNull(26) ? null : reader.GetFieldValue<DateTime>(26)),
         };
         return (smtp, webhooks);
     }
@@ -2080,8 +2084,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// (V184, #5632) follow them: the level <see cref="NotificationRouter.ResolveAgent"/> reads, and the route's limits.</summary>
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
-        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions "
+        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, "
+        + NotificationRouteSigningColumns + " "
         + "FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>A route's signing key columns (V193, #5998), last in both the service's and the viewer's route SELECT.</summary>
+    public const string NotificationRouteSigningColumns = "signing_key, previous_signing_key, previous_signing_key_until";
 
     /// <summary>The registry's server ids: every server a route's scope can name (#5750). The desired-state table, whose
     /// <c>server_id</c> is the key an alert carries as <c>AlertOutcome.ServerKey</c>.</summary>
@@ -2193,6 +2201,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     AgentExpiryMinutes = reader.GetInt32(14),
                     /* V187 (#5825): null follows the channel's setting. */
                     SendResolutions = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
+                    /* V193 (#5998): the route's own generic URL's signing keys, sealed. */
+                    GenericSigning = new WebhookSigningKeys(
+                        reader.GetString(16), reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetFieldValue<DateTime>(18)),
                 });
             }
         }
