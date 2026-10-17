@@ -133,6 +133,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Agent investigation" VerticalAlignment="Center" Margin="0,0,8,6"/>
@@ -158,6 +159,11 @@
             <TextBlock Grid.Row="3" Grid.Column="0" Text="Send resolutions" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <ComboBox Grid.Row="3" Grid.Column="1" x:Name="SendResolutionsCombo" Width="220" HorizontalAlignment="Left" Margin="0,0,0,6"
                       ToolTip="Whether this route's destinations also get the message that an alert has cleared. Use channel setting: each channel's Send resolutions box in Notifications decides. Always or Never overrides it for this route."/>
+
+            <!-- #6036: the route an expired investigation request goes to first (D8 of #5632 Phase C). -->
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Fallback route" VerticalAlignment="Center" Margin="0,0,8,6"/>
+            <ComboBox Grid.Row="4" Grid.Column="1" x:Name="FallbackRouteCombo" Width="320" HorizontalAlignment="Left" Margin="0,0,0,6"
+                      ToolTip="Where an investigation request goes when it expires with no agent holding it: the fallback route's email, Teams and Slack channels. None: this route's own channels, then the Investigation Not Picked Up alert. Never this route itself."/>
         </Grid>
 
         <CheckBox Grid.Row="12" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"

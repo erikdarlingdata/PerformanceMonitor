@@ -86,6 +86,12 @@ public sealed class PgNotificationRouteStore
         /// true or false overrides it.</summary>
         public bool? SendResolutions { get; init; }
 
+        /// <summary>The route an expired investigation request goes to first (#6036, D8 of #5632 Phase C), or null for none.</summary>
+        public int? FallbackRouteId { get; init; }
+
+        /// <summary>The fallback route's name (its <c>metric_match</c>), or null when there is no fallback.</summary>
+        public string? FallbackRouteName { get; init; }
+
         /// <summary>True when the route is scoped but its scope could not be read just now (the tag tables failed, for a tag-scoped route):
         /// it matches nothing until a read succeeds, and is not orphaned, since the tag may still exist. The loader's rule
         /// (<see cref="StoreConfigProvider.ExpandRoutes"/>), so the tool never shows such a route as an ordinary active one (#5750).</summary>
@@ -97,7 +103,7 @@ public sealed class PgNotificationRouteStore
     /// the one a superuser-run test never notices.</summary>
     public const string SelectSummariesSql = @"
 SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id,
-       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions
+       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id
 FROM config_notification_routes
 ORDER BY route_id";
 
@@ -118,6 +124,21 @@ UPDATE config_notification_routes
    SET enabled = $2,
        modified_at = (now() AT TIME ZONE 'UTC')
  WHERE route_id = $1";
+
+    /// <summary>The fallback write (#6036): the id and the stamp, nothing else.</summary>
+    public const string SetFallbackSql = @"
+UPDATE config_notification_routes
+   SET fallback_route_id = $2,
+       modified_at = (now() AT TIME ZONE 'UTC')
+ WHERE route_id = $1";
+
+    /// <summary>The fallback column has no foreign key (V193 adds the column and a not-itself CHECK only), so a delete clears
+    /// every reference to the deleted route first, in the same transaction (#6036).</summary>
+    public const string ClearFallbackReferencesSql = @"
+UPDATE config_notification_routes
+   SET fallback_route_id = NULL,
+       modified_at = (now() AT TIME ZONE 'UTC')
+ WHERE fallback_route_id = $1";
 
     public const string DeleteSql = "DELETE FROM config_notification_routes WHERE route_id = $1";
 
@@ -147,12 +168,16 @@ UPDATE config_notification_routes
                 AgentLeaseMinutes = reader.GetInt32(11),
                 AgentExpiryMinutes = reader.GetInt32(12),
                 SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
+                FallbackRouteId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
             });
         }
 
-        return routes.Exists(r => r.ScopeServerId.HasValue || r.ScopeTagId.HasValue)
-            ? await DescribeScopesAsync(routes, cancellationToken)
-            : routes;
+        var named = routes.Select(r => r.FallbackRouteId is { } fid
+            ? r with { FallbackRouteName = routes.FirstOrDefault(o => o.RouteId == fid)?.MetricMatch }
+            : r).ToList();
+        return named.Exists(r => r.ScopeServerId.HasValue || r.ScopeTagId.HasValue)
+            ? await DescribeScopesAsync(named, cancellationToken)
+            : named;
     }
 
     /// <summary>
@@ -255,12 +280,52 @@ UPDATE config_notification_routes
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    /// <summary>Deletes the route; returns the number of rows deleted (0 = no such route).</summary>
-    public async Task<int> DeleteAsync(int routeId, CancellationToken cancellationToken = default)
+    /// <summary>The refusal text for a fallback that cannot be set on <paramref name="routeId"/>, or null when it can: a route
+    /// is never its own fallback and the fallback must be an existing route (#6036).</summary>
+    public static string? FallbackRefusal(int routeId, int fallbackRouteId, IEnumerable<int> existingRouteIds)
     {
-        await using var command = _dataSource.CreateCommand(DeleteSql);
+        if (fallbackRouteId == routeId)
+        {
+            return $"fallback_route_id {fallbackRouteId} is the route itself; a route cannot be its own fallback.";
+        }
+
+        return existingRouteIds.Contains(fallbackRouteId)
+            ? null
+            : $"No notification route with route_id {fallbackRouteId} to use as the fallback; see get_notification_routes.";
+    }
+
+    /// <summary>Sets (or, with null, clears) the fallback; returns the number of rows updated (0 = no such route).</summary>
+    public async Task<int> SetFallbackAsync(int routeId, int? fallbackRouteId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(SetFallbackSql);
         command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = fallbackRouteId });
         return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>Deletes the route and clears every other route's reference to it as its fallback, in one transaction;
+    /// returns the number of rows deleted (0 = no such route).</summary>
+    public async Task<int> DeleteAsync(int routeId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var clear = new NpgsqlCommand(ClearFallbackReferencesSql, connection, transaction))
+        {
+            clear.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+            clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+            await clear.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        int deleted;
+        await using (var command = new NpgsqlCommand(DeleteSql, connection, transaction))
+        {
+            command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+            deleted = await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return deleted;
     }
 }

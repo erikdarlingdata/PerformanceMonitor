@@ -1269,6 +1269,18 @@ $v187$;
    END IF;
 END $$;
 GRANT UPDATE (enabled, modified_at), DELETE ON config.config_notification_routes TO mcp;
+-- #6036 (V193): set_notification_route_fallback writes the fallback route id, a pointer to another route (never a
+-- destination). Guarded on the column, so a store below V193 still commits the rest.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_notification_routes')
+                AND attname = 'fallback_route_id' AND NOT attisdropped) THEN
+      EXECUTE $v193f$
+GRANT UPDATE (fallback_route_id) ON config.config_notification_routes TO mcp;
+$v193f$;
+   END IF;
+END $$;
 GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;
 REVOKE UPDATE ON config.config_monitored_servers FROM mcp;
 -- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE

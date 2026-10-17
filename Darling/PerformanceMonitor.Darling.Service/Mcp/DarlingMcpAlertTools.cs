@@ -765,6 +765,57 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
+    [McpServerTool(Name = "set_notification_route_fallback"), Description(
+        "Sets or clears a notification route's fallback route. Changes shared alert configuration the service delivers on: an investigation request on this route that expires with no agent holding it goes to the fallback route's human channels first (before the route's own channels and the self-monitor alert). Moves no destination. Served only under mcp.allowWrites." +
+        "<<GUIDE>>" +
+        "Sets (or clears) fallback_route_id on the notification route route_id (ids from get_notification_routes). When an " +
+        "investigation request opened by this route expires with no agent holding it, it is posted to the fallback route's " +
+        "email, Teams and Slack channels first; with no fallback it goes to this route's own human channels, and with none " +
+        "of those to the 'Investigation Not Picked Up' self-alert. Pass a fallback_route_id to set it, or omit it to clear. " +
+        "A route cannot be its own fallback and the fallback must be an existing route: either is refused with " +
+        "{status:\"invalid\"}. Returns {status:\"updated\", route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} " +
+        "when it already holds that value, or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
+        "{status:\"refused\"}: it is changed in the Viewer. Deleting the fallback route clears the reference.")]
+    public static async Task<string> SetNotificationRouteFallback(
+        NpgsqlDataSource postgres,
+        [Description("The route to set the fallback on (from get_notification_routes).")] int route_id,
+        [Description("The route_id of the fallback route, from get_notification_routes. Omit to clear the fallback.")] int? fallback_route_id = null)
+    {
+        try
+        {
+            var store = new PgNotificationRouteStore(postgres);
+            var routes = await store.LoadSummariesAsync();
+            var existing = routes.FirstOrDefault(r => r.RouteId == route_id);
+            if (existing is null)
+            {
+                return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            if (AgentRouteRefusal(existing, "set_notification_route_fallback") is { } agentRefusal)
+            {
+                return agentRefusal;
+            }
+
+            if (fallback_route_id is { } wanted && PgNotificationRouteStore.FallbackRefusal(route_id, wanted, routes.Select(r => r.RouteId)) is { } invalid)
+            {
+                return Outcome("invalid", invalid);
+            }
+
+            if (existing.FallbackRouteId == fallback_route_id)
+            {
+                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+            }
+
+            await store.SetFallbackAsync(route_id, fallback_route_id);
+            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("set_notification_route_fallback", ex);
+        }
+    }
+
     [McpServerTool(Name = "delete_notification_route"), Description(
         "Deletes a notification route by its route_id (from get_notification_routes). Permanent: the alerts it " +
         "matched fall to the next level (a family route, then the parent channels) on the next firing. Returns " +
@@ -831,6 +882,10 @@ public sealed class DarlingMcpAlertTools
         /* #5825: null follows each channel's "send resolutions" setting (get_alert_settings, delivery.send_resolutions);
            true or false overrides it for this route's destinations. */
         send_resolutions = r.SendResolutions,
+        /* #6036 (D8 of #5632 Phase C): the route an expired investigation request goes to first. Null = none; the name is the
+           fallback route's metric_match. */
+        fallback_route_id = r.FallbackRouteId,
+        fallback_route_name = r.FallbackRouteName,
         agent_requests_last_hour = agentUse is null ? (int?)null : agentUse.TryGetValue(r.RouteId, out var hourUse) ? hourUse.LastHour : 0,
         agent_requests_last_day = agentUse is null ? (int?)null : agentUse.TryGetValue(r.RouteId, out var dayUse) ? dayUse.LastDay : 0,
     };

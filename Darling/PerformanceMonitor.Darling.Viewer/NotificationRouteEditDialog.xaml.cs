@@ -60,7 +60,10 @@ public partial class NotificationRouteEditDialog : Window
     /// and the route's own scope).</param>
     /// <param name="existing">The route to edit, or null for a new one.</param>
     /// <param name="dataService">The store, for the signing key of an existing route (#5998); null leaves the key block off.</param>
-    public NotificationRouteEditDialog(ViewerRouteScopeInputs? scopeInputs, NotificationRouteRow? existing = null, ViewerDataService? dataService = null)
+    private const string FallbackNoneChoice = "None (this route's own channels)";
+
+    public NotificationRouteEditDialog(ViewerRouteScopeInputs? scopeInputs, NotificationRouteRow? existing = null, ViewerDataService? dataService = null,
+        System.Collections.Generic.IEnumerable<NotificationRouteRow>? allRoutes = null)
     {
         InitializeComponent();
         _stored = existing;
@@ -86,6 +89,16 @@ public partial class NotificationRouteEditDialog : Window
         SendResolutionsCombo.Items.Add(new ComboBoxItem { Content = ResolutionsNeverChoice, Tag = false });
         var storedResolutions = existing?.SendResolutions;
         SendResolutionsCombo.SelectedItem = SendResolutionsCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedResolutions));
+
+        /* #6036: the fallback picker lists every OTHER route, with a none choice; the route being edited is never offered. */
+        FallbackRouteCombo.Items.Add(new ComboBoxItem { Content = FallbackNoneChoice, Tag = null });
+        foreach (var other in (allRoutes ?? System.Linq.Enumerable.Empty<NotificationRouteRow>()).Where(r => r.RouteId != (existing?.RouteId ?? 0)))
+        {
+            FallbackRouteCombo.Items.Add(new ComboBoxItem { Content = $"#{other.RouteId} {other.MetricMatch}", Tag = other.RouteId });
+        }
+
+        FallbackRouteCombo.SelectedItem = FallbackRouteCombo.Items.Cast<ComboBoxItem>().FirstOrDefault(i => Equals(i.Tag, existing?.FallbackRouteId))
+            ?? FallbackRouteCombo.Items[0];
 
         var scopeOptions = ViewerNotificationRouteScope.ScopeOptions(scopeInputs);
         var picked = existing is null ? scopeOptions[0] : ViewerNotificationRouteScope.OptionFor(existing, scopeOptions);
@@ -424,6 +437,7 @@ public partial class NotificationRouteEditDialog : Window
     {
         Route.AgentLevel = SelectedAgentLevel();
         Route.SendResolutions = (SendResolutionsCombo.SelectedItem as ComboBoxItem)?.Tag as bool?;
+        Route.FallbackRouteId = (FallbackRouteCombo.SelectedItem as ComboBoxItem)?.Tag as int?;
         if (!TryReadNumber(AgentMaxPerHourBox, "Requests per hour", out var perHour, out var error)
             || !TryReadNumber(AgentMaxPerDayBox, "Requests per day", out var perDay, out error)
             || !TryReadNumber(AgentLeaseMinutesBox, "Lease minutes", out var lease, out error)

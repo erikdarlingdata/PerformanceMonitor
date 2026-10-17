@@ -140,6 +140,7 @@ public static class DarlingWebEndpoints
         /* #5916: a threshold override is set over MCP; the web grid has its own admin-login route, not a generic read. */
         "set_alert_threshold_override",
         "set_notification_route_enabled",
+        "set_notification_route_fallback",
         /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two
            investigation reads only (/api/read). */
         "claim_investigation_request",

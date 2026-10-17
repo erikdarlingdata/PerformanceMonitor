@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -48,7 +49,7 @@ public sealed partial class ViewerDataService
     /// metric level, then the route id, so the id order is no longer the order routes are consulted in.</summary>
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, " + NotificationRouteDestinationColumns + ", enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
-        + NotificationRouteAgentColumns + ", send_resolutions "
+        + NotificationRouteAgentColumns + ", send_resolutions, fallback_route_id "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>The secret-free projection a read-only <c>viewer</c> seat reads: the four webhook-class
@@ -56,15 +57,15 @@ public sealed partial class ViewerDataService
     /// not a secret, on the parent either), and <c>configured_channels</c> carries presence.</summary>
     public const string NotificationRoutesSelectNoSecretSql =
         "SELECT route_id, metric_match, smtp_recipients, enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
-        + NotificationRouteAgentColumns + ", send_resolutions "
+        + NotificationRouteAgentColumns + ", send_resolutions, fallback_route_id "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in
     /// the column list; RETURNING hands it back for the grid.</summary>
     public const string NotificationRouteInsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + NotificationRouteDestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + NotificationRouteAgentColumns + @", send_resolutions, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + NotificationRouteDestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + NotificationRouteAgentColumns + @", send_resolutions, fallback_route_id, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string NotificationRouteUpdateSql = @"
@@ -84,11 +85,16 @@ UPDATE config_notification_routes SET
     agent_lease_minutes = $14,
     agent_expiry_minutes = $15,
     send_resolutions = $16,
+    fallback_route_id = $17,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
     public const string NotificationRouteSetEnabledSql =
         "UPDATE config_notification_routes SET enabled = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE route_id = $1";
+
+    /// <summary>The column has no foreign key (V193), so a delete clears the references to the deleted route first (#6036).</summary>
+    public const string NotificationRouteClearFallbackSql =
+        "UPDATE config_notification_routes SET fallback_route_id = NULL, modified_at = (now() AT TIME ZONE 'UTC') WHERE fallback_route_id = $1";
 
     public const string NotificationRouteDeleteSql = "DELETE FROM config_notification_routes WHERE route_id = $1";
 
@@ -104,6 +110,11 @@ WHERE route_id = $1";
             rows.Add(IsReadOnly ? ReadRouteRowNoSecret(reader) : ReadRouteRow(reader));
         }
 
+        foreach (var row in rows.Where(r => r.FallbackRouteId.HasValue))
+        {
+            row.FallbackRouteName = rows.FirstOrDefault(o => o.RouteId == row.FallbackRouteId)?.MetricMatch;
+        }
+
         return rows;
     }
 
@@ -112,6 +123,7 @@ WHERE route_id = $1";
     {
         ArgumentNullException.ThrowIfNull(row);
         ValidateRoute(row);
+        await EnsureFallbackRouteExistsAsync(row, null, null, cancellationToken);
 
         await using var command = _dataSource.CreateCommand(NotificationRouteInsertSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -124,7 +136,7 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });                    // $7
         AddNullableInt(command, row.ScopeServerId);                                                        // $8
         AddNullableInt(command, row.ScopeTagId);                                                           // $9
-        AddAgentColumns(command, row);                                                                     // $10-$15
+        AddAgentColumns(command, row);                                                                     // $10-$16
         var id = await ExecuteWriteScalarAsync(command, cancellationToken);
         return Convert.ToInt32(id, System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -133,6 +145,7 @@ WHERE route_id = $1";
     {
         ArgumentNullException.ThrowIfNull(row);
         ValidateRoute(row);
+        await EnsureFallbackRouteExistsAsync(row, null, null, cancellationToken);
 
         await using var command = _dataSource.CreateCommand(NotificationRouteUpdateSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -146,7 +159,7 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });                    // $8
         AddNullableInt(command, row.ScopeServerId);                                                        // $9
         AddNullableInt(command, row.ScopeTagId);                                                           // $10
-        AddAgentColumns(command, row);                                                                     // $11-$16
+        AddAgentColumns(command, row);                                                                     // $11-$17
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -191,6 +204,7 @@ WHERE route_id = $1";
             resolved.RouteId = routeId;
             ViewerWebhookSealing.ResolveRoute(resolved, stored, parent, routeId, sealer, refusal);
             ValidateRoute(resolved);
+            await EnsureFallbackRouteExistsAsync(resolved, connection, transaction, cancellationToken);
 
             /* #5998: a signing key is sealed for the route's stored URL text, so a save that changes that text would leave the key
                unreadable to the service. A new route has no key. */
@@ -211,7 +225,7 @@ WHERE route_id = $1";
             update.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = resolved.Enabled });                 // $8
             AddNullableInt(update, resolved.ScopeServerId);                                                      // $9
             AddNullableInt(update, resolved.ScopeTagId);                                                         // $10
-            AddAgentColumns(update, resolved);                                                                   // $11-$15
+            AddAgentColumns(update, resolved);                                                                   // $11-$17
             await update.ExecuteNonQueryAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return routeId;
@@ -250,12 +264,68 @@ WHERE route_id = $1";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
+    /// <summary>Clears every other route's fallback reference to the route (the column has no foreign key), then deletes it,
+    /// in one transaction (#6036).</summary>
     public async Task DeleteNotificationRouteAsync(int routeId, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(NotificationRouteDeleteSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-        await ExecuteWriteAsync(command, cancellationToken);
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await using (var clear = new NpgsqlCommand(NotificationRouteClearFallbackSql, connection, transaction))
+            {
+                clear.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+                await clear.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var delete = new NpgsqlCommand(NotificationRouteDeleteSql, connection, transaction))
+            {
+                delete.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                delete.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+    }
+
+    /// <summary>Refuses a fallback route id that names no route (#6036): the column has no foreign key, so the check is here.
+    /// Runs on the caller's transaction when it has one.</summary>
+    private async Task EnsureFallbackRouteExistsAsync(
+        NotificationRouteRow row, NpgsqlConnection? connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        if (row.FallbackRouteId is not { } fallbackId)
+        {
+            return;
+        }
+
+        var ownConnection = connection is null ? await _dataSource.OpenConnectionAsync(cancellationToken) : null;
+        try
+        {
+            await using var command = new NpgsqlCommand("SELECT 1 FROM config_notification_routes WHERE route_id = $1", connection ?? ownConnection, transaction);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = fallbackId });
+            if (await command.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                throw new ArgumentException($"Fallback route {fallbackId} does not exist.", nameof(row));
+            }
+        }
+        finally
+        {
+            if (ownConnection is not null)
+            {
+                await ownConnection.DisposeAsync();
+            }
+        }
     }
 
     /// <summary>
@@ -289,6 +359,11 @@ WHERE route_id = $1";
             return "Set at least one destination or the agent channel — a route with every channel empty inherits everything and routes nothing.";
         }
 
+        if (row.FallbackRouteId.HasValue && row.RouteId != 0 && row.FallbackRouteId == row.RouteId)
+        {
+            return "A route cannot be its own fallback route.";
+        }
+
         if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct))
         {
             return "The agent channel is Inherit, Off, Investigate or Act.";
@@ -317,6 +392,8 @@ WHERE route_id = $1";
         /* #5825 (V187): the resolution override, bound right after the agent columns in every insert and update. NULL is
            "use the channel's setting". */
         AddNullableBool(command, row.SendResolutions);
+        /* #6036: the fallback route, bound last (D8 of #5632 Phase C). NULL is none. */
+        AddNullableInt(command, row.FallbackRouteId);
     }
 
     /// <summary>The <c>smallint</c> <c>agent_level</c>: a value, or SQL NULL for "inherit".</summary>
@@ -354,6 +431,7 @@ WHERE route_id = $1";
         AgentLeaseMinutes = reader.GetInt32(15),
         AgentExpiryMinutes = reader.GetInt32(16),
         SendResolutions = reader.IsDBNull(17) ? null : reader.GetBoolean(17),
+        FallbackRouteId = reader.IsDBNull(18) ? null : reader.GetInt32(18),
     };
 
     /// <summary>The secret-free reader: the four carved destinations stay empty (the seat cannot author them
@@ -378,6 +456,7 @@ WHERE route_id = $1";
         AgentLeaseMinutes = reader.GetInt32(11),
         AgentExpiryMinutes = reader.GetInt32(12),
         SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
+        FallbackRouteId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
     };
 }
 
@@ -426,6 +505,16 @@ public sealed class NotificationRouteRow
     /// <summary>Whether this route's destinations get an alert's resolution (#5825): null uses each channel's setting,
     /// true always sends it, false never does.</summary>
     public bool? SendResolutions { get; set; }
+
+    /// <summary>The route an expired investigation request goes to first (#6036, D8 of #5632 Phase C), or null for none.
+    /// Never the route itself; the delete clears it when that route is deleted.</summary>
+    public int? FallbackRouteId { get; set; }
+
+    /// <summary>The fallback route's name (its match), filled by the read; display only.</summary>
+    public string? FallbackRouteName { get; set; }
+
+    /// <summary>The grid's Fallback cell: the fallback route's number and match, or blank for none.</summary>
+    public string FallbackDisplay => FallbackRouteId is not { } id ? "" : $"#{id} {FallbackRouteName ?? "(missing)"}";
 
     /// <summary>The Scope column: "All servers", the server's display name or the tag path. Filled by the window from the
     /// registry and the tag tree (<see cref="ViewerNotificationRouteScope.ScopeText"/>); not stored.</summary>
@@ -506,6 +595,8 @@ public sealed class NotificationRouteRow
         AgentLeaseMinutes = AgentLeaseMinutes,
         AgentExpiryMinutes = AgentExpiryMinutes,
         SendResolutions = SendResolutions,
+        FallbackRouteId = FallbackRouteId,
+        FallbackRouteName = FallbackRouteName,
         ScopeDisplay = ScopeDisplay,
         StatusDisplay = StatusDisplay,
     };

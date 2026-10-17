@@ -1611,6 +1611,19 @@ GRANT UPDATE (slack_send_resolutions, teams_send_resolutions, generic_send_resol
 -- presence column, never the URLs. The BEACON is covered: trg_bump_notification_routes -> config_bump_version
 -- (SECURITY INVOKER) UPDATEs config_service.config_version AS mcp, which the two-column grant above serves.
 GRANT UPDATE (enabled, modified_at), DELETE ON {config}.config_notification_routes TO {mcp};
+-- #6036 (V193): set_notification_route_fallback writes the fallback route id, a pointer to another route (never a
+-- destination). Guarded on the column, so a store below V193 still commits the rest; delete_notification_route clears
+-- the references to the deleted route with the same grant.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('{config}.config_notification_routes')
+                AND attname = 'fallback_route_id' AND NOT attisdropped) THEN
+      EXECUTE $v193f$
+GRANT UPDATE (fallback_route_id) ON {config}.config_notification_routes TO {mcp};
+$v193f$;
+   END IF;
+END $$;
 
 -- 9. Server onboarding (the MCP server-admin write tools): the mcp role's monitored-server writes, mirroring
 --    sections 7/8's model (an EXPLICIT single-table statement, NO ALTER DEFAULT PRIVILEGES). add_servers /

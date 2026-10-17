@@ -94,7 +94,7 @@ public partial class NotificationRoutesWindow : Window
 
     private async void AddRoute_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new NotificationRouteEditDialog(_scopeInputs) { Owner = this };
+        var dialog = new NotificationRouteEditDialog(_scopeInputs, null, null, _routes) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -148,7 +148,7 @@ public partial class NotificationRoutesWindow : Window
             return;
         }
 
-        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected, _dataService) { Owner = this };
+        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected, _dataService, _routes) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
