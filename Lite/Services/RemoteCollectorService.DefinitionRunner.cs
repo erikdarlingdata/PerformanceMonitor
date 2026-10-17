@@ -1277,6 +1277,10 @@ public partial class RemoteCollectorService
             }
         }
 
+        /* #5990: the batch's query-tag sightings, after the appender flushed. One statement, none for a batch with no
+           sightings, and failure-isolated: a failed write logs and the collection is unaffected. */
+        WriteQueryTagSightings(duckConnection, definition, rows, serverId);
+
         return rowsWritten;
     }
 

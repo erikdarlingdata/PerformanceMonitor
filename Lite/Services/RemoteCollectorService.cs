@@ -626,6 +626,9 @@ public partial class RemoteCollectorService
             return;
         }
 
+        /* #5990: the query-tag map, once per round: rebuilt when the rules moved, otherwise extended for new sightings. */
+        await RunQueryTagMapPassAsync(cancellationToken);
+
         await RunPostCollectionCheckpointAsync(LocalDataService.WriteLockBudget, cancellationToken);
     }
 
