@@ -13,7 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
+import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
 import { buildTagGroups, cardMatches } from "../fleet-groups.js";
@@ -102,15 +102,7 @@ function tagPills(c) {
   return el(
     "div",
     { class: "tag-pills" },
-    tags.map((t) => {
-      const safeColour = /^#[0-9a-fA-F]{6}$/.test(t.colour || "") ? t.colour : null;
-      return el("span", {
-        class: "tag-pill",
-        text: t.name,
-        title: t.name,
-        style: safeColour ? "background:" + safeColour : null,
-      });
-    })
+    tags.map((t) => tagPill(t.name, t.colour))
   );
 }
 

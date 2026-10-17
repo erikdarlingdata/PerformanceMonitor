@@ -31,7 +31,7 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class QueryTagReadsLiveTests
 {
-    private const string ServerName = "darling-query-tag-reads-e2e";
+    internal const string ServerName = "darling-query-tag-reads-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private const string Db = "TagDb";
     private const string Hog = "0xTAGHOG";
@@ -39,7 +39,7 @@ public sealed class QueryTagReadsLiveTests
     private const string Bat = "0xTAGBAT";
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static async Task RunAsync(Func<NpgsqlDataSource, CancellationToken, Task> body)
+    internal static async Task RunAsync(Func<NpgsqlDataSource, CancellationToken, Task> body)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live query-tag read tests.");

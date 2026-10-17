@@ -56,7 +56,7 @@ public sealed class TopRankingPagePinTests
     {
         var js = Tab();
         Assert.Contains(
-            "return ranking === \"cpu\" ? params : { ...params, order_by: ranking };",
+            "const ranked = ranking === \"cpu\" ? params : { ...params, order_by: ranking };",
             js, StringComparison.Ordinal);
         /* Every read of the two lists goes through it, so no call site can send order_by (or forget to) on its own. */
         Assert.DoesNotContain("order_by:", js.Replace("{ ...params, order_by: ranking }", ""), StringComparison.Ordinal);

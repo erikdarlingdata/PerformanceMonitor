@@ -1,0 +1,182 @@
+/* #5987: runs the by-tag page (wwwroot/js/pages/query-tag-usage.js) and the CPU tab's Top Queries grid (pages/server-tabs.js) with the shipped
+   panels.js and util.js against a scripted /api/read, and prints as one line of JSON what each asked for and drew. QueryTagUsageBehaviourTests starts it as
+       node query-tag-usage-harness.mjs <path to wwwroot/js>
+   The whole js tree is copied into a scratch folder first (#5279). Only the DOM and fetch are stand-ins. */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const jsDir = process.argv[2];
+
+class FakeNode {
+  constructor(tag, text) {
+    this.style = {};
+    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+    this.tag = tag;
+    this.children = [];
+    this.attrs = {};
+    this.dataset = {};
+    this.listeners = {};
+    this.parent = null;
+    this._text = text == null ? "" : String(text);
+    this.className = "";
+    this.value = "";
+  }
+  get parentNode() { return this.parent; }
+  get isConnected() { let n = this; while (n.parent) n = n.parent; return n.isRoot === true; }
+  closest(tag) { for (let n = this; n; n = n.parent) if (n.tag === tag) return n; return null; }
+  get firstChild() { return this.children[0] || null; }
+  get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  appendChild(c) {
+    if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c);
+    c.parent = this;
+    this.children.push(c);
+    return c;
+  }
+  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; return c; }
+  addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
+  fire(t, e = {}) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {}, target: this, ...e }); }
+}
+globalThis.Node = FakeNode;
+globalThis.document = {
+  body: new FakeNode("body"),
+  createElement: (t) => new FakeNode(t),
+  createElementNS: (ns, t) => new FakeNode(t),
+  createTextNode: (t) => new FakeNode("#text", t),
+  addEventListener() {},
+  removeEventListener() {},
+};
+globalThis.location = { hash: "#/server/a/cpu" };
+
+const ROWS = [
+  { query_hash: "0x1", database_name: "db1", query_text: "select 1", tag: "Prod / Web", total_cpu_ms: 5, execution_count: 2 },
+  { query_hash: "0x2", database_name: "db1", query_text: "select 2", total_cpu_ms: 4, execution_count: 1 },
+  { query_hash: "0x3", database_name: "db1", query_text: "select 3", tag: "Batch", total_cpu_ms: 3, execution_count: 1 },
+];
+const fig = (cpu, ex) => ({ cpu_ms: cpu, duration_ms: cpu * 2, logical_reads: cpu * 10, logical_writes: 0, executions: ex });
+const planCache = (serverName, tagOnly) => {
+  const b = {
+    section: "plan_cache", status: "ok", source: "collect.query_stats",
+    tag_rows: tagOnly
+      ? [{ tag_id: 7, tag: "Web", path: "Prod / Web", own: fig(5, 2), subtree: fig(5, 2) }]
+      : [{ tag_id: 3, tag: "Prod", path: "Prod", own: fig(0, 0), subtree: fig(5, 2) }, { tag_id: 7, tag: "Web", path: "Prod / Web", own: fig(5, 2), subtree: fig(5, 2) }],
+    total: fig(tagOnly ? 5 : 9, tagOnly ? 2 : 4),
+  };
+  if (!tagOnly) b.untagged = fig(4, 2);
+  else b.total_scope = "tag_subtree";
+  if (serverName) b.server = serverName;
+  return b;
+};
+const deadlocks = () => ({ section: "deadlocks", status: "empty", message: "No deadlock graphs in the window.", tag_rows: [], total: { deadlocks: 0, processes: 0 }, untagged: { deadlocks: 0, processes: 0 } });
+
+const asks = [];
+const answerFor = (name, q) => {
+  if (name === "list_servers") return { servers: [{ server_name: "a", display_name: "Server A", engine_kind: "sqlserver" }, { server_name: "b" }] };
+  if (name === "list_query_tags") return { status: "ok", tags: [{ tag_id: 3, name: "Prod", path: "Prod", colour: "#4E79A7" }, { tag_id: 7, name: "Web", path: "Prod / Web", colour: "#59A14F" }, { tag_id: 8, name: "Batch", path: "Batch", colour: null }] };
+  if (name === "get_resource_use_by_tag") {
+    const tagOnly = !!q.get("tag");
+    const fleet = !q.get("server");
+    const sections = fleet
+      ? [{ section: "plan_cache", status: "ok", source: "collect.query_stats", servers: [planCache("a", tagOnly), planCache("b", tagOnly)], fleet_total: fig(18, 8) }, deadlocks()]
+      : [planCache(null, tagOnly), deadlocks()];
+    return { scope: fleet ? "fleet" : "server", hours_back: 24, sections_additive: false, sections };
+  }
+  if (name === "get_top_queries_by_cpu") {
+    const tag = q.get("tag");
+    const rows = !tag ? ROWS : tag === "untagged" ? ROWS.filter((r) => !r.tag) : ROWS.filter((r) => r.tag === tag || (r.tag || "").startsWith(tag + " / "));
+    return { server: "a", hours_back: 24, tier_used: "raw", queries: rows };
+  }
+  return {};
+};
+globalThis.fetch = async (url) => {
+  const u = new URL(String(url), "http://viewer.test");
+  const name = u.pathname.replace("/api/read/", "");
+  asks.push({ name, q: Object.fromEntries(u.searchParams) });
+  return { status: 200, ok: true, text: async () => JSON.stringify(answerFor(name, u.searchParams)) };
+};
+process.on("unhandledRejection", () => {});
+
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "query-tag-usage-"));
+let modules;
+try {
+  fs.cpSync(jsDir, scratch, { recursive: true });
+  fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
+  const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
+  modules = { util: await load("util.js"), tabs: await load(path.join("pages", "server-tabs.js")), page: await load(path.join("pages", "query-tag-usage.js")) };
+} finally {
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
+const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
+const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
+const readsOf = (name) => asks.filter((a) => a.name === name).map((a) => a.q);
+const out = {};
+
+/* The by-tag page. */
+{
+  const main = new FakeNode("main");
+  main.isRoot = true;
+  modules.page.renderQueryTagUsage(main);
+  await flush();
+  const cardOfSection = (s) => all(main).find((n) => n.attrs["data-section"] === s);
+  const rowsOf = (card) => all(card).filter((n) => n.tag === "tr").map((tr) => tr.children.map((td) => td.textContent));
+  out.firstRead = readsOf("get_resource_use_by_tag")[0];
+  out.deadlockText = cardOfSection("deadlocks").textContent;
+  const sel = all(main).find((n) => n.tag === "select" && n.attrs["aria-label"] === "Server");
+  out.serverOptions = all(sel).filter((n) => n.tag === "option").map((o) => o.attrs.value);
+  /* The page opens on Fleet: no server in the read, and a block per server. */
+  out.fleetRead = out.firstRead;
+  out.fleetText = cardOfSection("plan_cache").textContent;
+
+  /* One server: its own table, with each tag, untagged and the total. */
+  asks.length = 0;
+  sel.value = "a";
+  sel.fire("change");
+  await flush();
+  out.serverRead = readsOf("get_resource_use_by_tag")[0];
+  out.planRows = rowsOf(cardOfSection("plan_cache"));
+
+  /* A click on a tag opens its subtree: the read is sent that tag's id. */
+  asks.length = 0;
+  const link = all(main).find((n) => n.className === "tag-link" && n.textContent === "Prod / Web");
+  link.fire("click");
+  await flush();
+  out.tagRead = readsOf("get_resource_use_by_tag")[0];
+  out.tagRows = rowsOf(cardOfSection("plan_cache"));
+}
+
+/* The grid. */
+{
+  const cpu = modules.tabs.SERVER_TABS.find((t) => t.id === "cpu");
+  const root = new FakeNode("main");
+  root.isRoot = true;
+  modules.util.mount(root, cpu.build("a", { hours: 24, label: "last 24 hours" }));
+  await flush();
+  const gridRows = () => {
+    const card = all(root).find((n) => n.className && /\bpanel\b/.test(n.className) && all(n).some((c) => c.tag === "h3" && c.textContent.startsWith("Top Queries by")));
+    return all(card).filter((n) => n.tag === "tbody").flatMap((tb) => tb.children.map((tr) => ({ text: tr.textContent, pills: all(tr).filter((c) => c.className === "tag-pill").map((p) => p.textContent) })));
+  };
+  out.gridFirstAsk = readsOf("get_top_queries_by_cpu")[0];
+  out.gridFirst = gridRows();
+  const sel = all(root).find((n) => n.tag === "select" && n.attrs["aria-label"] === "Tag" && all(n).some((o) => o.attrs.value === "Prod / Web"));
+  out.tagOptions = all(sel).filter((n) => n.tag === "option").map((o) => o.attrs.value);
+  asks.length = 0;
+  const pick = all(root).filter((n) => n.tag === "select" && n.attrs["aria-label"] === "Tag")[0];
+  pick.value = "Prod / Web";
+  pick.fire("change");
+  await flush();
+  out.gridTagAsk = readsOf("get_top_queries_by_cpu").at(-1);
+  out.gridTagged = gridRows();
+  const pick2 = all(root).filter((n) => n.tag === "select" && n.attrs["aria-label"] === "Tag")[0];
+  asks.length = 0;
+  pick2.value = "untagged";
+  pick2.fire("change");
+  await flush();
+  out.gridUntaggedAsk = readsOf("get_top_queries_by_cpu").at(-1);
+  out.gridUntagged = gridRows();
+}
+console.log(JSON.stringify(out));

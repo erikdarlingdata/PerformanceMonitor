@@ -58,6 +58,7 @@ import { getSession, listViews } from "./views-api.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderManageTags } from "./pages/manage-tags.js";
 import { renderManageQueryTags } from "./pages/manage-query-tags.js";
+import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
 import { refreshAttention, onChange as onLocalChange } from "./viewer-local.js";
 import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
@@ -123,6 +124,7 @@ function currentRoute() {
   }
   if (h === "#/manage-tags") return { name: "manageTags" };
   if (h === "#/manage-query-tags") return { name: "manageQueryTags" };
+  if (h === "#/query-tag-usage") return { name: "queryTagUsage" };
   if (h === "#/job-history" || h === "#/job-history/") return { name: "jobHistory" };
   return { name: "fleet" };
 }
@@ -198,6 +200,7 @@ function route(opts) {
   else if (r.name === "muteRules") renderMuteRules(main, r.query);
   else if (r.name === "manageTags") renderManageTags(main);
   else if (r.name === "manageQueryTags") renderManageQueryTags(main);
+  else if (r.name === "queryTagUsage") renderQueryTagUsage(main);
   else if (r.name === "jobHistory") renderJobHistory(main);
   else renderFleet(main);
 }
@@ -216,6 +219,7 @@ function navKeyFor(r) {
   if (r.name === "muteRules") return "mute-rules";
   if (r.name === "manageTags") return "manage-tags";
   if (r.name === "manageQueryTags") return "manage-query-tags";
+  if (r.name === "queryTagUsage") return "query-tag-usage";
   if (r.name === "jobHistory") return "job-history";
   return r.name;
 }
