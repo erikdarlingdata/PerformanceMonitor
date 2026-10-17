@@ -59,6 +59,14 @@ public sealed class McpQueryTools
                 ? $"lifetime max_dop >= {minMaxDop} (applied in SQL before the top-{top} ranking; the page is the top-{top} of the parallel population)"
                 : null;
 
+            /* #5984 round 1 (Darling's twin): a tag that cut the population is named in filter_applied beside the parallel floor, so a
+               tag-only call never publishes null over a population the tag shaped. A call without a tag is unchanged. */
+            if (tagScope.Named is { } queryTagName)
+            {
+                var tagText = $"query tag '{queryTagName}' (applied in SQL before the top-{top} ranking)";
+                filterApplied = filterApplied is null ? tagText : filterApplied + "; " + tagText;
+            }
+
             /* #4793: the ranking read floors last_execution_time, a stamp on THIS server's wall clock, at the
                window's start, so the floor needs THIS server's clock. It used to get none and floored at the
                UTC number: west of UTC a query last run early in the window was dropped, east of UTC one from
@@ -305,7 +313,7 @@ public sealed class McpQueryTools
                 total_spills = r.TotalSpills
             });
 
-            return JsonSerializer.Serialize(new
+            return WithTagFilter(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -329,12 +337,28 @@ public sealed class McpQueryTools
                 databases_left_out = DatabasesLeftOut.Named(leftOut),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOut),
                 procedures = result
-            }, McpHelpers.JsonOptions);
+            }, tagScope.Named);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_top_procedures_by_cpu", ex);
         }
+    }
+
+    /// <summary>
+    /// Serializes a payload and, only when a tag shaped the read, adds a <c>tag_filter</c> member naming it: the tag as the caller gave it,
+    /// or <c>untagged</c> (the twin of Darling's #5984 payload member). A call without a tag is unchanged.
+    /// </summary>
+    internal static string WithTagFilter(object payload, string? tagName)
+    {
+        if (tagName is null)
+        {
+            return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+        }
+
+        var node = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+        node["tag_filter"] = tagName;
+        return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>
@@ -465,7 +489,7 @@ public sealed class McpQueryTools
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength
             });
 
-            return JsonSerializer.Serialize(new
+            return WithTagFilter(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -478,7 +502,7 @@ public sealed class McpQueryTools
                     ? "The window reaches further back than this server's raw query_store_stats retains (or this server has been monitored for less time than that), so the older part of it was not read. This tool reads the raw tier only: no rollup carries query_id or plan_id, and plan identity is what it exists to return."
                     : null,
                 queries = result
-            }, McpHelpers.JsonOptions);
+            }, tagScope.Named);
         }
         catch (Exception ex)
         {

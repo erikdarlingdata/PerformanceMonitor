@@ -78,6 +78,7 @@ public sealed class McpSessionTools
                         "empty",
                         $"No active query snapshots on {resolved.ServerName} in the last {hours_back} hour(s) matched "
                         + DescribeActiveQueryFilters(filter, blocking_only, waitFilter)
+                        + (tagScope.Active ? $" (query tag '{tagScope.Requested}')" : "")
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
                         notice.AsHints());
                 }
@@ -123,7 +124,7 @@ public sealed class McpSessionTools
                 query_text_truncated = !full_text && (r.QueryText?.Length ?? 0) > QueryTextPreviewLength
             }).ToList();
 
-            return JsonSerializer.Serialize(new
+            var activePayload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -149,7 +150,15 @@ public sealed class McpSessionTools
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[^1].CollectionTime),
                 newest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[0].CollectionTime),
                 queries = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #5984 round 1 (Darling's twin): the tag is part of the population total_snapshots counts, so filters_applied names it (only when a tag was sent). */
+            if (tagScope.Named is { } sessionTagName && activePayload["filters_applied"] is System.Text.Json.Nodes.JsonObject appliedFilters)
+            {
+                appliedFilters["tag"] = sessionTagName;
+            }
+
+            return activePayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {

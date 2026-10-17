@@ -488,7 +488,7 @@ population AS (
     LEFT JOIN heads h
       ON  h.collection_time = w.collection_time
       AND h.session_id = w.session_id
-    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + (tags?.HashClause("w.query_hash", 5 + dbValues.Count + (waitFilter == null ? 0 : 1), tagValues) ?? "") + @"
+    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + (tags is null ? "" : QueryTagReadScope.HashToken("w.query_hash")) + @"
 )
 SELECT
     p.session_id,
@@ -528,6 +528,11 @@ SELECT
 FROM population p
 ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
 LIMIT $4";
+        if (tags is not null)
+        {
+            command.CommandText = tags.Apply(command.CommandText, 5 + dbValues.Count + (waitFilter == null ? 0 : 1));
+            tagValues.AddRange(tags.ParameterValues);
+        }
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

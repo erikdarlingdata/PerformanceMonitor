@@ -58,6 +58,9 @@ public sealed class QueryTagReadScope
     /// <summary>True when the caller named a tag nobody carries.</summary>
     public bool Unknown { get; }
 
+    /// <summary>The tag that shaped the read: the name as the caller gave it, or <c>untagged</c>. Null when no tag shaped it.</summary>
+    public string? Named => !Active ? null : Untagged ? UntaggedWord : Requested;
+
     /// <summary>True when the filter is the word <c>untagged</c>.</summary>
     public bool Untagged { get; }
 
@@ -82,46 +85,69 @@ public sealed class QueryTagReadScope
         return _object.TryGetValue(new QueryTagObject(database, schema, name).Qualified, out var id) && _paths.TryGetValue(id, out var path) ? path : null;
     }
 
+    /// <summary>The hash token a statement carries at the place its database filter sits: the filter's column holds the stored hash, in the 0x or the decimal form.</summary>
+    public static string HashToken(string hashColumn) => $"/*TAG:hash:{hashColumn}*/";
+
+    /// <summary>The object token: the three columns that build the qualified <c>database.schema.name</c>.</summary>
+    public static string ObjectToken(string databaseColumn, string schemaColumn, string nameColumn) => $"/*TAG:object:{databaseColumn},{schemaColumn},{nameColumn}*/";
+
+    private static readonly System.Text.RegularExpressions.Regex TokenPattern =
+        new(@"/\*TAG:(?<kind>hash|object):(?<cols>[^*]*)\*/", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>The tag ids a filtered read binds, in order, from the parameter number <see cref="Apply"/> was given. Empty when the filter is <c>untagged</c> or none.</summary>
+    public IReadOnlyList<object> ParameterValues => Untagged ? [] : _wanted.OrderBy(i => i).Select(i => (object)i).ToList();
+
     /// <summary>
-    /// An <c>AND ...</c> semi-join over <paramref name="hashExpression"/> (a column holding the stored hash, in the 0x or the decimal
-    /// form), or empty when there is no filter. The row's hash is put in the map's canonical form in SQL and compared by exact text to
-    /// <c>query_tag_map</c>; no key is written into the statement. The tag ids are parameters from <paramref name="firstParameter"/>,
-    /// appended to <paramref name="values"/> (the caller adds them after its own parameters); the server is <c>$1</c>.
+    /// Replaces each token of <paramref name="sql"/> (<see cref="HashToken"/>, <see cref="ObjectToken"/>) with an <c>AND EXISTS</c> (or
+    /// <c>AND NOT EXISTS</c> for <c>untagged</c>) semi-join on the server's <c>query_tag_map</c> rows, which is <c>$1</c>. The tag ids are the
+    /// <see cref="ParameterValues"/> the caller adds after its own parameters, from <paramref name="firstParameter"/>. A hash is put in
+    /// the map's canonical form in SQL and compared by exact text: nothing folds case, and both sides carry the collected text. With no filter the
+    /// text is returned as it came. A requested tag on a statement with no token would serve unfiltered rows under the tag the caller
+    /// asked for, so it throws <see cref="InvalidOperationException"/> naming the statement (the twin of Darling's <c>QueryTagReadJoin.Apply</c>).
     /// </summary>
-    public string HashClause(string hashExpression, int firstParameter, List<object> values)
-    {
-        var trimmed = $"trim({hashExpression})";
-        var canonical = $"(CASE WHEN {trimmed} LIKE '0x%' THEN {trimmed} "
-            + $"WHEN TRY_CAST({trimmed} AS UBIGINT) IS NOT NULL THEN '0x' || upper(lpad(to_hex(TRY_CAST({trimmed} AS UBIGINT)), 16, '0')) "
-            + $"ELSE {trimmed} END)";
-        return Clause("hash", canonical, firstParameter, values);
-    }
-
-    /// <summary>The same over the qualified object name built from the three columns, exact text.</summary>
-    public string ObjectClause(string databaseColumn, string schemaColumn, string nameColumn, int firstParameter, List<object> values) =>
-        Clause("object", $"(COALESCE({databaseColumn}, '') || '.' || COALESCE({schemaColumn}, '') || '.' || COALESCE({nameColumn}, ''))", firstParameter, values);
-
-    private string Clause(string kind, string expression, int firstParameter, List<object> values)
+    public string Apply(string sql, int firstParameter)
     {
         if (!Active)
         {
-            return string.Empty;
+            return sql;
         }
 
-        var map = $"SELECT 1 FROM query_tag_map m WHERE m.server_id = $1 AND m.key_kind = '{kind}' AND m.key = {expression}";
-        if (Untagged)
+        if (!sql.Contains("/*TAG:", StringComparison.Ordinal))
         {
-            return $" AND NOT EXISTS ({map})";
+            var head = sql.TrimStart();
+            throw new InvalidOperationException(
+                "A query tag was requested but the statement carries no /*TAG:...*/ token to apply it at: "
+                + (head.Length > 80 ? head[..80] + "..." : head));
         }
 
-        var marks = new List<string>();
-        foreach (var id in _wanted.OrderBy(i => i))
+        return TokenPattern.Replace(sql, match =>
         {
-            marks.Add("$" + (firstParameter + values.Count));
-            values.Add(id);
-        }
+            var cols = match.Groups["cols"].Value.Split(',', StringSplitOptions.TrimEntries);
+            string kind;
+            string expression;
+            if (match.Groups["kind"].Value == "object")
+            {
+                kind = "object";
+                expression = $"(COALESCE({cols[0]}, '') || '.' || COALESCE({cols[1]}, '') || '.' || COALESCE({cols[2]}, ''))";
+            }
+            else
+            {
+                kind = "hash";
+                var trimmed = $"trim({cols[0]})";
+                expression = $"(CASE WHEN {trimmed} LIKE '0x%' THEN {trimmed} "
+                    + $"WHEN TRY_CAST({trimmed} AS UBIGINT) IS NOT NULL THEN '0x' || upper(lpad(to_hex(TRY_CAST({trimmed} AS UBIGINT)), 16, '0')) "
+                    + $"ELSE {trimmed} END)";
+            }
 
-        return $" AND EXISTS ({map} AND m.tag_id IN ({string.Join(", ", marks)}))";
+            var map = $"SELECT 1 FROM query_tag_map m WHERE m.server_id = $1 AND m.key_kind = '{kind}' AND m.key = {expression}";
+            if (Untagged)
+            {
+                return $" AND NOT EXISTS ({map})";
+            }
+
+            var marks = Enumerable.Range(0, _wanted.Count).Select(i => "$" + (firstParameter + i));
+            return $" AND EXISTS ({map} AND m.tag_id IN ({string.Join(", ", marks)}))";
+        });
     }
 
     /// <summary>The message a read answers with when its <c>tag</c> names no tag.</summary>

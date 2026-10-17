@@ -52,7 +52,10 @@ public sealed class LiteQueryTagRollupTests : IClassFixture<SharedDuckDbFixture>
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static DateTime Ago(int minutes) => DateTime.UtcNow.AddMinutes(-minutes);
+    /* One clock for the whole test (#3676): every seeded stamp and the read window come from this instant. */
+    private readonly DateTime _now = DateTime.UtcNow;
+
+    private DateTime Ago(int minutes) => _now.AddMinutes(-minutes);
 
     private Task PlanAsync(int server, string hash, long cpuUs, long executions = 1) => ExecAsync(
         "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes) VALUES ($1, $2, $3, 'x', 'db1', $4, $5, $6, $6, 10, 1)",
@@ -67,7 +70,7 @@ public sealed class LiteQueryTagRollupTests : IClassFixture<SharedDuckDbFixture>
         "<deadlock><process-list>" + string.Concat(apps.Select((a, i) => $"<process id=\"p{i}\" clientapp=\"{a}\" loginname=\"lg\" hostname=\"h\" currentdbname=\"db1\" />")) + "</process-list></deadlock>");
 
     private async Task<QueryTagRollupData> ReadAsync() =>
-        await _service.GetQueryTagRollupDataAsync(Scope.Select(s => s.Id).ToList(), Ago(120), DateTime.UtcNow);
+        await _service.GetQueryTagRollupDataAsync(Scope.Select(s => s.Id).ToList(), Ago(120), _now);
 
     private static Dictionary<string, object?> Plan(QueryTagRollupData data, IReadOnlyList<(int Id, string Name)> scope, bool all, int? tag = null) =>
         QueryTagRollup.Section(QueryTagRollupSection.PlanCache, data.Sections["plan_cache"], scope, all, data.Tags, tag, 25);

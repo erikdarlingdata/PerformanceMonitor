@@ -275,13 +275,14 @@ ORDER BY p.page_ord";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
         /* #5992: the query tag filter rides the same place as the database filter, before the ranking and the cap. */
         var tagValues = new List<object>();
-        dbClause += tags?.HashClause("query_hash", 7 + dbValues.Count, tagValues) ?? "";
+        if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
 
         /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
         async Task<(List<QueryStatsRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
         {
         using var command = connection.CreateCommand();
         command.CommandText = TopQueriesByCpuSql(dbClause, candidates);
+        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 7 + dbValues.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -1053,11 +1054,16 @@ FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + (tags?.ObjectClause("database_name", "schema_name", "object_name", 6 + dbValues.Count + excludeValues.Count, tagValues) ?? "") + @"
+AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + (tags is null ? "" : QueryTagReadScope.ObjectToken("database_name", "schema_name", "object_name")) + @"
 GROUP BY database_name, schema_name, object_name, object_type
 HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
 ORDER BY SUM(delta_worker_time) DESC
 LIMIT $4";
+        if (tags is not null)
+        {
+            command.CommandText = tags.Apply(command.CommandText, 6 + dbValues.Count + excludeValues.Count);
+            tagValues.AddRange(tags.ParameterValues);
+        }
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

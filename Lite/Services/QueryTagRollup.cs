@@ -199,10 +199,10 @@ public static class QueryTagRollup
     }
 
     /// <summary>A section with no rows in the window: all figures zero, status <c>empty</c>.</summary>
-    public static Dictionary<string, object?> Empty(QueryTagRollupSection section, string message, string status = "empty")
+    public static Dictionary<string, object?> Empty(QueryTagRollupSection section, string message, string status = "empty", int? tagFilter = null)
     {
         var zeros = Figures(new double[section.Measures.Count], section);
-        return new Dictionary<string, object?>
+        var result = new Dictionary<string, object?>
         {
             ["section"] = section.Name,
             ["status"] = status,
@@ -210,16 +210,43 @@ public static class QueryTagRollup
             ["tag_rows"] = new List<object>(),
             ["tag_rows_total"] = 0,
             ["truncated"] = false,
-            ["untagged"] = zeros,
-            ["total"] = zeros,
         };
+
+        /* Under a tag filter there is no untagged row and the total is the tag's subtree, as in Shape. */
+        if (tagFilter is not null)
+        {
+            result["total_scope"] = "tag_subtree";
+        }
+        else
+        {
+            result["untagged"] = zeros;
+        }
+
+        result["total"] = zeros;
+        return result;
     }
 
-    /// <summary>The totals across all of a section's facts, for the fleet line.</summary>
-    public static Dictionary<string, object> FleetTotal(QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts)
+    /// <summary>True when <paramref name="tagId"/> is the filtered tag or sits under it. With no filter every fact counts.</summary>
+    public static bool IsUnderTag(int? tagId, IReadOnlyList<QueryTagRow> tags, int? tagFilter)
+    {
+        if (tagFilter is not int filter)
+        {
+            return true;
+        }
+
+        var byId = tags.ToDictionary(t => t.Id);
+        return tagId is int id && byId.ContainsKey(id) && SelfAndAncestors(id, byId).Contains(filter);
+    }
+
+    /// <summary>
+    /// The totals across a section's facts, for the fleet line. With a tag filter it is the sum of the per-server tagged totals (the
+    /// facts under the tag), the same predicate each server's own <c>total</c> uses; untagged and other tags' facts are left out.
+    /// </summary>
+    public static Dictionary<string, object> FleetTotal(
+        QueryTagRollupSection section, IReadOnlyList<QueryTagRollupFact> facts, IReadOnlyList<QueryTagRow> tags, int? tagFilter)
     {
         var total = new double[section.Measures.Count];
-        foreach (var fact in facts)
+        foreach (var fact in facts.Where(f => IsUnderTag(f.TagId, tags, tagFilter)))
         {
             total = Combine(total, fact.Values, section);
         }
@@ -227,8 +254,27 @@ public static class QueryTagRollup
         return Figures(total, section);
     }
 
-    public static Dictionary<string, object> FleetDeadlockTotal(IReadOnlyList<QueryTagDeadlockFact> facts) =>
-        Figures([facts.Count, facts.Sum(f => (double)(f.ProcessesByTag.Values.Sum() + f.UntaggedProcesses))], QueryTagRollupSection.Deadlocks);
+    /// <summary>The fleet line of the deadlock section; with a tag filter, the graphs with a process under the tag and those processes.</summary>
+    public static Dictionary<string, object> FleetDeadlockTotal(IReadOnlyList<QueryTagDeadlockFact> facts, IReadOnlyList<QueryTagRow> tags, int? tagFilter)
+    {
+        if (tagFilter is null)
+        {
+            return Figures([facts.Count, facts.Sum(f => (double)(f.ProcessesByTag.Values.Sum() + f.UntaggedProcesses))], QueryTagRollupSection.Deadlocks);
+        }
+
+        double graphs = 0, processes = 0;
+        foreach (var fact in facts)
+        {
+            var under = fact.ProcessesByTag.Where(p => IsUnderTag(p.Key, tags, tagFilter)).Sum(p => (double)p.Value);
+            if (under > 0)
+            {
+                graphs++;
+                processes += under;
+            }
+        }
+
+        return Figures([graphs, processes], QueryTagRollupSection.Deadlocks);
+    }
 
     /// <summary>One section for one server's facts, or for the all-servers view (a block per server and a <c>fleet_total</c>).</summary>
     public static Dictionary<string, object?> Section(
@@ -236,9 +282,9 @@ public static class QueryTagRollup
         bool allServers, IReadOnlyList<QueryTagRow> tags, int? tagFilter, int limit, string? unavailableReason = null)
     {
         Dictionary<string, object?> One(IReadOnlyList<QueryTagRollupFact> mine) => unavailableReason is not null
-            ? Empty(section, unavailableReason, "unavailable")
+            ? Empty(section, unavailableReason, "unavailable", tagFilter)
             : mine.Count == 0
-                ? Empty(section, "No rows in the window.")
+                ? Empty(section, "No rows in the window.", "empty", tagFilter)
                 : Assemble(section, mine, tags, tagFilter, limit);
 
         if (!allServers)
@@ -261,7 +307,7 @@ public static class QueryTagRollup
             ["status"] = unavailableReason is not null ? "unavailable" : facts.Count == 0 ? "empty" : "ok",
             ["message"] = unavailableReason,
             ["servers"] = servers,
-            ["fleet_total"] = FleetTotal(section, facts),
+            ["fleet_total"] = FleetTotal(section, facts, tags, tagFilter),
         };
     }
 
@@ -289,8 +335,8 @@ public static class QueryTagRollup
             }
 
             var empty = unavailableReason is not null
-                ? Empty(QueryTagRollupSection.Deadlocks, unavailableReason, "unavailable")
-                : Empty(QueryTagRollupSection.Deadlocks, "No deadlock graphs in the window.");
+                ? Empty(QueryTagRollupSection.Deadlocks, unavailableReason, "unavailable", tagFilter)
+                : Empty(QueryTagRollupSection.Deadlocks, "No deadlock graphs in the window.", "empty", tagFilter);
             empty["unparsed_graphs"] = 0;
             return empty;
         }
@@ -320,7 +366,7 @@ public static class QueryTagRollup
             ["rows_add_up_to_total"] = false,
             ["note"] = "A deadlock is counted once for each tag among its processes, so the deadlock rows do not add up to the total.",
             ["servers"] = servers,
-            ["fleet_total"] = FleetDeadlockTotal(facts),
+            ["fleet_total"] = FleetDeadlockTotal(facts, tags, tagFilter),
         };
     }
 }

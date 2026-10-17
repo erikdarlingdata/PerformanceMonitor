@@ -133,7 +133,7 @@ public sealed class McpLongQueryTools
                     tag = tagScope.TagOfHash(r.QueryHash)
                 });
 
-            return JsonSerializer.Serialize(new
+            return McpQueryTools.WithTagFilter(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -154,7 +154,7 @@ public sealed class McpLongQueryTools
                 newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "duration_ms_desc",
                 completions = result
-            }, McpHelpers.JsonOptions);
+            }, tagScope.Named);
         }
         catch (Exception ex)
         {

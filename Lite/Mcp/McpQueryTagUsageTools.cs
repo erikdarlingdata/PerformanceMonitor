@@ -21,7 +21,7 @@ public sealed class McpQueryTagUsageTools
     private const int DefaultLimit = 25;
     private const int MaxLimit = 200;
 
-    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for all servers. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. The all-servers answer lists each server and gives fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window.")]
+    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for all servers. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. The all-servers answer lists each server and gives fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the section's source table does not exist in this store. A tag that exists but matches no row in the window gives a top-level empty with a message saying so. The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
     public static async Task<string> GetResourceUseByTag(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -72,7 +72,12 @@ public sealed class McpQueryTagUsageTools
             }
 
             var sections = new List<object>();
-            var anyData = data.Deadlocks.Count > 0;
+            /* With a tag set, "data" means data under that tag: a tag that exists but matches nothing is an empty answer with its own
+               message, not data with every section ok and zero rows (#6023 review). anyUnfiltered says the window held rows at all. */
+            var anyUnfiltered = data.Deadlocks.Count > 0;
+            var anyData = tagFilter is null
+                ? data.Deadlocks.Count > 0
+                : data.Deadlocks.Any(d => d.ProcessesByTag.Keys.Any(k => QueryTagRollup.IsUnderTag(k, data.Tags, tagFilter)));
             var notServed = new List<(string Section, string Reason)>();
             foreach (var section in new[]
             {
@@ -81,7 +86,8 @@ public sealed class McpQueryTagUsageTools
             })
             {
                 var facts = data.Sections[section.Name];
-                anyData |= facts.Count > 0;
+                anyUnfiltered |= facts.Count > 0;
+                anyData |= facts.Any(f => QueryTagRollup.IsUnderTag(f.TagId, data.Tags, tagFilter));
                 data.Unavailable.TryGetValue(section.Name, out var why);
                 if (why is not null) notServed.Add((section.Name, why));
                 sections.Add(QueryTagRollup.Section(section, facts, scope, allServers, data.Tags, tagFilter, limit, why));
@@ -112,10 +118,18 @@ public sealed class McpQueryTagUsageTools
             payload["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture);
             payload["tag"] = tagFilter is int id ? data.Tags.First(t => t.Id == id).Name : null;
             payload["sections_additive"] = false;
+            var tagMissed = tagFilter is not null && !anyData && anyUnfiltered;
+            var tagMissText = tagMissed
+                ? $"The window held resource use, but none of it is under query tag '{data.Tags.First(t => t.Id == tagFilter).Name}', so every section is empty for that tag. Drop tag to see what the window holds. "
+                : string.Empty;
             if (notServed.Count > 0)
             {
-                payload["message"] = (anyData ? string.Empty : "No resource use was collected in the window" + (allServers ? " on any server. " : " on this server. "))
+                payload["message"] = tagMissText + (anyData || tagMissed ? string.Empty : "No resource use was collected in the window" + (allServers ? " on any server. " : " on this server. "))
                     + "Sections not served: " + NotServedText(notServed);
+            }
+            else if (tagMissed)
+            {
+                payload["message"] = tagMissText.TrimEnd();
             }
             else if (!anyData)
             {

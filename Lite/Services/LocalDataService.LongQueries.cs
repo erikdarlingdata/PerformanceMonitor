@@ -81,12 +81,13 @@ LIMIT {LongQueryGridCap}";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
         /* #5992: the query tag filter, on the raw rows before the duration ranking and the limit. */
         var tagValues = new List<object>();
-        dbClause += tags?.HashClause("query_hash", 5 + dbValues.Count, tagValues) ?? "";
+        if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
 
         command.CommandText = LongQueryCompletionsSelect + @"
 FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND collection_time <= $3" + dbClause, collectedFrom: "$2") + @" AS ev
 ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
 LIMIT $4";
+        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 5 + dbValues.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
