@@ -100,9 +100,21 @@ public sealed class McpQueryTagUsageTools
             /* Six independent sections answer from the ones they could serve: "unavailable" only when none could be, else "empty" when the
                served ones held no rows, else data. The sections not served are named with why. Lite has no interval tier and no
                Query Store coverage gate, and none of the six source collectors is gated off on any SQL Server edition (so no per-section not_collected, #6023), so a missing table is the one way a section is unavailable here. */
-            if (notServed.Count == sections.Count)
+            if (!anyUnfiltered)
             {
-                return McpHelpers.Status("unavailable", "No section of the roll-up could be read. " + NotServedText(notServed));
+                /* The same one top-level engine question Darling's twin asks (query_stats, one server, only when the window holds no work at
+                   all), so both SKUs wire this read to the same collector (EngineCapabilityReadWiringTests). On every SQL Server edition
+                   Lite collects today it answers null and the empty answer below stands. */
+                if (!allServers)
+                {
+                    var unmet = await McpEngineCapability.NotCollectedStatusAsync(dataService, scope[0].Id, scope[0].Name, "query_stats");
+                    if (unmet != null) return unmet;
+                }
+
+                if (notServed.Count == sections.Count)
+                {
+                    return McpHelpers.Status("unavailable", "No section of the roll-up could be read. " + NotServedText(notServed));
+                }
             }
 
             var payload = new Dictionary<string, object?>();
