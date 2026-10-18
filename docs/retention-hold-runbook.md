@@ -45,6 +45,22 @@ Restart-Service -DisplayName "PerformanceMonitor Darling"    # optional
 .\PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run
 ```
 
+### On Linux, or any host that runs the service as a .NET app (#6071)
+
+`--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim` run on Linux against a
+bring-your-own store (`postgres.connectionString`). Only a managed store needs Windows, because its credential
+is DPAPI-protected. Type the same verbs as `dotnet PerformanceMonitor.Darling.Service.dll <verb>` from the
+install folder, for example in the container:
+
+```bash
+dotnet PerformanceMonitor.Darling.Service.dll --backfill-rollups --dry-run
+dotnet PerformanceMonitor.Darling.Service.dll --backfill-rollups
+```
+
+Run it on the host that holds the store's data directory: the free-space check reads that directory and refuses
+when it does not exist on the machine you run the verb on. A managed store on a non-Windows host is refused with a
+message that says so.
+
 ## Why step 3 is a wait and not a restart
 
 `TimescaleSupport.EnsureRetentionPoliciesAsync` is the only thing that arms a held policy. Until #3812 it

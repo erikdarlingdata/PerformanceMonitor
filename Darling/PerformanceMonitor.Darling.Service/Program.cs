@@ -411,15 +411,11 @@ if (args.Length > 0 && DarlingCliCommands.IsDropXeSessionsVerb(args[0]))
    must materialize the whole history before the first purge reclaims anything, which puts peak disk BEFORE
    any relief. It preflights free space and refuses with numbers rather than filling the volume. Runs while the
    service is up, is resumable, and arms nothing itself. --dry-run prints the plan + estimate and stops.
-   Windows-only in managed mode (the DPAPI owner credential), same guard shape as the verbs above. */
+   NO Windows guard here (#6071): Windows is needed only for a MANAGED store's DPAPI owner credential, and the verb
+   decides that itself (DarlingCliCommands.ManagedStoreCredentialRefusal), so a bring-your-own store runs it on
+   Linux too, --dry-run included. Same posture as --drop-xe-sessions above. */
 if (args.Length > 0 && DarlingCliCommands.IsBackfillRollupsVerb(args[0]))
 {
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("--backfill-rollups requires Windows (DPAPI store credential).");
-        return 1;
-    }
-
     var rest = args.AsSpan(1);
     var dryRun = false;
     string? backfillConfigPath = null;
@@ -440,15 +436,9 @@ if (args.Length > 0 && DarlingCliCommands.IsBackfillRollupsVerb(args[0]))
 }
 
 /* #1912 — repair the pre-#1907 Query Store split slices still in stored rows, then re-materialize what they
-   fed. Same Windows-only managed-credential guard and same --dry-run shape as --backfill-rollups above. */
+   fed. Same managed-credential-only platform check (inside the verb) and same --dry-run shape as --backfill-rollups above. */
 if (args.Length > 0 && DarlingCliCommands.IsCollapseLegacySlicesVerb(args[0]))
 {
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("--collapse-legacy-slices requires Windows (DPAPI store credential).");
-        return 1;
-    }
-
     var rest = args.AsSpan(1);
     var dryRun = false;
     string? collapseConfigPath = null;
@@ -469,15 +459,9 @@ if (args.Length > 0 && DarlingCliCommands.IsCollapseLegacySlicesVerb(args[0]))
 }
 
 /* #2076 — convert the plan dimension's pre-V54 text rows to gzip (#2069's write form), in batches, while
-   the service runs. Same Windows-only managed-credential guard and same --dry-run shape as the verbs above. */
+   the service runs. Same managed-credential-only platform check (inside the verb) and same --dry-run shape as the verbs above. */
 if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
 {
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("--recompress-plan-dim requires Windows (DPAPI store credential).");
-        return 1;
-    }
-
     var (recompressConfigPath, dryRun, vacuumMode, parseError) = DarlingCliCommands.ParseRecompressArgs(args.AsSpan(1));
     if (parseError is not null)
     {

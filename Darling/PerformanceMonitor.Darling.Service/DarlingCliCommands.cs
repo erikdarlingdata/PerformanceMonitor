@@ -439,6 +439,8 @@ public static class DarlingCliCommands
     public static string UsageText() =>
         "PerformanceMonitor Darling service." + Environment.NewLine +
         Environment.NewLine +
+        "On Linux, and anywhere the service runs as a .NET app, type 'dotnet PerformanceMonitor.Darling.Service.dll' where this text says PerformanceMonitor.Darling.Service.exe." + Environment.NewLine +
+        Environment.NewLine +
         "Usage:" + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe                     Run the service (also how the Windows Service Control Manager starts it)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --version, -v       Print the product version and exit." + Environment.NewLine +
@@ -458,8 +460,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight. Runs on Linux against a bring-your-own store; only a managed store needs Windows." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed. Same platform rule as --backfill-rollups." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
@@ -748,6 +750,21 @@ public static class DarlingCliCommands
             return false;
         }
     }
+
+    /// <summary>
+    /// The platform decision for the store verbs that open the store with the owner credential
+    /// (<c>--backfill-rollups</c>, <c>--collapse-legacy-slices</c>, <c>--recompress-plan-dim</c>, #6071). Windows is
+    /// needed only for a MANAGED store, whose credential is DPAPI-protected and only Windows can read. A
+    /// bring-your-own store connects with <c>postgres.connectionString</c> on any platform. Returns null when the verb
+    /// may run, else the refusal text, which says why and what to do. Pure, because
+    /// <see cref="OperatingSystem.IsWindows"/> cannot be faked in a test.
+    /// </summary>
+    internal static string? ManagedStoreCredentialRefusal(string verb, bool isWindows, bool managedStore) =>
+        managedStore && !isWindows
+            ? $"{verb} cannot run on this host: a managed Postgres store keeps its credential in DPAPI, which only Windows can read. "
+                + "Run it on the Windows host the service runs on, or, for a store you run yourself, set postgres.connectionString "
+                + "(and managed to false). A bring-your-own store works on any platform."
+            : null;
 
     /// <summary>
     /// Why a managed store's stored credential could not be read, in the operator's terms (#4744): a Windows Data
@@ -5447,7 +5464,6 @@ public static class DarlingCliCommands
     ///
     /// <para>Returns 0 when the repair completed or had nothing to do, 1 on a load/mode/credential error.</para>
     /// </summary>
-    [SupportedOSPlatform("windows")]
     public static async Task<int> CollapseLegacySlicesAsync(
         string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
@@ -5472,6 +5488,13 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        /* Windows is needed only for a MANAGED store's DPAPI credential (#6071). A bring-your-own store runs here. */
+        if (ManagedStoreCredentialRefusal("--collapse-legacy-slices", OperatingSystem.IsWindows(), postgres.Managed) is { } platformRefusal)
+        {
+            error.WriteLine(platformRefusal);
+            return 1;
+        }
+
         if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
         {
             error.WriteLine(unusable);
@@ -5480,7 +5503,7 @@ public static class DarlingCliCommands
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            error.WriteLine(postgres.Managed
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
                 ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to repair.");
             return 1;
@@ -5835,7 +5858,6 @@ public static class DarlingCliCommands
     /// error or when any row failed round-trip verification (those rows keep their text; re-run after
     /// investigating).</para>
     /// </summary>
-    [SupportedOSPlatform("windows")]
     public static async Task<int> RecompressPlanDimAsync(
         string? configPath, bool dryRun, RecompressVacuumMode vacuumMode, TextWriter output, TextWriter error,
         CancellationToken cancellationToken)
@@ -5861,6 +5883,13 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        /* Windows is needed only for a MANAGED store's DPAPI credential (#6071). A bring-your-own store runs here. */
+        if (ManagedStoreCredentialRefusal("--recompress-plan-dim", OperatingSystem.IsWindows(), postgres.Managed) is { } platformRefusal)
+        {
+            error.WriteLine(platformRefusal);
+            return 1;
+        }
+
         if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
         {
             error.WriteLine(unusable);
@@ -5869,7 +5898,7 @@ public static class DarlingCliCommands
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            error.WriteLine(postgres.Managed
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
                 ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to convert.");
             return 1;
@@ -8204,7 +8233,6 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
     /// <para>Returns 0 when every rollup reached coverage (or already had it), 1 on a load/mode/credential
     /// error, on a preflight refusal, or when any rollup finished short of raw.</para>
     /// </summary>
-    [SupportedOSPlatform("windows")]
     public static async Task<int> BackfillRollupsAsync(
         string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
@@ -8226,6 +8254,13 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
             return 1;
         }
 
+        /* Windows is needed only for a MANAGED store's DPAPI credential (#6071). A bring-your-own store runs here. */
+        if (ManagedStoreCredentialRefusal("--backfill-rollups", OperatingSystem.IsWindows(), postgres.Managed) is { } platformRefusal)
+        {
+            error.WriteLine(platformRefusal);
+            return 1;
+        }
+
         /* Managed reads the service's own DPAPI-protected owner credential; bring-your-own uses the operator's
            configured string. Both are supported — this is a STORE operation, not a Windows one. */
         if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
@@ -8236,7 +8271,7 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            error.WriteLine(postgres.Managed
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
                 ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to back fill.");
             return 1;
