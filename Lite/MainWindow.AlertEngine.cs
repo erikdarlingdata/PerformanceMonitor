@@ -439,10 +439,10 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// The engine's resolution callback: Lite's tray-only "Resolved/Cleared" toasts. The engine
-    /// supplies the pre-forwarding loop's exact title/message strings and already applied the
+    /// The tray half of the engine's resolution callback (wired through <see cref="LiteAlertResolutionRecorder.Callback"/>,
+    /// which writes the resolution history row first, #6010 part 2). The engine supplies the pre-forwarding loop's exact title/message strings and already applied the
     /// old gates (only on an active→inactive transition, never suppressed/disabled); every
-    /// resolution toast was Success severity. No history row is recorded — exactly the old loop.
+    /// resolution toast was Success severity.
     /// </summary>
     private Task ShowAlertResolutionToastAsync(AlertResolution resolution, CancellationToken cancellationToken)
     {

@@ -8789,43 +8789,15 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// of resolutions. The pairing this method exists for is unaffected: the row is still written, still
     /// carries the resolution title, and still reads as resolved.</para>
     /// </summary>
-    public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution, string? contextJson = null) => new(
-        resolution.ServerKey, resolution.ServerName, resolution.Title,
-        CurrentValueText: "resolved", ThresholdValueText: "",
-        NumericCurrentValue: null, NumericThresholdValue: null,
-        Delivery: AlertDelivery.NoChannelApplies(),
-        Muted: false, DetailText: SensitiveStatements.Text(resolution.Message),
-        ContextJson: ResolutionContextJson(contextJson, resolution.MetricName));
+    public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution, string? contextJson = null) =>
+        AlertResolutionRecords.BuildResolutionRecord(resolution, contextJson);
 
-    /// <summary>The member of a resolution row's <c>context_json</c> that names the metric the row resolves (#6003).</summary>
-    public const string ResolvesMember = "Resolves";
+    /// <summary>The member of a resolution row's <c>context_json</c> that names the metric the row resolves (#6003); shared with Lite (#6010).</summary>
+    public const string ResolvesMember = AlertResolutionRecords.ResolvesMember;
 
-    /// <summary>
-    /// A resolution row's <c>context_json</c> (#6003, D7): the caller's context, when it gave one, plus <see cref="ResolvesMember"/>
-    /// naming the FIRING metric. The row's <c>metric_name</c> is the resolution's title ("CPU Resolved"), not the metric that
-    /// fired ("High CPU"), so without this member nothing in the store ties a clear back to the alert it ends, and the
-    /// investigation <c>resolved</c> detector reads exactly this. A context that is not a JSON object is replaced: no writer
-    /// passes one.
-    /// </summary>
-    public static string ResolutionContextJson(string? contextJson, string metricName)
-    {
-        System.Text.Json.Nodes.JsonObject node;
-        try
-        {
-            node = string.IsNullOrWhiteSpace(contextJson)
-                ? new System.Text.Json.Nodes.JsonObject()
-                : System.Text.Json.Nodes.JsonNode.Parse(contextJson) as System.Text.Json.Nodes.JsonObject
-                  ?? new System.Text.Json.Nodes.JsonObject();
-        }
-        catch (JsonException)
-        {
-            /* A resolution context that is not JSON is replaced: the caller's text, not a store read. */
-            node = new System.Text.Json.Nodes.JsonObject();
-        }
-
-        node[ResolvesMember] = metricName;
-        return node.ToJsonString();
-    }
+    /// <summary>A resolution row's <c>context_json</c> (#6003, D7); the one implementation is <see cref="AlertResolutionRecords.ResolutionContextJson"/>, shared with Lite.</summary>
+    public static string ResolutionContextJson(string? contextJson, string metricName) =>
+        AlertResolutionRecords.ResolutionContextJson(contextJson, metricName);
 
     /// <summary>
     /// The explicit "this metric has no measurement" value for the history stores' NOT NULL

@@ -938,8 +938,8 @@ ON CONFLICT (once_key) DO NOTHING";
         return cleared.Count == 0 ? 0 : await ExecAsync(connection, ResolveInsertSql, cancellationToken, now, cleared.Select(id => id.ToString()).ToArray());
     }
 
-    /// <summary>The member of a resolution row's context that names the metric it resolves (Darling's <c>DarlingSelfAlertEvaluator.ResolvesMember</c>).</summary>
-    private const string ResolvesMember = "Resolves";
+    /// <summary>The member of a resolution row's context that names the metric it resolves (the shared <c>AlertResolutionRecords.ResolvesMember</c>, written by both products).</summary>
+    private const string ResolvesMember = PerformanceMonitor.Alerting.AlertResolutionRecords.ResolvesMember;
 
     private static bool ResolvesMetric(string contextJson, string metric)
     {

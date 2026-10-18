@@ -278,6 +278,8 @@ public partial class LiteAlertForwardingTests : IDisposable
         public InMemoryStateStore StateStore { get; } = new();
         public RecordingDeliverer Deliverer { get; } = new();
         public List<AlertResolution> Resolutions { get; } = new();
+        /// <summary>#6010 part 2: runs after a resolution is noted, so a test can wire Lite's real history-row callback.</summary>
+        public Func<AlertResolution, CancellationToken, Task>? ResolutionHook { get; set; }
         public List<FailedJobInfo> FailedJobs { get; } = new();
         public bool Muted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
@@ -291,7 +293,7 @@ public partial class LiteAlertForwardingTests : IDisposable
             Adapter, StateStore, deliverer,
             isAlertMuted: _ => Muted,
             failedJobsFetcher: (_, _, _) => Task.FromResult(new List<FailedJobInfo>(FailedJobs)),
-            resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
+            resolutionCallback: (r, ct) => { Resolutions.Add(r); return ResolutionHook?.Invoke(r, ct) ?? Task.CompletedTask; },
             logger: null,
             utcNow: () => Now);
 

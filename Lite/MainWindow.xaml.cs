@@ -384,7 +384,7 @@ public partial class MainWindow : Window
                    fetcher's seam shape, and the same degrade: every failure is an empty map, so a
                    denied or broken msdb read costs a card its job NAME and never the card. */
                 agentJobStepResolver: FetchAgentJobStepNamesForAlertAsync,
-                resolutionCallback: ShowAlertResolutionToastAsync,
+                resolutionCallback: LiteAlertResolutionRecorder.Callback(_alertHistoryStore, ShowAlertResolutionToastAsync),
                 logger: new AppLoggerAdapter<AlertEngine>(),
                 /* #5715 part B: a Warning delivered before a restart still lets the Critical through at once. */
                 escalationSeedReader: PerformanceMonitor.Alerting.EscalationSeed.ReaderFor(_alertHistoryStore),
