@@ -192,7 +192,7 @@ public sealed class NotificationRouteStoreTests : IDisposable
             while (await reader.ReadAsync()) columns.Add(reader.GetString(0));
         }
 
-        Assert.Equal(19, columns.Count); /* the 14 route columns plus the five agent settings (#5820), which hold numbers only */
+        Assert.Equal(21, columns.Count); /* the 14 route columns plus the five agent settings (#5820) and the signing key flag and rotation end (#6012), which hold numbers and a time only */
         var needles = new[] { "r3-secret", "R3PAGERDUTY", "hooks.slack", "https://", "hook/abc123" };
         foreach (var column in columns)
         {
