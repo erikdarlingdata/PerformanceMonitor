@@ -115,7 +115,7 @@ public partial class LiteAlertForwardingTests
             Assert.Single(h.Deliverer.Outcomes);
 
             /* The fire opens a request for the same server and metric the engine named. */
-            var alert = new InvestigationAlert(1, int.Parse(Key, CultureInfo.InvariantCulture), Name, "cpu", "High CPU",
+            var alert = new InvestigationAlert(1, int.Parse(Key, CultureInfo.InvariantCulture), Name, "resources", "High CPU",
                 DateTime.UtcNow.AddMinutes(-5), new[] { "k-cpu" }, null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
             var opened = await investigations.OpenOrJoinAsync(alert, TestContext.Current.CancellationToken);
             Assert.Equal(InvestigationOpenOutcome.Opened, opened.Outcome);
