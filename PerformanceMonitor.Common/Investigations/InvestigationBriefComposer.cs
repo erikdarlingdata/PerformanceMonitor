@@ -102,6 +102,12 @@ public sealed class InvestigationBriefComposer
         return sources is null ? null : Compose(sources, _tools, _dataDetail.Mode, _utcNow());
     }
 
+    /// <summary>The read rule a brief carries under mcp.dataDetail maskLiterals or metadataOnly (#5632): the compiled parameter
+    /// values are hidden at those levels, and they explain most plan flips.</summary>
+    internal const string ParameterValuesHiddenRule =
+        "Compiled parameter values are hidden at this mcp.dataDetail level, and they explain most plan flips. " +
+        "If a plan conclusion could not check them, say so in your report.";
+
     /// <summary>
     /// Composes the brief for <paramref name="sources"/> at <paramref name="mode"/>, naming only <paramref name="tools"/>' tools.
     /// Pure: no store, no clock.
@@ -173,6 +179,11 @@ public sealed class InvestigationBriefComposer
                 ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "root_cause_found", "evidence"),
             },
         };
+        /* #5632: under maskLiterals and metadataOnly the compiled parameter values are hidden, and they explain most plan flips, so
+           the agent must say in its report when a plan conclusion could not check them. Absent under full, so a full brief is byte
+           for byte as before (Lite's golden pin). */
+        if (mode != McpDataDetail.Full)
+            ((JsonArray)root["read_rules"]!).Add(ParameterValuesHiddenRule);
         /* #5999: the registry's names for the server, read when the brief is composed. display_name is always present on Darling;
            instance_name is absent once the server has left the registry. Lite names both from its server list (#6011). Not host_name: that key is a masked client host (see InvestigationToolCore.RequestPayload). */
         if (request.DisplayName is { } displayName)

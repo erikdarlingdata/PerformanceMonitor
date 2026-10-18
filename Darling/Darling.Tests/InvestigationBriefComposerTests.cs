@@ -95,6 +95,30 @@ public sealed class InvestigationBriefComposerTests
     private static JsonObject Brief(InvestigationBriefSources sources, McpDataDetail mode = McpDataDetail.Full) =>
         JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, mode, Now))!.AsObject();
 
+    /* #5632: the parameter-values line is in the brief under maskLiterals and metadataOnly, and not under full. */
+    [Theory]
+    [InlineData(McpDataDetail.MaskLiterals, true)]
+    [InlineData(McpDataDetail.MetadataOnly, true)]
+    [InlineData(McpDataDetail.Full, false)]
+    public void Brief_SaysCompiledParameterValuesAreHidden_OnlyUnderMaskedLevels(McpDataDetail mode, bool present)
+    {
+        var rules = Brief(Sources(), mode)["read_rules"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray();
+        Assert.Equal(present, rules.Contains(InvestigationBriefComposer.ParameterValuesHiddenRule));
+        if (present)
+            Assert.Contains(rules, r => r.Contains("Compiled parameter values are hidden", StringComparison.Ordinal) && r.Contains("say so in your report", StringComparison.Ordinal));
+    }
+
+    /* #5632: a brief stored at full and served under a masked level gains the same line. */
+    [Fact]
+    public void AStoredFullBrief_ServedMasked_GainsTheParameterValuesLine_OnceOnly()
+    {
+        var stored = InvestigationBriefComposer.Compose(Sources(), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+        var served = InvestigationFieldMasking.StoredBrief(stored, McpDataDetail.MaskLiterals, McpDataDetailMasker.ForAnswer(McpDataDetail.MaskLiterals))!.AsObject();
+        Assert.Equal(1, served["read_rules"]!.AsArray().Count(n => n!.GetValue<string>() == InvestigationBriefComposer.ParameterValuesHiddenRule));
+        var again = InvestigationFieldMasking.StoredBrief(served.ToJsonString(), McpDataDetail.MetadataOnly, McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly))!.AsObject();
+        Assert.Equal(1, again["read_rules"]!.AsArray().Count(n => n!.GetValue<string>() == InvestigationBriefComposer.ParameterValuesHiddenRule));
+    }
+
     /* ---- format numbers (plan section 7) ---- */
 
     [Fact]

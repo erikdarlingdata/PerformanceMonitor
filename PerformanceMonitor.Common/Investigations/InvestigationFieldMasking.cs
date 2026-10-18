@@ -121,6 +121,11 @@ internal static class InvestigationFieldMasking
             }
         }
 
+        /* #5632: a brief stored at full carries no parameter-values line; one served at a weaker level needs it. */
+        if (briefObject["read_rules"] is JsonArray rules
+            && !rules.Any(r => r is JsonValue v && v.TryGetValue(out string? line) && string.Equals(line, InvestigationBriefComposer.ParameterValuesHiddenRule, StringComparison.Ordinal)))
+            rules.Add(InvestigationBriefComposer.ParameterValuesHiddenRule);
+
         briefObject["data_detail"] = McpDataDetailModes.Word(mode);
         return briefObject;
     }
