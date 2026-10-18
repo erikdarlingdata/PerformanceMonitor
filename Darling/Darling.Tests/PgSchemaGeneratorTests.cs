@@ -59,7 +59,8 @@ public sealed class PgSchemaGeneratorTests
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(72, CollectorCatalog.All.Count);
+        /* 73 since #5632: query_store_forced_plans (V195), also a plain table, so the hypertable count stays 71. */
+        Assert.Equal(73, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a

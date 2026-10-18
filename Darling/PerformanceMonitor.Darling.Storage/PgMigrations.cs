@@ -1698,6 +1698,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_query_tag_sightings_key_db
 DROP INDEX IF EXISTS collect.ux_query_tag_sightings_key;";
 
     /// <summary>
+    /// V195 (#5632) - <c>collect.query_store_forced_plans</c>: the plans Query Store has forced, read from <c>sys.query_store_plan</c> by
+    /// <c>QueryStoreForcedPlansCollector</c> every five minutes, one row per forced plan plus ONE all-NULL marker row per captured database
+    /// per pass (so a force that left a captured database reads as REMOVED, not as not captured). A PLAIN table on every store
+    /// (<c>StaysPlainTable</c>: a few rows per database per pass, the grid stays at 72 hypertables), its 30-day retention the time-sliced
+    /// DELETE. Columns and the one index (server_id, collection_time) are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one
+    /// agree; the table is small enough that it also serves the per-database newest-capture read. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent.
+    /// </summary>
+    private const string V195Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_forced_plans (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    plan_id bigint,
+    query_id bigint,
+    query_plan_hash text,
+    plan_forcing_type text,
+    force_failure_count bigint,
+    last_force_failure_reason text,
+    last_execution_time timestamp,
+    last_compile_start_time timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_forced_plans_time ON collect.query_store_forced_plans(server_id, collection_time);";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -2003,6 +2030,7 @@ $rung$;";
         new Migration(192, "query-tags-store", V192Sql),
         new Migration(193, "phase-c-store", V193Sql),
         new Migration(194, "query-tag-sightings-database", V194Sql),
+        new Migration(195, "query-store-forced-plans", V195Sql),
     };
 
     /// <summary>

@@ -290,6 +290,11 @@ BEGIN
             ON collect.query_tag_sightings (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''));
     END IF;
 END $do$;"),
+
+        // /// V195 (#5632): the forced-plans collector table. The table is the probe's newest sentinel (V194's index was until this rung). The
+        // rewind drops it, so a re-run of V195 does everything again. Safe on a store that never had it.
+        new(195, "hasQueryStoreForcedPlans",
+            "DROP TABLE IF EXISTS collect.query_store_forced_plans;"),
     ];
 
     /// <summary>
