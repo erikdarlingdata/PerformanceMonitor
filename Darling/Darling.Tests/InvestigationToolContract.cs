@@ -72,6 +72,7 @@ internal static class InvestigationToolContract
                 P("links", "string?", "null", "Optional JSON array of at most 10 {kind, url, key}; https only. See the guide."),
                 P("family_of", "string?", "null", "Optional. The request_id of the first report in this family; it must exist."),
                 P("queries_run", "string?", "null", "Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + "."),
+                P("follow_up_at", "string?", "null", "Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + "."),
             }),
         ["get_investigation_reports"] = new(
             new[] { "ok", "empty" },
@@ -84,16 +85,15 @@ internal static class InvestigationToolContract
     };
 
     /// <summary>
-    /// The parameters only Darling's tools take, after the shared ones: Darling's submit takes <c>follow_up_at</c> and
-    /// <c>follow_up_condition</c> (#6008, #6009); Lite's does not (#6012). <c>links</c>, <c>family_of</c> and <c>queries_run</c>
-    /// (#5914, #6004) and the basis on <c>evidence</c> are shared since #6011. Darling's test passes this table to
+    /// The parameters only Darling's tools take, after the shared ones: Darling's submit takes <c>follow_up_condition</c>
+    /// (#6009); Lite's does not (Lite opens a time follow-up only, #6012). <c>links</c>, <c>family_of</c> and <c>queries_run</c>
+    /// (#5914, #6004) and the basis on <c>evidence</c> are shared since #6011, and <c>follow_up_at</c> (#6008) since #6012. Darling's test passes this table to
     /// <see cref="Differences"/>; Lite's passes none.
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, ToolParameter[]> DarlingOnlyParameters = new Dictionary<string, ToolParameter[]>(StringComparer.Ordinal)
     {
         ["submit_investigation_report"] = new[]
         {
-            P("follow_up_at", "string?", "null", "Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + "."),
             P("follow_up_condition", "string?", "null", "Optional. Open the follow-up when a module is deployed: " + InvestigationReportFields.FollowUpConditionRule + "."),
         },
     };

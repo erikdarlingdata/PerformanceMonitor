@@ -142,7 +142,7 @@ public sealed class LiteInvestigationFollowUpTests : IDisposable
 
         var (id, refused) = await ReportAsync(99, 1, future);
         Assert.Equal("refused", refused.GetProperty("status").GetString());
-        Assert.Equal("follow_up_at", refused.GetProperty("parameter").GetString());
+        Assert.Equal("follow_up_at", refused.GetProperty("hints").GetProperty("parameter").GetString());
         Assert.Contains("20 pending follow-ups", refused.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal("0", Scalar($"SELECT count(*) FROM investigation_reports WHERE request_id = '{id}'"));
         Assert.Equal("claimed", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{id}'"));
