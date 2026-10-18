@@ -914,9 +914,10 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 7),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 8),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
-           not a read; the check it serves still reads, and counts, exactly as before. */
+           not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
+           rollup's catch, a write after the deadlock read, which counts its own failure. */
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
            since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
@@ -1291,8 +1292,9 @@ public sealed class AlertReadFailureSurfaceTests
            self-alert's wrapper catch, handed its failure record as a parameter. 41st since #5867: the worker's read of that
            record, which holds the standing alert on a failure. 42nd since #5910: the engine's threshold-override
            fallback, an in-memory lookup and not a read. 43rd since #6003: the resolution context parse, the caller's text and
-           not a store read. */
-        Assert.Equal(43, totalExempt);
+           not a store read. 44th since #6005: the deadlock rollup's catch, a write after the deadlock read, which counts its own
+           failure. */
+        Assert.Equal(44, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

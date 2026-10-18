@@ -148,7 +148,9 @@ public sealed class DeadlockRollupLiveTests
                 await SeedDayAsync(h.Connection, Sig(), d, 7, ct);
             }
 
-            await SeedDayAsync(h.Connection, Sig(), 0, 20, ct);
+            /* 13 today plus at most yesterday's 7 (the 24-hour count prorates yesterday by the hour of day) stays under 3 x 7 = 21
+               at any hour; 20 passed only late in the UTC day. */
+            await SeedDayAsync(h.Connection, Sig(), 0, 13, ct);
             Assert.False(await h.Rollup.AllowsAgentRequestAsync(Server, "Deadlocks Detected", ct));
             await SeedDayAsync(h.Connection, Sig("dbo.usp_other"), 3, 1, ct);
             await SeedDayAsync(h.Connection, Sig("dbo.usp_other"), 0, 9, ct);
