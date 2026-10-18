@@ -116,7 +116,8 @@ public sealed class DuckDbInvestigationStoreTests : IDisposable
         Assert.Equal("2|3", Scalar($@"
 SELECT concat_ws('|', alert_count, (SELECT count(*) FROM investigation_request_alerts WHERE request_id = '{first.RequestId}'))
 FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
-        Assert.Equal("2", Scalar("SELECT count(*) FROM investigation_journal WHERE event = 'joined'"));
+        /* #6010: every alert here is the same metric at the default severity, so both joins are quiet. */
+        Assert.Equal("2", Scalar("SELECT count(*) FROM investigation_journal WHERE event = 'joined_quiet'"));
         /* Every alert row has its own id: three on the first request, one each on the other three opens and the last join. */
         Assert.Equal("6|6", Scalar("SELECT concat_ws('|', count(*), count(DISTINCT request_alert_id)) FROM investigation_request_alerts"));
     }
