@@ -482,8 +482,12 @@ public sealed class DarlingMcpPlanForcePrecheckTools
     /// <summary>A test seam for the finding read: the store's own read logs and swallows its failures, so a pin on the throw path needs a read that throws. Null in the service.</summary>
     internal static Func<int, DateTime, CancellationToken, Task<List<AnalysisFinding>>>? FindingReadForTests { get; set; }
 
-    /// <summary>$1 server_id. The registry facts the force gate's <c>enablementIsCollected</c> asks the plan_correction collector about.</summary>
-    internal const string TargetFactsSql = "SELECT sql_engine_edition, sql_major_version, engine_kind FROM servers WHERE server_id = $1";
+    /// <summary>
+    /// $1 server_id. The registry facts the force gate's <c>enablementIsCollected</c> asks the plan_correction collector about.
+    /// <c>postgres_major_version</c> is selected but not read: every SELECT of <c>sql_major_version</c> carries the engine, the
+    /// PostgreSQL major and the edition beside it (<c>EngineAwareVersionLabelTests</c>), and the engine kind decides first here.
+    /// </summary>
+    internal const string TargetFactsSql = "SELECT sql_engine_edition, sql_major_version, engine_kind, postgres_major_version FROM servers WHERE server_id = $1";
 
     /// <summary>
     /// Does the plan_correction collector run for this server (#4770)? The bot asks <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>
