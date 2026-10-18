@@ -147,6 +147,42 @@ FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
         Assert.Null(await _store.ReadRequestAsync(Guid.NewGuid(), Ct));
     }
 
+    /// <summary>#5632: the grouping window slides: an alert joins within 30 minutes of the request's latest alert, up to 4 hours
+    /// after its first. Checked against the old rule (30 minutes after the first alert): the 25- and 50-minute joins and the
+    /// 235-minute join fail on it.</summary>
+    [Fact]
+    public async Task TheWindowSlides_AnAlertJoinsWithin30MinutesOfTheLatest_AndNeverPast4HoursAfterTheFirst()
+    {
+        /* #5632: the window slides. Each alert 25 minutes after the last joins, so the request is 50 minutes old at the third. */
+        var first = (await _store.OpenOrJoinAsync(Alert(T0), Ct)).RequestId!.Value;
+        _now = T0.AddMinutes(25);
+        Assert.Equal(first, (await _store.OpenOrJoinAsync(Alert(_now), Ct)).RequestId);
+        _now = T0.AddMinutes(50);
+        var at50 = await _store.OpenOrJoinAsync(Alert(_now), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Joined, at50.Outcome);
+        Assert.Equal(first, at50.RequestId);
+        /* 35 minutes after the latest alert (at 50): a new request. */
+        _now = T0.AddMinutes(85);
+        var at85 = await _store.OpenOrJoinAsync(Alert(_now), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, at85.Outcome);
+        Assert.NotEqual(first, at85.RequestId);
+        /* The 4-hour cap, on another server with an expiry past it so only the cap decides: an alert every 25 minutes joins up to 235
+           minutes, and one at 245 (10 minutes after the latest, 245 after the first) opens a new request. */
+        _now = T0;
+        var capped = (await _store.OpenOrJoinAsync(Alert(T0, serverId: 9) with { ExpiryMinutes = 600 }, Ct)).RequestId!.Value;
+        for (var minute = 25; minute <= 225; minute += 25)
+        {
+            _now = T0.AddMinutes(minute);
+            Assert.Equal(capped, (await _store.OpenOrJoinAsync(Alert(_now, serverId: 9) with { ExpiryMinutes = 600 }, Ct)).RequestId);
+        }
+        _now = T0.AddMinutes(235);
+        Assert.Equal(capped, (await _store.OpenOrJoinAsync(Alert(_now, serverId: 9) with { ExpiryMinutes = 600 }, Ct)).RequestId);
+        _now = T0.AddMinutes(245);
+        var pastCap = await _store.OpenOrJoinAsync(Alert(_now, serverId: 9) with { ExpiryMinutes = 600 }, Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, pastCap.Outcome);
+        Assert.NotEqual(capped, pastCap.RequestId);
+    }
+
     [Fact]
     public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlertAt31MinutesOpensANewOne_AndAReportedOneIsFinal()
     {

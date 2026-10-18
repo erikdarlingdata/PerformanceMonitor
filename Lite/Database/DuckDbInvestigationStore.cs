@@ -21,7 +21,7 @@ namespace PerformanceMonitorLite.Database;
 /// <summary>
 /// Lite's store of Level 1 investigations (#5820): the DuckDB port of Darling's <c>InvestigationRequestStore</c> behind the
 /// shared <see cref="IInvestigationRequestStore"/>. Each statement keeps the name of the Darling statement it ports, so the
-/// two can be read side by side. The semantics are Darling's: open or join within the 30-minute window, the route limits
+/// two can be read side by side. The semantics are Darling's: open or join within the sliding 30-minute window (up to 4 hours after the first alert), the route limits
 /// with <c>limit_reached</c> journaled once per route-hour, a claim as one conditional UPDATE, a report accepted from the
 /// current claim until a newer claim supersedes it, and a sweep that only expires.
 ///
@@ -40,7 +40,14 @@ public sealed partial class DuckDbInvestigationStore : IInvestigationRequestStor
     /* Darling's GroupLockSql and RouteLockSql (pg_advisory_xact_lock) have no twin: the write lock each write holds for its
        whole transaction covers them. SubmitLockSql keeps its name; its FOR UPDATE is the write lock. */
 
-    internal const string FindJoinSql = @"
+    /* #5632: the grouping window and its cap as interval literals, built from InvestigationRules so the SQL holds no second copy. */
+    private static readonly string GroupingWindowSql = string.Create(CultureInfo.InvariantCulture,
+        $"INTERVAL {(int)InvestigationRules.GroupingWindow.TotalMinutes} MINUTE");
+    private static readonly string GroupingWindowCapSql = string.Create(CultureInfo.InvariantCulture,
+        $"INTERVAL {(int)InvestigationRules.GroupingWindowCap.TotalMinutes} MINUTE");
+
+    /* #5632: the window slides (Darling's twin): window_until is the latest alert + 30 minutes, held to the first alert + 4 hours. */
+    internal static readonly string FindJoinSql = @"
 SELECT r.request_id,
        r.max_severity,
        EXISTS (SELECT 1 FROM investigation_request_alerts AS a
@@ -50,15 +57,16 @@ WHERE r.server_id = $1
   AND r.family = $2
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
-  AND r.opened_at >= $3 - INTERVAL 30 MINUTE
+  AND r.last_alert_at >= $3 - " + GroupingWindowSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
 LIMIT 1";
 
-    internal const string JoinSql = @"
+    internal static readonly string JoinSql = @"
 UPDATE investigation_requests
 SET alert_count = alert_count + 1,
     last_alert_at = greatest(last_alert_at, $2),
+    window_until = greatest(window_until, least(greatest(last_alert_at, $2) + " + GroupingWindowSql + @", first_alert_at + " + GroupingWindowCapSql + @")),
     max_severity = $3
 WHERE request_id = $1";
 
@@ -69,11 +77,11 @@ FROM investigation_requests
 WHERE route_id = $1
   AND opened_at > $2 - INTERVAL 1 DAY";
 
-    internal const string OpenSql = @"
+    internal static readonly string OpenSql = @"
 INSERT INTO investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
      first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, max_severity)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + INTERVAL 30 MINUTE, $10, $10 + to_minutes(CAST($11 AS BIGINT)), $12, $13)";
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + to_minutes(CAST($11 AS BIGINT)), $12, $13)";
 
     /* One row per key of the bound list; the ids continue from the table's max under the write lock. */
     internal const string AlertRowsSql = @"

@@ -421,7 +421,7 @@ CREATE TABLE IF NOT EXISTS notification_routes (
          local-zone, so the store binds every time. Request and claim ids are UUID, as in Darling. */
 
     /// <summary>
-    /// One investigation request per server, alert family and 30-minute grouping window, with its state, the current
+    /// One investigation request per server and alert family while its alerts keep firing (a sliding 30-minute grouping window, capped at 4 hours), with its state, the current
     /// claim and its lease, the claim count, the expiry and the brief composed at claim. Mirrors Darling's
     /// <c>config.investigation_requests</c>.
     /// </summary>
