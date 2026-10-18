@@ -183,6 +183,19 @@ FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
         Assert.NotEqual(capped, pastCap.RequestId);
     }
 
+    /// <summary>#5632 seat fix: the wall-clock test is on the request's open time, not its latest alert. An alert stamped hours
+    /// before it reaches the store (a late or replayed alert) still joins the request its own time falls in. Comparing the alert
+    /// time with now refused it, and this test fails on that rule. Darling's twin is InvestigationPracticeTests' three alerts
+    /// stamped 3 hours ago.</summary>
+    [Fact]
+    public async Task AnAlertStampedHoursBeforeItArrives_StillJoinsTheRequestItsTimeFallsIn()
+    {
+        _now = T0.AddHours(3);
+        var first = (await _store.OpenOrJoinAsync(Alert(T0), Ct)).RequestId!.Value;
+        Assert.Equal(first, (await _store.OpenOrJoinAsync(Alert(T0.AddMinutes(1)), Ct)).RequestId);
+        Assert.Equal(first, (await _store.OpenOrJoinAsync(Alert(T0.AddMinutes(2)), Ct)).RequestId);
+    }
+
     [Fact]
     public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneIsFinal()
     {

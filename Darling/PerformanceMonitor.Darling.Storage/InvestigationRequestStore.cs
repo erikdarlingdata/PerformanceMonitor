@@ -63,7 +63,9 @@ public sealed partial class InvestigationRequestStore : IInvestigationRequestSto
         $"interval '{(int)InvestigationRules.GroupingWindowCap.TotalMinutes} minutes'");
 
     /* #5632: the window slides. The request's window_until is its latest alert + 30 minutes, held to its first alert + 4 hours, and each
-       join moves it (JoinSql), so the alert time test is the whole bound; the wall-clock test is on the LATEST alert, not the open time. */
+       join moves it (JoinSql), so the alert-time test ($4 <= window_until) is the whole sliding bound. The wall-clock test stays on the
+       open time, on the wall clock ($3 is now), and is widened to the 4-hour cap: comparing an alert time with now would refuse every
+       alert stamped more than 30 minutes before it reached the store (a late or replayed alert). */
     internal static readonly string FindJoinSql = @"
 SELECT r.request_id,
        r.max_severity,
@@ -75,7 +77,7 @@ WHERE r.server_id = $1
   AND r.practice_of IS NULL
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
-  AND r.last_alert_at >= $3 - " + GroupingWindowSql + @"
+  AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
 LIMIT 1";

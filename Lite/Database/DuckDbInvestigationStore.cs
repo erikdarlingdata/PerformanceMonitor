@@ -46,7 +46,9 @@ public sealed partial class DuckDbInvestigationStore : IInvestigationRequestStor
     private static readonly string GroupingWindowCapSql = string.Create(CultureInfo.InvariantCulture,
         $"INTERVAL {(int)InvestigationRules.GroupingWindowCap.TotalMinutes} MINUTE");
 
-    /* #5632: the window slides (Darling's twin): window_until is the latest alert + 30 minutes, held to the first alert + 4 hours. */
+    /* #5632: the window slides (Darling's twin): window_until is the latest alert + 30 minutes, held to the first alert + 4 hours, and
+       the alert-time test ($4 <= window_until) is the sliding bound. The wall-clock test stays on the open time ($3 is now), widened to
+       the 4-hour cap, so an alert stamped more than 30 minutes before it reached the store still joins. */
     internal static readonly string FindJoinSql = @"
 SELECT r.request_id,
        r.max_severity,
@@ -57,7 +59,7 @@ WHERE r.server_id = $1
   AND r.family = $2
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
-  AND r.last_alert_at >= $3 - " + GroupingWindowSql + @"
+  AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
 LIMIT 1";
