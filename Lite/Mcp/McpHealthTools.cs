@@ -291,12 +291,12 @@ public sealed class McpHealthTools
         [Description("Return every field for every collector. Default compacts a HEALTHY collector with nothing to report; failing, stale, stopped, erroring, denied or regressed collectors always keep every field.")] bool full_detail = false,
         McpCollectorRunTimes? runTimes = null,
         [Description("With server_name \"*\": the one collector to report on every server (e.g. query_store, wait_stats). Required then; ignored for one server.")] string? collector_name = null,
-        [Description("With server_name \"*\": hours of history, 1 to 168. Default 24. Ignored for one server (always 7 days).")] int hours_back = 24)
+        [Description("With server_name \"*\": hours of history, 1 to 168. Default 24. Ignored for one server (always 7 days).")] int? hours_back = null)
     {
         /* #6074: server_name "*" is the fleet form, one collector's liveness on every enabled server (omitted still means the lone server). */
         if (server_name is not null && server_name.Trim() == "*")
         {
-            return await GetCollectionHealthFleetAsync(dataService, serverManager, collector_name, hours_back);
+            return await GetCollectionHealthFleetAsync(dataService, serverManager, collector_name, hours_back ?? 24);
         }
 
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);

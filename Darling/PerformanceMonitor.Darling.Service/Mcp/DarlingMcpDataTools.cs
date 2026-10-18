@@ -1743,10 +1743,10 @@ public sealed class DarlingMcpDataTools
         [Description("Return every field for every collector. Default compacts a HEALTHY collector with nothing to report; failing, stale, stopped, erroring, denied or regressed collectors always keep every field.")] bool full_detail = false,
         Microsoft.Extensions.Logging.ILogger? logger = null,
         [Description("With server_name \"*\": the one collector to report on every server (e.g. query_store, wait_stats). Required then; ignored for one server.")] string? collector_name = null,
-        [Description("With server_name \"*\": hours of history, 1 to 168. Default 24. Ignored for one server (always 7 days).")] int hours_back = 24,
+        [Description("With server_name \"*\": hours of history, 1 to 168. Default 24. Ignored for one server (always 7 days).")] int? hours_back = null,
         CancellationToken cancellationToken = default) =>
         server_name is not null && server_name.Trim() == "*"
-            ? GetCollectionHealthFleetAsync(postgres, collector_name, hours_back, cancellationToken)
+            ? GetCollectionHealthFleetAsync(postgres, collector_name, hours_back ?? 24, cancellationToken)
             : GetCollectionHealthCoreAsync(postgres, server_name, full_detail, uncutText: false, logger, cancellationToken);
 
     /// <summary>The enabled servers and the engine facts the fleet liveness read needs to say which servers a collector does not apply to
