@@ -70,7 +70,7 @@ public sealed class AlertDelivererInventoryPinTests
     /// text only and are not entry points.
     /// </summary>
     internal static readonly Regex ChannelCall = new(
-        @"[.]\s*(?:TrySendAlertEmailAsync|TrySendAsync|TrySendWebhookAlertsAsync|PostWebhookAsync|RecordAlertAsync)\s*\(\s*(?!(?:DarlingSelfAlertEvaluator[.])?BuildResolutionRecord)",
+        @"[.]\s*(?:TrySendAlertEmailAsync|TrySendAsync|TrySendWebhookAlertsAsync|PostWebhookAsync|RecordAlertAsync)\s*\(\s*(?!(?:(?:DarlingSelfAlertEvaluator|AlertResolutionRecords)[.])?BuildResolutionRecord)",
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
 
     private static IEnumerable<(string Relative, string Text)> Sources()
