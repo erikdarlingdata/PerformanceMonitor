@@ -36,6 +36,7 @@ public sealed class ViewerNotificationRouteActTests
     [InlineData(0, "Off", "agent off")]
     [InlineData(1, "Investigate (7/h, 70/day)", "agent")]
     [InlineData(2, "Act (7/h, 70/day)", "agent")]
+    [InlineData(3, "Act on servers (7/h, 70/day)", "agent")]
     public void TheAgentAndChannelsColumns_NameEveryLevel_AndActIsNotOff(int? level, string agent, string channels)
     {
         var row = ActRow();
@@ -50,8 +51,8 @@ public sealed class ViewerNotificationRouteActTests
     {
         var row = ActRow();
         Assert.Null(ViewerDataService.ValidateNotificationRoute(row));
-        row.AgentLevel = 3;
-        Assert.Equal("The agent channel is Inherit, Off, Investigate or Act.", ViewerDataService.ValidateNotificationRoute(row));
+        row.AgentLevel = 4;
+        Assert.Equal("The agent channel is Inherit, Off, Investigate, Act or Act on servers.", ViewerDataService.ValidateNotificationRoute(row));
     }
 
     [Fact]

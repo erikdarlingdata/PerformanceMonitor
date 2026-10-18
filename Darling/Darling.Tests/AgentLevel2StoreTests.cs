@@ -84,23 +84,24 @@ public sealed class AgentLevel2StoreRungTests
 
             await ExecAsync(store, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5909, 'srv-a', 'host-a'), (5910, 'srv-b', 'host-b')", ct);
 
-            /* The route accepts 0 to 2 and refuses 3 and -1. */
-            foreach (var level in new[] { "NULL", "0", "1", "2" })
+            /* The route accepts 0 to 3 (V196 widened it from 2) and refuses 4 and -1. */
+            foreach (var level in new[] { "NULL", "0", "1", "2", "3" })
             {
                 await ExecAsync(store, $"INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('m{level}', {level})", ct);
             }
 
-            foreach (var level in new[] { "3", "-1" })
+            foreach (var level in new[] { "4", "-1" })
             {
                 var refusal = await Assert.ThrowsAsync<PostgresException>(() =>
                     ExecAsync(store, $"INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('bad{level}', {level})", ct));
                 Assert.Equal("ck_config_notification_routes_agent", refusal.ConstraintName);
             }
 
-            /* The request accepts 1 and 2 and refuses 0 and 3. */
+            /* The request accepts 1 to 3 and refuses 0 and 4. */
             await InsertRequestAsync(store, "11111111-1111-1111-1111-111111111111", 1, ct: ct);
             await InsertRequestAsync(store, "22222222-2222-2222-2222-222222222222", 2, ct: ct);
-            foreach (var level in new[] { 0, 3 })
+            await InsertRequestAsync(store, "33333333-3333-3333-3333-333333333333", 3, ct: ct);
+            foreach (var level in new[] { 0, 4 })
             {
                 var refusal = await Assert.ThrowsAsync<PostgresException>(() =>
                     InsertRequestAsync(store, Guid.NewGuid().ToString(), level, ct: ct));
@@ -221,21 +222,22 @@ public sealed class AgentLevel2StoreRungTests
             Assert.Null(await ScalarAsync(store, "SELECT practice_of FROM config.investigation_requests WHERE request_id = '55555555-5555-5555-5555-555555555555'", ct));
             await ExecAsync(store, "UPDATE config.config_notification_routes SET agent_level = 2 WHERE metric_match = 'kept'", ct);
             await ExecAsync(store, "UPDATE config.investigation_requests SET autonomy_level = 2 WHERE request_id = '55555555-5555-5555-5555-555555555555'", ct);
-            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(store, "UPDATE config.config_notification_routes SET agent_level = 3 WHERE metric_match = 'kept'", ct));
+            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(store, "UPDATE config.config_notification_routes SET agent_level = 4 WHERE metric_match = 'kept'", ct));
 
-            /* A second run changes nothing: the checks keep their catalog identity and the script raises nothing. */
+            /* A second run changes nothing: the checks keep their catalog identity and the script raises nothing. V196 has widened the
+               checks since, so the rung that runs again is the one that owns their shape now (V191's own guard would narrow them back). */
             const string Identity = "SELECT string_agg(c.oid::text || ':' || c.conname, ',' ORDER BY c.conname) FROM pg_constraint c "
                 + "WHERE c.conname IN ('ck_config_notification_routes_agent', 'ck_investigation_requests_autonomy')";
             var before = await ScalarAsync(store, Identity, ct);
             await PgMigrations.MigrateAsync(store, ct);
-            await ExecAsync(store, Rung.Sql, ct);
+            await ExecAsync(store, PgMigrations.Scripts.Single(m => m.Name == "level-3-server-action-switches").Sql, ct);
             Assert.Equal(before, await ScalarAsync(store, Identity, ct));
 
-            /* V191's guard reads pg_get_constraintdef text (!~ 'ARRAY\[0, 1, 2\]' and 'ARRAY\[1, 2\]'). The columns are smallint, and
+            /* The guard reads pg_get_constraintdef text (!~ 'ARRAY\[0, 1, 2, 3\]' and 'ARRAY\[1, 2, 3\]'). The columns are smallint, and
                this is the rendering they produce: no explicit casts inside the array, so the guard recognises its own
                constraint (the identity check above is the same fact, from the other side). */
-            Assert.Matches(@"ARRAY\[0, 1, 2\]", await ScalarAsync(store, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_config_notification_routes_agent'", ct));
-            Assert.Matches(@"ARRAY\[1, 2\]", await ScalarAsync(store, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_investigation_requests_autonomy'", ct));
+            Assert.Matches(@"ARRAY\[0, 1, 2, 3\]", await ScalarAsync(store, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_config_notification_routes_agent'", ct));
+            Assert.Matches(@"ARRAY\[1, 2, 3\]", await ScalarAsync(store, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_investigation_requests_autonomy'", ct));
             Assert.Equal("1", await ScalarAsync(store, "SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_bump_threshold_overrides' AND NOT tgisinternal", ct));
         });
     }
@@ -392,6 +394,11 @@ public sealed class AgentLevel2StoreGrantLiveTests
             ("viewer", "config.investigation_feedback", "SELECT"),
             ("mcp", "config.config_threshold_overrides", "SELECT,INSERT,UPDATE,DELETE"),
             ("mcp", "config.investigation_feedback", "SELECT"),
+            /* V196 (#5632): the per-server action switches. Every role reads them; none writes them (the store owner does), so no MCP
+               tool, web route or login the service hands out can turn one on. */
+            ("admin", "config.config_server_actions", "SELECT"),
+            ("viewer", "config.config_server_actions", "SELECT"),
+            ("mcp", "config.config_server_actions", "SELECT"),
         ];
         foreach (var (role, table, verbs) in expected)
         {
@@ -546,6 +553,12 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await AssertDeniedAsync(mcp, "INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('66666666-6666-6666-6666-666666666666', 'right', 'mcp-agent')", ct);
             await AssertDeniedAsync(mcp, "UPDATE config.investigation_feedback SET verdict = 'wrong'", ct);
             await AssertDeniedAsync(mcp, "DELETE FROM config.investigation_feedback", ct);
+
+            /* V196 (#5632): the switch table is read by every role and written by none of them, so a role cannot turn an action on. */
+            Assert.Equal("0", await ScalarAsync(mcp, "SELECT count(*) FROM config.config_server_actions", ct));
+            await AssertDeniedAsync(mcp, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (5909, 'force_plan', true, 'mcp')", ct);
+            await AssertDeniedAsync(mcp, "UPDATE config.config_server_actions SET enabled = true", ct);
+            await AssertDeniedAsync(mcp, "DELETE FROM config.config_server_actions", ct);
         }
 
         await ExecAsync(owner, "INSERT INTO config.config_threshold_overrides (server_id, threshold_key, value, set_by) VALUES (5909, 'cpu.percent', 80, 'owner')", ct);
@@ -560,6 +573,12 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await AssertDeniedAsync(viewer, "INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('66666666-6666-6666-6666-666666666666', 'right', 'viewer')", ct);
             await AssertDeniedAsync(viewer, "UPDATE config.investigation_feedback SET verdict = 'wrong'", ct);
             await AssertDeniedAsync(viewer, "DELETE FROM config.investigation_feedback", ct);
+
+            /* V196 (#5632): the switch table is read by every role and written by none of them, so a role cannot turn an action on. */
+            Assert.Equal("0", await ScalarAsync(viewer, "SELECT count(*) FROM config.config_server_actions", ct));
+            await AssertDeniedAsync(viewer, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (5909, 'force_plan', true, 'viewer')", ct);
+            await AssertDeniedAsync(viewer, "UPDATE config.config_server_actions SET enabled = true", ct);
+            await AssertDeniedAsync(viewer, "DELETE FROM config.config_server_actions", ct);
         }
 
         await using (var admin = await LoginAsync(scratch, "admin", adminPassword, ct))
@@ -570,6 +589,12 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await ExecAsync(admin, "UPDATE config.investigation_feedback SET comment = 'edited' WHERE author = 'admin'", ct);
             await ExecAsync(admin, "DELETE FROM config.investigation_feedback WHERE author = 'admin'", ct);
             await ExecAsync(admin, "DELETE FROM config.config_threshold_overrides", ct);
+
+            /* V196 (#5632): the switch table is read by every role and written by none of them, so a role cannot turn an action on. */
+            Assert.Equal("0", await ScalarAsync(admin, "SELECT count(*) FROM config.config_server_actions", ct));
+            await AssertDeniedAsync(admin, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (5909, 'force_plan', true, 'admin')", ct);
+            await AssertDeniedAsync(admin, "UPDATE config.config_server_actions SET enabled = true", ct);
+            await AssertDeniedAsync(admin, "DELETE FROM config.config_server_actions", ct);
         }
     }
 }

@@ -1,0 +1,64 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
+
+namespace PerformanceMonitor.Darling.Service.Mcp;
+
+/// <summary>
+/// The one entry point every SERVER action will call (#5632, step 5), beside <see cref="DarlingAgentActionGate"/>, which answers for
+/// Level 2 changes to the monitoring store. An action may run only when all four conditions hold: the service's
+/// <c>agent_actions_enabled</c>, a Level 3 request, that server's switch for that action, and that server's remediation login given
+/// as an <c>env:</c> or <c>file:</c> reference. A call that lacks one is refused with its own reason, and the refusal is journaled.
+/// <para><b>It takes no <c>DarlingMcpWritePolicy</c>.</b> <c>mcp.allowWrites</c> never bypasses it, and there is no flag that skips a
+/// check. <b>Nothing calls it yet</b>: step 7 (force and unforce), step 10 (evict a plan handle) and step 12 (kill) will. No tool, web
+/// route or <c>darling.json</c> key writes <c>config.config_server_actions</c>, so every switch reads off until a person turns one on.</para>
+/// </summary>
+internal static class ServerActionGate
+{
+    /// <summary>
+    /// Checks one action on one server. <paramref name="ownerSource"/> is the store owner's data source: the remediation secret
+    /// column is not readable by the <c>mcp</c> role, and the gate only classifies the slot by its prefix, never resolving it.
+    /// Null means the action may run; otherwise the refusal (already journaled).
+    /// </summary>
+    internal static async Task<AgentActionRefusal?> CheckAsync(
+        InvestigationRequestStore store,
+        NpgsqlDataSource ownerSource,
+        ILogger logger,
+        string tool,
+        string serverAction,
+        string? agentAction,
+        AgentActionTarget target,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(ownerSource);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(target);
+
+        var problem = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
+        if (problem is not null)
+        {
+            await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, cancellationToken);
+            return problem;
+        }
+
+        var hooks = new ServerActionHooks
+        {
+            LoadLevels = (connection, _, ct) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, ct),
+            ReadCredential = (serverId, ct) => store.ReadServerCredentialStateAsync(ownerSource, serverId, ct),
+        };
+        return await store.CheckServerActionAsync(new ServerActionCall(tool, serverAction, action!, target), hooks, cancellationToken);
+    }
+}

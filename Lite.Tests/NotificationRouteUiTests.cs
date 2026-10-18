@@ -301,6 +301,19 @@ public sealed class NotificationRouteUiTests : IDisposable
         Assert.Equal("The agent channel is Inherit, Off or Investigate.", NotificationRouteUi.InlineMessage(act));
     }
 
+    /* Level 3 (#5632, step 5) is refused the same way: Lite stays advise-only and writes no level above Investigate. */
+    [Fact]
+    public void LitesStore_RefusesToWriteLevelThree_InTheWordsOfItsAgentChannel()
+    {
+        var act = Assert.Throws<ArgumentException>(() =>
+            new DuckDbNotificationRouteStore(null!, () => Array.Empty<int>(), new FakeRouteSecrets().Access)
+                .InsertAsync(new NotificationRoute(0, "performance", "", "", "", "", "", true) { AgentLevel = NotificationRoute.AgentLevelServerAct })
+                .GetAwaiter().GetResult());
+        Assert.Equal("The agent channel is Inherit, Off or Investigate.", NotificationRouteUi.InlineMessage(act));
+        Assert.Equal("Act on servers (5/h, 50/day)", NotificationRouteUi.AgentDisplay(
+            new NotificationRoute(0, "performance", "", "", "", "", "", true) { AgentLevel = NotificationRoute.AgentLevelServerAct, AgentMaxPerHour = 5, AgentMaxPerDay = 50 }));
+    }
+
     /* The dialog's combo holds Inherit, Off and Investigate. Its Lite window needs the app's theme resources, which the test host
        does not load, so the choice the dialog makes for a stored level is the helper's, run on the same kind of combo: a Level 2
        row gets a disabled "Act" item, selected, so the dialog neither throws (it used to .First(...)) nor reads it back as another level. */

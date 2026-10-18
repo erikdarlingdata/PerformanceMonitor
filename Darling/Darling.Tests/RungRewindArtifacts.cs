@@ -295,6 +295,38 @@ END $do$;"),
         // rewind drops it, so a re-run of V195 does everything again. Safe on a store that never had it.
         new(195, "hasQueryStoreForcedPlans",
             "DROP TABLE IF EXISTS collect.query_store_forced_plans;"),
+
+        // /// V196 (#5632): the per-server action switches. The table is the probe's newest sentinel. The rewind drops it and puts the two
+        // level CHECKs back to their V191 shape (route 0 to 2, request 1 to 2), so a re-run of V196 does everything again. A row at level
+        // 3 would refuse that, so the rewind lowers it first (a rewound store holds no Level 3 row it could have kept). Safe on a store
+        // that never had any of it.
+        new(196, "hasServerActionSwitches",
+            @"
+DROP TABLE IF EXISTS config.config_server_actions;
+DO $do$
+BEGIN
+    IF to_regclass('config.config_notification_routes') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_notification_routes_agent'
+                   AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes DROP CONSTRAINT ck_config_notification_routes_agent;
+        UPDATE config.config_notification_routes SET agent_level = 2 WHERE agent_level = 3;
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_agent CHECK (
+                (agent_level IS NULL OR agent_level IN (0, 1, 2))
+                AND agent_max_per_hour BETWEEN 1 AND 60
+                AND agent_max_per_day BETWEEN 1 AND 500
+                AND agent_lease_minutes BETWEEN 5 AND 120
+                AND agent_expiry_minutes BETWEEN 15 AND 1440);
+    END IF;
+    IF to_regclass('config.investigation_requests') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_investigation_requests_autonomy'
+                   AND conrelid = 'config.investigation_requests'::regclass) THEN
+        ALTER TABLE config.investigation_requests DROP CONSTRAINT ck_investigation_requests_autonomy;
+        UPDATE config.investigation_requests SET autonomy_level = 2 WHERE autonomy_level = 3;
+        ALTER TABLE config.investigation_requests
+            ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level IN (1, 2));
+    END IF;
+END $do$;"),
     ];
 
     /// <summary>

@@ -255,6 +255,31 @@ RETURNING journal_id";
         bool practice = true)
     {
         var action = call.Action;
+        if (ClaimOrPracticeRefusal(request, action, now, practice) is { } claimRefusal)
+            return claimRefusal;
+        var live = request!;
+
+        var level = await ResolveRequestLevelAsync(connection, transaction, live, hooks.LoadLevels, 2, cancellationToken);
+
+        /* Level 3 (#5632, step 5) includes everything Level 2 allows, so a Level 3 request passes this check. The routes' lowest level
+           still wins above, and a stamped level above 3 is not a level. */
+        if (level < 2)
+            return new AgentActionRefusal(AgentActionCodes.NotLevel2,
+                "This request is not Level 2: its routes let an agent investigate, not change settings. Report what you would change instead.");
+
+        if (call.Target.ServerId != live.ServerId)
+            return new AgentActionRefusal(AgentActionCodes.OtherServer,
+                $"This change targets {call.Target.ServerName}; the request is for {live.ServerName}. Level 2 changes only the request's server.");
+
+        return null;
+    }
+
+    /// <summary>
+    /// The claim and practice checks both gates share: the claim is live and this agent's, and the request is not a practice
+    /// request. One message for every claim cause, so it is not an oracle. Null when both pass.
+    /// </summary>
+    private static AgentActionRefusal? ClaimOrPracticeRefusal(AgentActionRequest? request, AgentAction action, DateTime now, bool practice)
+    {
         if (request is null
             || request.State != "claimed"
             || request.ClaimId != action.ClaimId
@@ -269,29 +294,31 @@ RETURNING journal_id";
             return new AgentActionRefusal(AgentActionCodes.Practice,
                 "This is a practice request: it changes nothing. Report what you would change instead.");
 
-        /* The routes are read once per pass, and only when the stamp still says 2. A metric whose route was deleted after the
-           request opened resolves to null and lowers the request to 0: not Level 2, fail closed (pinned live). */
+        return null;
+    }
+
+    /// <summary>
+    /// The level the request holds now: its stamp, lowered to the level the live routes send each of its metrics on. The routes
+    /// are read once per pass, and only when the stamp is at least <paramref name="floor"/>. A metric whose route was deleted
+    /// after the request opened resolves to null and lowers the request to 0: fail closed (pinned live).
+    /// </summary>
+    private static async Task<int> ResolveRequestLevelAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        AgentActionRequest request, Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> loadLevels,
+        int floor, CancellationToken cancellationToken)
+    {
         var level = request.AutonomyLevel;
-        if (level >= 2)
+        if (level >= floor)
         {
-            var resolve = await hooks.LoadLevels(connection, transaction, cancellationToken);
+            var resolve = await loadLevels(connection, transaction, cancellationToken);
             foreach (var metric in request.Metrics)
             {
-                if (level < 2)
+                if (level < floor)
                     break;
                 level = Math.Min(level, resolve(metric, request.ServerId) ?? 0);
             }
         }
 
-        if (level != 2)
-            return new AgentActionRefusal(AgentActionCodes.NotLevel2,
-                "This request is not Level 2: its routes let an agent investigate, not change settings. Report what you would change instead.");
-
-        if (call.Target.ServerId != request.ServerId)
-            return new AgentActionRefusal(AgentActionCodes.OtherServer,
-                $"This change targets {call.Target.ServerName}; the request is for {request.ServerName}. Level 2 changes only the request's server.");
-
-        return null;
+        return level;
     }
 
     private sealed record AgentActionRequest(string State, Guid? ClaimId, string? ClaimedBy, DateTime? LeaseUntil,

@@ -37,6 +37,7 @@ public partial class NotificationRouteEditDialog : Window
     /* #5912: shown only on a route already stored at Level 2, and never chosen from here (the write path for Act is a later slice). */
     private const string AgentActChoice = "Act (Level 2: investigate and change alert settings)";
     private const string AgentInvestigateChoice = "Investigate";
+    private const string AgentServerActChoice = "Act on servers (Level 3: also needs each server's switch and remediation credential)";
 
     /// <summary>The "Every metric (*)" entry of the Matches list. It is in the list only while a server or a tag is chosen
     /// (the V181 CHECK refuses a fleet-wide <c>*</c>); its Tag is the stored match text.</summary>
@@ -82,6 +83,9 @@ public partial class NotificationRouteEditDialog : Window
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentInvestigateChoice, Tag = NotificationRoute.AgentLevelInvestigate });
         /* #5915: Level 2 is offered. An agent holding a live claim may mute one metric on the request's server and change custom alert rules scoped to it; every change is journaled. */
         AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentActChoice, Tag = NotificationRoute.AgentLevelAct });
+        /* #5632 step 5: Level 3 is offered. It includes everything Level 2 allows. A server action also needs that server's own switch (all off, and no
+           server action exists yet), the server's remediation login given as an env: or file: reference, and agent_actions_enabled. */
+        AgentLevelCombo.Items.Add(new ComboBoxItem { Content = AgentServerActChoice, Tag = NotificationRoute.AgentLevelServerAct });
         ShowAgent(existing ?? new NotificationRouteRow());
 
         SendResolutionsCombo.Items.Add(new ComboBoxItem { Content = ResolutionsChannelChoice, Tag = null });
@@ -406,7 +410,7 @@ public partial class NotificationRouteEditDialog : Window
         {
             item = new ComboBoxItem
             {
-                Content = level == NotificationRoute.AgentLevelAct ? AgentActChoice : $"Level {level}",
+                Content = level == NotificationRoute.AgentLevelAct ? AgentActChoice : level == NotificationRoute.AgentLevelServerAct ? AgentServerActChoice : $"Level {level}",
                 Tag = level,
                 IsEnabled = false,
             };
@@ -422,7 +426,7 @@ public partial class NotificationRouteEditDialog : Window
     /// <summary>The limits apply only to a route that investigates, so they are editable only then.</summary>
     private void UpdateAgentLimitsEnabled()
     {
-        var investigates = SelectedAgentLevel() is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct;
+        var investigates = SelectedAgentLevel() is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct;
         AgentMaxPerHourBox.IsEnabled = investigates;
         AgentMaxPerDayBox.IsEnabled = investigates;
         AgentLeaseMinutesBox.IsEnabled = investigates;

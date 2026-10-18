@@ -1826,6 +1826,14 @@ GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
 GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
 
+-- 10e2. The per-server action switches (V196, #5632 step 5). Every role reads them and NO role but the store owner (the service)
+--     writes them: the default privileges would give admin INSERT/UPDATE/DELETE on a table made after them, so REVOKE ALL ... CASCADE
+--     takes every privilege from PUBLIC and the three roles, and SELECT goes back to all three. No MCP tool, web route or darling.json
+--     key can turn a switch on. How a person turns one on is a later grant, added here and in provision-roles.sql step 3j2. It runs
+--     after every blanket grant above, and before 10a.
+REVOKE ALL ON {config}.config_server_actions FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.config_server_actions TO {admin}, {viewer}, {mcp};
+
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
 --     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege

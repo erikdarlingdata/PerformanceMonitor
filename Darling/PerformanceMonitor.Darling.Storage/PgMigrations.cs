@@ -1725,6 +1725,69 @@ CREATE TABLE IF NOT EXISTS collect.query_store_forced_plans (
 CREATE INDEX IF NOT EXISTS idx_query_store_forced_plans_time ON collect.query_store_forced_plans(server_id, collection_time);";
 
     /// <summary>
+    /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
+    ///
+    /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
+    /// <c>ck_investigation_requests_autonomy</c> allows <c>autonomy_level</c> 1 to 3. Each is replaced in place, under its own
+    /// name, only when the stored definition does not already name 3 (V191's guard), so a second run replaces nothing.
+    /// Level 3 means a route's request may, once an action exists, act on the monitored server; it still needs the four
+    /// conditions of <c>ServerActionGate</c>.</para>
+    ///
+    /// <para><b>Switches.</b> <c>config.config_server_actions</c>: one row per server and action (<c>force_plan</c>,
+    /// <c>evict_plan</c>, <c>kill_session</c>), <c>enabled</c> defaulting to <c>false</c>. <b>No row means off, and this
+    /// migration inserts no row.</b> It is deleted with its server (foreign key, <c>ON DELETE CASCADE</c>) and joins the
+    /// <c>config_version</c> reload beacon with V117's trigger shape, as V191's overrides do. It is configuration and is never aged.
+    /// Grants are provisioning's (managed section 10e, provision-roles.sql step 3j): every role reads it and <b>no role but the owner
+    /// writes it</b>, so no MCP tool, web route or <c>darling.json</c> key can turn a switch on. How a person turns one on is a
+    /// later decision. <b>No Lite twin:</b> Lite is advise-only.</para>
+    /// </summary>
+    private const string V196Sql = @"
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'ck_config_notification_routes_agent'
+                 AND conrelid = 'config.config_notification_routes'::regclass
+                 AND pg_get_constraintdef(oid) !~ 'ARRAY\[0, 1, 2, 3\]') THEN
+        ALTER TABLE config.config_notification_routes DROP CONSTRAINT ck_config_notification_routes_agent;
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_agent CHECK (
+                (agent_level IS NULL OR agent_level IN (0, 1, 2, 3))
+                AND agent_max_per_hour BETWEEN 1 AND 60
+                AND agent_max_per_day BETWEEN 1 AND 500
+                AND agent_lease_minutes BETWEEN 5 AND 120
+                AND agent_expiry_minutes BETWEEN 15 AND 1440);
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'ck_investigation_requests_autonomy'
+                 AND conrelid = 'config.investigation_requests'::regclass
+                 AND pg_get_constraintdef(oid) !~ 'ARRAY\[1, 2, 3\]') THEN
+        ALTER TABLE config.investigation_requests DROP CONSTRAINT ck_investigation_requests_autonomy;
+        ALTER TABLE config.investigation_requests
+            ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level IN (1, 2, 3));
+    END IF;
+END $do$;
+
+CREATE TABLE IF NOT EXISTS config.config_server_actions
+(
+    server_id integer NOT NULL,
+    action text NOT NULL,
+    enabled boolean NOT NULL DEFAULT false,
+    set_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pk_config_server_actions PRIMARY KEY (server_id, action),
+    CONSTRAINT fk_config_server_actions_server FOREIGN KEY (server_id)
+        REFERENCES config.config_monitored_servers (server_id) ON DELETE CASCADE,
+    CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session')),
+    CONSTRAINT ck_config_server_actions_set_by CHECK (btrim(set_by) <> '')
+);
+
+DROP TRIGGER IF EXISTS trg_bump_server_actions ON config.config_server_actions;
+CREATE TRIGGER trg_bump_server_actions
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_server_actions
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -2031,6 +2094,7 @@ $rung$;";
         new Migration(193, "phase-c-store", V193Sql),
         new Migration(194, "query-tag-sightings-database", V194Sql),
         new Migration(195, "query-store-forced-plans", V195Sql),
+        new Migration(196, "level-3-server-action-switches", V196Sql),
     };
 
     /// <summary>
