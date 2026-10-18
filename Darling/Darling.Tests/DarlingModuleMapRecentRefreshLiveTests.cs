@@ -116,7 +116,7 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             /* The daily refresh obeys the same rule: its window holds only the older row. It runs on the explicit
                clock: on the wall clock the 2026-01 anchor is past the lookback floor, and #5729 moves a watermark
                over an empty span up to that floor. */
-            await DarlingModuleMap.RefreshFromWatermarkOrFullAsync(connection, null, Now, DarlingModuleMap.DailyRepairSlack, "module_map daily refresh", ct);
+            await DarlingModuleMap.RefreshFromWatermarkOrFullAsync(connection, null, Now, DarlingModuleMap.DailyRepairSlack, "module_map daily refresh", cancellationToken: ct);
             Assert.Equal(Anchor.AddMinutes(30), await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
         });
     }
@@ -584,14 +584,14 @@ WHERE (m.object_name, m.last_seen) IS DISTINCT FROM (newest.object_name, newest.
             await SeedStaleWatermarkAsync(connection, Now - StaleBy, ct);
             var log = new CapturingTestLogger();
 
-            await DarlingModuleMap.RefreshFromWatermarkOrFullAsync(connection, log, Now, DarlingModuleMap.DailyRepairSlack, "module_map daily refresh", ct);
+            await DarlingModuleMap.RefreshFromWatermarkOrFullAsync(connection, log, Now, DarlingModuleMap.DailyRepairSlack, "module_map daily refresh", cancellationToken: ct);
             Assert.True(LookbackWarnings(log) == 0, log.Joined);
             Assert.Equal(Now - DarlingModuleMap.MaxLookback, await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
 
             await ExecAsync(connection, $"UPDATE collect.module_map_state SET refreshed_through = '{(Now - StaleBy):yyyy-MM-dd HH:mm:ss}'", ct);
             await InsertProcAsync(connection, Now.AddDays(-3), "0xSKIPPED2", "skipped2", ct);
             var withRow = new CapturingTestLogger();
-            await DarlingModuleMap.RefreshFromWatermarkOrFullAsync(connection, withRow, Now, DarlingModuleMap.DailyRepairSlack, "module_map daily refresh", ct);
+            await DarlingModuleMap.RefreshFromWatermarkOrFullAsync(connection, withRow, Now, DarlingModuleMap.DailyRepairSlack, "module_map daily refresh", cancellationToken: ct);
             Assert.Equal(1, LookbackWarnings(withRow));
         });
     }

@@ -289,13 +289,13 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// sweep loop (its first pass is right after the collectors start, #5578), never from the start path: this
     /// statement can run for a minute on a large store and must not hold a collector back.</summary>
     public static Task<int> RefreshAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
-        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map daily refresh", cancellationToken);
+        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map daily refresh", cancellationToken: cancellationToken);
 
     /// <summary>#6044: the daily refresh, reporting whether its read failed. A failure is swallowed (the map keeps
     /// serving) and returns 0, which is also what a read that found nothing returns, so the caller that must
     /// not count a failed run as a run reads <paramref name="outcome"/> instead.</summary>
     public static Task<int> RefreshAsync(NpgsqlConnection connection, ILogger? logger, ModuleMapRefreshOutcome outcome, CancellationToken cancellationToken = default) =>
-        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map daily refresh", cancellationToken, outcome);
+        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map daily refresh", outcome, cancellationToken);
 
 
 
@@ -306,7 +306,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// <summary>The daily refresh against an explicit clock and slack; the tests pass a fixed clock.
     /// <paramref name="label"/> names the caller in the log lines.</summary>
     public static async Task<int> RefreshFromWatermarkOrFullAsync(
-        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, TimeSpan slack, string label, CancellationToken cancellationToken = default, ModuleMapRefreshOutcome? outcome = null)
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, TimeSpan slack, string label, ModuleMapRefreshOutcome? outcome = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connection);
         DateTime? watermark = null;
