@@ -152,8 +152,8 @@ OPTION(RECOMPILE);";
     /// The per-database read, one body for both paths (the on-prem path quote-doubles it into
     /// <c>[db].sys.sp_executesql</c>, Azure runs it as-is). The eligibility gate returns NO result set for a database
     /// whose Query Store is off, in error or a readable secondary, so such a database writes nothing (not captured is
-    /// not the same as no forced plans). Otherwise the LEFT JOIN from a one-row anchor returns every forced plan, or
-    /// exactly one all-NULL marker row when there is none. <c>is_forced_plan = 1</c> is the only filter.
+    /// not the same as no forced plans). Otherwise it returns ONE all-NULL marker row, always, then every forced plan
+    /// (the marker is how a reader tells the capture happened). <c>is_forced_plan = 1</c> is the only filter.
     /// </summary>
     internal static string BuildPayloadBody(CollectorContext context)
     {
@@ -180,23 +180,40 @@ BEGIN
     RETURN;
 END;
 
-SELECT TOP ({MaxRowsPerDatabase}) /* PerformanceMonitorLite */
-    plan_id = qsp.plan_id,
-    query_id = qsp.query_id,
-    query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
-    {forcingTypeColumn}
-    force_failure_count = qsp.force_failure_count,
-    last_force_failure_reason = NULLIF(qsp.last_force_failure_reason_desc, N'NONE'),
-    last_execution_time = CONVERT(datetime2, qsp.last_execution_time AT TIME ZONE 'UTC'),
-    last_compile_start_time = CONVERT(datetime2, qsp.last_compile_start_time AT TIME ZONE 'UTC')
+SELECT /* PerformanceMonitorLite */
+    plan_id = CONVERT(bigint, NULL),
+    query_id = CONVERT(bigint, NULL),
+    query_plan_hash = CONVERT(varchar(64), NULL),
+    plan_forcing_type = CONVERT(nvarchar(60), NULL),
+    force_failure_count = CONVERT(bigint, NULL),
+    last_force_failure_reason = CONVERT(nvarchar(60), NULL),
+    last_execution_time = CONVERT(datetime2, NULL),
+    last_compile_start_time = CONVERT(datetime2, NULL)
+UNION ALL
+SELECT
+    f.plan_id,
+    f.query_id,
+    f.query_plan_hash,
+    f.plan_forcing_type,
+    f.force_failure_count,
+    f.last_force_failure_reason,
+    f.last_execution_time,
+    f.last_compile_start_time
 FROM
 (
-    SELECT
-        anchor = 1
-) AS a
-LEFT JOIN sys.query_store_plan AS qsp
-  ON qsp.is_forced_plan = 1
-ORDER BY qsp.plan_id
+    SELECT TOP ({MaxRowsPerDatabase})
+        plan_id = qsp.plan_id,
+        query_id = qsp.query_id,
+        query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
+        {forcingTypeColumn}
+        force_failure_count = CONVERT(bigint, qsp.force_failure_count),
+        last_force_failure_reason = NULLIF(qsp.last_force_failure_reason_desc, N'NONE'),
+        last_execution_time = CONVERT(datetime2, qsp.last_execution_time AT TIME ZONE 'UTC'),
+        last_compile_start_time = CONVERT(datetime2, qsp.last_compile_start_time AT TIME ZONE 'UTC')
+    FROM sys.query_store_plan AS qsp
+    WHERE qsp.is_forced_plan = 1
+    ORDER BY qsp.plan_id
+) AS f
 OPTION(RECOMPILE);";
     }
 
