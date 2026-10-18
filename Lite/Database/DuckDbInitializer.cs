@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 74;
+    internal const int CurrentSchemaVersion = 75;
 
     private readonly string _archivePath;
 
@@ -3061,6 +3061,13 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v74: adding investigation_reports.family_of and queries_run");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(74));
         }
+
+        if (fromVersion < 75)
+        {
+            /* v75 (#6012): investigation_requests.follow_up_of and follow_up_at, Darling's V193 follow-up columns (#6008; the shared added-columns list). */
+            _logger?.LogInformation("Running migration to v75: adding investigation_requests.follow_up_of and follow_up_at");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(75));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3124,6 +3131,10 @@ public partial class DuckDbInitializer : IDisposable
            NULL on a report stored before v74. family_of carries no foreign key here: the tool's existence check is the guard. */
         (74, "investigation_reports", "family_of", "UUID"),
         (74, "investigation_reports", "queries_run", "VARCHAR"),
+        /* #6012: the request this follow-up was opened for, and the time a reported request asked to be followed up at (Darling's V193
+           follow_up_of and follow_up_at, #6008). NULL on a request stored before v75. follow_up_of carries no foreign key: the purge clears it. */
+        (75, "investigation_requests", "follow_up_of", "UUID"),
+        (75, "investigation_requests", "follow_up_at", "TIMESTAMP"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

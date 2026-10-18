@@ -128,9 +128,56 @@ FROM investigation_requests
 WHERE request_id = $1";
 
     internal const string SubmitLockSql = @"
-SELECT state, claim_id, server_id, first_metric, first_dedup_key, story_path_hash
+SELECT state, claim_id, server_id, first_metric, first_dedup_key, story_path_hash, route_id
 FROM investigation_requests
 WHERE request_id = $1";
+
+    /* #6012 (Darling's PendingFollowUpsSql, #6008): the pending follow-ups of a route: reported requests that set follow_up_at and
+       whose follow-up has not opened. Lite has no practice requests, so there is no practice_of filter. $1 route. */
+    internal const string PendingFollowUpsSql = @"
+SELECT count(*)
+FROM investigation_requests AS r
+WHERE r.route_id = $1
+  AND r.state = 'reported'
+  AND r.follow_up_at IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM investigation_requests AS f WHERE f.follow_up_of = r.request_id)";
+
+    /* Written only when the report set a time. $1 request, $2 time. */
+    internal const string SetFollowUpSql = @"
+UPDATE investigation_requests SET follow_up_at = $2 WHERE request_id = $1";
+
+    /* The reported requests whose follow-up is due and not yet opened, oldest first (Darling's DueFollowUpsSql without the deploy
+       condition: Lite takes the time only). $1 now. */
+    internal const string DueFollowUpsSql = @"
+SELECT r.request_id
+FROM investigation_requests AS r
+WHERE r.state = 'reported'
+  AND r.follow_up_at IS NOT NULL
+  AND r.follow_up_at <= $1
+  AND NOT EXISTS (SELECT 1 FROM investigation_requests AS f WHERE f.follow_up_of = r.request_id)
+ORDER BY r.follow_up_at, r.request_id
+LIMIT 50";
+
+    /* The follow-up request copies its source's route, server, family, metric, story path, alert times, life and level, and names the
+       source in follow_up_of (Darling's OpenFollowUpSql). $1 new id, $2 source, $3 now. */
+    internal const string OpenFollowUpSql = @"
+INSERT INTO investigation_requests
+    (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, follow_up_of)
+SELECT $1, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.story_path_hash, r.first_alert_at, r.last_alert_at,
+       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, r.request_id
+FROM investigation_requests AS r
+WHERE r.request_id = $2
+RETURNING route_id, server_id";
+
+    /* The source's alert rows, without the dedup key, so the brief's alerts section reads what the source's read. $1 new, $2 source. */
+    internal const string CopyFollowUpAlertsSql = @"
+INSERT INTO investigation_request_alerts
+    (request_alert_id, request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+SELECT (SELECT coalesce(max(request_alert_id), 0) FROM investigation_request_alerts) + row_number() OVER (ORDER BY request_alert_id),
+       $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json
+FROM investigation_request_alerts
+WHERE request_id = $2";
 
     internal const string ReportInsertSql = @"
 INSERT INTO investigation_reports
@@ -339,6 +386,12 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
        of every surviving report whose family request it is about to remove: a family_of that is served always names a request. */
     internal const string RetentionFamilyOfSql =
         "UPDATE investigation_reports SET family_of = NULL WHERE family_of IN (" + RetentionDoomedRequests + ")"
+        + " AND request_id NOT IN (" + RetentionDoomedRequests + ")";
+
+    /* #6012: Darling's follow_up_of is a foreign key ON DELETE SET NULL; a purge clears it the way it clears family_of, so a served
+       follow_up_of always names a request. A follow-up that is itself doomed goes with the delete. */
+    internal const string RetentionFollowUpOfSql =
+        "UPDATE investigation_requests SET follow_up_of = NULL WHERE follow_up_of IN (" + RetentionDoomedRequests + ")"
         + " AND request_id NOT IN (" + RetentionDoomedRequests + ")";
 
     internal const string RetentionRequestsSql =
@@ -593,7 +646,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
 
         string? state = null;
         Guid? currentClaim = null;
-        int serverId = 0;
+        int serverId = 0, routeId = 0;
         string? metric = null, dedupKey = null, story = null;
         using (var command = Command(connection, SubmitLockSql, report.RequestId))
         using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -606,6 +659,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
                 metric = reader.GetString(3);
                 dedupKey = reader.IsDBNull(4) ? null : reader.GetString(4);
                 story = reader.IsDBNull(5) ? null : reader.GetString(5);
+                routeId = reader.GetInt32(6);
             }
         }
 
@@ -644,6 +698,23 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             return outcome;
         }
 
+        /* #6012 (Darling's #6008): a follow-up time over the route's pending cap refuses the whole report, before anything is written.
+           The write lock held since the top makes concurrent submits count in turn. */
+        if (report.FollowUpAtUtc is not null)
+        {
+            long pending;
+            using (var count = Command(connection, PendingFollowUpsSql, routeId))
+            {
+                pending = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+            }
+
+            if (pending >= InvestigationReportFields.MaxPendingFollowUpsPerRoute)
+            {
+                transaction.Commit();
+                return InvestigationSubmitOutcome.FollowUpLimit;
+            }
+        }
+
         await ExecAsync(connection, ReportInsertSql, cancellationToken,
             report.RequestId, report.ReportFormat, report.AgentId, report.ClaimId, now, report.Verdict,
             report.RootCause, report.RootCauseFound, report.Summary, report.EvidenceJson, serverId,
@@ -654,6 +725,11 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         }
 
         await ExecAsync(connection, ReportedSql, cancellationToken, report.RequestId, now);
+        if (report.FollowUpAtUtc is { } followUpAt)
+        {
+            await ExecAsync(connection, SetFollowUpSql, cancellationToken, report.RequestId, followUpAt);
+        }
+
         await JournalAsync(connection, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
         /* #5914, Darling's rule in the shared contract: each link a link_recorded row, once per request and URL. Lite's submit
@@ -913,7 +989,52 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         using var resolvedTransaction = connection.BeginTransaction();
         var resolved = await SweepResolvedAsync(connection, now, cancellationToken);
         resolvedTransaction.Commit();
-        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved };
+
+        /* #6012 (Darling's #6008): its own transaction too, so a follow-up that cannot open holds back neither the expiry nor the
+           resolved journal. */
+        using var followUpTransaction = connection.BeginTransaction();
+        var followUps = await SweepFollowUpsAsync(connection, now, cancellationToken);
+        followUpTransaction.Commit();
+        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps };
+    }
+
+    /// <summary>
+    /// The follow-up sweep (#6012, Darling's #6008): for each reported request whose <c>follow_up_at</c> has come and that has no
+    /// follow-up yet, opens a new request that names it in <c>follow_up_of</c> and journals one <c>follow_up</c> event (trigger
+    /// <c>time</c>) for the new request, once per earlier request. The new request's brief reads the earlier report as it reads any
+    /// earlier report of the same server and family. Lite has no event delivery, so an agent finds the follow-up in the request list.
+    /// Returns the follow-ups opened.
+    /// </summary>
+    private async Task<int> SweepFollowUpsAsync(DuckDBConnection connection, DateTime now, CancellationToken cancellationToken)
+    {
+        var due = new List<Guid>();
+        using (var candidates = Command(connection, DueFollowUpsSql, now))
+        using (var reader = await candidates.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                due.Add(reader.GetGuid(0));
+            }
+        }
+
+        foreach (var earlier in due)
+        {
+            var followUpId = Guid.NewGuid();
+            int routeId, serverId;
+            using (var insert = Command(connection, OpenFollowUpSql, followUpId, earlier, now))
+            using (var returned = await insert.ExecuteReaderAsync(cancellationToken))
+            {
+                await returned.ReadAsync(cancellationToken);
+                routeId = returned.GetInt32(0);
+                serverId = returned.GetInt32(1);
+            }
+
+            await ExecAsync(connection, CopyFollowUpAlertsSql, cancellationToken, followUpId, earlier);
+            await JournalAsync(connection, now, followUpId, routeId, serverId, InvestigationEvents.FollowUp, "service",
+                null, "{\"follow_up_of\":\"" + earlier.ToString("D") + "\",\"trigger\":\"time\"}", InvestigationEvents.FollowUpOnceKey(earlier), cancellationToken);
+        }
+
+        return due.Count;
     }
 
     /* #6010, D7 (Darling's #6003): a live request is resolved when EVERY metric linked to it has a resolution row after that
@@ -1010,6 +1131,7 @@ ON CONFLICT (once_key) DO NOTHING";
         await ExecAsync(connection, RetentionAlertRowsSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionEvidenceSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionFamilyOfSql, cancellationToken, cutoff);
+        await ExecAsync(connection, RetentionFollowUpOfSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionReportsSql, cancellationToken, cutoff);
         var requests = await ExecAsync(connection, RetentionRequestsSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionJournalSql, cancellationToken, cutoff);
