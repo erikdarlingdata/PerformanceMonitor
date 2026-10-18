@@ -80,13 +80,16 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     /// (the newest collection_time, then the largest execution_count), so no total adds one interval twice. The
     /// partition is the one <c>DarlingDataReader.QueryStoreTopRawPrefix</c> uses; PostgreSQL matches NULL to NULL in it.
     /// </summary>
-    internal const string HistorySql = """
+    internal const string HistoryDedupeCte = """
         WITH deduped AS (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
                                          ORDER BY collection_time DESC, execution_count DESC) AS rn
             FROM query_store_stats
             WHERE server_id = $1 AND database_name = $2 AND query_id = $3
             AND collection_time >= $4 AND collection_time <= $5)
+        """;
+
+    internal const string HistorySql = HistoryDedupeCte + "\n" + """
         SELECT plan_id, collection_time, execution_count,
                CAST(avg_duration_us AS double precision) / 1000.0,
                CAST(avg_cpu_time_us AS double precision) / 1000.0,
@@ -115,12 +118,19 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                CAST(avg_duration_us AS double precision) / 1000.0,
                CAST(avg_cpu_time_us AS double precision) / 1000.0,
                first_execution_time, last_execution_time, is_forced_plan
+        """ + "\n" + HistoryTableFromWhere + " " + HistoryOrder;
+
+    /// <summary>
+    /// The interval-table read's FROM and WHERE (#5300, #5807, #5523), shared with <c>get_plan_force_precheck</c> (#5632) so a
+    /// second reader of the same table takes the same index-friendly predicates and cannot drift from them.
+    /// </summary>
+    internal static readonly string HistoryTableFromWhere = $$"""
         FROM query_store_interval_wide
         WHERE server_id = $1 AND database_name = $2 AND query_id = $3
         AND collection_time >= $4 AND collection_time <= $5
         AND first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
         AND first_execution_time <= $5 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-        """ + " " + HistoryOrder;
+        """;
 
     internal readonly record struct HistoryRow(
         long PlanId, DateTime CollectionTime, long ExecutionCount, double? AvgDurationMs, double? AvgCpuMs,
@@ -208,8 +218,17 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     /// decision and the read it authorizes see one snapshot. Null (never an empty list) when the gate says raw or anything
     /// before the table read fails; a fault falls back to raw, as the grid's does. Cancellation propagates.
     /// </summary>
-    private static async Task<(List<HistoryRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryReadFromTableAsync(
-        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    private static Task<(List<HistoryRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryReadFromTableAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, DateTime start, DateTime end, CancellationToken cancellationToken) =>
+        TryReadFromTableAsync(postgres, serverId, databaseName, queryId, start, end, HistoryTableSql, ReadRowsAsync, cancellationToken);
+
+    /// <summary>
+    /// The tier choice with the row shape and the select list left to the caller (#5632): <c>get_plan_force_precheck</c> reads
+    /// the same table under the same gate with more columns. <paramref name="tableSql"/> takes $1 to $5 as <see cref="HistoryTableSql"/> does.
+    /// </summary>
+    internal static async Task<(List<T> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryReadFromTableAsync<T>(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, DateTime start, DateTime end,
+        string tableSql, Func<NpgsqlDataReader, CancellationToken, Task<List<T>>> readRows, CancellationToken cancellationToken)
     {
         if (!DarlingDataReader.QueryStoreTopMayReadTable(start, end)) return null;
         var gateDecided = false;
@@ -232,14 +251,14 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             }
 
             gateDecided = true;
-            await using var command = new NpgsqlCommand(HistoryTableSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            await using var command = new NpgsqlCommand(tableSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);
             command.Parameters.AddWithValue(queryId);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified));
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            var rows = await ReadRowsAsync(reader, cancellationToken);
+            var rows = await readRows(reader, cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceIntervalTable);
             return (rows, plan);
         }

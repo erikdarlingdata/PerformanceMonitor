@@ -50,7 +50,7 @@ export const UNFILTERED = new Set([
  *  injected into them and they show no chip. */
 export const IDENTITY = new Set([
   "get_query_trend", "get_plan_xml", "get_query_store_plan_xml", "get_active_query_plan_xml", "get_procedure_plan_xml",
-  "get_query_store_query_history", "get_blocking_plan_xml", "get_deadlock_plan_xml", "get_query_repro_script",
+  "get_query_store_query_history", "get_plan_force_precheck", "get_blocking_plan_xml", "get_deadlock_plan_xml", "get_query_repro_script",
 ]);
 
 /** Every other SQL Server read a module of the server page names: the data has no database, so the filter does not apply.
