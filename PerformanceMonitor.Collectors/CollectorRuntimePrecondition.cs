@@ -644,6 +644,37 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
+    /// The sentence a Query Store read that found nothing appends when the newest <c>query_store_health</c> row of a
+    /// database in scope is not READ_WRITE (#6074), or <c>null</c> when every database in scope is collecting (or no row
+    /// was recorded). <see cref="QueryStoreDisabledMessage"/> is the all-or-nothing answer (silent while ANY database in
+    /// scope is READ_WRITE); this one is per database and only a suffix, so it can ride on the other empty answers a
+    /// Query Store read has (a tag that matched nothing, no history for a query, a trend with no samples) and say that
+    /// the empty answer may be a Query Store that stopped recording rather than a quiet database. It names
+    /// <c>get_query_store_health</c>, which says why (the desired state and <c>readonly_reason</c>).
+    /// </summary>
+    public static string? QueryStoreNotWritingHint(IReadOnlyList<QueryStoreDatabaseState> states, DateTime? observedUtc)
+    {
+        if (states is null || states.Count == 0)
+        {
+            return null;
+        }
+
+        var notWriting = states.Where(s => !IsCollecting(s.ActualState)).ToList();
+        if (notWriting.Count == 0)
+        {
+            return null;
+        }
+
+        var named = string.Join(", ", notWriting.Take(3).Select(s =>
+            $"{s.DatabaseName} ({(string.IsNullOrWhiteSpace(s.ActualState) ? "no state recorded" : s.ActualState!.Trim().ToUpperInvariant())})"));
+        var more = notWriting.Count > 3 ? $" and {notWriting.Count - 3} more" : string.Empty;
+
+        return $" Query Store is not READ_WRITE on {named}{more}{DescribeObserved(observedUtc)}, so it records nothing new there and " +
+               "an empty read can mean that rather than a quiet database. get_query_store_health shows the actual and " +
+               "desired state and the read-only reason.";
+    }
+
+    /// <summary>
     /// READ_WRITE is the only <c>actual_state_desc</c> that records new runtime statistics. The other three
     /// the catalog view can report — OFF, READ_ONLY and ERROR — each get their own sentence above, because
     /// each has its own remedy. ALL_TRANSACTIONS and friends are capture MODES rather than states and never

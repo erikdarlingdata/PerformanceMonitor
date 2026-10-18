@@ -1464,7 +1464,11 @@ public sealed class DarlingMcpDataTools
                 truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
             }
 
-            if (rows.Count == 0)
+            /* #6074: every empty answer below is also read against the database's newest query_store_health row: when Query
+               Store is not READ_WRITE there, the answer says so and names get_query_store_health, because an empty page from a
+               read-only Query Store looks like a tool error or a quiet database. The ladder is unchanged; its answer gets one
+               more sentence when it is an empty or unavailable status. */
+            async Task<string> EmptyAnswerAsync()
             {
                 /* #5984: a tag that matched nothing is an answer, not a missing collection. */
                 if (tagFilter.Active)
@@ -1527,6 +1531,10 @@ public sealed class DarlingMcpDataTools
                         "nothing was read for the older part of it. Try a shorter window before concluding the " +
                         "queries did not run.");
             }
+
+            if (rows.Count == 0)
+                return await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
+                    await EmptyAnswerAsync(), postgres, resolved.ServerId, databases, cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
