@@ -1765,6 +1765,13 @@ FROM d";
     /// materialization hypertables, never the views (a real-time view shows rows that are not materialized), and
     /// "the child has no bucket for the day" is a plain anti-join: every parent row maps to a child row, so a
     /// materialized parent day with an empty child day is by construction a hole, never a day the source lacks.
+    ///
+    /// <para><b>One probe per day, never a scan of the parent.</b> The days come from <c>generate_series</c>
+    /// over <c>[$1, $2]</c> (both are daily bucket starts: <c>$1</c> is the parent's own <c>min(bucket)</c>, <c>$2</c>
+    /// is aligned down), and each day is an <c>EXISTS</c> on the parent and a <c>NOT EXISTS</c> on the child, both
+    /// on the bucket index, fenced with <c>OFFSET 0</c> like <see cref="LegacySuccessorHoleExistsSql"/>. A
+    /// <c>SELECT DISTINCT bucket</c> over the parent read every row of every day it holds (millions of rows on a
+    /// large store, compressed chunks decompressed) on every start.</para>
     /// </summary>
     public static string DailyChildHoleDaysSql((string Schema, string Name) parent, (string Schema, string Name) child)
     {
@@ -1772,8 +1779,9 @@ FROM d";
         var childRelation = $"{QuoteIdentifier(child.Schema)}.{QuoteIdentifier(child.Name)}";
         return $@"
 SELECT d.bucket
-FROM (SELECT DISTINCT p.bucket FROM {parentRelation} AS p WHERE p.bucket >= $1::timestamp AND p.bucket <= $2::timestamp) AS d
-WHERE NOT EXISTS (SELECT 1 FROM (SELECT c.bucket FROM {childRelation} AS c WHERE c.bucket = d.bucket OFFSET 0) AS x)
+FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '1 day') AS d(bucket)
+WHERE EXISTS (SELECT 1 FROM {parentRelation} AS p WHERE p.bucket = d.bucket OFFSET 0)
+AND NOT EXISTS (SELECT 1 FROM {childRelation} AS c WHERE c.bucket = d.bucket OFFSET 0)
 ORDER BY d.bucket DESC
 LIMIT $3";
     }
