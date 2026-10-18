@@ -608,6 +608,8 @@ public sealed class QueryTagMapBuilderLiveTests
             await SightOnAsync(env, other, HashSightings("0x03", "Report"));
             Assert.True(await builder.RunMapPassAsync(new[] { Server, other }, env.Ct));
             Assert.Equal($"0x02|{tagA},0x03|{tagA}", await MapOfAsync(env, other));
+            /* An extend re-reads the last two minutes of sightings, which would mask the gap: age them past it, as a real gap would. */
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = last_seen - interval '1 hour', first_seen = first_seen - interval '1 hour'");
 
             /* The rule changes to set B while the other server is out of the pass (disabled, say). */
             await ExecAsync(env, $"UPDATE config.query_tag_rules SET tag_id = {tagB} WHERE id = {ruleId}");
@@ -637,6 +639,7 @@ public sealed class QueryTagMapBuilderLiveTests
             Assert.True(await PassAsync(env, builder));
             Assert.True(await PassAsync(env, builder));
             Assert.Equal($"0x01|{tagA}", await MapOfAsync(env, Server));
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = last_seen - interval '1 hour', first_seen = first_seen - interval '1 hour'");
 
             await ExecAsync(env, $"UPDATE config.query_tag_rules SET tag_id = {tagB} WHERE id = {ruleId}");
             string version = await ScalarAsync(env, "SELECT rules_version FROM config.query_tag_state");
