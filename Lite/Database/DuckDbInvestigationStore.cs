@@ -41,7 +41,10 @@ public sealed partial class DuckDbInvestigationStore : IInvestigationRequestStor
        whole transaction covers them. SubmitLockSql keeps its name; its FOR UPDATE is the write lock. */
 
     internal const string FindJoinSql = @"
-SELECT r.request_id
+SELECT r.request_id,
+       r.max_severity,
+       EXISTS (SELECT 1 FROM investigation_request_alerts AS a
+               WHERE a.request_id = r.request_id AND a.metric_name = $5) AS has_metric
 FROM investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
@@ -55,7 +58,8 @@ LIMIT 1";
     internal const string JoinSql = @"
 UPDATE investigation_requests
 SET alert_count = alert_count + 1,
-    last_alert_at = greatest(last_alert_at, $2)
+    last_alert_at = greatest(last_alert_at, $2),
+    max_severity = $3
 WHERE request_id = $1";
 
     internal const string CountRouteSql = @"
@@ -68,8 +72,8 @@ WHERE route_id = $1
     internal const string OpenSql = @"
 INSERT INTO investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
-     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + INTERVAL 30 MINUTE, $10, $10 + to_minutes(CAST($11 AS BIGINT)), $12)";
+     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, max_severity)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + INTERVAL 30 MINUTE, $10, $10 + to_minutes(CAST($11 AS BIGINT)), $12, $13)";
 
     /* One row per key of the bound list; the ids continue from the table's max under the write lock. */
     internal const string AlertRowsSql = @"
@@ -369,23 +373,39 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         using var connection = await OpenAsync(cancellationToken);
         using var transaction = connection.BeginTransaction();
 
+        var severity = string.Equals(alert.Severity, InvestigationEvents.Critical, StringComparison.Ordinal)
+            ? InvestigationEvents.Critical : InvestigationEvents.Warning;
         Guid? joinId = null;
-        using (var find = Command(connection, FindJoinSql, alert.ServerId, alert.Family, now, alertTime))
+        string? maxSeverity = null;
+        var newMetric = false;
+        using (var find = Command(connection, FindJoinSql, alert.ServerId, alert.Family, now, alertTime, alert.MetricName))
+        using (var found = await find.ExecuteReaderAsync(cancellationToken))
         {
-            if (await find.ExecuteScalarAsync(cancellationToken) is Guid id)
+            if (await found.ReadAsync(cancellationToken))
             {
-                joinId = id;
+                joinId = found.GetGuid(0);
+                maxSeverity = found.IsDBNull(1) ? null : found.GetString(1);
+                newMetric = !found.GetBoolean(2);
             }
         }
 
         if (joinId is Guid join)
         {
-            await ExecAsync(connection, JoinSql, cancellationToken, join, alertTime);
+            /* #6010, D6 (Darling's #6003): a join is an event only when it brings a metric the request has not seen or a
+               severity above its max_severity; any other join is journaled as a quiet join. */
+            var evented = InvestigationEvents.JoinIsEvent(newMetric, maxSeverity, severity);
+            var newMax = InvestigationEvents.SeverityRank(severity) > InvestigationEvents.SeverityRank(maxSeverity)
+                ? severity
+                : maxSeverity ?? severity;
+            await ExecAsync(connection, JoinSql, cancellationToken, join, alertTime, newMax);
             await InsertAlertRowsAsync(connection, join, alert, alertTime, keys, cancellationToken);
-            await JournalAsync(connection, now, join, alert.RouteId, alert.ServerId, "joined", "service",
-                alert.MetricName, null, null, cancellationToken);
+            await JournalAsync(connection, now, join, alert.RouteId, alert.ServerId,
+                evented ? InvestigationEvents.Joined : InvestigationEvents.QuietJoin, "service",
+                alert.MetricName,
+                evented ? "{\"new_metric\":" + (newMetric ? "true" : "false") + ",\"severity\":\"" + severity + "\"}" : null,
+                null, cancellationToken);
             transaction.Commit();
-            return new InvestigationOpenResult(InvestigationOpenOutcome.Joined, join);
+            return new InvestigationOpenResult(InvestigationOpenOutcome.Joined, join) { Evented = evented };
         }
 
         long lastHour, lastDay;
@@ -412,7 +432,9 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         var requestId = Guid.NewGuid();
         await ExecAsync(connection, OpenSql, cancellationToken,
             requestId, alert.RouteId, alert.ServerId, alert.ServerName, alert.Family, alert.MetricName,
-            keys.FirstOrDefault(), alert.StoryPathHash, alertTime, now, alert.ExpiryMinutes, alert.LeaseMinutes);
+            keys.FirstOrDefault(), alert.StoryPathHash, alertTime, now, alert.ExpiryMinutes, alert.LeaseMinutes,
+            string.Equals(alert.Severity, InvestigationEvents.Critical, StringComparison.Ordinal)
+                ? InvestigationEvents.Critical : InvestigationEvents.Warning);
         await InsertAlertRowsAsync(connection, requestId, alert, alertTime, keys, cancellationToken);
         await JournalAsync(connection, now, requestId, alert.RouteId, alert.ServerId, "opened", "service",
             alert.MetricName, null, null, cancellationToken);
@@ -851,7 +873,89 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         await ExecAsync(connection, SweepExpireSql, cancellationToken, now);
         var expired = await ExecAsync(connection, SweepExpireUpdateSql, cancellationToken, now);
         transaction.Commit();
-        return new InvestigationSweepResult(lapsed, expired);
+
+        /* #6010, D7: its own transaction, so a failure there cannot hold back the expiry above (Darling's order). */
+        using var resolvedTransaction = connection.BeginTransaction();
+        var resolved = await SweepResolvedAsync(connection, now, cancellationToken);
+        resolvedTransaction.Commit();
+        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved };
+    }
+
+    /* #6010, D7 (Darling's #6003): a live request is resolved when EVERY metric linked to it has a resolution row after that
+       metric's last alert on the same server. A resolution row's context_json names the metric it resolves in its top-level
+       Resolves member; the candidate rows come back and C# parses each context (a text match would miss the escapings).
+       A metric with no candidate comes back once with a NULL context, so a request with an uncleared metric is unresolved.
+       Read through v_config_alert_log (live plus archive) so an archived resolution still counts. */
+    internal const string ResolveCandidatesSql = @"
+SELECT m.request_id, m.metric_name, h.context_json
+FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
+      FROM investigation_request_alerts AS a
+      WHERE a.request_id IN (SELECT r.request_id
+                             FROM investigation_requests AS r
+                             WHERE r.state IN ('open', 'claimed', 'reported')
+                               AND r.opened_at > $1 - INTERVAL 2 DAY)
+      GROUP BY a.request_id, a.server_id, a.metric_name) AS m
+LEFT JOIN v_config_alert_log AS h
+       ON h.server_id = m.server_id
+      AND h.alert_time > m.last_alert
+      AND strpos(h.context_json, 'Resolves') > 0";
+
+    /* Journals resolved once per request (once key resolved:<request_id>); the state is checked again under the write lock. */
+    internal const string ResolveInsertSql = @"
+INSERT INTO investigation_journal (journal_id, event_time, request_id, route_id, server_id, event, actor, once_key)
+SELECT (SELECT coalesce(max(journal_id), 0) FROM investigation_journal) + row_number() OVER (),
+       $1, r.request_id, r.route_id, r.server_id, 'resolved', 'service', 'resolved:' || r.request_id::VARCHAR
+FROM investigation_requests AS r
+WHERE list_contains($2::VARCHAR[], r.request_id::VARCHAR)
+  AND r.state IN ('open', 'claimed', 'reported')
+ON CONFLICT (once_key) DO NOTHING";
+
+    private async Task<int> SweepResolvedAsync(DuckDBConnection connection, DateTime now, CancellationToken cancellationToken)
+    {
+        var requests = new Dictionary<Guid, Dictionary<string, bool>>();
+        using (var candidates = Command(connection, ResolveCandidatesSql, now))
+        using (var reader = await candidates.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var requestId = reader.GetGuid(0);
+                var metric = reader.GetString(1);
+                if (!requests.TryGetValue(requestId, out var metrics))
+                {
+                    metrics = new Dictionary<string, bool>(StringComparer.Ordinal);
+                    requests[requestId] = metrics;
+                }
+
+                metrics.TryAdd(metric, false);
+                if (!reader.IsDBNull(2) && !metrics[metric] && ResolvesMetric(reader.GetString(2), metric))
+                {
+                    metrics[metric] = true;
+                }
+            }
+        }
+
+        var cleared = requests.Where(r => r.Value.Values.All(done => done)).Select(r => r.Key).ToList();
+        return cleared.Count == 0 ? 0 : await ExecAsync(connection, ResolveInsertSql, cancellationToken, now, cleared.Select(id => id.ToString()).ToArray());
+    }
+
+    /// <summary>The member of a resolution row's context that names the metric it resolves (Darling's <c>DarlingSelfAlertEvaluator.ResolvesMember</c>).</summary>
+    private const string ResolvesMember = "Resolves";
+
+    private static bool ResolvesMetric(string contextJson, string metric)
+    {
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(contextJson);
+            return document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                && document.RootElement.TryGetProperty(ResolvesMember, out var member)
+                && member.ValueKind == System.Text.Json.JsonValueKind.String
+                && string.Equals(member.GetString(), metric, StringComparison.Ordinal);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            /* A context that is not JSON names nothing; the row is stored data, not a store read. */
+            return false;
+        }
     }
 
     /// <summary>

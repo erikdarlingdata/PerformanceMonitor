@@ -454,6 +454,7 @@ CREATE TABLE IF NOT EXISTS investigation_requests (
     closed_by VARCHAR,
     closed_reason VARCHAR,
     evidence_state VARCHAR,
+    max_severity VARCHAR,
     CHECK (family IN ('blocking', 'query_performance', 'resources', 'availability', 'jobs', 'self_monitor', 'other')),
     CHECK (state IN ('open', 'claimed', 'reported', 'closed', 'expired'))
 )";

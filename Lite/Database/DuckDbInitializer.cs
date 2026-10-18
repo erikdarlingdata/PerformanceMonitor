@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 72;
+    internal const int CurrentSchemaVersion = 73;
 
     private readonly string _archivePath;
 
@@ -3047,6 +3047,13 @@ public partial class DuckDbInitializer : IDisposable
 
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(72));
         }
+
+        if (fromVersion < 73)
+        {
+            /* v73 (#6010): investigation_requests.max_severity, the quiet-join rule's high-water mark (the shared added-columns list). */
+            _logger?.LogInformation("Running migration to v73: adding investigation_requests.max_severity");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(73));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3104,6 +3111,8 @@ public partial class DuckDbInitializer : IDisposable
         (69, "notification_routes", "agent_expiry_minutes", "INTEGER"),
         /* #6010: the request's evidence state (Darling's V193 evidence_state): NULL until the capture settles a section. */
         (72, "investigation_requests", "evidence_state", "VARCHAR"),
+        /* #6010: the highest severity any alert joined to the request had (Darling's V193 max_severity); NULL on a request opened before v73. */
+        (73, "investigation_requests", "max_severity", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

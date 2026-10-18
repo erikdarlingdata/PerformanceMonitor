@@ -328,12 +328,12 @@ VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', 7, {plan}, 'Regular', '{Ts
         var first = Shape(upgraded);
         Assert.Contains("investigation_evidence.section", first);
         Assert.Contains("investigation_requests.evidence_state", first);
-        Assert.Equal("72", Scalar2(upgraded, "SELECT max(version) FROM schema_version"));
+        Assert.Equal("73", Scalar2(upgraded, "SELECT max(version) FROM schema_version"));
 
         using var again = new DuckDbInitializer(path);
         await again.InitializeAsync();
         Assert.Equal(first, Shape(again));
-        Assert.Equal("72", Scalar2(again, "SELECT max(version) FROM schema_version"));
+        Assert.Equal("73", Scalar2(again, "SELECT max(version) FROM schema_version"));
     }
 
     private static void Exec2(DuckDbInitializer db, string sql)
