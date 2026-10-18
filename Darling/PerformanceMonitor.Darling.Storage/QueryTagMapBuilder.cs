@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -130,13 +131,23 @@ public sealed class QueryTagMapBuilder
             }
         }
 
-        /* An empty server list rebuilt nothing, so there is no version to claim a map was built from. */
-        if (rebuildAll && allSucceeded && serverIds.Count > 0)
+        /* A rebuild-all pass stamps the version it read. A server that was NOT in this pass (disabled, say, or the list was
+           empty) was not rebuilt, and after the stamp rebuildAll is false, so when it returns it would be extended: its map
+           rows would keep the tags of the old rules while the state row says the map is current (#5971). So the stamp also
+           drops the cursor of every server outside this pass, and each of them is rebuilt (no cursor) when it returns. That
+           is also why an empty list may stamp: no map is claimed current that was not built, which matches Lite, whose pass
+           covers every server that has sightings. A failed stamp changes nothing: the next pass is rebuild-all again. */
+        if (rebuildAll && allSucceeded)
         {
             try
             {
                 await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
                 await QueryTagMapStore.StampBuiltVersionAsync(connection, snapshot.RulesVersion, cancellationToken).ConfigureAwait(false);
+                var inPass = new HashSet<int>(serverIds);
+                foreach (int cursorServer in _cursors.Keys.Where(id => !inPass.Contains(id)).ToList())
+                {
+                    _cursors.Remove(cursorServer);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
