@@ -44,7 +44,7 @@ export const MCP_TOOL_NAMES = [
   "get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_wraparound_risk", "get_pg_write_stats",
   "get_pg_xmin_horizon", "get_plan_cache_bloat", "get_plan_corrections", "get_plan_force_precheck", "get_plan_xml",
   "get_procedure_duration_trend", "get_procedure_plan_xml", "get_pvs_stats", "get_query_duration_trend",
-  "get_query_heatmap", "get_query_repro_script", "get_query_store_clutter", "get_query_store_duration_trend",
+  "get_query_heatmap", "get_query_repro_script", "get_query_store_aborts", "get_query_store_clutter", "get_query_store_duration_trend",
   "get_query_store_health", "get_query_store_plan_xml", "get_query_store_query_history",
   "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
   "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_config", "get_server_config_changes",
