@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -31,6 +32,7 @@ public sealed class AlertHistoryFilterTests : IDisposable
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly TestAlertDataHelper _helper;
+    private readonly List<DuckDbInitializer> _initializers = [];
 
     public AlertHistoryFilterTests()
     {
@@ -42,6 +44,11 @@ public sealed class AlertHistoryFilterTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* Best-effort cleanup */ }
     }
@@ -49,6 +56,7 @@ public sealed class AlertHistoryFilterTests : IDisposable
     private async Task<LocalDataService> SeedAsync(params (int MinutesAgo, string Metric)[] rows)
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeFromTemplateAsync();
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
         {
@@ -117,7 +125,7 @@ public sealed class AlertHistoryFilterTests : IDisposable
     [Fact]
     public async Task TheFamilyPredicate_AgreesWithAlertFamilyOf_ForEveryCensusNameAndPrefixShape()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeFromTemplateAsync();
         var names = AlertFamily.MetricFamilies.Keys.Concat(AlertFamily.RecoveryPairs.Keys)
             .Concat(new[] { "Custom:1", "External:src:key", "Analysis: cpu_pressure [ab12cd34]", "Some Uncensused Alert" })
