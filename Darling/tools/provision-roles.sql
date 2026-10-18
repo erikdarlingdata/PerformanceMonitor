@@ -1818,6 +1818,14 @@ BEGIN
 GRANT UPDATE (follow_up_at) ON config.investigation_requests TO mcp;
 $v193u$;
    END IF;
+   -- #6009 (V193): the deploy condition beside it, guarded the same way.
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.investigation_requests'::regclass
+                AND attname = 'follow_up_condition' AND NOT attisdropped) THEN
+      EXECUTE $v193c$
+GRANT UPDATE (follow_up_condition) ON config.investigation_requests TO mcp;
+$v193c$;
+   END IF;
    GRANT INSERT ON config.investigation_reports TO mcp;
    GRANT INSERT (event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
       ON config.investigation_journal TO mcp;

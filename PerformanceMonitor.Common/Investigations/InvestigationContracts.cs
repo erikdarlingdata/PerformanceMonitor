@@ -145,7 +145,7 @@ public enum InvestigationSubmitOutcome
 /// <see cref="Links"/> (#5914) are checked by <see cref="InvestigationReportLinks.Validate"/> and stored once per URL.
 /// <see cref="FamilyOf"/> (#6004) is the first report's request id, which must name a request; <see cref="QueriesRunJson"/>
 /// is a JSON array of statement strings within <see cref="InvestigationReportFields"/>'s caps. <see cref="FollowUpAtUtc"/>
-/// (#6008) is when Darling opens a follow-up request; the store keeps it on the report's request (Lite ignores it, #6012).</summary>
+/// (#6008) is when Darling opens a follow-up request; <see cref="FollowUpCondition"/> (#6009) is a <c>module:db.schema.object</c> deploy that opens it sooner; the store keeps it on the report's request (Lite ignores it, #6012).</summary>
 public sealed record InvestigationReportSubmission(
     Guid RequestId,
     Guid ClaimId,
@@ -160,7 +160,8 @@ public sealed record InvestigationReportSubmission(
     IReadOnlyList<InvestigationReportLink>? Links = null,
     Guid? FamilyOf = null,
     string? QueriesRunJson = null,
-    DateTime? FollowUpAtUtc = null);
+    DateTime? FollowUpAtUtc = null,
+    string? FollowUpCondition = null);
 
 /// <summary>What a lease renewal answered (#5632 Phase A, a claim made with the caller's own claim id).</summary>
 /// <param name="Renewed">True when the claim still held a live lease and the lease moved on.</param>

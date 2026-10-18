@@ -2915,6 +2915,14 @@ public sealed class DarlingCollectorRunner
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
+                    /* #6009: procedure_stats' module phase on Azure SQL Database, where this loop is the collector's path: this database's
+                       watched modules, on this database's own connection, after its reader is disposed. Sends nothing when no module of
+                       this database is watched. Inside the slice, so its time counts as this database's SQL time. */
+                    if ((object)batch is List<ProcedureStatsCollector.Row> moduleBatch && moduleBatch.Count > 0)
+                    {
+                        await RunProcedureStatsModulePhaseAsync(perDbProvider, null, dbConnection, server, context, moduleBatch, null, dbToken);
+                    }
+
                     /* Read ONCE. A second read a few statements later returns a larger number, and the
                        per-item total would then exceed the blended total it is a ratio against — a dominance
                        a hair above the truth, on every Azure run (#2472). Small, and wrong in the direction
@@ -3942,6 +3950,15 @@ public sealed class DarlingCollectorRunner
                             targetProvider, reader, targetConnection, server, context, phaseRows, itemToken);
                     }
 
+                    /* #6009: the module phase. For the modules a pending deploy follow-up watches and nowhere else, a second small
+                       query reads modify_date on this same target connection and inside the same budget. With nothing watched it
+                       sends nothing, and the plan reuse pass below runs exactly as before. */
+                    if ((object)rows is List<ProcedureStatsCollector.Row> moduleRows && moduleRows.Count > 0)
+                    {
+                        await RunProcedureStatsModulePhaseAsync(
+                            targetProvider, reader, targetConnection, server, context, moduleRows, null, itemToken);
+                    }
+
                     /* #5158: the deferred plan fetch. After the main read is over and on this same target connection,
                        inside the same wall-clock budget (itemToken), so a slow fetch is cut by the budget like the read. */
                     if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
@@ -4917,6 +4934,15 @@ public sealed class DarlingCollectorRunner
                     await QueryStatsHourLedgerWriter.AddBatchAsync(
                         pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
                         writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                /* #6009: a watched module's modify_date, onto the rows just copied, on this transaction behind its own savepoint.
+                   Nothing runs unless a row carries a date, which is a batch of a server with a watched module. */
+                if (totalsBatch)
+                {
+                    await ProcedureStatsModuleDates.StampAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime,
+                        rows.OfType<ProcedureStatsCollector.Row>(), ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
                 }
 
                 /* #5638: the collection's per-database totals, read back from the rows the store now holds for this
@@ -7913,6 +7939,80 @@ RETURNING s.state_key";
 
         ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, results);
         return Math.Max(1L, watch.ElapsedMilliseconds);
+    }
+
+    /// <summary>#6009: a server's watch list and when it was read, so the databases of one Azure SQL Database collection share one store read.</summary>
+    private readonly ConcurrentDictionary<int, (long ReadAtMs, IReadOnlyList<ProcedureStatsCollector.WatchedModule> Modules)> _watchedModules = new();
+
+    /// <summary>#6009: how long a read watch list is reused: longer than one collection's fan-out over databases, far shorter than the collection interval.</summary>
+    private const long WatchedModulesReuseMs = 30_000;
+
+    private async Task<IReadOnlyList<ProcedureStatsCollector.WatchedModule>> WatchedModulesAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var now = Environment.TickCount64;
+        if (_watchedModules.TryGetValue(serverId, out var held) && now - held.ReadAtMs < WatchedModulesReuseMs)
+        {
+            return held.Modules;
+        }
+
+        var modules = await ProcedureStatsModuleDates.ReadWatchedAsync(_postgres, serverId, _logger, cancellationToken);
+        _watchedModules[serverId] = (now, modules);
+        return modules;
+    }
+
+    /// <summary>
+    /// #6009: procedure_stats' module phase, option C of D16. Reads the watch list from the store (once per collection, unless
+    /// <paramref name="watched"/> is given), and for each database that holds a watched module sends ONE small query on the target
+    /// connection: <c>sys.objects</c> joined to <c>sys.schemas</c> for those names only. A row of a watched module takes the module's
+    /// <c>modify_date</c>; every other row keeps null. With nothing watched, or no watched module among the rows, it sends nothing
+    /// at all. Closes the main reader first when it sends (one command at a time on the connection). A failed query is a warning and
+    /// the rows ship without a date; a stop or the budget expiring propagates. Returns how many queries it sent.
+    /// </summary>
+    internal async Task<int> RunProcedureStatsModulePhaseAsync(
+        ITargetProvider provider,
+        DbDataReader? mainReader,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<ProcedureStatsCollector.Row> rows,
+        IReadOnlyList<ProcedureStatsCollector.WatchedModule>? watched,
+        CancellationToken cancellationToken)
+    {
+        watched ??= await WatchedModulesAsync(server.ServerId, cancellationToken);
+        var byDatabase = ProcedureStatsCollector.SelectWatchedModules(rows, watched.ToArray());
+        if (byDatabase.Count == 0)
+        {
+            return 0;
+        }
+
+        if (mainReader is not null)
+        {
+            await mainReader.CloseAsync();
+        }
+
+        var sent = 0;
+        foreach (var (databaseName, modules) in byDatabase)
+        {
+            sent++;
+            try
+            {
+                var query = ProcedureStatsCollector.BuildModulePhaseQuery(context, databaseName, modules);
+                using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
+                using var moduleReader = await command.ExecuteReaderAsync(cancellationToken);
+                var results = await ProcedureStatsCollector.ReadModulePhaseAsync(moduleReader, cancellationToken);
+                ProcedureStatsCollector.ApplyModulePhase(rows, databaseName, results);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                       && !cancellationToken.IsCancellationRequested)
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "{Collector} on '{Server}': the module query for [{Database}] failed, so this run's rows ship without a module modify_date; it is read again next cycle (#6009).",
+                    ProcedureStatsCollector.Instance.Name, server.Config.DisplayName, databaseName);
+            }
+        }
+
+        return sent;
     }
 
     /// <summary>
