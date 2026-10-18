@@ -48,7 +48,7 @@ public sealed class ServerActionSwitchStoreTests
     public void TheRungInsertsNoRow()
     {
         /* "No row means off" holds only if the migration seeds nothing: no INSERT in the text, and no DEFAULT that turns a row on. */
-        Assert.DoesNotContain("INSERT", Rung.Sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotMatch(@"(?i)\bINSERT\s+INTO\b", Rung.Sql);
         Assert.Contains("enabled boolean NOT NULL DEFAULT false", Rung.Sql, StringComparison.Ordinal);
     }
 

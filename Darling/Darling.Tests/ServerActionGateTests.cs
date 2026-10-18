@@ -179,6 +179,9 @@ public sealed class ServerActionGateLiveTests
             var (request, claim) = await OpenAndClaimAsync(store, 3);
             async Task Refuses(string code, ServerActionHooks hooks, string action = ServerActionNames.ForcePlan)
             {
+                /* The clock moves an hour at a time to reach a new journal hour; the claim's lease moves with it. */
+                await ExecAsync(connection, FormattableString.Invariant(
+                    $"UPDATE config.investigation_requests SET lease_until = '{_now:yyyy-MM-dd HH:mm:ss}+00'::timestamptz + interval '10 minutes', expires_at = '{_now:yyyy-MM-dd HH:mm:ss}+00'::timestamptz + interval '4 hours'"), ct);
                 for (var i = 0; i < 3; i++)
                     Assert.Equal(code, (await store.CheckServerActionAsync(Call(request, claim, action), hooks, ct))?.Reason);
                 Assert.Equal("1", await ScalarAsync(connection,
@@ -234,12 +237,23 @@ public sealed class ServerActionGateLiveTests
             var refusal = await store.CheckServerActionAsync(Call(request, claim), Hooks(store, source, resolved: 2), ct);
             Assert.Equal(AgentActionCodes.NotLevel3, refusal?.Reason);
             Assert.StartsWith("Level 2 changes only the monitoring store", refusal!.Message, StringComparison.Ordinal);
+            /* Stamped 2, the request is refused even where the routes now say 3: the stamp is the ceiling. */
+            Assert.Equal(AgentActionCodes.NotLevel3, (await store.CheckServerActionAsync(Call(request, claim), Hooks(store, source, resolved: 3), ct))?.Reason);
+        });
+    }
 
-            /* A request stamped 3 whose routes now answer 2 (an operator lowered a route) is refused the same way: the lowest level wins. */
-            var (request3, claim3) = await OpenAndClaimAsync(store, 3);
-            Assert.Equal(AgentActionCodes.NotLevel3, (await store.CheckServerActionAsync(Call(request3, claim3), Hooks(store, source, resolved: 2), ct))?.Reason);
-            /* ... and a route deleted after the open (it resolves to nothing) fails closed. */
-            Assert.Equal(AgentActionCodes.NotLevel3, (await store.CheckServerActionAsync(Call(request3, claim3), Hooks(store, source, resolved: null), ct))?.Reason);
+    [Fact]
+    public async Task ARequestStampedThree_WhoseRoutesNowAnswerLess_IsRefused_AndARouteDeletedAfterTheOpenFailsClosed()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            await ArmAsync(connection, switchOn: true, "svc_fix", "env:FIX_PASSWORD", ct);
+            Assert.Null(await store.CheckServerActionAsync(Call(request, claim), Hooks(store, source, resolved: 3), ct));
+            /* An operator lowered a route to 2: the lowest level wins. */
+            Assert.Equal(AgentActionCodes.NotLevel3, (await store.CheckServerActionAsync(Call(request, claim), Hooks(store, source, resolved: 2), ct))?.Reason);
+            /* A route deleted after the open resolves to nothing and fails closed. */
+            Assert.Equal(AgentActionCodes.NotLevel3, (await store.CheckServerActionAsync(Call(request, claim), Hooks(store, source, resolved: null), ct))?.Reason);
         });
     }
 

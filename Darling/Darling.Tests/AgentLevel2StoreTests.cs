@@ -100,7 +100,7 @@ public sealed class AgentLevel2StoreRungTests
             /* The request accepts 1 to 3 and refuses 0 and 4. */
             await InsertRequestAsync(store, "11111111-1111-1111-1111-111111111111", 1, ct: ct);
             await InsertRequestAsync(store, "22222222-2222-2222-2222-222222222222", 2, ct: ct);
-            await InsertRequestAsync(store, "33333333-3333-3333-3333-333333333333", 3, ct: ct);
+            await InsertRequestAsync(store, "77777777-7777-7777-7777-777777777777", 3, ct: ct);
             foreach (var level in new[] { 0, 4 })
             {
                 var refusal = await Assert.ThrowsAsync<PostgresException>(() =>

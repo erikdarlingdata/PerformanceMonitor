@@ -279,6 +279,16 @@ public sealed class MigrationDataMovingRungCensusPins
             + "to it before this build, so at this rung it is empty on nearly every store and a build over it is milliseconds. It does "
             + "not move the lock-wait floor."),
         new(
+            196,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_notification_routes (#5632, created V131) and on "
+            + "config.investigation_requests (created V184): each level CHECK is replaced by one that also allows level 3 and "
+            + "validated against every stored row, as V191 did. The routes table holds a handful of operator-written rows, and the "
+            + "requests table holds at most a year of investigation requests, narrow rows with no payload read, so each scan is "
+            + "milliseconds. Each replacement runs only when the stored definition does not already name level 3. The new "
+            + "config.config_server_actions table is created empty, and the migration inserts no row. It does not move the "
+            + "lock-wait floor."),
+        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "

@@ -1832,7 +1832,8 @@ GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
 --     key can turn a switch on. How a person turns one on is a later grant, added here and in provision-roles.sql step 3j2. It runs
 --     after every blanket grant above, and before 10a.
 REVOKE ALL ON {config}.config_server_actions FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
-GRANT SELECT ON {config}.config_server_actions TO {admin}, {viewer}, {mcp};
+GRANT SELECT ON {config}.config_server_actions TO {admin}, {viewer};
+GRANT SELECT ON {config}.config_server_actions TO {mcp};
 
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE

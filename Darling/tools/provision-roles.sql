@@ -1976,7 +1976,8 @@ BEGIN
    END IF;
 
    REVOKE ALL ON config.config_server_actions FROM PUBLIC, admin, viewer, mcp CASCADE;
-   GRANT SELECT ON config.config_server_actions TO admin, viewer, mcp;
+   GRANT SELECT ON config.config_server_actions TO admin, viewer;
+   GRANT SELECT ON config.config_server_actions TO mcp;
 END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
