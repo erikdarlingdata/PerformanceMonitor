@@ -83,6 +83,14 @@ let rulesList = [
   { id: 5, field: "login", pattern: "svc*", priority: 100, enabled: true, tag_id: 1, tag: "Reports", server_id: null },
   { id: 6, field: "application", pattern: "etl*", priority: 10, enabled: false, tag_id: 2, tag: "Reports/Batch<b>", server_id: 7 },
 ];
+/* The fleet's cards (/api/fleet): the page names a server by the card with its server_id. */
+let fleetCards = [
+  { server_id: 7, server_name: "srv-g", display_name: "Server G" },
+  { server_id: 8, server_name: "srv-h", display_name: "Server H" },
+  { server_id: 9, server_name: "srv-i", display_name: "" },
+];
+let fleetDown = false;
+const ruleReads = [];
 let canEdit = true;
 let gate = null;
 let responder = () => ({ status: 200, body: {} });
@@ -93,7 +101,13 @@ globalThis.fetch = async (url, init = {}) => {
   const body = init.body ? JSON.parse(init.body) : null;
   if (url === "/api/session") return reply(200, { can_edit: canEdit });
   if (url === "/api/read/list_query_tags") return reply(200, { status: "ok", tag_count: tagList.length, tags: tagList, map });
-  if (url === "/api/query-tag-rules" && method === "GET") return reply(200, { status: "ok", count: rulesList.length, rules_version: 3, built_version: 3, rules: rulesList });
+  if (url === "/api/fleet") return fleetDown ? reply(500, { error: "fleet down" }) : reply(200, { cards: fleetCards, tags: [] });
+  if ((url === "/api/query-tag-rules" || url.startsWith("/api/query-tag-rules?")) && method === "GET") {
+    ruleReads.push(url);
+    const asked = url.includes("?server_id=") ? Number(url.split("?server_id=")[1]) : null;
+    const rules = asked == null ? rulesList : rulesList.filter((r) => r.server_id == null || r.server_id === asked);
+    return reply(200, { status: "ok", count: rules.length, rules_version: 3, built_version: 3, rules });
+  }
   calls.push({ method, url, body, contentType: (init.headers || {})["Content-Type"] || null });
   if (gate) await gate;
   const r = responder(method, url, body);
@@ -110,6 +124,7 @@ try {
   const main = new FakeNode("main");
   const mountPage = async () => { await page.renderManageQueryTags(main); await settle(); };
   const paint = () => main.textContent;
+  const pickServer = async (name, v) => { const f = field(main, name); f.value = v; await fire(f, "change"); };
   const items = (attr) => all(main, (n) => n.tag === "li" && n.attrs[attr] !== undefined);
 
   const scenarios = {
@@ -156,7 +171,7 @@ try {
       await fire(nodeButton(main, 2), "click");
       await clickText(main, "Assign a query");
       await typeInto(main, "query_hash", " 0xCD34 ");
-      await typeInto(main, "server_id", "7");
+      await pickServer("server_id", "7");
       await clickText(main, "Save");
       return { calls };
     },
@@ -215,6 +230,42 @@ try {
       await fire(enabled, "change");
       await clickText(main, "Save");
       return { calls };
+    },
+    ruleServerNames: async () => {
+      rulesList = [...rulesList, { id: 7, field: "host", pattern: "gone*", priority: 20, enabled: true, tag_id: 1, tag: "Reports", server_id: 99 }, { id: 8, field: "host", pattern: "nodisp*", priority: 30, enabled: true, tag_id: 1, tag: "Reports", server_id: 9 }];
+      await mountPage();
+      return { rules: items("data-rule-id").map((n) => n.textContent), options: all(field(main, "rule_server_filter"), (n) => n.tag === "option").map((n) => n.textContent) };
+    },
+    ruleServerFilter: async () => {
+      await mountPage();
+      const first = ruleReads.slice();
+      await pickServer("rule_server_filter", "8");
+      const picked = { reads: ruleReads.slice(), rules: items("data-rule-id").map((n) => n.attrs["data-rule-id"]), shown: field(main, "rule_server_filter").value };
+      await page.renderManageQueryTags(main);
+      await settle();
+      const tickRead = ruleReads[ruleReads.length - 1];
+      const afterTick = { shown: field(main, "rule_server_filter").value, rules: items("data-rule-id").map((n) => n.attrs["data-rule-id"]) };
+      await pickServer("rule_server_filter", "");
+      return { first, picked, tickRead, afterTick, back: { read: ruleReads[ruleReads.length - 1], rules: items("data-rule-id").map((n) => n.attrs["data-rule-id"]) } };
+    },
+    fleetDown: async () => {
+      fleetDown = true;
+      await mountPage();
+      await fire(nodeButton(main, 1), "click");
+      await clickText(main, "New rule");
+      const f = field(main, "server_id");
+      return { rules: items("data-rule-id").map((n) => n.textContent), serverInput: f.tag, assignments: items("data-assignment-id").map((n) => n.textContent) };
+    },
+    ruleServerPick: async () => {
+      responder = () => ({ status: 201, body: { status: "created", rule: { id: 8 } } });
+      await mountPage();
+      await clickText(main, "New rule");
+      const f = field(main, "server_id");
+      const options = all(f, (n) => n.tag === "option").map((n) => n.textContent);
+      await typeInto(main, "pattern", "rep*");
+      await pickServer("server_id", "8");
+      await clickText(main, "Save");
+      return { tag: f.tag, options, calls };
     },
     pollKeepsForm: async () => {
       await mountPage();

@@ -102,6 +102,12 @@ public sealed class QueryTagMapBuilderLiveTests
     private static Task SightAsync(Env env, params IReadOnlyList<QueryTagSighting>[] batches) =>
         QueryTagSightingWriter.RecordAsync(env.Source, Server, batches.SelectMany(b => b).ToList(), null, env.Ct);
 
+    private static Task SightOnAsync(Env env, int serverId, params IReadOnlyList<QueryTagSighting>[] batches) =>
+        QueryTagSightingWriter.RecordAsync(env.Source, serverId, batches.SelectMany(b => b).ToList(), null, env.Ct);
+
+    private static async Task<string> MapOfAsync(Env env, int serverId) =>
+        await ScalarAsync(env, "SELECT COALESCE(string_agg(key || '|' || tag_id, ',' ORDER BY key), '') FROM config.query_tag_map WHERE server_id = " + serverId);
+
     private static async Task<bool> PassAsync(Env env, QueryTagMapBuilder builder) =>
         await builder.RunMapPassAsync(new[] { Server }, env.Ct);
 
@@ -565,7 +571,7 @@ public sealed class QueryTagMapBuilderLiveTests
     }
 
     [Fact]
-    public async Task APassOverNoServers_ClaimsNoVersion_AndTheFirstPassOverARealServerStampsIt()
+    public async Task APassOverNoServers_StampsTheVersion_AndTheFirstPassOverARealServerBuildsItsMap()
     {
         await WithStoreAsync(async env =>
         {
@@ -577,12 +583,72 @@ public sealed class QueryTagMapBuilderLiveTests
 
             Assert.True(await builder.RunMapPassAsync(Array.Empty<int>(), env.Ct));
 
-            Assert.NotEqual(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
+            Assert.Equal(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
 
             Assert.True(await PassAsync(env, builder));
 
             Assert.Equal(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
             Assert.Single(await MapAsync(env));
+        });
+    }
+
+    [Fact]
+    public async Task AServerExtendedUnderOneRuleSet_ThatIsOutOfTheRebuildAllPass_IsRebuiltUnderTheNewRulesWhenItReturns()
+    {
+        await WithStoreAsync(async env =>
+        {
+            const int other = 7302;
+            int tagA = await NewTagAsync(env, "SetA");
+            int tagB = await NewTagAsync(env, "SetB");
+            int ruleId = await NewRuleAsync(env, tagA, "application", "Report*");
+            await SightAsync(env, HashSightings("0x01", "Report"));
+            await SightOnAsync(env, other, HashSightings("0x02", "Report"));
+            var builder = new QueryTagMapBuilder(env.Source);
+            Assert.True(await builder.RunMapPassAsync(new[] { Server, other }, env.Ct));
+            await SightOnAsync(env, other, HashSightings("0x03", "Report"));
+            Assert.True(await builder.RunMapPassAsync(new[] { Server, other }, env.Ct));
+            Assert.Equal($"0x02|{tagA},0x03|{tagA}", await MapOfAsync(env, other));
+            /* An extend re-reads the last two minutes of sightings, which would mask the gap: age them past it, as a real gap would. */
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = last_seen - interval '1 hour', first_seen = first_seen - interval '1 hour'");
+
+            /* The rule changes to set B while the other server is out of the pass (disabled, say). */
+            await ExecAsync(env, $"UPDATE config.query_tag_rules SET tag_id = {tagB} WHERE id = {ruleId}");
+            string version = await ScalarAsync(env, "SELECT rules_version FROM config.query_tag_state");
+            Assert.NotEqual(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
+            Assert.True(await PassAsync(env, builder));
+            Assert.Equal(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
+            Assert.Equal($"0x01|{tagB}", await MapOfAsync(env, Server));
+
+            /* It returns: the state row says the map is current, so the pass must rebuild it, not extend it. */
+            Assert.True(await builder.RunMapPassAsync(new[] { Server, other }, env.Ct));
+
+            Assert.Equal($"0x02|{tagB},0x03|{tagB}", await MapOfAsync(env, other));
+        });
+    }
+
+    [Fact]
+    public async Task APassOverNoServers_DropsEveryCursor_SoTheServerThatComesBackIsRebuiltUnderTheCurrentRules()
+    {
+        await WithStoreAsync(async env =>
+        {
+            int tagA = await NewTagAsync(env, "SetA");
+            int tagB = await NewTagAsync(env, "SetB");
+            int ruleId = await NewRuleAsync(env, tagA, "application", "Report*");
+            await SightAsync(env, HashSightings("0x01", "Report"));
+            var builder = new QueryTagMapBuilder(env.Source);
+            Assert.True(await PassAsync(env, builder));
+            Assert.True(await PassAsync(env, builder));
+            Assert.Equal($"0x01|{tagA}", await MapOfAsync(env, Server));
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = last_seen - interval '1 hour', first_seen = first_seen - interval '1 hour'");
+
+            await ExecAsync(env, $"UPDATE config.query_tag_rules SET tag_id = {tagB} WHERE id = {ruleId}");
+            string version = await ScalarAsync(env, "SELECT rules_version FROM config.query_tag_state");
+            Assert.True(await builder.RunMapPassAsync(Array.Empty<int>(), env.Ct));
+            Assert.Equal(version, await ScalarAsync(env, "SELECT built_version FROM config.query_tag_state"));
+
+            Assert.True(await PassAsync(env, builder));
+
+            Assert.Equal($"0x01|{tagB}", await MapOfAsync(env, Server));
         });
     }
 
