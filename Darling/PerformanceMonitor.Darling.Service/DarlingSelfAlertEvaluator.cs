@@ -6962,8 +6962,8 @@ WHERE c.is_enabled";
                                   "real disk. ") +
                             "The policy arms ITSELF once its consumer covers everything raw holds: the coverage " +
                             "gate is re-judged at startup and on the running service's hourly maintenance tick " +
-                            "(EnsureRetentionPoliciesAsync, #3812), so the remedy is one step - run the " +
-                            "--backfill-rollups operator action - and the hold clears by itself within about an " +
+                            "(EnsureRetentionPoliciesAsync, #3812), so the remedy is one step - " +
+                            RetentionHoldRemedy(OperatingSystem.IsWindows()) + " - and the hold clears by itself within about an " +
                             "hour of the backfill completing. Restart the service only if you want it armed " +
                             "immediately; this alert resolves on the tick after the one that arms it. Do NOT arm " +
                             "the policy by hand: the history it holds exists nowhere else, so arming drops the only " +
@@ -9026,6 +9026,14 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     }
 
     /// <summary>The sentence a repeated state alert leads its detail with; empty for the entry.</summary>
+    /// <summary>
+    /// The Retention Held alert's remedy, in the form that runs on the host the service runs on (#6071): the
+    /// Windows <c>.exe</c> or the <c>dotnet ...dll</c> form everywhere else, so a Linux operator is not handed a
+    /// command that does not exist there. The platform is a parameter so both forms pin.
+    /// </summary>
+    internal static string RetentionHoldRemedy(bool isWindows) =>
+        "run the --backfill-rollups operator action (" + OperatorVerbForm.Command("--backfill-rollups", isWindows) + ")";
+
     private static string StateRepeatNote(ConnectionAlertDecision decision, int refireMinutes) =>
         decision == ConnectionAlertDecision.Lost
             ? string.Empty

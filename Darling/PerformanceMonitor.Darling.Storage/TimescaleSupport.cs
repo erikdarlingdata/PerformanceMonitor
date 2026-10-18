@@ -8389,8 +8389,8 @@ AND   j.hypertable_name = '{relation}'";
                            hour, which is what the runbook's "do not arm by hand" already asks for. */
                         reHeld++;
                         logger?.LogWarning(
-                            "Retention policy for {Relation} RE-HELD - it was armed, and {ShortConsumer} no longer covers everything it holds, so the {DropAfter} purge is stopped before it drops history that consumer has never materialized. Backfill that consumer past the source's oldest row and the policy arms itself on the next evaluation (hourly on the running service, and at every start).",
-                            relation, shortConsumer, dropAfter);
+                            "Retention policy for {Relation} RE-HELD - it was armed, and {ShortConsumer} no longer covers everything it holds, so the {DropAfter} purge is stopped before it drops history that consumer has never materialized. Backfill that consumer past the source's oldest row (run {BackfillCommand}) and the policy arms itself on the next evaluation (hourly on the running service, and at every start).",
+                            relation, shortConsumer, dropAfter, OperatorVerbForm.CommandHere("--backfill-rollups"));
                     }
                     else
                     {
@@ -8401,8 +8401,8 @@ AND   j.hypertable_name = '{relation}'";
                            hour, and the Retention Held self-alert judges its cost on the same tick. */
                         logger?.Log(
                             pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,
-                            "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon and the policy arms itself on the next evaluation - the running service re-judges every held policy hourly (#3812), and at every start.",
-                            relation, shortConsumer, dropAfter);
+                            "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon (run {BackfillCommand}) and the policy arms itself on the next evaluation - the running service re-judges every held policy hourly (#3812), and at every start.",
+                            relation, shortConsumer, dropAfter, OperatorVerbForm.CommandHere("--backfill-rollups"));
                     }
                 }
                 else
