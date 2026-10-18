@@ -1650,6 +1650,7 @@ namespace PerformanceMonitor.Common
             "index_object_stats",
             "plan_correction",
             "query_store_health",
+            "query_store_forced_plans",
         };
 
         /// <summary>

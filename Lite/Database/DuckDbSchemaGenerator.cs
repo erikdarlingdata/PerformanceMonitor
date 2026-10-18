@@ -301,7 +301,7 @@ public static class DuckDbSchemaGenerator
     /// would come to disagree.</para>
     /// </summary>
     internal static IEnumerable<ICollectorSchemaInfo> StoredCollectors =>
-        CollectorCatalog.All.Where(s => s.TargetEngine == CollectorTargetEngine.SqlServer);
+        CollectorCatalog.All.Where(s => s.TargetEngine == CollectorTargetEngine.SqlServer && !s.IsDarlingOnly);
 
     /// <summary>Every collector target table Lite stores, in catalog order (the generated table/index set).</summary>
     public static IEnumerable<string> CollectorTableNames()

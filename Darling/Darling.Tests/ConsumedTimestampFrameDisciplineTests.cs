@@ -76,10 +76,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer; V139 (#3955)
        added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql;
        V155 (#4765) added query_store_stats.interval_end_time_utc beside interval_start_time_utc, so 70 over 71,
-       51 SqlServer; #5640 added attention_events.event_time (a SQL Server XE table), so 71, 52 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
+       51 SqlServer; #5640 added attention_events.event_time (a SQL Server XE table), so 71, 52 SqlServer; #5632 added two UTC columns on query_store_forced_plans, so 73, 54 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
        a column vanish. */
-    private const int TimestampColumnCount = 71;
-    private const int SqlServerTimestampColumnCount = 52;
+    private const int TimestampColumnCount = 73;
+    private const int SqlServerTimestampColumnCount = 54;
     private const int PostgresTimestampColumnCount = 19;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
@@ -273,8 +273,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        the sibling sample_time stays ServerLocal beside it rather than flipping. */
     /* 13 until V155 (#4765): query_store_stats.interval_end_time_utc is read as Utc off its own
        AT TIME ZONE 'UTC', the twin of interval_start_time_utc beside it.
-       15 since #5640: attention_events.event_time is read as Utc off the XE event's own @timestamp, like the other XE tables. */
-    private const int TsqlUtcCount = 15;
+       15 since #5640: attention_events.event_time is read as Utc off the XE event's own @timestamp, like the other XE tables.
+       17 since #5632: query_store_forced_plans.last_execution_time and .last_compile_start_time are read as Utc off their own
+       AT TIME ZONE 'UTC' in the collector's SELECT. */
+    private const int TsqlUtcCount = 17;
 
     /// <summary>
     /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole
@@ -340,6 +342,8 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         "query_snapshots.tran_start_time=ServerLocal",
         "query_stats.creation_time=ServerLocal",
         "query_stats.last_execution_time=ServerLocal",
+        "query_store_forced_plans.last_compile_start_time=Utc",
+        "query_store_forced_plans.last_execution_time=Utc",
         "query_store_stats.interval_end_time_utc=Utc",
         "query_store_stats.interval_start_time_utc=Utc",
         "running_jobs.start_time=ServerLocal",

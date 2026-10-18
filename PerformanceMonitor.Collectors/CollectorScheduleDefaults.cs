@@ -114,6 +114,11 @@ public static class CollectorScheduleDefaults
            per-database reader already sits (query_store); the read itself is a handful of rows per
            database against in-memory recommendation state, not a Query Store scan. */
         ["plan_correction"] = new(5, 30),
+        /* #5632 forced-plan state. The query_store collector reads only plans that RAN since its last pass, so a force the
+           engine ignores, or that never runs, never reaches the store. This reads sys.query_store_plan for the forced
+           plans themselves, a few rows per database, so the store can say whether each force works. Five minutes is the
+           query_store cadence the rows are compared against; 30 days is the retention of the rows it is compared with. */
+        ["query_store_forced_plans"] = new(5, 30),
         /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
            database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
            kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing

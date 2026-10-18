@@ -98,7 +98,7 @@ public sealed class SharedCollectorDefaultsPinTests
            has no PostgreSQL target, so its schedule table correctly does not list the PostgreSQL collectors —
            a phantom row for a collector this SKU can never dispatch would show up in Lite's own schedule UI. */
         var sqlServerDefaults = CollectorCatalog.All
-            .Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer)
+            .Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer && !d.IsDarlingOnly)
             .Select(d => d.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 

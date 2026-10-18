@@ -178,4 +178,12 @@ public interface ICollectorSchemaInfo
     /// definitions and the test doubles need no change.</para>
     /// </summary>
     bool StaysPlainTable => false;
+
+    /// <summary>
+    /// True when only Darling stores and schedules this collector: Lite creates no table for it, lists no schedule row and never
+    /// dispatches it (#5632). False for every other definition. A default interface implementation, the choice
+    /// <see cref="StaysPlainTable"/> made, so the existing definitions and the test doubles need no change. The holder today is
+    /// <c>query_store_forced_plans</c>, whose reader is a Darling MCP read; its Lite twin is a follow-up.
+    /// </summary>
+    bool IsDarlingOnly => false;
 }

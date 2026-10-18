@@ -74,6 +74,7 @@ public sealed class StatementColumnCensusTests
         /* Row 5: Query Store. Lite stores it live; Darling stores it live and from backfill (R3). */
         ["query_store.query_text"] = Hooked("5", "R3", pending: false),
         ["query_store.query_plan_hash"] = Exempt("a hash of the plan, not plan text; the filter has nothing to read"),
+        ["query_store_forced_plans.query_plan_hash"] = Exempt("a hash of the plan, not plan text; the collector never reads the plan XML or any statement text (#5632)"),
         ["query_store.query_plan_text"] = Null("the main Query Store query writes a typed NULL here (QueryStoreCollector.cs:738); plan text reaches the store only through the separate by-ids fetch and the plan writer (6.7 row 7, R3)"),
 
         /* Row 8: the live snapshot of running requests (R6). */

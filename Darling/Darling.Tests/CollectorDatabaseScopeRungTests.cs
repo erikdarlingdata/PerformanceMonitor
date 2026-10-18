@@ -350,13 +350,13 @@ public sealed class CollectorDatabaseScopeRungTests
 
     /// <summary>
     /// The census, taken from the CATALOG rather than a hand-list: every definition that enumerates on
-    /// ANY target (the five get_collection_health names today — query_store, plan_correction,
+    /// ANY target (the six get_collection_health names today — query_store, plan_correction,
     /// query_store_health, index_object_stats, database_scoped_config) splices the scope into its
     /// enumeration when the context carries one, and none of them does when it does not. Walking
     /// CollectorCatalog.All is what makes a SIXTH enumerating collector that skips the seam fail here,
     /// in its author's own run, instead of shipping a collector the scope silently does not govern.
-    /// The walk also takes the per-target census: since #3764 every one of the five is an enumerator on
-    /// SQL Server proper only — on Azure SQL DB all five ride the per-database connection loop, because
+    /// The walk also takes the per-target census: since #3764 every one of the six is an enumerator on
+    /// SQL Server proper only — on Azure SQL DB all six ride the per-database connection loop, because
     /// the <c>[db].sys.sp_executesql</c> idiom their per-item queries nest is rejected there — so the Azure
     /// enumerator set is EMPTY, and a collector that starts enumerating on Azure again fails here.
     /// </summary>
@@ -413,7 +413,7 @@ public sealed class CollectorDatabaseScopeRungTests
             }
         }
 
-        /* The census count IS the get_collection_health description's census: five enumerate. A sixth
+        /* The census count IS the get_collection_health description's census: six enumerate. A seventh
            name appearing here is the signal to extend that description, not loosen this pin. */
         Assert.Equal(
             new[]
@@ -422,6 +422,7 @@ public sealed class CollectorDatabaseScopeRungTests
                 nameof(IndexObjectStatsCollector),
                 nameof(PlanCorrectionCollector),
                 nameof(QueryStoreCollector),
+                nameof(QueryStoreForcedPlansCollector),
                 nameof(QueryStoreHealthCollector),
             },
             enumerators.OrderBy(n => n, StringComparer.Ordinal).ToArray());
