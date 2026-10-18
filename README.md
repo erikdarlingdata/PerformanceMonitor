@@ -3,9 +3,15 @@
 <p align="center">
   <a href="https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest"><img src="https://img.shields.io/github/v/release/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="Latest Release"></a>
   <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/LICENSE"><img src="https://img.shields.io/github/license/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="License: MIT"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/stargazers"><img src="https://img.shields.io/github/stars/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="GitHub stars"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/releases"><img src="https://img.shields.io/github/downloads/erikdarlingdata/PerformanceMonitor/total?style=for-the-badge" alt="Total downloads"></a>
 </p>
 
 Free, open-source monitoring that replaces the tools charging you thousands per server per year. It includes specialized collectors, real-time alerts, and a built-in MCP server for AI analysis. Nothing phones home. Your data stays on your server and your machine.
+
+If you pay for a monitoring tool now, read the comparison for yours.
+
+[Redgate SQL Monitor](https://erikdarling.com/redgate-sql-monitor-renewal-free-alternative/) · [SQL Sentry](https://erikdarling.com/solarwinds-sql-sentry-renewal-free-alternative/) · [SolarWinds DPA](https://erikdarling.com/solarwinds-dpa-renewal-free-alternative/) · [Idera SQL Diagnostic Manager](https://erikdarling.com/idera-sql-diagnostic-manager-renewal-free-alternative/) · [Quest Spotlight](https://erikdarling.com/your-quest-spotlight-on-sql-server-enterprise-renewal-is-coming-up-heres-what-free-looks-like-in-2026/) · [Datadog Database Monitoring](https://erikdarling.com/datadog-database-monitoring-cost-free-alternative/) · [Database Health Monitor](https://erikdarling.com/database-health-monitor-renewal-free-alternative/)
 
 It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It also supports Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling). Darling also monitors PostgreSQL, including AWS RDS and Aurora.
 
@@ -66,7 +72,14 @@ These steps are for Windows. For Linux, the full steps, and the web dashboard, r
 
 ## Support
 
-This project is free and open source under the MIT License, with no features withheld. Two commercial support tiers are available for organizations that need a vendor agreement or an invoice: **Supported** at $500/year and **Priority** at $2,500/year. [Support and sponsorship](docs/support.md) has the details. You can also [sponsor on GitHub](https://github.com/sponsors/erikdarlingdata).
+Performance Monitor is free and open source under the MIT License, with no features withheld. The tools that it replaces charge thousands of dollars per server per year. A support subscription covers all of your SQL Server instances.
+
+| Tier | Cost per year | Email response | Includes |
+|------|---------------|----------------|----------|
+| **Supported** | $500 | Within 2 business days | Guaranteed compatibility updates for new SQL Server versions, priority feature requests, a support agreement and invoices, unlimited instances |
+| **Priority** | $2,500 | By the next business day | Everything in Supported, plus a quarterly live Q&A session, early access to new features, and direct input on the roadmap |
+
+[Support and sponsorship](docs/support.md) says what support gets you and has the link to buy. You can also [sponsor on GitHub](https://github.com/sponsors/erikdarlingdata).
 
 ## Sponsors
 
