@@ -27,6 +27,8 @@ namespace Darling.Tests;
 /// #6005 on a live store: the daily rollup the alert pass writes, the agent gate over it and the 4-hour digest. The gate holds
 /// back only the agent request; the human page's rows are written whatever it answers.
 /// </summary>
+/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres and never touches another test's rows,
+   so the class is deliberately NOT [Collection("live-postgres")]. */
 public sealed class DeadlockRollupLiveTests
 {
     private const int ServerId = 42;
