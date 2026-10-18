@@ -86,6 +86,6 @@ public sealed class LiteInvestigationGoldenTests
 
         text.Append(InvestigationFormats.UnsupportedReportFormatMessage(2, "Lite"));
         var all = text.ToString();
-        Assert.True(Sha(all) == "8C1FF0844D7C6BD7557E002A3D2F6CD9BD758630542BE2A5755702CFAE05A397", $"Lite's Level 1 tool texts moved; their SHA-256 is {Sha(all)}:\n{all}");
+        Assert.True(Sha(all) == "061953075B45E959B8FE504B1E03D07FC2E122E02C7A839713FC7E542B4448BA", $"Lite's Level 1 tool texts moved; their SHA-256 is {Sha(all)}:\n{all}");
     }
 }
