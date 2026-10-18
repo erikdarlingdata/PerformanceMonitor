@@ -273,8 +273,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        the sibling sample_time stays ServerLocal beside it rather than flipping. */
     /* 13 until V155 (#4765): query_store_stats.interval_end_time_utc is read as Utc off its own
        AT TIME ZONE 'UTC', the twin of interval_start_time_utc beside it.
-       15 since #5640: attention_events.event_time is read as Utc off the XE event's own @timestamp, like the other XE tables. */
-    private const int TsqlUtcCount = 15;
+       15 since #5640: attention_events.event_time is read as Utc off the XE event's own @timestamp, like the other XE tables.
+       17 since #5632: query_store_forced_plans.last_execution_time and .last_compile_start_time are read as Utc off their own
+       AT TIME ZONE 'UTC' in the collector's SELECT. */
+    private const int TsqlUtcCount = 17;
 
     /// <summary>
     /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole

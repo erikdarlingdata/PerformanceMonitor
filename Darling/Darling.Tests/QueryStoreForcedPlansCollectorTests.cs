@@ -21,10 +21,14 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryStoreForcedPlansCollectorTests
 {
+    /* The collector reads the engine version from the enumeration probe (SERVERPROPERTY PRODUCTVERSION major), the way
+       QueryStoreCollector does, so the context carries it as EnumerationProbeResult. Target.SqlMajorVersion alone is not
+       what the per-database body gates on. */
     private static CollectorContext Context(int major) => new()
     {
         CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "s", Target = new CollectorTargetInfo { SqlMajorVersion = major },
         Deltas = new CollectorDeltaCalculator(),
+        EnumerationProbeResult = major,
     };
 
     [Fact]
@@ -45,6 +49,38 @@ public sealed class QueryStoreForcedPlansCollectorTests
     {
         Assert.Contains("plan_forcing_type_desc", QueryStoreForcedPlansCollector.BuildPayloadBody(Context(14)), StringComparison.Ordinal);
         Assert.DoesNotContain("plan_forcing_type_desc", QueryStoreForcedPlansCollector.BuildPayloadBody(Context(13)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheEnumeration_AppliesTheServersDatabaseScopeAndExclusions_AndAzureDoesNotEnumerate()
+    {
+        var context = new CollectorContext
+        {
+            CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "s", Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            Deltas = new CollectorDeltaCalculator(),
+            DatabaseScope = new[] { "KeepA", "KeepB" },
+            ExcludedDatabases = new[] { "Skip" },
+        };
+
+        var query = QueryStoreForcedPlansCollector.Instance.BuildEnumerationQuery(context)!;
+
+        Assert.Contains("@scope_db_0", query.Text, StringComparison.Ordinal);
+        Assert.Contains("@scope_db_1", query.Text, StringComparison.Ordinal);
+        Assert.Contains("@excl_db_0", query.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("KeepA", query.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("/*EXCLUSION_FILTER*/", query.Text, StringComparison.Ordinal);
+        Assert.Contains(query.Parameters, p => Equals(p.Value, "KeepA"));
+        Assert.Contains(query.Parameters, p => Equals(p.Value, "Skip"));
+
+        var unscoped = QueryStoreForcedPlansCollector.Instance.BuildEnumerationQuery(Context(16))!;
+        Assert.DoesNotContain("@scope_db_", unscoped.Text, StringComparison.Ordinal);
+
+        var azure = new CollectorContext
+        {
+            CollectionTime = DateTime.UtcNow, ServerId = 1, ServerName = "s", Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+            Deltas = new CollectorDeltaCalculator(),
+        };
+        Assert.Null(QueryStoreForcedPlansCollector.Instance.BuildEnumerationQuery(azure));
     }
 
     [Fact]
