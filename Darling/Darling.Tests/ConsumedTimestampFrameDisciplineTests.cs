@@ -833,6 +833,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("FormatServerTime", ClockFrame.Utc),
         ("FormatStoredUtc", ClockFrame.Utc),
         ("FormatServerClock", ClockFrame.ServerLocal),
+        /* #6010: Lite's investigation evidence capture renders an instant into a frozen section as
+           yyyy-MM-ddTHH:mm:ssZ, so it is a UTC renderer: it states Z and does no conversion. The columns it is handed
+           are deadlocks.deadlock_time and blocked_process_reports.event_time, both naive UTC. */
+        ("Value", ClockFrame.Utc),
     ];
 
     /// <summary>
@@ -2106,7 +2110,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            take naive UTC and exactly ONE takes the server's own clock — asserted as a count rather than
            left as a comment, because the defect class IS a value reaching the renderer for the other
            frame, and a second server-local renderer appearing unnoticed would split that side. */
-        Assert.Equal(5, Renderers.Length);
+        Assert.Equal(6, Renderers.Length);
         Assert.Equal(2, Renderers.Select(r => r.Expects).Distinct().Count());
         Assert.Equal(ClockFrame.ServerLocal, Renderers.Single(r => r.Renderer == "FormatServerClock").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatServerTime").Expects);

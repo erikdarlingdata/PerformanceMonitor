@@ -914,9 +914,10 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 7),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 8),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
-           not a read; the check it serves still reads, and counts, exactly as before. */
+           not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
+           rollup's catch, a write after the deadlock read, which counts its own failure. */
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
            since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
@@ -1053,6 +1054,7 @@ public sealed class AlertReadFailureSurfaceTests
     {
         ["Could not load incident occurrences"] = "bookkeeping about an alert, not the condition read it is judged on",
         ["Could not persist incident occurrences"] = "a write",
+        ["The deadlock rollup failed for {Server}: {Message}"] = "#6005: the daily signature rollup, a write (and its own bookkeeping read) after the deadlock read it counts, which is counted where it is made; the alert is judged on that read, not on this",
         ["Could not persist the {Metric} persistence gate"] = "a write (#3282; one save path for every gated built-in since #3653 A5 put tempdb Space behind the same gate as High CPU); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOADs beside it are the reads, and they are counted",
         ["Alert resolution callback failed"] = "the delivery path",
         ["A resolution context that is not JSON is replaced"] = "#6003: parses the caller's context text for the Resolves member, not a store read",
@@ -1290,8 +1292,9 @@ public sealed class AlertReadFailureSurfaceTests
            self-alert's wrapper catch, handed its failure record as a parameter. 41st since #5867: the worker's read of that
            record, which holds the standing alert on a failure. 42nd since #5910: the engine's threshold-override
            fallback, an in-memory lookup and not a read. 43rd since #6003: the resolution context parse, the caller's text and
-           not a store read. */
-        Assert.Equal(43, totalExempt);
+           not a store read. 44th since #6005: the deadlock rollup's catch, a write after the deadlock read, which counts its own
+           failure. */
+        Assert.Equal(44, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

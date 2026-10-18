@@ -97,6 +97,8 @@ public sealed class AlertEngine
     /// <summary>#5910: per-server and per-database threshold overrides; null = every threshold is the global setting.</summary>
     private readonly IAlertThresholdOverrides? _overrides;
     private readonly IAlertReadAdapter _readAdapter;
+    /* #6005: Darling's deadlock rollup; null in Lite, which then does nothing extra. */
+    private readonly IDeadlockRollup? _deadlockRollup;
     private readonly IAlertStateStore _stateStore;
     private readonly IAlertDeliverer _deliverer;
     private readonly Func<AlertMuteContext, bool> _isAlertMuted;
@@ -395,8 +397,10 @@ public sealed class AlertEngine
         Func<DateTime>? utcNow = null,
         AlertReadFailureCounter? readFailures = null,
         Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? escalationSeedReader = null,
-        IAlertThresholdOverrides? overrides = null)
+        IAlertThresholdOverrides? overrides = null,
+        IDeadlockRollup? deadlockRollup = null)
     {
+        _deadlockRollup = deadlockRollup;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _readAdapter = readAdapter ?? throw new ArgumentNullException(nameof(readAdapter));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
@@ -1901,6 +1905,27 @@ public sealed class AlertEngine
                 _logger?.LogError("Failed to check deadlocks for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(key, "deadlocks", readClock.ElapsedMilliseconds);
                 return;
+            }
+        }
+
+        /* #6005: the daily rollup of per-graph signatures, written on every sweep that read the window (not only a fire), so
+           the counts the agent gate and the digest read are the day's. A failure is the sink's own to absorb. */
+        if (deadlockRows is not null && _deadlockRollup is not null)
+        {
+            try
+            {
+                var counted = excludedDatabases.Count == 0
+                    ? deadlockRows
+                    : deadlockRows.Where(r => !AlertContextBuilders.IsDeadlockExcluded(r, excludedDatabases)).ToList();
+                await _deadlockRollup.RecordAsync(key, counted, now, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("The deadlock rollup failed for {Server}: {Message}", serverName, ex.Message);
             }
         }
 

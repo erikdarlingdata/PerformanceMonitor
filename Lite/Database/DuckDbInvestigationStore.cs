@@ -35,7 +35,7 @@ namespace PerformanceMonitorLite.Database;
 /// <para><b>Times.</b> Every time is bound from the injected clock, truncated to the microsecond DuckDB keeps, and read
 /// back with <see cref="DateTimeKind.Utc"/>. DuckDB's <c>current_timestamp</c> is never used: it is local-zone.</para>
 /// </summary>
-public sealed class DuckDbInvestigationStore : IInvestigationRequestStore, IInvestigationNoteStore
+public sealed partial class DuckDbInvestigationStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
     /* Darling's GroupLockSql and RouteLockSql (pg_advisory_xact_lock) have no twin: the write lock each write holds for its
        whole transaction covers them. SubmitLockSql keeps its name; its FOR UPDATE is the write lock. */
@@ -319,6 +319,9 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
 
     internal const string RetentionAlertRowsSql =
         "DELETE FROM investigation_request_alerts WHERE request_id IN (" + RetentionDoomedRequests + ")";
+
+    internal const string RetentionEvidenceSql =
+        "DELETE FROM investigation_evidence WHERE request_id IN (" + RetentionDoomedRequests + ")";
 
     internal const string RetentionReportsSql =
         "DELETE FROM investigation_reports WHERE request_id IN (" + RetentionDoomedRequests + ")";
@@ -866,6 +869,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         using var transaction = connection.BeginTransaction();
         await ExecAsync(connection, ClearBriefSql, cancellationToken, now.AddDays(-BriefRetentionDays));
         await ExecAsync(connection, RetentionAlertRowsSql, cancellationToken, cutoff);
+        await ExecAsync(connection, RetentionEvidenceSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionReportsSql, cancellationToken, cutoff);
         var requests = await ExecAsync(connection, RetentionRequestsSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionJournalSql, cancellationToken, cutoff);

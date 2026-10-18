@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 71;
+    internal const int CurrentSchemaVersion = 72;
 
     private readonly string _archivePath;
 
@@ -3029,6 +3029,24 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogWarning("Migration to v71 query_tag_sightings encountered an error (non-fatal; the version stays at v70 and the step retries at the next start): {Error}", ex.Message);
             }
         }
+
+        if (fromVersion < 72)
+        {
+            /* v72 (#6010): investigation_evidence (a new table, nothing to backfill) and investigation_requests.evidence_state
+               (the shared added-columns list). Non-fatal, like v69 and v70: without them the capture finds no evidence to settle
+               and a brief carries no evidence sections; the table statements that follow retry the CREATE on the next start. */
+            _logger?.LogInformation("Running migration to v72: adding investigation_evidence and investigation_requests.evidence_state");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, Schema.CreateInvestigationEvidenceTable);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v72 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(72));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3084,6 +3102,8 @@ public partial class DuckDbInitializer : IDisposable
         (69, "notification_routes", "agent_max_per_day", "INTEGER"),
         (69, "notification_routes", "agent_lease_minutes", "INTEGER"),
         (69, "notification_routes", "agent_expiry_minutes", "INTEGER"),
+        /* #6010: the request's evidence state (Darling's V193 evidence_state): NULL until the capture settles a section. */
+        (72, "investigation_requests", "evidence_state", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

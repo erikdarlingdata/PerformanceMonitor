@@ -48,6 +48,7 @@ public sealed class InvestigationDispatchCore
     private readonly IAlertSettings _settings;
     private readonly ILogger _logger;
     private readonly Action<int>? _opened;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _agentGate;
 
     /// <param name="openOrJoin">The store's open-or-join (<see cref="IInvestigationRequestStore.OpenOrJoinAsync"/>).</param>
     /// <param name="settings">The live alert settings: the route list and the PagerDuty auto-resolve flag are read per call.</param>
@@ -57,8 +58,10 @@ public sealed class InvestigationDispatchCore
         Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>> openOrJoin,
         IAlertSettings settings,
         ILogger logger,
-        Action<int>? opened = null)
+        Action<int>? opened = null,
+        Func<string, string, CancellationToken, Task<bool>>? agentGate = null)
     {
+        _agentGate = agentGate;
         _openOrJoin = openOrJoin ?? throw new ArgumentNullException(nameof(openOrJoin));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -149,6 +152,15 @@ public sealed class InvestigationDispatchCore
             var route = NotificationRouter.ResolveAgent(metricName, _settings.NotificationRoutes, routeServerId);
             if (route is null)
             {
+                return null;
+            }
+
+            /* #6005, D13: a host's agent gate (Darling's deadlock gate; null in Lite) may hold an agent request back. It sits
+               after the route is resolved and before the store is asked, so it touches only the agent request: the page
+               (the alert row and the send) is written by the caller whatever this answers. */
+            if (_agentGate is not null && !await _agentGate(serverId, metricName, cancellationToken))
+            {
+                _logger.LogDebug("Investigation request for {Metric} on {Server} held back by the agent gate", metricName, serverName);
                 return null;
             }
 

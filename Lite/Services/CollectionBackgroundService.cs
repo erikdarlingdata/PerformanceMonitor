@@ -446,6 +446,13 @@ public class CollectionBackgroundService : BackgroundService
         [
             new HousekeepingStep("query_store_backfill", token => RunQueryStoreBackfillIfDueAsync(token)),
         ]),
+        /* #6010: the evidence capture of Level 1 investigations: its own loop, so a long archival or analysis never holds back a
+           request's evidence. It reads only Lite's own database (no monitored-server connection), freezes each section once, and
+           never throws: a failed pass is logged and the next tick retries. */
+        new HousekeepingLoop("investigation_evidence",
+        [
+            new HousekeepingStep("investigation_evidence", token => RunInvestigationEvidenceAsync(token)),
+        ]),
         new HousekeepingLoop("analysis",
         [
             new HousekeepingStep("analysis", token => RunAnalysisIfDueAsync(token)),
@@ -828,6 +835,35 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Findings cleanup failed");
+        }
+    }
+
+    /// <summary>#6010: one evidence capture pass over Lite's database. A busy write lock or a failed read costs this tick only.</summary>
+    private async Task RunInvestigationEvidenceAsync(CancellationToken token)
+    {
+        if (_duckDb == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var requests = new PerformanceMonitorLite.Database.DuckDbInvestigationStore(_duckDb);
+            var capture = new PerformanceMonitorLite.Investigations.LiteInvestigationEvidenceCapture(
+                _duckDb, requests, _logger, collectorIntervalMinutes: (collector, serverId) =>
+                    _scheduleManager is not null && _serverManager is not null
+                        && _scheduleManager.GetFrequencyForStorageServer(_serverManager, serverId, collector) is { } minutes
+                            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(minutes)
+                            : -1);
+            await capture.CaptureOnceAsync(token);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Investigation evidence pass skipped; the next tick retries");
         }
     }
 

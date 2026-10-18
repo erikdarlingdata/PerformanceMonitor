@@ -48,6 +48,13 @@ public sealed class DuckDbInvestigationBriefSourceReader : IInvestigationBriefSo
     /// <summary>How far back recent changes reach.</summary>
     public static readonly TimeSpan ChangeWindow = TimeSpan.FromDays(7);
 
+    /* #6010: the evidence the capture froze for the request, in the order the sections were written (Darling's EvidenceSql). */
+    internal const string EvidenceSql = @"
+SELECT section, state, content, captured_at
+FROM investigation_evidence
+WHERE request_id = $1
+ORDER BY evidence_id";
+
     internal const string RequestSql = @"
 SELECT server_id, server_name, family, state, expires_at, lease_until, alert_count, first_metric, story_path_hash
 FROM investigation_requests
@@ -263,6 +270,30 @@ LIMIT $4";
             }
         }
 
+        var evidence = new List<InvestigationBriefEvidence>();
+        using (_duckDb.AcquireReadLock(cancellationToken))
+        {
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var command = Command(connection, EvidenceSql, requestId);
+                using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    evidence.Add(new InvestigationBriefEvidence(
+                        reader.GetString(0), reader.GetString(1),
+                        reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc),
+                        reader.IsDBNull(2) ? null : reader.GetString(2)));
+                }
+            }
+            catch (DuckDB.NET.Data.DuckDBException)
+            {
+                /* A file whose v72 step has not run has no evidence table: the brief carries no evidence, as before. */
+                evidence.Clear();
+            }
+        }
+
         // Priority order: the first alert, then the newest.
         if (alerts.Count > 1)
             alerts = alerts.Take(1).Concat(alerts.Skip(1).Reverse()).ToList();
@@ -270,7 +301,8 @@ LIMIT $4";
         // The finding store and the force-plan state take the read lock themselves, so they run outside the scope above.
         var findings = await FindingsAsync(request, now, cancellationToken).ConfigureAwait(false);
 
-        return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles);
+        return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
+            Evidence: evidence.Count > 0 ? evidence : null);
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each

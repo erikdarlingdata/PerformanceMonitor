@@ -453,6 +453,7 @@ CREATE TABLE IF NOT EXISTS investigation_requests (
     closed_at TIMESTAMP,
     closed_by VARCHAR,
     closed_reason VARCHAR,
+    evidence_state VARCHAR,
     CHECK (family IN ('blocking', 'query_performance', 'resources', 'availability', 'jobs', 'self_monitor', 'other')),
     CHECK (state IN ('open', 'claimed', 'reported', 'closed', 'expired'))
 )";
@@ -556,7 +557,27 @@ CREATE TABLE IF NOT EXISTS agent_environment_profiles (
     modified_by VARCHAR
 )";
 
-    /// <summary>The six investigation tables in the order the v69 step creates them (none depends on another).</summary>
+    /// <summary>
+    /// One frozen evidence section per request and section name (v72, #6010). Mirrors Darling's
+    /// <c>config.investigation_evidence</c> (V193). A section is <c>pending</c>, then <c>ready</c> or <c>not_collected</c>,
+    /// and the store never rewrites it after that. No identity, no foreign key and no CHECK on the content size, as the tables
+    /// above: the ids are max + 1 under the write lock, retention deletes the rows with their requests, and the capture holds
+    /// the content to the report evidence's cap.
+    /// </summary>
+    public const string CreateInvestigationEvidenceTable = @"
+CREATE TABLE IF NOT EXISTS investigation_evidence (
+    evidence_id BIGINT PRIMARY KEY,
+    request_id UUID NOT NULL,
+    section VARCHAR NOT NULL,
+    state VARCHAR NOT NULL DEFAULT 'pending',
+    content VARCHAR,
+    captured_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL,
+    UNIQUE (request_id, section),
+    CHECK (state IN ('pending', 'ready', 'not_collected'))
+)";
+
+    /// <summary>The investigation tables in the order the v69 step creates them (none depends on another).</summary>
     public static IEnumerable<string> InvestigationTableStatements()
     {
         yield return CreateInvestigationRequestsTable;
@@ -565,6 +586,7 @@ CREATE TABLE IF NOT EXISTS agent_environment_profiles (
         yield return CreateInvestigationJournalTable;
         yield return CreateInvestigationNotesTable;
         yield return CreateAgentEnvironmentProfilesTable;
+        yield return CreateInvestigationEvidenceTable;
     }
 
     /// <summary>
