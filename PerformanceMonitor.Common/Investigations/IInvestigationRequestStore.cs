@@ -52,6 +52,10 @@ public interface IInvestigationRequestStore
     Task RecordRefusalAsync(Guid requestId, string agentId, string operation, string reason, string? detailJson,
         CancellationToken cancellationToken = default);
 
+    /// <summary>True when a request with <paramref name="requestId"/> exists (#6004: what a report's <c>family_of</c> must name;
+    /// #6011: Lite's submit tool asks it too). Writes nothing.</summary>
+    Task<bool> RequestExistsAsync(Guid requestId, CancellationToken cancellationToken = default);
+
     /// <summary>One request by id with its stored brief; null when no request has that id. Writes nothing.</summary>
     Task<(InvestigationRequestRow Row, string? Brief)?> ReadRequestAsync(Guid requestId,
         CancellationToken cancellationToken = default);

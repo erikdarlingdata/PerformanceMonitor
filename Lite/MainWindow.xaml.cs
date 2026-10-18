@@ -158,7 +158,8 @@ public partial class MainWindow : Window
            dispatch core. The core reads the agent routes through _alertSettings (the route cache the route store below
            fills); Lite has no wait tool, so the open signal is null. The webhook token's brief is masked at the running
            MCP host's mcp_data_detail, and at that setting's default (full) while no host runs. */
-        var duckInvestigationStore = new DuckDbInvestigationStore(_databaseInitializer);
+        var duckInvestigationStore = new DuckDbInvestigationStore(_databaseInitializer,
+            serverNames: InvestigationServerNameLookup.FromServerManager(() => _serverManager));
         InvestigationStore = duckInvestigationStore;
         InvestigationNoteStore = duckInvestigationStore;
         var investigationStore = InvestigationStore;

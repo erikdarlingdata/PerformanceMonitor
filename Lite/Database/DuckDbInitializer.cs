@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 73;
+    internal const int CurrentSchemaVersion = 74;
 
     private readonly string _archivePath;
 
@@ -3054,6 +3054,13 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v73: adding investigation_requests.max_severity");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(73));
         }
+
+        if (fromVersion < 74)
+        {
+            /* v74 (#6011): investigation_reports.family_of and queries_run, Darling's V193-era report fields (#6004; the shared added-columns list). */
+            _logger?.LogInformation("Running migration to v74: adding investigation_reports.family_of and queries_run");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(74));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3113,6 +3120,10 @@ public partial class DuckDbInitializer : IDisposable
         (72, "investigation_requests", "evidence_state", "VARCHAR"),
         /* #6010: the highest severity any alert joined to the request had (Darling's V193 max_severity); NULL on a request opened before v73. */
         (73, "investigation_requests", "max_severity", "VARCHAR"),
+        /* #6011: a report's first-of-family request id and the statements it ran (Darling's family_of uuid and queries_run jsonb, #6004);
+           NULL on a report stored before v74. family_of carries no foreign key here: the tool's existence check is the guard. */
+        (74, "investigation_reports", "family_of", "UUID"),
+        (74, "investigation_reports", "queries_run", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

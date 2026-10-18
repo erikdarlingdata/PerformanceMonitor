@@ -26,7 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class McpInvestigationToolsTests : IDisposable
 {
-    private const string Evidence = "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"head blocker 412 s\"}]";
+    private const string Evidence = "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"head blocker 412 s\",\"basis\":\"verified\"}]";
 
     private readonly string _tempDir;
     private readonly DuckDbInitializer _db;

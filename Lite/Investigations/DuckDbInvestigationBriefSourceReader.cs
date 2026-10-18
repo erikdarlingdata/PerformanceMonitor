@@ -153,13 +153,53 @@ FROM (
 ORDER BY at_utc DESC
 LIMIT $4";
 
+    /* #6011 (Darling's RecurrenceSql, #6000): how often each of the request's linked metrics fired at the first alert's time of
+       day: the metric's alert history rows in the Days days before the first alert, within WindowMinutes minutes either side of
+       its clock time (circular, so a 23:50 alert counts a 00:10 fire, the next date's), muted apart from unmuted. Both numbers
+       come from InvestigationAlertRecurrence, the constants the brief publishes, so the SQL cannot measure one window while the
+       brief states another. What is not history: the first alert's own row and anything at or after it, and any fire in the
+       WindowMinutes minutes before it (this incident's own rise); a fire about 24 hours earlier still counts. A metric with no
+       rows still comes back (day NULL), so the brief says zero.
+       Both investigation_request_alerts.alert_time and config_alert_log.alert_time are naive UTC, so the clock arithmetic rides
+       no session time zone. The history is read through v_config_alert_log: ordinary archival moves rows older than
+       ArchiveService.HotDataDays (7) days, the edge of this window, to Parquet. A resolution row (#6057) is written to the same
+       log under its title (for example 'CPU Resolved'), never a firing metric's name, so it never matches. $1 request, $2 server. */
+    internal static readonly string RecurrenceSql = @"
+WITH anchor AS (
+    SELECT min(alert_time) AS t FROM investigation_request_alerts WHERE request_id = $1
+), m AS (
+    SELECT DISTINCT metric_name FROM investigation_request_alerts WHERE request_id = $1
+)
+SELECT m.metric_name, a.t, f.day, f.muted, f.n
+FROM m
+CROSS JOIN anchor AS a
+LEFT JOIN LATERAL (
+    SELECT strftime(CAST(h.alert_time AS DATE), '%Y-%m-%d') AS day, h.muted, count(*) AS n
+    FROM (
+        SELECT cal.alert_time, cal.muted,
+               ((epoch_us(cal.alert_time) - epoch_us(a.t)) % 86400000000 + 86400000000) % 86400000000 AS d
+        FROM v_config_alert_log AS cal
+        WHERE cal.server_id = $2
+          AND cal.metric_name = m.metric_name
+          AND cal.alert_time >= a.t - INTERVAL " + InvestigationAlertRecurrence.Days + @" DAY
+          AND cal.alert_time < a.t - INTERVAL " + InvestigationAlertRecurrence.WindowMinutes + @" MINUTE
+    ) AS h
+    WHERE least(h.d, 86400000000 - h.d) <= " + (InvestigationAlertRecurrence.WindowMinutes * 60 * 1000000L) + @"
+    GROUP BY 1, 2
+) AS f ON true
+ORDER BY m.metric_name, f.day DESC";
+
     private readonly DuckDbInitializer _duckDb;
     private readonly FindingStore _findings;
     private readonly Func<DateTime> _utcNow;
+    private readonly InvestigationServerNameLookup.Snapshot? _serverNames;
 
-    /// <summary>A reader over <paramref name="duckDb"/>, Lite's store.</summary>
-    public DuckDbInvestigationBriefSourceReader(DuckDbInitializer duckDb, Func<DateTime>? utcNow = null)
+    /// <summary>A reader over <paramref name="duckDb"/>, Lite's store. <paramref name="serverNames"/> (#6011) is Lite's server
+    /// list, read when a brief is composed; null leaves the brief's <c>display_name</c> and <c>instance_name</c> off.</summary>
+    public DuckDbInvestigationBriefSourceReader(DuckDbInitializer duckDb, Func<DateTime>? utcNow = null,
+        InvestigationServerNameLookup.Snapshot? serverNames = null)
     {
+        _serverNames = serverNames;
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
         _findings = new FindingStore(duckDb);
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -175,6 +215,7 @@ LIMIT $4";
         var notes = new List<InvestigationBriefNote>();
         var profiles = new List<InvestigationProfileText>();
         var changes = new List<InvestigationRecentChange>();
+        var recurrence = new List<InvestigationAlertRecurrence>();
 
         using (_duckDb.AcquireReadLock(cancellationToken))
         {
@@ -186,6 +227,9 @@ LIMIT $4";
             {
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
+                    var (displayName, instanceName) = _serverNames is null
+                        ? ((string?)null, (string?)null)
+                        : InvestigationServerNameLookup.Resolve(_serverNames(), reader.GetInt32(0), reader.GetString(1));
                     request = new InvestigationBriefRequest(
                         requestId,
                         reader.GetInt32(0),
@@ -197,7 +241,9 @@ LIMIT $4";
                         reader.IsDBNull(5) ? null : Utc(reader, 5),
                         reader.GetInt32(6),
                         reader.GetString(7),
-                        reader.IsDBNull(8) ? null : reader.GetString(8));
+                        reader.IsDBNull(8) ? null : reader.GetString(8),
+                        DisplayName: displayName,
+                        InstanceName: instanceName);
                 }
             }
 
@@ -268,6 +314,8 @@ LIMIT $4";
                         reader.IsDBNull(3) ? null : reader.GetString(3)));
                 }
             }
+
+            ReadRecurrence(connection, requestId, request.ServerId, recurrence, cancellationToken);
         }
 
         var evidence = new List<InvestigationBriefEvidence>();
@@ -302,7 +350,50 @@ LIMIT $4";
         var findings = await FindingsAsync(request, now, cancellationToken).ConfigureAwait(false);
 
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
+            Recurrence: recurrence.Count > 0 ? recurrence : null,
             Evidence: evidence.Count > 0 ? evidence : null);
+    }
+
+    /// <summary>#6011: one entry per linked metric, newest day first inside it (the rows come ordered by metric then day
+    /// descending, one per day and muted flag), the twin of Darling's read of <see cref="RecurrenceSql"/>.</summary>
+    private static void ReadRecurrence(DuckDBConnection connection, Guid requestId, int serverId,
+        List<InvestigationAlertRecurrence> result, CancellationToken cancellationToken)
+    {
+        using var command = Command(connection, RecurrenceSql, requestId, serverId);
+        using var reader = command.ExecuteReader();
+        string? metric = null;
+        DateTime around = default;
+        int fired = 0, muted = 0;
+        var firedDates = new List<DateOnly>();
+        var mutedDates = new List<DateOnly>();
+        void Flush()
+        {
+            if (metric is not null)
+                result.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates));
+            firedDates = new List<DateOnly>();
+            mutedDates = new List<DateOnly>();
+            fired = 0;
+            muted = 0;
+        }
+
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var name = reader.GetString(0);
+            if (!string.Equals(name, metric, StringComparison.Ordinal))
+            {
+                Flush();
+                metric = name;
+                around = Utc(reader, 1);
+            }
+
+            if (reader.IsDBNull(2)) continue;
+            var count = (int)reader.GetInt64(4);
+            var date = DateOnly.ParseExact(reader.GetString(2), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            if (reader.GetBoolean(3)) { muted += count; mutedDates.Add(date); } else { fired += count; firedDates.Add(date); }
+        }
+
+        Flush();
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each

@@ -174,8 +174,7 @@ public sealed class InvestigationBriefComposer
             },
         };
         /* #5999: the registry's names for the server, read when the brief is composed. display_name is always present on Darling;
-           instance_name is absent once the server has left the registry. Lite has a servers table but no join yet (#6011), so
-           both are absent there. Not host_name: that key is a masked client host (see InvestigationToolCore.RequestPayload). */
+           instance_name is absent once the server has left the registry. Lite names both from its server list (#6011). Not host_name: that key is a masked client host (see InvestigationToolCore.RequestPayload). */
         if (request.DisplayName is { } displayName)
             ((JsonObject)root["request"]!)["display_name"] = displayName;
         if (request.InstanceName is { } instanceName)

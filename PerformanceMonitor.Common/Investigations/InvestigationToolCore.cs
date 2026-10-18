@@ -363,9 +363,10 @@ internal static class InvestigationToolCore
                 ["root_cause_found"] = r.RootCauseFound,
                 ["summary"] = null,
             }, masker, ("root_cause", r.RootCause), ("summary", r.Summary));
-            /* #6004 (D17): a store that keeps feedback (Darling's) serves the evidence as two lists by basis, with the items written
-               before the basis existed apart as unlabelled; Lite's answer keeps its one list until its own slice (#6011). */
-            if (read.Feedback is not null)
+            /* #6004 (D17): the evidence is served as two lists by basis, with the items written before the basis existed apart as
+               unlabelled. Both stores say so with EvidenceByBasis (#6011: Lite's submit now requires a basis); a read that leaves it
+               null follows whether the store keeps feedback, as before. Feedback itself stays keyed on Feedback below. */
+            if (read.EvidenceByBasis ?? read.Feedback is not null)
                 AddEvidenceLists(node, storedEvidence, evidence);
             else
                 node["evidence"] = evidence;
@@ -523,8 +524,8 @@ internal static class InvestigationToolCore
             payload["practice_of"] = practiceOf.ToString();
         /* #5999: the registry's names, read when served (a rename shows on the next read). Darling always has a display_name (its
            fallback floor is the name the request was opened with) and lacks only the instance_name once the server has left the
-           registry. Lite has a servers registry table (Lite/Database/Schema.cs) but its request reads do not join it yet (#6011), so
-           both keys are absent there. The key is instance_name and NOT host_name on purpose: McpDataDetailKeys classifies host_name
+           registry. Lite fills both from its server list (ServerManager, #6011; its DuckDB servers table is never written), and
+           leaves both keys absent only where a store is built with no list. The key is instance_name and NOT host_name on purpose: McpDataDetailKeys classifies host_name
            as a client machine (every other host_name in the product is one) and numbers it to host#1 at metadataOnly on every MCP
            answer, which would hide the very name this adds. */
         if (r.DisplayName is { } displayName)

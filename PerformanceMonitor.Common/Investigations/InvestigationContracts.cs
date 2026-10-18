@@ -200,7 +200,9 @@ public sealed record InvestigationJournalRow(
 /// those of the page's requests only), and <see cref="JournalTruncated"/> that those requests held more journal rows
 /// than the journal page (#5834). <see cref="Feedback"/> is the people's feedback on the page's reports and
 /// <see cref="FamilyCounts"/> the false-positive counts per family over the same window (#5913); both are null from a store
-/// that keeps no feedback (Lite's).</summary>
+/// that keeps no feedback (Lite's). <see cref="EvidenceByBasis"/> (#6011) says whether the answer serves each report's evidence as
+/// two lists by basis; both stores set it true. Left null it follows <see cref="Feedback"/> (a read built before the flag existed),
+/// so an empty feedback list is never what claims Lite keeps feedback.</summary>
 public sealed record InvestigationReportsRead(
     IReadOnlyList<InvestigationRequestRow> Requests,
     IReadOnlyList<InvestigationReportRow> Reports,
@@ -209,7 +211,8 @@ public sealed record InvestigationReportsRead(
     bool RequestsTruncated = false,
     bool JournalTruncated = false,
     IReadOnlyList<InvestigationFeedbackRow>? Feedback = null,
-    IReadOnlyList<InvestigationFamilyCounts>? FamilyCounts = null);
+    IReadOnlyList<InvestigationFamilyCounts>? FamilyCounts = null,
+    bool? EvidenceByBasis = null);
 
 /// <summary>
 /// One request as the long-poll's catch-up read returns it (#5822): the request id, its route, the server name, the family
@@ -245,7 +248,7 @@ public sealed record InvestigationOpenedRow(
 /// <see cref="DisplayName"/> and <see cref="InstanceName"/> (#5999) are the registry's names for the server, read when the row is served so a
 /// rename shows on the next read (<see cref="ServerName"/> stays the name the request was opened with). Darling always fills
 /// <see cref="DisplayName"/> (it falls back to the opened name) and leaves <see cref="InstanceName"/> null once the server has left the
-/// registry; a store whose reads do not join the registry (Lite until #6011) leaves both null. A null is absent from the answer.
+/// registry; a store built with no server list to read leaves both null. Lite names them from its server list (ServerManager, #6011). A null is absent from the answer.
 /// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,

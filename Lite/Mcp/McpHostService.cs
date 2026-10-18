@@ -257,7 +257,8 @@ public sealed class McpHostService : BackgroundService
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
             /* #5820: the investigation brief's reader and composer, for the claim tool (the composer's own file registers both). */
-            PerformanceMonitorLite.Investigations.LiteInvestigationServices.AddInvestigationBrief(builder.Services, _duckDb);
+            PerformanceMonitorLite.Investigations.LiteInvestigationServices.AddInvestigationBrief(builder.Services, _duckDb,
+                InvestigationServerNameLookup.FromServerManager(_serverManager));
             /* #5820: the one investigation store MainWindow built, as a singleton, for the four tools and get_notification_routes. */
             builder.Services.AddSingleton<IInvestigationRequestStore>(_investigationStore);
 

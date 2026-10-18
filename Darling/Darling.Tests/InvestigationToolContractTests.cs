@@ -20,6 +20,5 @@ public sealed class InvestigationToolContractTests
 {
     [Fact]
     public void DarlingsInvestigationTools_KeepTheSharedContract() =>
-        Assert.Empty(InvestigationToolContract.Differences(typeof(DarlingMcpInvestigationTools), InvestigationToolContract.DarlingOnlyParameters,
-            InvestigationToolContract.DarlingParameterDescriptions));
+        Assert.Empty(InvestigationToolContract.Differences(typeof(DarlingMcpInvestigationTools), InvestigationToolContract.DarlingOnlyParameters));
 }

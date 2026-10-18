@@ -196,13 +196,21 @@ public sealed class McpInvestigationTools
         "unsupported_format, lease_lost, already_reported or not_found. <<GUIDE>> " +
         "A report is verdict (real, false_positive, needs_person), root_cause, evidence (the calls you made and the numbers " +
         "they showed) and summary, with an optional proposed_note for a person to approve. " +
-        "evidence is a JSON array of at least one {\"tool\":\"...\",\"arguments\":{...},\"key_numbers\":\"...\"}. invalid " +
+        "evidence is a JSON array of at least one {\"tool\":\"...\",\"arguments\":{...},\"key_numbers\":\"...\",\"basis\":\"" + InvestigationReportFields.BasesAlternation + "\"}: " +
+        "basis says whether you checked the claim against data (verified) or reasoned to it (inferred), and a reader sees the two apart. invalid " +
         "lists every missing or wrong field at once. Level 1 investigates and proposes nothing: any action_proposals is " +
         "refused (invalid) and journaled. A report is accepted under the current claim_id until a newer claim supersedes " +
         "it (then lease_lost), even after the lease lapsed. report_format: 1. summary at most 4,000 characters, " +
         "proposed_note at most 2,000, root_cause at most 8,000; evidence at most 50 items, each string value at most 1,000 " +
         "characters, 32 KB in all (over a cap: status refused, naming the field and the cap). The note waits as pending until a person approves it, and only then reaches a later " +
-        "brief. Refusals are journaled once per request and reason.")]
+        "brief. Refusals are journaled once per request and reason. " +
+        "links (optional) is a JSON array of at most 10 {\"kind\":\"" + InvestigationReportLinks.KindsAlternation + "\",\"url\":\"https://...\",\"key\":\"OPS-123\"}: a ticket, " +
+        "pull request, bug report, commit or release you opened or found. A url must be https with no user name or password; http, file and UNC " +
+        "(\\\\server\\share, //server/share) links are refused (invalid). Each URL is journaled once per request as link_recorded. " +
+        "Lite stores the link and never calls Jira or git. " +
+        "family_of (optional) is the request_id of the first report in this family; it must name a request (else invalid). " +
+        "queries_run (optional) is a JSON array of the statements you ran, " + InvestigationReportFields.QueriesRunRule + " (over a cap: refused, never cut); " +
+        "it is masked as statement text.")]
     public static Task<string> SubmitInvestigationReport(
         IInvestigationRequestStore store,
         [Description("The request you claimed.")] string request_id,
@@ -210,21 +218,53 @@ public sealed class McpInvestigationTools
         [Description("1.")] int report_format,
         [Description("real, false_positive or needs_person.")] string verdict,
         [Description("What caused the alert, or that you could not tell.")] string root_cause,
-        [Description("JSON array of {tool, arguments, key_numbers}; see the guide.")] string evidence,
+        [Description("JSON array of {tool, arguments, key_numbers, basis}; basis (" + InvestigationReportFields.BasesAlternation + ") is required on each item; see the guide.")] string evidence,
         [Description("At most 4,000 characters.")] string summary,
         [Description("Optional note for a person to approve, at most 2,000 characters.")] string? proposed_note = null,
         [Description("Refused at Level 1. Omit.")] string? action_proposals = null,
+        [Description("Optional JSON array of at most 10 {kind, url, key}; https only. See the guide.")] string? links = null,
+        [Description("Optional. The request_id of the first report in this family; it must exist.")] string? family_of = null,
+        [Description("Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + ".")] string? queries_run = null,
         CancellationToken cancellationToken = default) =>
         SubmitAsync(store, request_id, claim_id, report_format, verdict, root_cause, evidence, summary,
-            proposed_note, action_proposals, cancellationToken);
+            proposed_note, action_proposals, cancellationToken, links, family_of, queries_run);
+
+    /// <summary>The <c>reported</c> answer: <c>links_recorded</c> only when the report carried a link (Darling's answer, #5914).</summary>
+    private static string ReportedAnswer(Guid requestId, string? proposedNote, int linksRecorded)
+    {
+        var answer = new JsonObject
+        {
+            ["status"] = "reported",
+            ["request_id"] = requestId.ToString(),
+            ["proposed_note"] = string.IsNullOrWhiteSpace(proposedNote) ? null : "pending",
+        };
+        if (linksRecorded > 0)
+            answer["links_recorded"] = linksRecorded;
+        return answer.ToJsonString(McpHelpers.JsonOptions);
+    }
 
     /// <summary>The submit over a given store.</summary>
     internal static async Task<string> SubmitAsync(IInvestigationRequestStore store, string request_id, string claim_id,
         int report_format, string verdict, string root_cause, string evidence, string summary, string? proposed_note,
-        string? action_proposals, CancellationToken cancellationToken)
+        string? action_proposals, CancellationToken cancellationToken, string? links = null, string? family_of = null,
+        string? queries_run = null)
     {
         var problems = InvestigationToolCore.ValidateReport(request_id, claim_id, verdict, root_cause, evidence, summary, proposed_note,
-            action_proposals, out var requestId, out var claimId, out var evidenceJson);
+            action_proposals, out var requestId, out var claimId, out var evidenceJson, requireBasis: true);
+        /* #5914/#6004 (ported by #6011): links, family_of and queries_run ride after the other fields, in Darling's order. */
+        if (InvestigationReportLinks.Validate(links, out var reportLinks) is { } linkProblem)
+            problems.Add("links: " + linkProblem);
+        Guid? familyOf = null;
+        if (!string.IsNullOrWhiteSpace(family_of))
+        {
+            if (Guid.TryParse(family_of, out var parsedFamily))
+                familyOf = parsedFamily;
+            else
+                problems.Add("family_of: not a request id.");
+        }
+
+        if (InvestigationReportFields.Validate(queries_run, out var queriesRunJson) is { } queriesProblem)
+            problems.Add("queries_run: " + queriesProblem);
         try
         {
             var agent = requestId != Guid.Empty && claimId != Guid.Empty
@@ -241,7 +281,7 @@ public sealed class McpInvestigationTools
             }
 
             /* The caps, before any write, journaled once per request and reason. */
-            var oversize = InvestigationToolCore.CapProblems(root_cause, evidence);
+            var oversize = InvestigationToolCore.CapProblems(root_cause, evidence, queries_run);
             if (oversize.Count > 0)
             {
                 if (requestId != Guid.Empty)
@@ -254,6 +294,9 @@ public sealed class McpInvestigationTools
                     "The report was not stored: it is over a size cap. " + string.Join(" ", oversize.Select(p => p.Problem)),
                     new { parameter = oversize[0].Field, cap = oversize[0].Cap });
             }
+
+            if (familyOf is { } family && !await store.RequestExistsAsync(family, cancellationToken))
+                problems.Add($"family_of: no investigation request has id {family}; give the request_id of the first report in this family.");
 
             if (problems.Count > 0)
             {
@@ -271,16 +314,12 @@ public sealed class McpInvestigationTools
             var outcome = await store.SubmitAsync(new InvestigationReportSubmission(
                 requestId, claimId, agent, (short)report_format, verdict, root_cause.Trim(),
                 RootCauseFound: verdict != "needs_person", summary.Trim(), evidenceJson!,
-                string.IsNullOrWhiteSpace(proposed_note) ? null : proposed_note.Trim()), cancellationToken);
+                string.IsNullOrWhiteSpace(proposed_note) ? null : proposed_note.Trim(), reportLinks.Count > 0 ? reportLinks : null,
+                familyOf, queriesRunJson), cancellationToken);
 
             return outcome switch
             {
-                InvestigationSubmitOutcome.Reported => JsonSerializer.Serialize(new
-                {
-                    status = "reported",
-                    request_id = requestId,
-                    proposed_note = string.IsNullOrWhiteSpace(proposed_note) ? null : "pending",
-                }, McpHelpers.JsonOptions),
+                InvestigationSubmitOutcome.Reported => ReportedAnswer(requestId, proposed_note, reportLinks.Count),
                 InvestigationSubmitOutcome.LeaseLost => InvestigationToolCore.Status("lease_lost",
                     "This claim_id no longer holds the request: a newer claim superseded it, or it never held one. The report was not stored."),
                 InvestigationSubmitOutcome.AlreadyReported => InvestigationToolCore.Status("already_reported", "The request already holds a report."),

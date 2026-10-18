@@ -22,16 +22,18 @@ internal static class LiteInvestigationServices
 {
     /// <summary>
     /// Registers <see cref="IInvestigationBriefSourceReader"/> (over <paramref name="duckDb"/>) and
-    /// <see cref="InvestigationBriefComposer"/>. The data-detail setting is resolved as optional, so the composer masks at
+    /// <see cref="InvestigationBriefComposer"/>. <paramref name="serverNames"/> (#6011) is Lite's server list, which names the
+    /// server on a brief. The data-detail setting is resolved as optional, so the composer masks at
     /// <see cref="McpDataDetail.Full"/> (as the host filter passes through) when the host registered none. Typed-generic
     /// <c>AddSingleton&lt;T&gt;</c>, as the host's other service-parameter registrations are.
     /// </summary>
-    internal static void AddInvestigationBrief(IServiceCollection services, DuckDbInitializer duckDb)
+    internal static void AddInvestigationBrief(IServiceCollection services, DuckDbInitializer duckDb,
+        InvestigationServerNameLookup.Snapshot? serverNames = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(duckDb);
 
-        services.AddSingleton<IInvestigationBriefSourceReader>(_ => new DuckDbInvestigationBriefSourceReader(duckDb));
+        services.AddSingleton<IInvestigationBriefSourceReader>(_ => new DuckDbInvestigationBriefSourceReader(duckDb, serverNames: serverNames));
         services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),

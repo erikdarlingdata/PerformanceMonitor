@@ -915,6 +915,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     /// <summary>True when a request with <paramref name="requestId"/> exists (#6004: what a report's <c>family_of</c> must
     /// name). Writes nothing.</summary>
+    /// <inheritdoc />
     public async Task<bool> RequestExistsAsync(Guid requestId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -1073,7 +1074,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         if (ids.Length == 0)
         {
             /* #5913: this store keeps feedback, so even an empty read says so (no family_counts key would read as "a store that keeps none"). */
-            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, false, [], requestId is null ? [] : null);
+            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, false, [], requestId is null ? [] : null, EvidenceByBasis: true);
         }
 
         await using (var command = Command(connection, null, ReportsSql, P(ids)))
@@ -1135,7 +1136,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds);
         var feedback = await feedbackStore.ReadAsync(connection, ids, cancellationToken);
         var familyCounts = requestId is null ? await feedbackStore.FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken) : null;
-        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts);
+        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts, EvidenceByBasis: true);
     }
 
     /// <summary>
