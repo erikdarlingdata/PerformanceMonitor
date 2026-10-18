@@ -6533,7 +6533,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_trace_flag_changes"] = R(CatConfig, "Trace-flag changes over time.", PServer(), PHours(168), PAsOf()),
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
-            ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
+            ["get_collection_health"] = R(CatData, "Per-collector collection health for a server. server=* with collector_name answers for that one collector on every enabled server (hours: default 24).", PServer(), PText("collector_name")),
             ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms"), PText("status")),
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PDatabases(), PAsOf()),
             ["get_client_timeouts"] = R(CatData, "Client-timeout (attention) counts, rate and top databases, applications and statements over the window, with the newest sampled events (#5640).", PServer(), PHours(1), PLimit(20), PAsOf()),
@@ -7499,7 +7499,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #4198: full_detail=true keeps the web viewer's payload exactly what it was before the default
                cut — every field on every collector row, never the compact shape a boring-healthy row gets
                by default. */
-            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true, cancellationToken: c.RequestAborted),
+            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true, collector_name: Str(c, "collector_name"), hours_back: Hours(c, 24), cancellationToken: c.RequestAborted),
             /* #4198: full_text: true, because error_message carried no preview cap before this PR — the
                web viewer keeps that behavior (an operator reading the Collection Log grid gets the whole
                error, the same way get_deadlock_detail's row passes TrendBudget.Chart-style overrides to
