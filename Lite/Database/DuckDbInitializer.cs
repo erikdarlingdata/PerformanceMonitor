@@ -3064,8 +3064,8 @@ public partial class DuckDbInitializer : IDisposable
 
         if (fromVersion < 75)
         {
-            /* v75 (#6012): investigation_requests.follow_up_of and follow_up_at, Darling's V193 follow-up columns (#6008; the shared added-columns list). */
-            _logger?.LogInformation("Running migration to v75: adding investigation_requests.follow_up_of and follow_up_at");
+            /* v75 (#6012): investigation_requests.follow_up_of and follow_up_at, Darling's V193 follow-up columns (#6008), and the route signing-key flag (the shared added-columns list). */
+            _logger?.LogInformation("Running migration to v75: adding investigation_requests.follow_up_of and follow_up_at, notification_routes.generic_signing_set and generic_signing_until");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(75));
         }
     }
@@ -3135,6 +3135,9 @@ public partial class DuckDbInitializer : IDisposable
            follow_up_of and follow_up_at, #6008). NULL on a request stored before v75. follow_up_of carries no foreign key: the purge clears it. */
         (75, "investigation_requests", "follow_up_of", "UUID"),
         (75, "investigation_requests", "follow_up_at", "TIMESTAMP"),
+        /* #6012: a route's generic signing key flag and the end of its rotation overlap (non-secret; the keys are in Credential Manager). NULL reads as no key. */
+        (75, "notification_routes", "generic_signing_set", "BOOLEAN"),
+        (75, "notification_routes", "generic_signing_until", "TIMESTAMP"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

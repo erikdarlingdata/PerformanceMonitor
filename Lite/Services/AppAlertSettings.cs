@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Services;
@@ -38,10 +39,46 @@ public sealed class AppAlertSettings : IAlertSettings
     public string SlackWebhookUrl     => App.SlackWebhookUrl;
     public string SlackProxyAddress   => App.SlackProxyAddress;
 
-    public bool   GenericWebhookEnabled      => App.GenericWebhookEnabled;
-    public string GenericWebhookUrl          => App.GenericWebhookUrl;
+    /* #6012 (Darling's #5998): a saved signing key that will not open turns the settings row's generic URL off, so a destination
+       that was set up signed is never sent unsigned. */
+    public bool   GenericWebhookEnabled      => App.GenericWebhookEnabled && !GenericSigningKeyUnreadable;
+    public string GenericWebhookUrl          => GenericSigningKeyUnreadable ? "" : App.GenericWebhookUrl;
     public string GenericWebhookHeadersJson  => App.GenericWebhookHeadersJson;
     public string GenericWebhookBodyTemplate => App.GenericWebhookBodyTemplate;
+
+    private readonly RouteSecretAccess? _signingSecrets;
+
+    /// <summary>The app's settings; <paramref name="signingSecrets"/> is where the signing keys are read (null: Windows Credential
+    /// Manager). A test passes an in-memory pair.</summary>
+    public AppAlertSettings(RouteSecretAccess? signingSecrets = null)
+    {
+        _signingSecrets = signingSecrets;
+    }
+
+    private RouteSecretAccess Secrets => _signingSecrets ?? RouteSecretAccess.CredentialManager();
+
+    private WebhookSigningKeys OpenSigning(out bool unreadable) =>
+        LiteWebhookSigningKeys.Open(
+            Secrets, LiteWebhookSigningKeys.SettingsName(false), LiteWebhookSigningKeys.SettingsName(true),
+            new LiteSigningState(App.GenericSigningSet, App.GenericSigningUntilUtc), DateTime.UtcNow, out unreadable);
+
+    /// <summary>#6012: the signing keys of the settings row's generic URL, opened. None when no key is saved.</summary>
+    public WebhookSigningKeys GenericWebhookSigning => OpenSigning(out _);
+
+    /// <summary>#6012: a key is saved and will not open.</summary>
+    public bool GenericSigningKeyUnreadable
+    {
+        get
+        {
+            if (!App.GenericSigningSet)
+            {
+                return false;
+            }
+
+            OpenSigning(out var unreadable);
+            return unreadable;
+        }
+    }
     public string GenericWebhookProxyAddress => App.GenericWebhookProxyAddress;
 
     /* PagerDuty: the enable flag AND a non-empty routing key, matching the sibling channels' shape

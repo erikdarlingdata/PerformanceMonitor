@@ -66,6 +66,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Teams webhook URL" VerticalAlignment="Center"
@@ -88,6 +89,22 @@
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
             <TextBox Grid.Row="4" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
                      ToolTip="Comma-separated. Redirects email only: the SMTP server, from-address and credentials stay in the app-wide email settings."/>
+
+            <!-- #6012: this route's own generic URL is signed with this route's own key (Standard Webhooks headers). -->
+            <TextBlock Grid.Row="5" Grid.Column="0" Text="Generic signing key" VerticalAlignment="Top"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,8,6"/>
+            <StackPanel Grid.Row="5" Grid.Column="1" Margin="0,0,0,6">
+                <TextBlock x:Name="SigningStatusText" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,4,0,4"/>
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="SigningGenerateButton" Content="Generate key" Click="SigningGenerate_Click"
+                            ToolTip="Makes a key and signs every post to this route's own generic URL with it. The key is shown once."/>
+                    <Button x:Name="SigningRemoveButton" Content="Remove key" Margin="8,0,0,0" Click="SigningRemove_Click"/>
+                </StackPanel>
+                <TextBlock x:Name="SigningShownOnceText" TextWrapping="Wrap" Margin="0,6,0,2" Visibility="Collapsed"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBox x:Name="SigningNewKeyBox" IsReadOnly="True" Visibility="Collapsed" FontFamily="Consolas"
+                         AutomationProperties.Name="New signing key"/>
+            </StackPanel>
         </Grid>
         <TextBlock Grid.Row="10" Foreground="{DynamicResource ForegroundDimBrush}" TextWrapping="Wrap" Margin="0,0,0,8"
                    Text="A saved destination is never shown. Leave the dots to keep it, type to replace it, or clear the box to remove it. Generic webhook headers, the generic body template, and the proxy and region settings stay app-wide."/>

@@ -530,7 +530,8 @@ public class WebhookAlertService
         string? headersJson,
         string? bodyTemplate,
         string? proxyAddress,
-        AlertBranding branding)
+        AlertBranding branding,
+        WebhookSigningKeys? signing = null)
     {
         try
         {
@@ -548,6 +549,15 @@ public class WebhookAlertService
 
             if (!IsWellFormedJson(payload, out var bodyError))
                 return bodyError;
+
+            /* #6012: the sender signs its own test when it holds a key (Lite, which is the sender); Darling's Viewer passes none and
+               sends the test unsigned, as before. */
+            if (signing is { HasKey: true })
+            {
+                var sendUtc = DateTime.UtcNow;
+                var signed = new WebhookSendSigning(signing.LiveKeys(sendUtc), WebhookSigning.NewMessageId(), WebhookSigning.UnixSeconds(sendUtc));
+                return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers, WebhookPostTimeout, signed, CancellationToken.None);
+            }
 
             return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers);
         }

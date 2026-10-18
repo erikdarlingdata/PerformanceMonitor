@@ -101,7 +101,8 @@ public partial class NotificationRoutesWindow : Window
         if (RefuseWhileRestorePending()) return;
         if (RoutesGrid.SelectedItem is not NotificationRouteRow selected) return;
         var dialog = new NotificationRouteEditDialog(
-            _scopeOptions, route => _store.UpdateAsync(route), selected.Route) { Owner = this };
+            _scopeOptions, route => _store.UpdateAsync(route), selected.Route,
+            generateKey: id => _store.GenerateSigningKeyAsync(id), removeKey: id => _store.RemoveSigningKeyAsync(id)) { Owner = this };
         if (dialog.ShowDialog() == true)
         {
             await LoadRoutesAsync();

@@ -379,6 +379,11 @@ public partial class App : Application
     public static string GenericWebhookBodyTemplate { get; set; } = "";
     public static string GenericWebhookProxyAddress { get; set; } = "";
 
+    /* #6012: the settings row's generic signing key. Only these two facts are plain prefs (settings.json): whether a key is saved
+       and when the previous key stops signing. The keys themselves are in Credential Manager (LiteWebhookSigningKeys). */
+    public static bool GenericSigningSet { get; set; } = false;
+    public static DateTime? GenericSigningUntilUtc { get; set; }
+
     /* PagerDuty webhook settings — Events API v2. The routing key is a bearer secret like the Teams/Slack
        URLs, so it lives in Credential Manager, never in settings.json; only the enable flag and the EU-region
        toggle are plain prefs. */
@@ -1520,6 +1525,13 @@ public partial class App : Application
             if (read.TryGetProperty("generic_webhook_enabled", out v)) GenericWebhookEnabled = v.Bool(GenericWebhookEnabled);
             if (read.TryGetProperty("generic_proxy_address", out v)) GenericWebhookProxyAddress = v.Text(GenericWebhookProxyAddress);
             if (read.TryGetProperty("generic_body_template", out v)) GenericWebhookBodyTemplate = v.Text(GenericWebhookBodyTemplate);
+            if (read.TryGetProperty("generic_signing_set", out v)) GenericSigningSet = v.Bool(GenericSigningSet);
+            if (read.TryGetProperty("generic_signing_until", out v)
+                && DateTime.TryParse(v.TextOrNull(), System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var signingUntil))
+            {
+                GenericSigningUntilUtc = signingUntil;
+            }
 
             /* PagerDuty webhook settings. The routing key is a secret and loads from Credential Manager below;
                only the enable flag and EU-region toggle are plain prefs. */

@@ -608,6 +608,22 @@
                                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </StackPanel>
                                 </Grid>
+                                <!-- #6012: the signing key of the generic URL (Standard Webhooks headers). The key is shown once, here, and never again. -->
+                                <StackPanel Margin="20,8,0,0">
+                                    <TextBlock Text="Signing key" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBlock x:Name="GenericSigningStatusText" TextWrapping="Wrap" FontSize="11" Margin="0,2,0,4"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button x:Name="GenericSigningGenerateButton" Content="Generate key" Click="GenericSigningGenerate_Click"
+                                                ToolTip="Makes a key and signs every post to this URL with it (webhook-id, webhook-timestamp and webhook-signature headers). The key is shown once."/>
+                                        <Button x:Name="GenericSigningRemoveButton" Content="Remove key" Margin="8,0,0,0" Click="GenericSigningRemove_Click"
+                                                ToolTip="Stops signing posts to this URL."/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="GenericSigningShownOnceText" TextWrapping="Wrap" FontSize="11" Margin="0,6,0,2" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox x:Name="GenericSigningNewKeyBox" IsReadOnly="True" Visibility="Collapsed" FontFamily="Consolas"
+                                             AutomationProperties.Name="New signing key"/>
+                                </StackPanel>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run Text="Placeholders (each is JSON-escaped when substituted): "/>
                                     <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}}"/>

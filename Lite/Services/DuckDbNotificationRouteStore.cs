@@ -83,7 +83,8 @@ public sealed class DuckDbNotificationRouteStore
     private const string RowColumns =
         "route_id, metric_match, scope_server_id, scope_tag_id, teams_set, slack_set, generic_set, pagerduty_set, "
         + "smtp_recipients, enabled, teams_secret_gen, slack_secret_gen, generic_secret_gen, pagerduty_secret_gen, "
-        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes";
+        + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, "
+        + "generic_signing_set, generic_signing_until";
 
     private readonly DuckDbInitializer _dbInitializer;
     private readonly Func<IReadOnlyCollection<int>> _knownServerIds;
@@ -467,6 +468,13 @@ public sealed class DuckDbNotificationRouteStore
             }
 
             DeleteKeysLeniently(routeId, keys.Select(kv => (kv.Value, kv.Key)), "route");
+
+            /* #6012: the route's signing keys go with it; a key that will not go is read by no route. */
+            DeleteKeysLeniently(routeId, new[]
+            {
+                (NotificationRouter.GenericChannel, LiteWebhookSigningKeys.RouteName(routeId, false)),
+                (NotificationRouter.GenericChannel, LiteWebhookSigningKeys.RouteName(routeId, true)),
+            }, "signing");
         }
 
         NotificationRouteCache.Invalidate();
@@ -477,7 +485,8 @@ public sealed class DuckDbNotificationRouteStore
     private sealed record Row(
         int RouteId, string MetricMatch, int? ScopeServerId, int? ScopeTagId,
         bool[] Set, string SmtpRecipients, bool Enabled, string?[] Gens,
-        int? AgentLevel, int AgentMaxPerHour, int AgentMaxPerDay, int AgentLeaseMinutes, int AgentExpiryMinutes);
+        int? AgentLevel, int AgentMaxPerHour, int AgentMaxPerDay, int AgentLeaseMinutes, int AgentExpiryMinutes,
+        bool SigningSet, DateTime? SigningUntilUtc);
 
     private static Row ReadRowFrom(System.Data.Common.DbDataReader reader) =>
         new(
@@ -497,7 +506,10 @@ public sealed class DuckDbNotificationRouteStore
             reader.IsDBNull(15) ? NotificationRoute.DefaultAgentMaxPerHour : reader.GetInt32(15),
             reader.IsDBNull(16) ? NotificationRoute.DefaultAgentMaxPerDay : reader.GetInt32(16),
             reader.IsDBNull(17) ? NotificationRoute.DefaultAgentLeaseMinutes : reader.GetInt32(17),
-            reader.IsDBNull(18) ? NotificationRoute.DefaultAgentExpiryMinutes : reader.GetInt32(18));
+            reader.IsDBNull(18) ? NotificationRoute.DefaultAgentExpiryMinutes : reader.GetInt32(18),
+            /* #6012: the signing key's flag and its rotation end (UTC); NULL is no key. */
+            !reader.IsDBNull(19) && reader.GetBoolean(19),
+            reader.IsDBNull(20) ? null : DateTime.SpecifyKind(reader.GetDateTime(20), DateTimeKind.Utc));
 
     private static async Task<List<Row>> ReadAllRowsAsync(DuckDBConnection connection, CancellationToken cancellationToken = default)
     {
@@ -573,6 +585,29 @@ public sealed class DuckDbNotificationRouteStore
         var generic = Read(2);
         var pagerDuty = Read(3);
 
+        /* #6012 (Darling's #5998): a route's own generic URL is signed with the route's own keys. A saved key that will not open
+           turns the generic channel off for this route, so its alerts are neither sent unsigned nor sent to the app-wide URL. */
+        var signing = WebhookSigningKeys.None;
+        if (row.SigningSet && !string.IsNullOrEmpty(generic))
+        {
+            signing = LiteWebhookSigningKeys.Open(
+                _secrets, LiteWebhookSigningKeys.RouteName(row.RouteId, false), LiteWebhookSigningKeys.RouteName(row.RouteId, true),
+                new LiteSigningState(true, row.SigningUntilUtc), DateTime.UtcNow, out var unreadable);
+            if (unreadable)
+            {
+                generic = "";
+                if (!off.Contains(NotificationRouter.GenericChannel))
+                {
+                    off.Add(NotificationRouter.GenericChannel);
+                }
+
+                if (_warnedUnreadable.TryAdd($"{row.RouteId}_signing", 0))
+                {
+                    AppLogger.Warn("NotificationRoutes", $"Notification route {row.RouteId} has a saved generic webhook signing key that could not be read from Credential Manager, so its generic channel is off until the key is made again.");
+                }
+            }
+        }
+
         return new NotificationRoute(
             row.RouteId, row.MetricMatch, teams, slack, generic, pagerDuty, row.SmtpRecipients, row.Enabled)
         {
@@ -583,8 +618,89 @@ public sealed class DuckDbNotificationRouteStore
             AgentMaxPerHour = row.AgentMaxPerHour,
             AgentMaxPerDay = row.AgentMaxPerDay,
             AgentLeaseMinutes = row.AgentLeaseMinutes,
-            AgentExpiryMinutes = row.AgentExpiryMinutes
+            AgentExpiryMinutes = row.AgentExpiryMinutes,
+            GenericSigning = signing
         };
+    }
+
+    /// <summary>
+    /// Makes a signing key for a route's own generic URL, or rotates it (#6012, Darling's #5998 D2 and D3): the current key
+    /// becomes the previous one for <see cref="WebhookSigning.RotationOverlap"/>. Returns the new key, to be shown once, or a
+    /// sentence saying why not (no such route, no saved generic URL, Credential Manager refused). The key goes only to Credential
+    /// Manager; the row keeps the flag and the rotation's end. A URL change keeps the key: Credential Manager does not bind a key
+    /// to the URL text as Darling's seal does.
+    /// </summary>
+    public async Task<(string? Key, string? Error)> GenerateSigningKeyAsync(int routeId)
+    {
+        string? key;
+        string? error;
+        using (var writeLock = _dbInitializer.AcquireWriteLock())
+        {
+            PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, TableName);
+            using var connection = _dbInitializer.CreateConnection();
+            await connection.OpenAsync();
+            var current = await ReadRowAsync(connection, routeId);
+            if (current is null)
+            {
+                return (null, "This route no longer exists.");
+            }
+
+            if (!current.Set[Array.IndexOf(s_channels, NotificationRouter.GenericChannel)])
+            {
+                return (null, "Save a generic webhook URL on this route first. A key signs the route's own generic URL.");
+            }
+
+            var result = LiteWebhookSigningKeys.Generate(
+                _secrets, LiteWebhookSigningKeys.RouteName(routeId, false), LiteWebhookSigningKeys.RouteName(routeId, true),
+                new LiteSigningState(current.SigningSet, current.SigningUntilUtc), DateTime.UtcNow);
+            key = result.NewKey;
+            error = result.Error;
+            if (key is not null)
+            {
+                await WriteSigningFlagAsync(connection, routeId, result.State);
+            }
+        }
+
+        NotificationRouteCache.Invalidate();
+        return (key, error);
+    }
+
+    /// <summary>Removes a route's signing keys; its generic URL is sent unsigned from then on. Null when done, else why not.</summary>
+    public async Task<string?> RemoveSigningKeyAsync(int routeId)
+    {
+        string? error;
+        using (var writeLock = _dbInitializer.AcquireWriteLock())
+        {
+            PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, TableName);
+            using var connection = _dbInitializer.CreateConnection();
+            await connection.OpenAsync();
+            var current = await ReadRowAsync(connection, routeId);
+            if (current is null)
+            {
+                return "This route no longer exists.";
+            }
+
+            var state = LiteWebhookSigningKeys.Remove(
+                _secrets, LiteWebhookSigningKeys.RouteName(routeId, false), LiteWebhookSigningKeys.RouteName(routeId, true),
+                new LiteSigningState(current.SigningSet, current.SigningUntilUtc), out error);
+            if (error is null)
+            {
+                await WriteSigningFlagAsync(connection, routeId, state);
+            }
+        }
+
+        NotificationRouteCache.Invalidate();
+        return error;
+    }
+
+    private static async Task WriteSigningFlagAsync(DuckDBConnection connection, int routeId, LiteSigningState state)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"UPDATE {TableName} SET generic_signing_set = $2, generic_signing_until = $3 WHERE route_id = $1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = routeId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = state.HasKey });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)state.PreviousUntilUtc ?? DBNull.Value });
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private static NotificationRoute Validate(NotificationRoute route)
