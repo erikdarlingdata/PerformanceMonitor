@@ -65,15 +65,15 @@ public sealed class InvestigationRequestStoreLiveTests
             var other = await store.OpenOrJoinAsync(Alert(_now, family: "resources"), ct);
             Assert.Equal(InvestigationOpenOutcome.Opened, other.Outcome);
 
-            /* Past the window with a key already on the request: a key never decides a join (#5632 review M2), so it opens
+            /* 31 minutes after the latest alert (at 20) with a key already on the request: a key never decides a join (#5632 review M2), so it opens
                another. */
-            _now = T0.AddMinutes(50);
+            _now = T0.AddMinutes(51);
             var late = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { "key-3" }), ct);
             Assert.Equal(InvestigationOpenOutcome.Opened, late.Outcome);
             Assert.NotEqual(first.RequestId, late.RequestId);
 
             /* Inside the new request's window with a new key: joins it, not the first. */
-            _now = T0.AddMinutes(51);
+            _now = T0.AddMinutes(52);
             var next = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { "key-9" }), ct);
             Assert.Equal(late.RequestId, next.RequestId);
 
@@ -158,7 +158,7 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
     }
 
     [Fact]
-    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlertAt31MinutesOpensANewOne_AndAReportedOneIsFinal()
+    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneIsFinal()
     {
         await RunAsync(async (store, connection, ct) =>
         {
@@ -172,7 +172,7 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
             Assert.Equal(InvestigationOpenOutcome.Joined, joined.Outcome);
             Assert.Equal(first, joined.RequestId);
 
-            _now = T0.AddMinutes(31);
+            _now = T0.AddMinutes(60);
             var opened = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), ct);
             Assert.Equal(InvestigationOpenOutcome.Opened, opened.Outcome);
             Assert.NotEqual(first, opened.RequestId);
@@ -183,7 +183,7 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
             var second = opened.RequestId!.Value;
             var secondClaim = await store.ClaimAsync(second, "agent-a", ct);
             Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(second, secondClaim.ClaimId!.Value), ct));
-            _now = T0.AddMinutes(33);
+            _now = T0.AddMinutes(62);
             var third = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), ct);
             Assert.Equal(InvestigationOpenOutcome.Opened, third.Outcome);
             Assert.NotEqual(second, third.RequestId);
