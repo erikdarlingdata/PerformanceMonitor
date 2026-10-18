@@ -135,9 +135,13 @@ WHERE request_id = $1";
     internal const string ReportInsertSql = @"
 INSERT INTO investigation_reports
     (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary,
-     evidence, server_id, metric_name, dedup_key, story_path_hash)
+     evidence, server_id, metric_name, dedup_key, story_path_hash, family_of, queries_run)
 VALUES ((SELECT coalesce(max(report_id), 0) + 1 FROM investigation_reports), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-        $12, $13, $14)";
+        $12, $13, $14, $15, $16)";
+
+    /* #6004, Lite's twin of Darling's RequestExistsSql: a report's family_of must name a request. DuckDB has no foreign key
+       here, so this check is the guard; the retention purge can remove that request later (see ReadReportsAsync). */
+    internal const string RequestExistsSql = "SELECT 1 FROM investigation_requests WHERE request_id = $1";
 
     internal const string ReportedSql = @"
 UPDATE investigation_requests
@@ -260,7 +264,8 @@ ORDER BY r.opened_at DESC, r.request_id::VARCHAR
 LIMIT $5";
 
     internal const string ReportsSql = @"
-SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence
+SELECT request_id, report_format, agent_id, submitted_at, verdict, root_cause, root_cause_found, summary, evidence,
+       family_of, queries_run
 FROM investigation_reports
 WHERE list_contains($1::VARCHAR[], request_id::VARCHAR)
 ORDER BY submitted_at DESC";
@@ -329,6 +334,12 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
 
     internal const string RetentionReportsSql =
         "DELETE FROM investigation_reports WHERE request_id IN (" + RetentionDoomedRequests + ")";
+
+    /* #6011: Darling's family_of is a foreign key ON DELETE SET NULL. DuckDB has no foreign key here, so a purge clears the id
+       of every surviving report whose family request it is about to remove: a family_of that is served always names a request. */
+    internal const string RetentionFamilyOfSql =
+        "UPDATE investigation_reports SET family_of = NULL WHERE family_of IN (" + RetentionDoomedRequests + ")"
+        + " AND request_id NOT IN (" + RetentionDoomedRequests + ")";
 
     internal const string RetentionRequestsSql =
         "DELETE FROM investigation_requests WHERE state NOT IN ('open', 'claimed') AND opened_at < $1";
@@ -570,6 +581,8 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         }
 
         InvestigationReportLinks.ThrowIfInvalid(report.Links, nameof(report));
+        /* #6004: and the queries_run caps, never clamped (the tool's CapProblems already refused them; this is the store's own). */
+        InvestigationReportFields.ThrowIfInvalid(report.QueriesRunJson, nameof(report));
 
         var now = Now();
         var actor = "agent:" + report.AgentId;
@@ -634,7 +647,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         await ExecAsync(connection, ReportInsertSql, cancellationToken,
             report.RequestId, report.ReportFormat, report.AgentId, report.ClaimId, now, report.Verdict,
             report.RootCause, report.RootCauseFound, report.Summary, report.EvidenceJson, serverId,
-            metric, dedupKey, story);
+            metric, dedupKey, story, report.FamilyOf, report.QueriesRunJson);
         if (!string.IsNullOrWhiteSpace(report.ProposedNote))
         {
             await ExecAsync(connection, ProposedNoteSql, cancellationToken, report.RequestId, report.ProposedNote, actor, now);
@@ -643,8 +656,8 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         await ExecAsync(connection, ReportedSql, cancellationToken, report.RequestId, now);
         await JournalAsync(connection, now, report.RequestId, null, serverId, "reported", actor,
             report.Verdict, null, null, cancellationToken);
-        /* #5914, Darling's rule in the shared contract: each link a link_recorded row, once per request and URL. Lite's
-           submit tool takes no links argument, so a Lite report carries none today. */
+        /* #5914, Darling's rule in the shared contract: each link a link_recorded row, once per request and URL. Lite's submit
+           tool takes links since #6011 (commit and release among the kinds). */
         var links = InvestigationReportLinks.Distinct(report.Links ?? []);
         if (links.Count > 0)
         {
@@ -728,6 +741,14 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     }
 
     /// <inheritdoc />
+    public async Task<bool> RequestExistsAsync(Guid requestId, CancellationToken cancellationToken = default)
+    {
+        using var connection = await OpenAsync(cancellationToken);
+        using var command = Command(connection, RequestExistsSql, requestId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <inheritdoc />
     public async Task<(InvestigationRequestRow Row, string? Brief)?> ReadRequestAsync(Guid requestId,
         CancellationToken cancellationToken = default)
     {
@@ -775,7 +796,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         var journal = new List<InvestigationJournalRow>();
         if (requests.Count == 0)
         {
-            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated);
+            return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, EvidenceByBasis: true);
         }
 
         var ids = requests.Select(r => r.RequestId.ToString("D")).ToList();
@@ -786,7 +807,8 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             {
                 reports.Add(new InvestigationReportRow(
                     reader.GetGuid(0), reader.GetInt16(1), reader.GetString(2), Utc(reader.GetDateTime(3)), reader.GetString(4),
-                    reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
+                    reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8),
+                    FamilyOf: reader.IsDBNull(9) ? null : reader.GetGuid(9), QueriesRunJson: reader.IsDBNull(10) ? null : reader.GetString(10)));
             }
         }
 
@@ -829,7 +851,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             journal.RemoveRange(journalLimit, journal.Count - journalLimit);
         }
 
-        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated);
+        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, EvidenceByBasis: true);
     }
 
     /// <inheritdoc />
@@ -987,6 +1009,7 @@ ON CONFLICT (once_key) DO NOTHING";
         await ExecAsync(connection, ClearBriefSql, cancellationToken, now.AddDays(-BriefRetentionDays));
         await ExecAsync(connection, RetentionAlertRowsSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionEvidenceSql, cancellationToken, cutoff);
+        await ExecAsync(connection, RetentionFamilyOfSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionReportsSql, cancellationToken, cutoff);
         var requests = await ExecAsync(connection, RetentionRequestsSql, cancellationToken, cutoff);
         await ExecAsync(connection, RetentionJournalSql, cancellationToken, cutoff);

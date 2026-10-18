@@ -500,6 +500,8 @@ CREATE TABLE IF NOT EXISTS investigation_reports (
     metric_name VARCHAR,
     dedup_key VARCHAR,
     story_path_hash VARCHAR,
+    family_of UUID,
+    queries_run VARCHAR,
     CHECK (verdict IN ('real', 'false_positive', 'needs_person'))
 )";
 

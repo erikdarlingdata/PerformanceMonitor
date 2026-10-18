@@ -115,7 +115,7 @@ internal sealed class InvestigationPanelReader
             var node = reportNodes[i]!.AsObject();
             reports.Add(new InvestigationPanelReport(
                 r.AgentId, LocalText(r.SubmittedAtUtc), Text(node["verdict"]), r.RootCauseFound,
-                Withheld(node, Text(node["summary"])), Text(node["root_cause"]), Text(node["evidence"])));
+                Withheld(node, Text(node["summary"])), Text(node["root_cause"]), EvidenceText(node)));
         }
 
         var journal = new List<InvestigationPanelJournalRow>();
@@ -131,6 +131,22 @@ internal sealed class InvestigationPanelReader
         var brief = answer["brief"];
         return new InvestigationPanelDetail(
             read.Requests[0], LocalText(claimed), reports, journal, brief is null ? null : Text(brief), read.JournalTruncated);
+    }
+
+    /// <summary>#6011: a report's evidence as the panel shows it. The answer serves it as <c>evidence_verified</c>,
+    /// <c>evidence_inferred</c> and, for items stored before the basis was required, <c>evidence_unlabelled</c>; each non-empty
+    /// list is shown under its own heading. An answer that still carries one <c>evidence</c> list is shown as it is.</summary>
+    internal static string EvidenceText(JsonObject report)
+    {
+        if (report["evidence"] is { } single) return Text(single);
+        var parts = new List<string>();
+        foreach (var (key, title) in new[] { ("evidence_verified", "Verified"), ("evidence_inferred", "Inferred"), ("evidence_unlabelled", "Unlabelled") })
+        {
+            if (report[key] is JsonArray { Count: > 0 } list)
+                parts.Add(title + ":\n" + Text(list));
+        }
+
+        return string.Join("\n\n", parts);
     }
 
     /// <summary>A node as text: a string as it is, nothing as empty, anything else (a masked field is an object) as indented JSON.</summary>

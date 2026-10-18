@@ -363,9 +363,10 @@ internal static class InvestigationToolCore
                 ["root_cause_found"] = r.RootCauseFound,
                 ["summary"] = null,
             }, masker, ("root_cause", r.RootCause), ("summary", r.Summary));
-            /* #6004 (D17): a store that keeps feedback (Darling's) serves the evidence as two lists by basis, with the items written
-               before the basis existed apart as unlabelled; Lite's answer keeps its one list until its own slice (#6011). */
-            if (read.Feedback is not null)
+            /* #6004 (D17): the evidence is served as two lists by basis, with the items written before the basis existed apart as
+               unlabelled. Both stores say so with EvidenceByBasis (#6011: Lite's submit now requires a basis); a read that leaves it
+               null follows whether the store keeps feedback, as before. Feedback itself stays keyed on Feedback below. */
+            if (read.EvidenceByBasis ?? read.Feedback is not null)
                 AddEvidenceLists(node, storedEvidence, evidence);
             else
                 node["evidence"] = evidence;
