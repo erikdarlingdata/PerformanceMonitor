@@ -114,7 +114,6 @@ public sealed class ServerActionLevelThreeTests
 /// </summary>
 public sealed class ServerActionGateLiveTests
 {
-    private const string Tool = "force_plan";
     private static readonly DateTime T0 = new(2026, 10, 18, 12, 0, 0, DateTimeKind.Utc);
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
     private DateTime _now = T0;
@@ -123,7 +122,7 @@ public sealed class ServerActionGateLiveTests
         new(1, 7, "srv-7", "blocking", "Blocking", at, Array.Empty<string>(), null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240) { AutonomyLevel = level };
 
     private static ServerActionCall Call(Guid request, Guid claim, string action = ServerActionNames.ForcePlan, int serverId = 7) =>
-        new(Tool, action, new AgentAction(request, claim, "agent-a", "the plan regressed",
+        new(action, action, new AgentAction(request, claim, "agent-a", "the plan regressed",
             "[{\"tool\":\"get_query_store_top\",\"arguments\":{},\"key_numbers\":\"12\"}]"),
             new AgentActionTarget(serverId, "srv-" + serverId.ToString(CultureInfo.InvariantCulture), null, null));
 
@@ -182,9 +181,12 @@ public sealed class ServerActionGateLiveTests
                 /* The clock moves an hour at a time to reach a new journal hour; the claim's lease moves with it. */
                 await ExecAsync(connection, FormattableString.Invariant(
                     $"UPDATE config.investigation_requests SET lease_until = '{_now:yyyy-MM-dd HH:mm:ss}+00'::timestamptz + interval '10 minutes', expires_at = '{_now:yyyy-MM-dd HH:mm:ss}+00'::timestamptz + interval '4 hours'"), ct);
+                var before = long.Parse((await ScalarAsync(connection,
+                    $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{code}' AND request_id = '{request}'", ct))!, CultureInfo.InvariantCulture);
                 for (var i = 0; i < 3; i++)
                     Assert.Equal(code, (await store.CheckServerActionAsync(Call(request, claim, action), hooks, ct))?.Reason);
-                Assert.Equal("1", await ScalarAsync(connection,
+                /* Three refusals in one hour journal one row. */
+                Assert.Equal((before + 1).ToString(CultureInfo.InvariantCulture), await ScalarAsync(connection,
                     $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{code}' AND request_id = '{request}'", ct));
             }
 
