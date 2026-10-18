@@ -24,7 +24,7 @@ internal static class McpToolClassification
     internal static readonly IReadOnlySet<string> ReadOnlyTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-        "analyze_server", "audit_config", "compare_analysis", "get_active_queries", "get_alert_history",
+        "analyze_server", "audit_config", "compare_analysis", "find_database", "get_active_queries", "get_alert_history",
         "get_alert_settings", "get_analysis_facts", "get_analysis_findings", "get_blocked_process_reports",
         "get_blocked_process_xml", "get_blocking_stats", "get_blocking_trend", "get_client_timeouts", "get_collection_health",
         "get_collection_log", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",

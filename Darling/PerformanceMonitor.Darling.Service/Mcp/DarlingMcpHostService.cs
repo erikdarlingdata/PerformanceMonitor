@@ -1289,6 +1289,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpPlanForcePrecheckTools>()
             /* #5632 step 1b: get_forced_plans, whether each Query Store force works. */
             .WithGeminiCompatibleTools<DarlingMcpForcedPlanTools>()
+            /* #6074: find_database, which monitored server holds a database. */
+            .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
             /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
             .WithGeminiCompatibleTools<DarlingMcpQueryTagRollupTools>()
             /* The core data-read tools (resource metrics, query performance, discovery/health —

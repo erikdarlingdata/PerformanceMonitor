@@ -259,6 +259,42 @@ ORDER BY database_name";
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
     }
 
+    /// <summary>
+    /// #6074: the sentence a Query Store read that found nothing appends when a database it covers is not READ_WRITE
+    /// (see <see cref="CollectorRuntimePrecondition.QueryStoreNotWritingHint"/>), read from the same
+    /// <c>v_query_store_health</c> row <c>get_query_store_health</c> answers from. Null when every database in scope is collecting,
+    /// when there is no health row, and when the read fails: this runs on a path that already found nothing, and a diagnostic
+    /// must not turn that into an error.
+    /// </summary>
+    public static async Task<string?> QueryStoreNotWritingHintAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var (states, observedUtc) = await ReadQueryStoreStatesAsync(postgres, serverId, databases, cancellationToken);
+            return CollectorRuntimePrecondition.QueryStoreNotWritingHint(states, observedUtc);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="answer"/> with <see cref="QueryStoreNotWritingHintAsync"/>'s sentence appended to its message when the
+    /// answer is an empty or unavailable status (#6074). Other statuses (a precondition, a not-collected answer, an error) already say their own cause.
+    /// </summary>
+    public static async Task<string> WithQueryStoreNotWritingHintAsync(
+        string answer, NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
+    {
+        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
+        {
+            return answer;
+        }
+
+        return McpHelpers.AppendToMessage(answer, await QueryStoreNotWritingHintAsync(postgres, serverId, databases, cancellationToken));
+    }
+
     private static async Task<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)> ReadLatestOutcomeAsync(
         NpgsqlDataSource postgres,
         int serverId,

@@ -428,7 +428,9 @@ public sealed class McpQueryTools
             var effectiveStart = EffectiveWindowStart(floor, requestedStart);
             var truncated = IsWindowTruncated(floor, requestedStart);
 
-            if (rows.Count == 0)
+            /* #6074: every empty answer below is also read against the database's newest query_store_health row: when Query
+               Store is not READ_WRITE there, the answer says so and names get_query_store_health. The ladder is unchanged. */
+            async Task<string> EmptyAnswerAsync()
             {
                 if (tagScope.Active)
                 {
@@ -466,6 +468,10 @@ public sealed class McpQueryTools
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
+
+            if (rows.Count == 0)
+                return await McpRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
+                    await EmptyAnswerAsync(), dataService, resolved.ServerId, database_name);
 
             var result = rows.Select(r => new
             {
