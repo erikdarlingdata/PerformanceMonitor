@@ -71,6 +71,13 @@ public sealed class QueryStoreReadOnlyHintTests : IClassFixture<SharedDuckDbFixt
 
         var readWrite = JsonDocument.Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager, database_name: "RwDb")).RootElement;
         Assert.DoesNotContain("get_query_store_health", readWrite.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        /* The scoped RoDb answer above is already named by the older all-or-nothing precondition, which only fires when NO database in
+           scope is READ_WRITE. The hint's own case is a server read that spans both: one READ_WRITE database silences that precondition,
+           so only the hint says that RoDb stopped recording. This is the assertion that fails without the #6074 hint. */
+        var wholeServer = JsonDocument.Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager)).RootElement;
+        Assert.Contains("is not READ_WRITE on RoDb (READ_ONLY)", wholeServer.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("get_query_store_health", wholeServer.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     private async Task SeedHealthAsync(string databaseName, string actualState)
