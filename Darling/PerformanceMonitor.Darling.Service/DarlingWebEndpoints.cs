@@ -6593,6 +6593,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_wait_stats"] = R(CatData, "Top wait statistics in the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_wait_trend"] = R(CatData, "One wait type's totals over time (requires wait_type).", PReqText("wait_type"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_wait_types"] = R(CatData, "The wait types observed in the window.", PServer(), PHours(24), PAsOf()),
+            ["find_database"] = R(CatData, "Which monitored server holds a database: exact, case-insensitive name match against each server's newest database list, with the registry and display names, whether the server is still monitored and when the list was last seen (requires database_name).", PReqText("database_name")),
             ["list_servers"] = R(CatData, "The monitored servers known to the store."),
             ["list_query_tags"] = R(CatData, "The query tag tree with each tag's hand assignments, their precedence over rules, and whether the tag map has caught up."),
 
@@ -7628,6 +7629,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("wait_type"),
             ["get_wait_types"] = (c, pg, an) => DarlingMcpDataTools.GetWaitTypes(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["find_database"] = (c, pg, an) => !RequireText(c, "database_name", out var fdDatabase)
+                ? MissingParam("database_name")
+                : DarlingMcpFindDatabaseTools.FindDatabase(pg, fdDatabase, c.RequestAborted),
             ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg, c.RequestAborted),
             ["list_query_tags"] = (c, pg, an) => DarlingMcpQueryTagTools.ListQueryTags(pg, c.RequestAborted),
 

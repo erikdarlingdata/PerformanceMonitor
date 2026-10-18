@@ -142,7 +142,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 206 tools. 107 are the same names Lite exposes. The remaining 99 are unique to Darling: " +
+        "This server exposes 207 tools. 108 are the same names Lite exposes. The remaining 99 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
@@ -156,7 +156,7 @@ internal static class DarlingMcpInstructions
     {
         "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule", "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-        "analyze_server", "audit_config", "claim_investigation_request", "compare_analysis", "delete_notification_route", "get_active_queries",
+        "analyze_server", "audit_config", "claim_investigation_request", "compare_analysis", "delete_notification_route", "find_database", "get_active_queries",
         "get_alert_history", "get_alert_settings", "get_analysis_facts", "get_analysis_findings",
         "get_blocked_process_reports", "get_blocked_process_xml", "get_blocking_stats", "get_blocking_trend",
         "get_client_timeouts", "get_collection_health", "get_collection_log", "get_cpu_scheduler_pressure",
