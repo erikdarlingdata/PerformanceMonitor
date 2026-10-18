@@ -2039,6 +2039,8 @@ public sealed class McpPayloadContractCensusTests
             "audit_config's edition-NAME fallback (Enterprise / Standard / … / Unknown) — a name, spelled as the canon by coincidence"),
         ("Unknown", "McpAnalysisTools.cs",
             "audit_config's edition-NAME fallback — the Lite twin of the above"),
+        ("unknown", "DarlingMcpPlanForcePrecheckTools.cs",
+            "get_plan_force_precheck's unknown[] section name: the checks the store could not answer, listed beside refusals and never a refusal (#5632). A section name, not a band"),
         ("unknown", "DarlingMcpTools.cs",
             "mute_analysis_finding's kind (plain / read-only / per-database) for a resolved server that has no definition row in the store (one defined in darling.json) — a registration kind, not a band"),
         ("unknown", "DarlingMcpPgWaitSamplingTools.cs",
