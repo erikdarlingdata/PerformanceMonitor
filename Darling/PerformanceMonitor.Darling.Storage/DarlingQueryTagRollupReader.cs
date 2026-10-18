@@ -42,8 +42,8 @@ public static class DarlingQueryTagRollupReader
     /// <summary>The read deadline (seconds) a caller that names none gets: the MCP surface's, kept so the tool's behaviour is unchanged by the move (#5988). The viewer passes its own.</summary>
     public const int DefaultReadSeconds = 75;
 
-    /// <summary>The Query Store interval table is read only for a window at least this long (the MCP top read's rule, #3953).</summary>
-    public static readonly TimeSpan QueryStoreMinWindow = TimeSpan.FromHours(24);
+    /// <summary>The Query Store interval table is read only for a window at least this long (the MCP top read's rule, #3953). The same field as that read's: <see cref="QueryStoreIntervalWide.TopMinWindow"/>.</summary>
+    public static readonly TimeSpan QueryStoreMinWindow = QueryStoreIntervalWide.TopMinWindow;
 
     /// <summary>The store schema version that has the interval table; pinned equal to the other readers' copies of it.</summary>
     private const int QueryStoreTableMinSchemaVersion = 145;

@@ -2945,15 +2945,13 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// #3953's own threshold for this read (ruling issuecomment-5836972848 item 5): below this window the
-    /// table's extra round trips (the gate's own reads plus a second transaction) cost more than they save, so
-    /// the gate reads raw regardless of coverage. A read's own constant — does not share
-    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> (the grid's) — the two reads may not share a
-    /// threshold. Raised from 12 to 24 hours (lane B4t, rig-d4, 15-day seed at a field store's rate,
-    /// end-to-end through <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,CancellationToken)"/>):
-    /// median of 5 at the ruled 12-hour cell, table 737.0 ms (spread 655.1-746.5) against raw 581.1 ms (spread
-    /// 544.3-629.3) — the table was slower than raw there, so the ruling moves this threshold to 24 hours.
+    /// table's extra round trips cost more than they save, so the gate reads raw regardless of coverage. It is
+    /// <see cref="QueryStoreIntervalWide.TopMinWindow"/>, the one value shared with the by-tag rollup (#5971); the
+    /// measurement that raised it from 12 to 24 hours (lane B4t, rig-d4, end-to-end through
+    /// <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,CancellationToken)"/>)
+    /// is written there. Not <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> (the grid's).
     /// </summary>
-    public static readonly TimeSpan QueryStoreTopMinWindow = TimeSpan.FromHours(24);
+    public static readonly TimeSpan QueryStoreTopMinWindow = QueryStoreIntervalWide.TopMinWindow;
 
     /// <summary>The store schema version <see cref="TryGetQueryStoreTopFromTableAsync"/> requires (#3953 gate
     /// clause 6, ruling issuecomment-5836972848) before it will even attempt the table. Unlike the viewer —

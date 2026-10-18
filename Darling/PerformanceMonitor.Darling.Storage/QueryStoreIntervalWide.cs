@@ -516,6 +516,21 @@ SELECT EXISTS
     public static readonly TimeSpan GridWideMinWindow = TimeSpan.FromHours(12);
 
     /// <summary>
+    /// The window the by-Query-Store-top reads must span before the interval table is read at all (#3953's own threshold
+    /// for the MCP top read, ruling issuecomment-5836972848 item 5): below this window the table's extra round trips (the
+    /// gate's own reads plus a second transaction) cost more than they save, so the gate reads raw regardless of coverage.
+    /// A read's own constant, not <see cref="GridWideMinWindow"/> (the grid's): the two reads may not share a threshold.
+    /// Raised from 12 to 24 hours (lane B4t, rig-d4, 15-day seed at a field store's rate, end-to-end through the MCP top
+    /// read): median of 5 at the ruled 12-hour cell, table 737.0 ms (spread 655.1-746.5) against raw 581.1 ms (spread
+    /// 544.3-629.3), so the table was slower than raw there and the ruling moved this threshold to 24 hours.
+    /// <para>The ONE value of it (#5971): the MCP top read (<c>DarlingDataReader.QueryStoreTopMinWindow</c>) and the by-tag
+    /// rollup's Query Store section (<c>DarlingQueryTagRollupReader.QueryStoreMinWindow</c>) both read this field, so one
+    /// retune cannot move one and leave the other. It is not the 48-hour duration-trend threshold, which was measured
+    /// separately.</para>
+    /// </summary>
+    public static readonly TimeSpan TopMinWindow = TimeSpan.FromHours(24);
+
+    /// <summary>
     /// How long one Query Store runtime-stats interval can span (V143's clause 3 restated: "B is the window minus
     /// a day, and an interval spans at most a day"), so an interval that STARTED up to a day before the window can
     /// still have executions inside it. Clause 3 of <see cref="UseTable"/> no longer uses it alone (#5541): it is
