@@ -115,6 +115,41 @@ internal static class McpRuntimePrecondition
     }
 
     /// <summary>
+    /// #6074: the sentence a Query Store read that found nothing appends when a database it covers is not READ_WRITE
+    /// (<see cref="CollectorRuntimePrecondition.QueryStoreNotWritingHint"/>), read from the same <c>v_query_store_health</c> row
+    /// <c>get_query_store_health</c> answers from. Null when every database in scope is collecting, there is no health row, or
+    /// the read fails: this runs on a path that already found nothing.
+    /// </summary>
+    public static async Task<string?> QueryStoreNotWritingHintAsync(LocalDataService dataService, int serverId, string? databaseName)
+    {
+        try
+        {
+            var (states, observedUtc) = await dataService.GetQueryStoreStatesAsync(
+                serverId, string.IsNullOrEmpty(databaseName) ? null : new[] { databaseName });
+            return CollectorRuntimePrecondition.QueryStoreNotWritingHint(states, observedUtc);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="answer"/> with <see cref="QueryStoreNotWritingHintAsync"/>'s sentence appended to its message when the
+    /// answer is an empty or unavailable status (#6074). Other statuses already say their own cause.
+    /// </summary>
+    public static async Task<string> WithQueryStoreNotWritingHintAsync(
+        string answer, LocalDataService dataService, int serverId, string? databaseName)
+    {
+        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
+        {
+            return answer;
+        }
+
+        return McpHelpers.AppendToMessage(answer, await QueryStoreNotWritingHintAsync(dataService, serverId, databaseName));
+    }
+
+    /// <summary>
     /// The <c>precondition</c> envelope when this server's recorded Query Store configuration says the
     /// databases the read covered are not recording runtime statistics, or <c>null</c> when it says nothing
     /// of the kind (no snapshot yet, or at least one database in scope is READ_WRITE).

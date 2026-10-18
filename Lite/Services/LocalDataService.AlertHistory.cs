@@ -38,13 +38,36 @@ public partial class LocalDataService
     /// <c>dismissed_archive_alerts</c> sidecar the v23 schema migration added), so no read through the view can return or count them;
     /// the MCP tool's description says so.</para>
     /// </summary>
-    public async Task<List<AlertHistoryRow>> GetAlertHistoryAsync(int hoursBack = 24, int limit = 500, int? serverId = null, DateTime? asOfUtc = null, bool includeDismissed = false)
+    public async Task<List<AlertHistoryRow>> GetAlertHistoryAsync(int hoursBack = 24, int limit = 500, int? serverId = null, DateTime? asOfUtc = null, bool includeDismissed = false,
+        string? metricName = null, string? family = null)
     {
         /* Both edges, not just the lower one: the row cap is applied by the database, so trimming
            after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
            empty window that looks exactly like a quiet one. */
         var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
-        return await ReadAlertHistoryAsync(cutoff, until, "<=", limit, serverId, includeDismissed);
+        return await ReadAlertHistoryAsync(cutoff, until, "<=", limit, serverId, includeDismissed, metricName, family);
+    }
+
+    /// <summary>The metric and family predicate of an alert history read (#6074), with its parameter appended when one is needed.
+    /// Applied in the SQL so the row cap counts only rows of the filtered population. <paramref name="metricName"/> is an exact,
+    /// case-insensitive match on the stored name; <paramref name="family"/> goes through the census
+    /// (<see cref="AlertFamily.SqlFamilyPredicate"/>). Empty when neither is set. <paramref name="nextParameter"/> is the
+    /// first free positional parameter number.</summary>
+    private static string AlertFilterClause(string? metricName, string? family, int nextParameter, DuckDBCommand command)
+    {
+        var clause = string.Empty;
+        if (!string.IsNullOrWhiteSpace(metricName))
+        {
+            clause += $"\nAND   lower(metric_name) = lower(${nextParameter})";
+            command.Parameters.Add(new DuckDBParameter { Value = metricName.Trim() });
+        }
+
+        if (!string.IsNullOrWhiteSpace(family))
+        {
+            clause += "\nAND   " + AlertFamily.SqlFamilyPredicate("metric_name", family.Trim());
+        }
+
+        return clause;
     }
 
     /// <summary>
@@ -60,7 +83,8 @@ public partial class LocalDataService
             : ReadAlertHistoryAsync(sinceUtc, DateTime.UtcNow, "<=", limit, serverId, includeDismissed: false);
 
     private async Task<List<AlertHistoryRow>> ReadAlertHistoryAsync(
-        DateTime cutoff, DateTime until, string untilOperator, int limit, int? serverId, bool includeDismissed)
+        DateTime cutoff, DateTime until, string untilOperator, int limit, int? serverId, bool includeDismissed,
+        string? metricName = null, string? family = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -87,7 +111,7 @@ FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   alert_time {untilOperator} $2
 AND   server_id = $3
-AND   (dismissed = FALSE OR $5)
+AND   (dismissed = FALSE OR $5)" + "{FILTER}" + @"
 ORDER BY alert_time DESC
 LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
@@ -95,6 +119,7 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
             command.Parameters.Add(new DuckDBParameter { Value = limit });
             command.Parameters.Add(new DuckDBParameter { Value = includeDismissed });
+            command.CommandText = command.CommandText.Replace("{FILTER}", AlertFilterClause(metricName, family, 6, command), StringComparison.Ordinal);
         }
         else
         {
@@ -117,13 +142,14 @@ SELECT
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   alert_time {untilOperator} $2
-AND   (dismissed = FALSE OR $4)
+AND   (dismissed = FALSE OR $4)" + "{FILTER}" + @"
 ORDER BY alert_time DESC
 LIMIT $3";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
             command.Parameters.Add(new DuckDBParameter { Value = until });
             command.Parameters.Add(new DuckDBParameter { Value = limit });
             command.Parameters.Add(new DuckDBParameter { Value = includeDismissed });
+            command.CommandText = command.CommandText.Replace("{FILTER}", AlertFilterClause(metricName, family, 5, command), StringComparison.Ordinal);
         }
 
         var items = new List<AlertHistoryRow>();
@@ -197,7 +223,7 @@ LIMIT $3";
     /// read, so it counts exactly the rows that read COULD have returned with the filter off — which on this
     /// SKU excludes archived-and-dismissed rows the view has already removed.
     /// </summary>
-    public async Task<long> CountDismissedAlertsAsync(int hoursBack, int? serverId, DateTime? asOfUtc)
+    public async Task<long> CountDismissedAlertsAsync(int hoursBack, int? serverId, DateTime? asOfUtc, string? metricName = null, string? family = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -218,6 +244,7 @@ AND   dismissed = TRUE";
         command.Parameters.Add(new DuckDBParameter { Value = until });
         if (serverId.HasValue)
             command.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
+        command.CommandText += AlertFilterClause(metricName, family, serverId.HasValue ? 4 : 3, command);
 
         var result = await command.ExecuteScalarAsync();
         return result is null || result is DBNull ? 0L : ToInt64(result);
