@@ -245,7 +245,7 @@ public sealed record InvestigationOpenedRow(
 /// <see cref="DisplayName"/> and <see cref="InstanceName"/> (#5999) are the registry's names for the server, read when the row is served so a
 /// rename shows on the next read (<see cref="ServerName"/> stays the name the request was opened with). Darling always fills
 /// <see cref="DisplayName"/> (it falls back to the opened name) and leaves <see cref="InstanceName"/> null once the server has left the
-/// registry; a store whose reads do not join the registry (Lite until #6011) leaves both null. A null is absent from the answer.
+/// registry; a store built with no server list to read leaves both null. Lite names them from its server list (ServerManager, #6011). A null is absent from the answer.
 /// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,

@@ -155,7 +155,7 @@ SET state = 'open', claimed_by = NULL, claim_id = NULL, claimed_at = NULL, lease
 WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
 
     internal const string OpenedSinceSql = @"
-SELECT request_id, route_id, server_name, family, opened_at
+SELECT request_id, route_id, server_name, family, opened_at, server_id
 FROM investigation_requests
 WHERE opened_at > $1
   AND ($2::INTEGER[] IS NULL OR list_contains($2::INTEGER[], route_id))
@@ -341,12 +341,17 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     private readonly DuckDbInitializer _db;
     private readonly Func<DateTime> _utcNow;
     private readonly TimeSpan _lockBudget;
+    private readonly InvestigationServerNameLookup.Snapshot? _serverNames;
 
     /// <summary><paramref name="utcNow"/> is the clock (tests move it); it defaults to the wall clock.
     /// <paramref name="lockBudget"/> bounds every wait for the write lock; it defaults to
-    /// <see cref="LocalDataService.DefaultWriteLockBudget"/> (5 s), the same budget Darling's store gives its locks.</summary>
-    public DuckDbInvestigationStore(DuckDbInitializer db, Func<DateTime>? utcNow = null, TimeSpan? lockBudget = null)
+    /// <see cref="LocalDataService.DefaultWriteLockBudget"/> (5 s), the same budget Darling's store gives its locks.
+    /// <paramref name="serverNames"/> (#6011) is Lite's server list, read at each read so a rename shows on the next one; null
+    /// leaves <c>display_name</c> and <c>instance_name</c> off every row (a store with no list to read).</summary>
+    public DuckDbInvestigationStore(DuckDbInitializer db, Func<DateTime>? utcNow = null, TimeSpan? lockBudget = null,
+        InvestigationServerNameLookup.Snapshot? serverNames = null)
     {
+        _serverNames = serverNames;
         _db = db ?? throw new ArgumentNullException(nameof(db));
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _lockBudget = lockBudget ?? LocalDataService.DefaultWriteLockBudget;
@@ -734,7 +739,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
             return null;
         }
 
-        return (RequestRow(reader), reader.IsDBNull(16) ? null : reader.GetString(16));
+        return (Named(RequestRow(reader), NamesNow()), reader.IsDBNull(16) ? null : reader.GetString(16));
     }
 
     /// <inheritdoc />
@@ -745,13 +750,14 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         ArgumentOutOfRangeException.ThrowIfLessThan(journalLimit, 1);
         using var connection = await OpenAsync(cancellationToken);
         var requests = new List<InvestigationRequestRow>();
+        var names = NamesNow();
         string? brief = null;
         using (var command = Command(connection, ReportsRequestsSql, Now(), requestId, serverId, Micro(sinceUtc), limit + 1))
         using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                requests.Add(RequestRow(reader));
+                requests.Add(Named(RequestRow(reader), names));
                 if (requestId is not null && !reader.IsDBNull(16))
                 {
                     brief = reader.GetString(16);
@@ -834,10 +840,11 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, ListSql, Now(), state, serverId, family, limit);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var names = NamesNow();
         var rows = new List<InvestigationRequestRow>();
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(RequestRow(reader));
+            rows.Add(Named(RequestRow(reader), names));
         }
 
         return rows;
@@ -852,11 +859,17 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         using var command = Command(connection, OpenedSinceSql,
             Micro(sinceUtc), routeIds is { Count: > 0 } ? routeIds.ToList() : null, limit);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var names = NamesNow();
         var rows = new List<InvestigationOpenedRow>();
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new InvestigationOpenedRow(
                 reader.GetGuid(0), reader.GetInt32(1), reader.GetString(2), reader.GetString(3), Utc(reader.GetDateTime(4))));
+            if (names is not null)
+            {
+                var (display, instance) = InvestigationServerNameLookup.Resolve(names, reader.GetInt32(5), reader.GetString(2));
+                rows[^1] = rows[^1] with { DisplayName = display, InstanceName = instance };
+            }
         }
 
         return rows;
@@ -1048,6 +1061,17 @@ ON CONFLICT (once_key) DO NOTHING";
             "note " + noteId.ToString(CultureInfo.InvariantCulture), null, null, cancellationToken);
         transaction.Commit();
         return true;
+    }
+
+    /// <summary>#6011: the row with the names Lite's server list holds now (see <see cref="InvestigationServerNameLookup"/>).
+    /// Read once per call and shared by its rows, so a list is named from one snapshot.</summary>
+    private IReadOnlyDictionary<int, InvestigationServerNames>? NamesNow() => _serverNames?.Invoke();
+
+    private static InvestigationRequestRow Named(InvestigationRequestRow row, IReadOnlyDictionary<int, InvestigationServerNames>? names)
+    {
+        if (names is null) return row;
+        var (display, instance) = InvestigationServerNameLookup.Resolve(names, row.ServerId, row.ServerName);
+        return row with { DisplayName = display, InstanceName = instance };
     }
 
     private static InvestigationRequestRow RequestRow(System.Data.Common.DbDataReader reader) => new(

@@ -523,8 +523,8 @@ internal static class InvestigationToolCore
             payload["practice_of"] = practiceOf.ToString();
         /* #5999: the registry's names, read when served (a rename shows on the next read). Darling always has a display_name (its
            fallback floor is the name the request was opened with) and lacks only the instance_name once the server has left the
-           registry. Lite has a servers registry table (Lite/Database/Schema.cs) but its request reads do not join it yet (#6011), so
-           both keys are absent there. The key is instance_name and NOT host_name on purpose: McpDataDetailKeys classifies host_name
+           registry. Lite fills both from its server list (ServerManager, #6011; its DuckDB servers table is never written), and
+           leaves both keys absent only where a store is built with no list. The key is instance_name and NOT host_name on purpose: McpDataDetailKeys classifies host_name
            as a client machine (every other host_name in the product is one) and numbers it to host#1 at metadataOnly on every MCP
            answer, which would hide the very name this adds. */
         if (r.DisplayName is { } displayName)
