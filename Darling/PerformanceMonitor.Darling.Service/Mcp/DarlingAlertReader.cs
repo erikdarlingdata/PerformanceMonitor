@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -103,6 +104,8 @@ WHERE a.alert_time >= $1
 AND   a.alert_time <= $2
 AND   a.server_id = $3
 AND   (a.dismissed = FALSE OR $5)
+AND   ($6::text IS NULL OR lower(a.metric_name) = lower($6))
+AND   TRUE /* family */
 ORDER BY a.alert_time DESC
 LIMIT $4";
 
@@ -115,6 +118,8 @@ LEFT JOIN servers s ON s.server_id = a.server_id
 WHERE a.alert_time >= $1
 AND   a.alert_time <= $2
 AND   (a.dismissed = FALSE OR $4)
+AND   ($5::text IS NULL OR lower(a.metric_name) = lower($5))
+AND   TRUE /* family */
 ORDER BY a.alert_time DESC
 LIMIT $3";
 
@@ -128,7 +133,9 @@ FROM config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
 AND   server_id = $3
-AND   dismissed = TRUE";
+AND   dismissed = TRUE
+AND   ($4::text IS NULL OR lower(metric_name) = lower($4))
+AND   TRUE /* family */";
 
     /// <summary>The fleet-wide twin of <see cref="DismissedAlertCountSql"/>. $1 window start, $2 window end.</summary>
     public const string DismissedAlertCountAllServersSql = @"
@@ -136,7 +143,9 @@ SELECT COUNT(*)
 FROM config_alert_log
 WHERE alert_time >= $1
 AND   alert_time <= $2
-AND   dismissed = TRUE";
+AND   dismissed = TRUE
+AND   ($3::text IS NULL OR lower(metric_name) = lower($3))
+AND   TRUE /* family */";
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History read. With no
@@ -147,18 +156,37 @@ AND   dismissed = TRUE";
     /// </summary>
     public static Task<List<AlertHistoryReadRow>> GetAlertHistoryAsync(
         NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, CancellationToken cancellationToken = default) =>
-        GetAlertHistoryPageAsync(postgres, sinceUtc, untilUtc, serverId, limit, includeDismissed: false, cancellationToken);
+        GetAlertHistoryPageAsync(postgres, sinceUtc, untilUtc, serverId, limit, includeDismissed: false, cancellationToken: cancellationToken);
+
+    /// <summary>The optional metric and family filters of <c>get_alert_history</c> (#6074). Both apply in the SQL, ahead of
+    /// the row cap, so a filtered page is the newest <c>limit</c> rows OF THAT METRIC and not a trim of an unfiltered page.
+    /// <see cref="MetricName"/> matches the stored name exactly, case-insensitively; <see cref="Family"/> is a canonical family
+    /// (<see cref="AlertFamily.NormalizeFamily"/>), matched through <see cref="AlertFamily.Of"/>'s census.</summary>
+    public sealed record AlertHistoryFilter(string? MetricName, string? Family)
+    {
+        public static readonly AlertHistoryFilter None = new(null, null);
+
+        public bool IsSet => MetricName is not null || Family is not null;
+
+        /// <summary>The statement with the family placeholder replaced by the family predicate over <paramref name="column"/>.</summary>
+        internal string Apply(string sql, string column) =>
+            Family is null
+                ? sql
+                : sql.Replace("TRUE /* family */", AlertFamily.SqlFamilyPredicate(column, Family), StringComparison.Ordinal);
+    }
 
     /// <summary>
     /// <see cref="GetAlertHistoryAsync"/> with the dismissed filter as a parameter. Callers detecting
     /// truncation pass <c>limit + 1</c> and read the extra row as the signal.
     /// </summary>
     public static async Task<List<AlertHistoryReadRow>> GetAlertHistoryPageAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, bool includeDismissed, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, int limit, bool includeDismissed,
+        AlertHistoryFilter? filter = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<AlertHistoryReadRow>();
+        filter ??= AlertHistoryFilter.None;
 
-        await using var command = postgres.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
+        await using var command = postgres.CreateCommand(filter.Apply(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql, "a.metric_name"));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
         DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
@@ -170,6 +198,7 @@ AND   dismissed = TRUE";
         /* Typed bool so Npgsql binds a boolean rather than inferring from an object — the predicate is
            `(dismissed = FALSE OR $N)` and an untyped parameter there is a runtime type error, not a compile one. */
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeDismissed });
+        DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -345,9 +374,10 @@ LIMIT 1";
     /// <summary>How many dismissed rows the window (and server scope) holds — the rows the default read hides.
     /// See <see cref="DismissedAlertCountSql"/>.</summary>
     public static async Task<long> CountDismissedAlertsAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, int? serverId, AlertHistoryFilter? filter = null, CancellationToken cancellationToken = default)
     {
-        await using var command = postgres.CreateCommand(serverId.HasValue ? DismissedAlertCountSql : DismissedAlertCountAllServersSql);
+        filter ??= AlertHistoryFilter.None;
+        await using var command = postgres.CreateCommand(filter.Apply(serverId.HasValue ? DismissedAlertCountSql : DismissedAlertCountAllServersSql, "metric_name"));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
         DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
@@ -355,6 +385,7 @@ LIMIT 1";
         {
             DarlingMcpReadParameters.AddInt(command, serverId.Value);
         }
+        DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
 
         var count = await command.ExecuteScalarAsync(cancellationToken);
         return count is long l ? l : Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture);

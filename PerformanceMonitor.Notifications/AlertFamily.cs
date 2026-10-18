@@ -371,6 +371,90 @@ public static class AlertFamily
         return Performance;
     }
 
+    /// <summary>
+    /// A SQL boolean expression over <paramref name="column"/> that is true exactly when <see cref="Of"/> answers
+    /// <paramref name="family"/> for the stored metric name (#6074), so the alert history read filters by family in
+    /// the database, ahead of its row cap, rather than trimming a page after the cap. Spelled with the census
+    /// as quoted LITERALS because the census is compiled-in code, never caller input, and so the one fragment
+    /// serves both stores (PostgreSQL and DuckDB both have <c>starts_with</c>). A census entry decides first, then
+    /// a prefix rule, then the fall-through, the order <see cref="Of"/> reads: the fall-through family
+    /// (<see cref="Performance"/>) takes every name the census and the prefixes do not know. A recovery name
+    /// (<c>Server Restored</c>) is in its firing's family. <paramref name="family"/> must be a value
+    /// <see cref="NormalizeFamily"/> returned; any other value yields a predicate that matches nothing.
+    /// </summary>
+    public static string SqlFamilyPredicate(string column, string family)
+    {
+        if (column is null)
+        {
+            throw new ArgumentNullException(nameof(column));
+        }
+
+        if (NormalizeFamily(family) is not { } canonicalFamily)
+        {
+            return "(1 = 0)";
+        }
+
+        var census = MetricFamilies.Keys.Concat(RecoveryPairs.Keys).Distinct(StringComparer.Ordinal).ToList();
+        var inFamily = census.Where(name => string.Equals(Of(name), canonicalFamily, StringComparison.Ordinal))
+            .OrderBy(name => name, StringComparer.Ordinal).Select(SqlLiteral).ToList();
+        var allCensus = census.OrderBy(name => name, StringComparer.Ordinal).Select(SqlLiteral).ToList();
+        var prefixesIn = PrefixFamilies.Where(p => p.Family == canonicalFamily).Select(p => p.Prefix).Distinct(StringComparer.Ordinal).ToList();
+        var prefixesAny = PrefixFamilies.Select(p => p.Prefix).Distinct(StringComparer.Ordinal).ToList();
+
+        string Starts(IEnumerable<string> prefixes) =>
+            "(" + string.Join(" OR ", prefixes.Select(prefix => "starts_with(" + column + ", " + SqlLiteral(prefix) + ")")) + ")";
+
+        var arms = new List<string>();
+        if (inFamily.Count > 0)
+        {
+            arms.Add(column + " IN (" + string.Join(", ", inFamily) + ")");
+        }
+
+        var uncensused = column + " NOT IN (" + string.Join(", ", allCensus) + ")";
+        if (prefixesIn.Count > 0)
+        {
+            arms.Add("(" + uncensused + " AND " + Starts(prefixesIn) + ")");
+        }
+
+        if (string.Equals(canonicalFamily, Performance, StringComparison.Ordinal))
+        {
+            arms.Add("(" + uncensused + " AND NOT " + Starts(prefixesAny) + ")");
+        }
+
+        return arms.Count == 0 ? "(1 = 0)" : "(" + string.Join(" OR ", arms) + ")";
+    }
+
+    /// <summary>The trimmed <c>metric_name</c> and <c>family</c> inputs of an alert history read (#6074), null when blank.
+    /// A family that spells no family keeps its trimmed text, and <see cref="SqlFamilyPredicate"/> matches nothing for it,
+    /// so an unknown family reads as an EMPTY page whose status sentence names the filter rather than as an error.</summary>
+    public static (string? MetricName, string? Family) NormalizeHistoryFilter(string? metricName, string? family)
+    {
+        var metric = string.IsNullOrWhiteSpace(metricName) ? null : metricName.Trim();
+        var fam = string.IsNullOrWhiteSpace(family) ? null : (NormalizeFamily(family) ?? family.Trim());
+        return (metric, fam);
+    }
+
+    /// <summary>The clause an empty alert history page appends to say which filters were on, e.g.
+    /// <c> for metric_name 'High CPU' and family 'performance'</c>; empty when neither was set. A family that names no family
+    /// says so, with the list of the real ones.</summary>
+    public static string DescribeHistoryFilter(string? metricName, string? family)
+    {
+        var parts = new List<string>();
+        if (metricName is not null)
+        {
+            parts.Add("metric_name '" + metricName + "'");
+        }
+
+        if (family is not null)
+        {
+            parts.Add("family '" + family + "'" + (IsFamily(family) ? string.Empty : " (not a family; the families are " + string.Join(", ", All) + ")"));
+        }
+
+        return parts.Count == 0 ? string.Empty : " for " + string.Join(" and ", parts);
+    }
+
+    private static string SqlLiteral(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
     /// <summary>Whether the census names <paramref name="metricName"/> (after canonicalization) explicitly —
     /// by entry or by prefix — as opposed to answering through the fall-through.</summary>
     public static bool IsClassified(string metricName)

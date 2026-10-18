@@ -139,7 +139,7 @@ VALUES ($1, $2, $3, 'High CPU', 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $4, $5)
             new DarlingAnalysisService(postgres), postgres, ServerName, hours_back: 24, include_drilldown: true, as_of: null, cancellationToken: ct);
         var found = new List<string>(await AssertFilteredAsync(server, "get_analysis_findings", findings));
 
-        var history = await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, 24, 50, null, false, ct);
+        var history = await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, 24, 50, null, false, cancellationToken: ct);
         found.AddRange(await AssertFilteredAsync(server, "get_alert_history", history));
 
         var rules = await DarlingMcpAlertTools.GetMuteRules(postgres, true, ct);
