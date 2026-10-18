@@ -67,7 +67,7 @@ public sealed class DailyChildRefreshOrderLiveTests
             var bodySucceeded = false;
             try
             {
-                Assert.SkipWhen(!await PrepareAsync(connection, ct), "The live #6070 tests need TimescaleDB.");
+                Assert.SkipWhen(!await PrepareAsync(connection, scratch.ConnectionString, ct), "The live #6070 tests need TimescaleDB.");
 
                 await InsertDayAsync(connection, D0, ct);
                 await RefreshAsync(connection, Hourly, D0, D0.AddDays(1), ct);
@@ -144,7 +144,7 @@ public sealed class DailyChildRefreshOrderLiveTests
         var bodySucceeded = false;
         try
         {
-            Assert.SkipWhen(!await PrepareAsync(connection, ct), "The live #6070 tests need TimescaleDB.");
+            Assert.SkipWhen(!await PrepareAsync(connection, scratch.ConnectionString, ct), "The live #6070 tests need TimescaleDB.");
 
             // Make the old shape: the child's job on 3 days, and paused, so "never arms" is observable.
             var before = await JobAsync(connection, Child, ct);
@@ -214,7 +214,7 @@ public sealed class DailyChildRefreshOrderLiveTests
         var bodySucceeded = false;
         try
         {
-            Assert.SkipWhen(!await PrepareAsync(connection, ct), "The live #6070 tests need TimescaleDB.");
+            Assert.SkipWhen(!await PrepareAsync(connection, scratch.ConnectionString, ct), "The live #6070 tests need TimescaleDB.");
 
             // A child that has materialized nothing at all (the shape the hole scan skips) cannot be repaired
             // from a parent that holds nothing either.
@@ -272,10 +272,13 @@ public sealed class DailyChildRefreshOrderLiveTests
 
     /// <summary>Migrates, enables TimescaleDB, builds every aggregate with its real policy, then stops the scheduler
     /// so only the explicit refreshes in the tests run. False when TimescaleDB is not available.</summary>
-    private static async Task<bool> PrepareAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<bool> PrepareAsync(NpgsqlConnection connection, string connectionString, CancellationToken ct)
     {
         await PgMigrations.MigrateAsync(connection, ct);
-        if (!await TimescaleSupport.TryEnableAsync(connection, null, ct))
+
+        /* #1922: CREATE EXTENSION can end the backend it runs on when timescaledb is on disk but not preloaded,
+           so it runs on the probe's own connection, never on the one these tests keep using. */
+        if (!await LiveTimescaleProbe.TryEnableAsync(connectionString, ct))
         {
             return false;
         }
