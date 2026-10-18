@@ -24,7 +24,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5632 step A2: get_plan_force_precheck over seeded store rows. Each case plants one query's Query Store rows, its text and its
-/// stored plans, reads the tool, and asserts the verdict and the stable refusal codes. as_of is fixed so no clock decides the window.
+/// stored plans, reads the tool, and asserts the verdict, the blockers and the stable warning codes. as_of is fixed so no clock decides the window.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PlanForcePrecheckLiveTests
@@ -106,8 +106,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$7,$8,$8,$9,$10,5000,7000,$11,$12,0)",
     private static Task Exec(NpgsqlConnection c, CancellationToken ct, string sql, params object?[] values) =>
         DarlingMcpTestData.ExecAsync(c, ct, sql, values.Select(v => v is DateTime d ? DateTime.SpecifyKind(d, DateTimeKind.Unspecified) : v).ToArray());
 
+    /// <summary>The warning codes: everything that fired and is not a blocker.</summary>
     private static string[] Codes(JsonDocument d) =>
-        d.RootElement.GetProperty("refusals").EnumerateArray().Select(r => r.GetProperty("code").GetString()!).ToArray();
+        d.RootElement.GetProperty("warnings").EnumerateArray().Select(r => r.GetProperty("code").GetString()!).ToArray();
+
+    private static string[] Blockers(JsonDocument d) =>
+        d.RootElement.GetProperty("blockers").EnumerateArray().Select(r => r.GetProperty("code").GetString()!).ToArray();
+
+    private static string Verdict(JsonDocument d) => d.RootElement.GetProperty("verdict").GetString()!;
 
     private static string[] UnknownChecks(JsonDocument d) =>
         d.RootElement.GetProperty("unknown").EnumerateArray().Select(r => r.GetProperty("check").GetString()!).ToArray();
@@ -117,56 +123,152 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$7,$8,$8,$9,$10,5000,7000,$11,$12,0)",
         new(q, text, [(1, 100, 60, 30, Plan("1"), false), (2, 120, 60, 5, Plan("1"), false)]);
 
     [Fact]
-    public async Task ACleanCandidate_HasNoRefusal_ButTheVerdictNeverSaysSafe()
+    public async Task ACleanCandidate_IsNotBlocked_ButTheVerdictNeverSaysSafe()
     {
         using var doc = await RunAsync(Clean());
         var codes = Codes(doc);
-        /* The store holds no force state, so the gate's state_unavailable is the one refusal; every check this read owns is quiet. */
-        Assert.DoesNotContain(codes, c => c is "recompile_hint" or "temp_table" or "not_run_recently" or "too_few_executions" or "psp_variant" or "output_differs" or "query_store_read_only");
+        /* The store holds no force state beyond the stats rows, so only gate findings can fire; every check this read owns is quiet. */
+        Assert.DoesNotContain(codes, c => c is "recompile_hint" or "temp_table" or "psp_variant" or "query_store_read_only");
         Assert.Contains("query_store_read_only", UnknownChecks(doc));
-        Assert.DoesNotContain("safe", doc.RootElement.GetProperty("verdict").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(Blockers(doc));
+        Assert.Equal("not_blocked", Verdict(doc));
+        Assert.DoesNotContain("safe", Verdict(doc), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task Pattern1_AStatementWithOptionRecompile_IsRefused()
+    public async Task Pattern1_AStatementWithOptionRecompile_IsAWarning_NotABlock()
     {
         using var doc = await RunAsync(Clean(7002, "SELECT * FROM dbo.widgets WHERE id = @p OPTION (RECOMPILE)"));
         Assert.Contains("recompile_hint", Codes(doc));
-        Assert.Equal("refuse", doc.RootElement.GetProperty("verdict").GetString());
+        Assert.Empty(Blockers(doc));
+        Assert.Equal("not_blocked", Verdict(doc));
     }
 
     [Fact]
-    public async Task Pattern2_PlansReturning26000AndFiftyRowsPerCall_AreRefusedAsOutputDiffers()
+    public async Task Pattern2_PlansReturning26000AndFiftyRowsPerCall_ShowBothAveragesAndTheirRatio_WithNoWarning()
     {
         var seed = new Seed(7003, "SELECT 1", [(1, 50, 60, 30, Plan("1"), false), (2, 26_000, 60, 5, Plan("1"), false)]);
         using var doc = await RunAsync(seed);
-        Assert.Contains("output_differs", Codes(doc));
+        var rows = doc.RootElement.GetProperty("shown").GetProperty("rows_per_call");
+        Assert.Equal(50, rows.GetProperty("candidate_avg_rows").GetDouble());
+        Assert.Equal(26_000, rows.GetProperty("compare_avg_rows").GetDouble());
+        Assert.Equal(520, rows.GetProperty("larger_over_smaller").GetDouble());
+        Assert.DoesNotContain(Codes(doc), c => c is "output_differs" or "not_run_recently" or "too_few_executions");
+        Assert.Empty(Blockers(doc));
+        Assert.Equal("not_blocked", Verdict(doc));
     }
 
     [Fact]
-    public async Task ABlockerFromTheExistingGate_AppearsUnderItsOwnCode()
+    public async Task APlanThatIsNotInTheStore_IsBlocked_AsPlanNotFound()
+    {
+        using var doc = await RunAsync(Clean(7012), planId: 999);
+        Assert.Equal(["plan_not_found"], Blockers(doc));
+        Assert.Equal("blocked", Verdict(doc));
+    }
+
+    [Fact]
+    public async Task TheCandidateAlreadyForced_IsBlocked_AsPlanAlreadyForced()
     {
         var seed = new Seed(7004, "SELECT 1", [(1, 100, 60, 30, Plan("1"), true), (2, 100, 60, 5, Plan("1"), false)]);
         using var doc = await RunAsync(seed);
-        Assert.Contains("already_forced", Codes(doc));
+        Assert.Equal(["plan_already_forced"], Blockers(doc));
+        Assert.Equal("blocked", Verdict(doc));
+        /* The gate's own already_forced for this plan is the blocker, not a second, warning copy of it. */
+        Assert.DoesNotContain("already_forced", Codes(doc));
     }
 
     [Fact]
-    public async Task ARunStoppedQuery_AndAThinPlan_AreRefused()
+    public async Task AnotherPlanOfTheQueryForced_IsAWarning_NotABlock()
+    {
+        var seed = new Seed(7013, "SELECT 1", [(1, 100, 60, 30, Plan("1"), false), (2, 100, 60, 5, Plan("1"), true)]);
+        using var doc = await RunAsync(seed);
+        Assert.Contains("already_forced", Codes(doc));
+        Assert.Empty(Blockers(doc));
+        Assert.Equal("not_blocked", Verdict(doc));
+    }
+
+    [Fact]
+    public async Task ARunStoppedQuery_AndAThinPlan_ShowTheirNumbers_WithNoWarning()
     {
         var seed = new Seed(7005, "SELECT 1", [(1, 100, 3, 300, Plan("1"), false), (2, 100, 60, 240, Plan("1"), false)]);
         using var doc = await RunAsync(seed);
-        var codes = Codes(doc);
-        Assert.Contains("not_run_recently", codes);
-        Assert.Contains("too_few_executions", codes);
+        Assert.DoesNotContain(Codes(doc), c => c is "not_run_recently" or "too_few_executions");
+        Assert.Empty(Blockers(doc));
+        var shown = doc.RootElement.GetProperty("shown");
+        /* The newest plan last ran 240 minutes before the anchor, and as_of is one hour after it. */
+        Assert.Equal(300, shown.GetProperty("minutes_since_query_last_execution").GetDouble());
+        Assert.Equal(3, shown.GetProperty("plans")[0].GetProperty("executions").GetInt64());
     }
 
     [Fact]
-    public async Task DifferentCompiledValues_AreShown_NeverRefused()
+    public async Task WhenTheFindingReadThrows_ParameterSensitivityIsListedOnceUnderUnknown()
+    {
+        try
+        {
+            DarlingMcpPlanForcePrecheckTools.FindingReadForTests = (_, _, _) => throw new InvalidOperationException("finding read failed");
+            using var doc = await RunAsync(Clean(7014));
+            Assert.Single(UnknownChecks(doc), c => c == "parameter_sensitivity_cofired");
+            Assert.Single(UnknownChecks(doc), c => c == "secondary_replica_evidence");
+        }
+        finally
+        {
+            DarlingMcpPlanForcePrecheckTools.FindingReadForTests = null;
+        }
+    }
+
+    [Fact]
+    public async Task AStoredIntervalWithNoCpu_IsLeftOutOfTheAverage_NotCountedAsZero()
+    {
+        /* Plan 1: 60 executions at 5000 us CPU, plus 60 executions in a second interval that stored no CPU. The mean over the interval that has one is 5 ms, not 2.5. */
+        using var doc = await RunAsync(Clean(7015), async (c, ct) => await Exec(c, ct, @"INSERT INTO query_store_stats
+(collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, runtime_stats_interval_id,
+ interval_start_time_utc, first_execution_time, last_execution_time, execution_count, avg_cpu_time_us, avg_duration_us, avg_rowcount, is_forced_plan, force_failure_count)
+VALUES ($1,$2,$3,$4,$5,$6,1,'Regular',901,$7,$7,$8,60,NULL,7000,100,FALSE,0)",
+            CollectionIdGenerator.Next(), Anchor, ServerId, ServerName, Db, 7015L, Anchor.AddHours(-3), Anchor.AddHours(-2)));
+        var plan = doc.RootElement.GetProperty("shown").GetProperty("plans")[0];
+        Assert.Equal(120, plan.GetProperty("executions").GetInt64());
+        Assert.Equal(5.0, plan.GetProperty("cpu_per_execution_ms").GetDouble(), 6);
+        Assert.DoesNotContain("cpu_per_execution", UnknownChecks(doc));
+    }
+
+    [Fact]
+    public async Task APlanWithNoCpuAtAll_ShowsNullCpu_AndSaysSoUnderUnknown()
+    {
+        using var doc = await RunAsync(Clean(7016), async (c, ct) => await Exec(c, ct,
+            "UPDATE query_store_stats SET avg_cpu_time_us = NULL WHERE server_id = $1 AND plan_id = 1", ServerId));
+        var plan = doc.RootElement.GetProperty("shown").GetProperty("plans")[0];
+        Assert.Equal(JsonValueKind.Null, plan.GetProperty("cpu_per_execution_ms").ValueKind);
+        Assert.Contains("cpu_per_execution", UnknownChecks(doc));
+        /* Plan 2 still has its CPU. */
+        Assert.Equal(5.0, doc.RootElement.GetProperty("shown").GetProperty("plans")[1].GetProperty("cpu_per_execution_ms").GetDouble(), 6);
+    }
+
+    [Fact]
+    public async Task ADatabaseWithNoPlanCorrectionRow_WarnsApcEnablementUnknown_WhereTheCollectorRuns()
+    {
+        /* The registered server is an on-premises SQL Server 2019 (major 15), where the plan_correction collector runs, and no plan_correction row was ever stored. */
+        using var doc = await RunAsync(Clean(7017));
+        Assert.Contains("apc_enablement_unknown", Codes(doc));
+        Assert.Empty(Blockers(doc));
+    }
+
+    [Fact]
+    public async Task ABlockerFromTheExistingGate_AppearsAsAWarningUnderItsOwnCode()
+    {
+        /* A failed force on the candidate: the gate's forcing_failed_on_this_plan, listed as a warning. */
+        using var doc = await RunAsync(Clean(7018), async (c, ct) => await Exec(c, ct,
+            "UPDATE query_store_stats SET force_failure_count = 3, last_force_failure_reason = 'GENERAL_FAILURE' WHERE server_id = $1 AND plan_id = 1", ServerId));
+        Assert.Contains("forcing_failed_on_this_plan", Codes(doc));
+        Assert.Empty(Blockers(doc));
+    }
+
+    [Fact]
+    public async Task DifferentCompiledValues_AreShown_NeverWarned()
     {
         var seed = new Seed(7006, "SELECT 1", [(1, 100, 60, 30, Plan("111"), false), (2, 100, 60, 5, Plan("222"), false)]);
         using var doc = await RunAsync(seed);
         Assert.DoesNotContain(Codes(doc), c => c is "output_differs" or "recompile_hint" or "psp_variant");
+        Assert.Empty(Blockers(doc));
         var raw = doc.RootElement.GetRawText();
         Assert.Contains("\"compiled_value\":\"111\"", raw, StringComparison.Ordinal);
         Assert.Contains("\"compiled_value\":\"222\"", raw, StringComparison.Ordinal);
@@ -178,7 +280,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$7,$8,$8,$9,$10,5000,7000,$11,$12,0)",
     }
 
     [Fact]
-    public async Task ATempTable_AndAPspVariant_AreRefused_AndATableVariableIsNot()
+    public async Task ATempTable_AndAPspVariant_AreWarnings_AndATableVariableIsNot()
     {
         var temp = Plan("1", "<RelOp NodeId=\"0\"><Object Database=\"[ForceDb]\" Schema=\"[dbo]\" Table=\"[#orders]\"/></RelOp>");
         var tableVar = Plan("1", "<RelOp NodeId=\"0\"><Object Database=\"[ForceDb]\" Schema=\"[dbo]\" Table=\"[@orders]\"/></RelOp>");
@@ -192,12 +294,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$7,$8,$8,$9,$10,5000,7000,$11,$12,0)",
     }
 
     [Fact]
-    public async Task AReadOnlyQueryStore_IsRefused_AndNoHealthRowIsUnknown()
+    public async Task AReadOnlyQueryStore_IsAWarning_AndNoHealthRowIsUnknown()
     {
         using var ro = await RunAsync(Clean(7010), async (c, ct) => await Exec(c, ct,
             @"INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason)
               VALUES ($1,$2,$3,$4,$5,'READ_ONLY','READ_WRITE',65536)", CollectionIdGenerator.Next(), Anchor, ServerId, ServerName, Db));
         Assert.Contains("query_store_read_only", Codes(ro));
+        Assert.Empty(Blockers(ro));
         using var none = await RunAsync(Clean(7011));
         Assert.DoesNotContain("query_store_read_only", Codes(none));
         Assert.Contains("query_store_read_only", UnknownChecks(none));
