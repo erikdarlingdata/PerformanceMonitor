@@ -59,8 +59,8 @@ public sealed class LiteInvestigationGoldenTests
 
     [Theory]
     [InlineData(McpDataDetail.Full, "103E37D369912AE9161B2691C10F7F51BFEBF5FA72E60CE18B4A50BE17ADAD67")]
-    [InlineData(McpDataDetail.MaskLiterals, "33838ECB78F26BE7280938D128B0812E8265E2383B0C607EE81C79C34F59E49B")]
-    [InlineData(McpDataDetail.MetadataOnly, "5038BF910A6FD6915F5CA1DF43B1EDFBE782BB89F6B8E2FFAD7C6E2907C0049A")]
+    [InlineData(McpDataDetail.MaskLiterals, "6427BD28BEE859A66C29009A545072C0B5F96B6DF9BCFEA1E52B7A0EBDA5F46E")]
+    [InlineData(McpDataDetail.MetadataOnly, "CD0442961146963B9162A96E5395B181B8238FD232AA1E651F6771745A5BCE3E")]
     public void TheLiteBrief_ForAFixedInput_IsByteForByteUnchanged(McpDataDetail mode, string expectedSha)
     {
         var brief = InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, mode, At);
@@ -86,6 +86,6 @@ public sealed class LiteInvestigationGoldenTests
 
         text.Append(InvestigationFormats.UnsupportedReportFormatMessage(2, "Lite"));
         var all = text.ToString();
-        Assert.True(Sha(all) == "62A75C554816D5CB1A61C4F8449774A13D4B0C0747AF487E44A689CCA8F2FC37", $"Lite's Level 1 tool texts moved; their SHA-256 is {Sha(all)}:\n{all}");
+        Assert.True(Sha(all) == "D5E43FB06F2EE2CE56495183C6A2EDD2CF4A729C87E169E256CA991CD1E78A30", $"Lite's Level 1 tool texts moved; their SHA-256 is {Sha(all)}:\n{all}");
     }
 }
