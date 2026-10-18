@@ -1576,7 +1576,7 @@ public partial class SettingsWindow : Window
         App.WriteSetting("generic signing key", root =>
         {
             root["generic_signing_set"] = App.GenericSigningSet;
-            root["generic_signing_until"] = App.GenericSigningUntilUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+            root["generic_signing_until"] = App.GenericSigningUntilUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture) ?? "";
             saved = true;
         });
         return saved;
@@ -1702,7 +1702,7 @@ public partial class SettingsWindow : Window
         root["generic_body_template"] = App.GenericWebhookBodyTemplate;
         /* #6012: the signing key's two plain facts; the keys are in Credential Manager. */
         root["generic_signing_set"] = App.GenericSigningSet;
-        root["generic_signing_until"] = App.GenericSigningUntilUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        root["generic_signing_until"] = App.GenericSigningUntilUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture) ?? "";
 
         root["pagerduty_webhook_enabled"] = App.PagerDutyWebhookEnabled;
         root["pagerduty_use_eu_region"] = App.PagerDutyUseEuRegion;
