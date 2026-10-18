@@ -35,8 +35,8 @@ public sealed class McpInvestigationTools
         "Each row: id, server, family, first metric, alert count, state, lease and expiry. The state is computed from the " +
         "lease and expiry at read time (a lapsed lease reads open), and the read writes nothing. " +
         "A request is opened when an alert matches a notification route whose agent_level is 1 (get_notification_routes), " +
-        "within the route's hourly and daily limits; alerts of one server and family join one request inside a 30-minute " +
-        "window. States: open (claimable), claimed (a live lease), reported, closed, expired (past its expiry, or out of its " +
+        "within the route's hourly and daily limits; alerts of one server and family join one request while they keep firing (each within 30 minutes of the request's latest alert, up to 4 hours after its first). " +
+        "States: open (claimable), claimed (a live lease), reported, closed, expired (past its expiry, or out of its " +
         "three claims). Filters are optional: state, server_name (exact, then partial), family (blocking, query_performance, " +
         "resources, availability, jobs, self_monitor, other), limit (1-100, default 20). requests_returned is how many rows " +
         "you got; truncated says more requests matched than limit (raise limit or narrow the filters).")]

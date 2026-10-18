@@ -28,8 +28,8 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>Open or join is one transaction.</b> It takes a transaction-scoped advisory lock on the server and family, so two
 /// alerts of one incident cannot both open a request; joins an open or claimed request of that server and family only while
-/// the request is inside its 30-minute window (opened at most 30 minutes ago, and the alert at most 30 minutes after the
-/// request's first); and otherwise takes
+/// the alert fires within 30 minutes of the request's latest alert and no later than 4 hours after its first (#5632: the
+/// window slides, see <see cref="InvestigationRules.GroupingWindow"/> and <see cref="InvestigationRules.GroupingWindowCap"/>); and otherwise takes
 /// <c>pg_advisory_xact_lock(5632, route_id)</c> over the count of the route's requests and the INSERT (ruling R6), so two
 /// families of one route cannot both pass the limit. At a limit it journals <c>limit_reached</c> once per route per hour
 /// (the journal's <c>once_key</c>) and opens nothing. Joins never count toward a limit.</para>
@@ -55,7 +55,18 @@ public sealed partial class InvestigationRequestStore : IInvestigationRequestSto
     internal const string RouteLockSql = "SELECT pg_advisory_xact_lock($1, $2)";
 
     /* #5918: a practice request is never joined (a live alert must open its own request) and never counts against a route's limits. */
-    internal const string FindJoinSql = @"
+    /// <summary>The grouping window and its cap as interval literals, built from <see cref="InvestigationRules"/> so the SQL never
+    /// holds a second copy of either number (#5632).</summary>
+    private static readonly string GroupingWindowSql = string.Create(CultureInfo.InvariantCulture,
+        $"interval '{(int)InvestigationRules.GroupingWindow.TotalMinutes} minutes'");
+    private static readonly string GroupingWindowCapSql = string.Create(CultureInfo.InvariantCulture,
+        $"interval '{(int)InvestigationRules.GroupingWindowCap.TotalMinutes} minutes'");
+
+    /* #5632: the window slides. The request's window_until is its latest alert + 30 minutes, held to its first alert + 4 hours, and each
+       join moves it (JoinSql), so the alert-time test ($4 <= window_until) is the whole sliding bound. The wall-clock test stays on the
+       open time, on the wall clock ($3 is now), and is widened to the 4-hour cap: comparing an alert time with now would refuse every
+       alert stamped more than 30 minutes before it reached the store (a late or replayed alert). */
+    internal static readonly string FindJoinSql = @"
 SELECT r.request_id,
        r.max_severity,
        EXISTS (SELECT 1 FROM config.investigation_request_alerts AS a
@@ -66,7 +77,7 @@ WHERE r.server_id = $1
   AND r.practice_of IS NULL
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
-  AND r.opened_at >= $3 - interval '30 minutes'
+  AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
 LIMIT 1";
@@ -86,6 +97,7 @@ LIMIT 1";
 UPDATE config.investigation_requests
 SET alert_count = alert_count + 1,
     last_alert_at = greatest(last_alert_at, $2),
+    window_until = greatest(window_until, least(greatest(last_alert_at, $2) + " + GroupingWindowSql + @", first_alert_at + " + GroupingWindowCapSql + @")),
     autonomy_level = least(autonomy_level, " + StampLevelSql(3, 4) + @"),
     max_severity = $5
 WHERE request_id = $1";
@@ -102,7 +114,7 @@ WHERE route_id = $1
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
      first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + interval '30 minutes', $10, $10 + make_interval(mins => $11), $12,
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
         " + StampLevelSql(6, 13) + ", $14)";
 
     internal const string AlertRowsSql = @"
@@ -574,7 +586,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// would join every later alert of that metric for the request's whole life, after its brief was composed. The keys are
     /// recorded as the request's alert rows only.</para>
     /// <para><b>A reported or closed request is final.</b> A later alert of the same server and family opens a NEW request,
-    /// even inside the same 30 minutes, and that request counts against the route's hourly and daily limits. This is
+    /// even inside the same grouping window, and that request counts against the route's hourly and daily limits. This is
     /// intended: the agent's report answered the alerts it was briefed on, and a condition that fires again is a new question.</para>
     /// </remarks>
     public async Task<InvestigationOpenResult> OpenOrJoinAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)

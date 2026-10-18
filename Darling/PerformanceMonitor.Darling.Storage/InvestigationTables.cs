@@ -14,8 +14,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// The store's tables for Level 1 investigations that an alert hands to the operator's own agent (V184, #5632 Phase A).
 /// Only the text lives here; the V184 rung embeds it.
 ///
-/// <para><b>What each table holds.</b> <c>config.investigation_requests</c> is one request per server, alert family and
-/// 30-minute grouping window, with its state (open, claimed, reported, closed, expired), the current claim and its lease,
+/// <para><b>What each table holds.</b> <c>config.investigation_requests</c> is one request per server and alert family
+/// while its alerts keep firing (a sliding 30-minute grouping window, capped at 4 hours), with its state (open, claimed, reported, closed, expired), the current claim and its lease,
 /// the claim count, the expiry, and the brief composed at claim. <c>config.investigation_request_alerts</c> holds a row
 /// per alert that opened or joined a request, and per incident dedup key of that alert, so a later alert carrying a known
 /// key joins the same request. <c>config.investigation_reports</c> holds the one report an agent returned for a request.

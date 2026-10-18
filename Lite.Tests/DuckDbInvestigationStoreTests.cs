@@ -104,13 +104,13 @@ public sealed class DuckDbInvestigationStoreTests : IDisposable
         _now = T0.AddMinutes(21);
         Assert.Equal(InvestigationOpenOutcome.Opened, (await _store.OpenOrJoinAsync(Alert(_now, family: "resources"), Ct)).Outcome);
 
-        /* Past the window with a key already on the request: a key never decides a join, so it opens another. */
-        _now = T0.AddMinutes(50);
+        /* 31 minutes after the latest alert (at 20) with a key already on the request: a key never decides a join, so it opens another. */
+        _now = T0.AddMinutes(51);
         var late = await _store.OpenOrJoinAsync(Alert(_now, keys: new[] { "key-3" }), Ct);
         Assert.Equal(InvestigationOpenOutcome.Opened, late.Outcome);
         Assert.NotEqual(first.RequestId, late.RequestId);
 
-        _now = T0.AddMinutes(51);
+        _now = T0.AddMinutes(52);
         Assert.Equal(late.RequestId, (await _store.OpenOrJoinAsync(Alert(_now, keys: new[] { "key-9" }), Ct)).RequestId);
 
         Assert.Equal("2|3", Scalar($@"
@@ -147,8 +147,57 @@ FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
         Assert.Null(await _store.ReadRequestAsync(Guid.NewGuid(), Ct));
     }
 
+    /// <summary>#5632: the grouping window slides: an alert joins within 30 minutes of the request's latest alert, up to 4 hours
+    /// after its first. Checked against the old rule (30 minutes after the first alert): the 25- and 50-minute joins and the
+    /// 235-minute join fail on it.</summary>
     [Fact]
-    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlertAt31MinutesOpensANewOne_AndAReportedOneIsFinal()
+    public async Task TheWindowSlides_AnAlertJoinsWithin30MinutesOfTheLatest_AndNeverPast4HoursAfterTheFirst()
+    {
+        /* #5632: the window slides. Each alert 25 minutes after the last joins, so the request is 50 minutes old at the third. */
+        var first = (await _store.OpenOrJoinAsync(Alert(T0), Ct)).RequestId!.Value;
+        _now = T0.AddMinutes(25);
+        Assert.Equal(first, (await _store.OpenOrJoinAsync(Alert(_now), Ct)).RequestId);
+        _now = T0.AddMinutes(50);
+        var at50 = await _store.OpenOrJoinAsync(Alert(_now), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Joined, at50.Outcome);
+        Assert.Equal(first, at50.RequestId);
+        /* 35 minutes after the latest alert (at 50): a new request. */
+        _now = T0.AddMinutes(85);
+        var at85 = await _store.OpenOrJoinAsync(Alert(_now), Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, at85.Outcome);
+        Assert.NotEqual(first, at85.RequestId);
+        /* The 4-hour cap, on another server with an expiry past it so only the cap decides: an alert every 25 minutes joins up to 235
+           minutes, and one at 245 (10 minutes after the latest, 245 after the first) opens a new request. */
+        _now = T0;
+        var capped = (await _store.OpenOrJoinAsync(Alert(T0, serverId: 9) with { ExpiryMinutes = 600 }, Ct)).RequestId!.Value;
+        for (var minute = 25; minute <= 225; minute += 25)
+        {
+            _now = T0.AddMinutes(minute);
+            Assert.Equal(capped, (await _store.OpenOrJoinAsync(Alert(_now, serverId: 9) with { ExpiryMinutes = 600 }, Ct)).RequestId);
+        }
+        _now = T0.AddMinutes(235);
+        Assert.Equal(capped, (await _store.OpenOrJoinAsync(Alert(_now, serverId: 9) with { ExpiryMinutes = 600 }, Ct)).RequestId);
+        _now = T0.AddMinutes(245);
+        var pastCap = await _store.OpenOrJoinAsync(Alert(_now, serverId: 9) with { ExpiryMinutes = 600 }, Ct);
+        Assert.Equal(InvestigationOpenOutcome.Opened, pastCap.Outcome);
+        Assert.NotEqual(capped, pastCap.RequestId);
+    }
+
+    /// <summary>#5632 seat fix: the wall-clock test is on the request's open time, not its latest alert. An alert stamped hours
+    /// before it reaches the store (a late or replayed alert) still joins the request its own time falls in. Comparing the alert
+    /// time with now refused it, and this test fails on that rule. Darling's twin is InvestigationPracticeTests' three alerts
+    /// stamped 3 hours ago.</summary>
+    [Fact]
+    public async Task AnAlertStampedHoursBeforeItArrives_StillJoinsTheRequestItsTimeFallsIn()
+    {
+        _now = T0.AddHours(3);
+        var first = (await _store.OpenOrJoinAsync(Alert(T0), Ct)).RequestId!.Value;
+        Assert.Equal(first, (await _store.OpenOrJoinAsync(Alert(T0.AddMinutes(1)), Ct)).RequestId);
+        Assert.Equal(first, (await _store.OpenOrJoinAsync(Alert(T0.AddMinutes(2)), Ct)).RequestId);
+    }
+
+    [Fact]
+    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneIsFinal()
     {
         const string Fallback = "7:Blocking";
         var first = (await _store.OpenOrJoinAsync(Alert(T0, keys: new[] { Fallback }), Ct)).RequestId!.Value;
@@ -159,7 +208,7 @@ FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
         Assert.Equal(InvestigationOpenOutcome.Joined, joined.Outcome);
         Assert.Equal(first, joined.RequestId);
 
-        _now = T0.AddMinutes(31);
+        _now = T0.AddMinutes(60);
         var opened = await _store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), Ct);
         Assert.Equal(InvestigationOpenOutcome.Opened, opened.Outcome);
         Assert.NotEqual(first, opened.RequestId);
@@ -168,7 +217,7 @@ FROM investigation_requests WHERE request_id = '{first.RequestId}'"));
         var second = opened.RequestId!.Value;
         var secondClaim = await _store.ClaimAsync(second, "agent-a", Ct);
         Assert.Equal(InvestigationSubmitOutcome.Reported, await _store.SubmitAsync(Report(second, secondClaim.ClaimId!.Value), Ct));
-        _now = T0.AddMinutes(33);
+        _now = T0.AddMinutes(62);
         var third = await _store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), Ct);
         Assert.Equal(InvestigationOpenOutcome.Opened, third.Outcome);
         Assert.NotEqual(second, third.RequestId);

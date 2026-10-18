@@ -20,8 +20,13 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public static class InvestigationRules
 {
-    /// <summary>The grouping window: an alert this long after a request's first alert still joins it.</summary>
+    /// <summary>The grouping window (#5632): an alert joins a request when it fires within this long of the request's LATEST
+    /// alert, up to <see cref="GroupingWindowCap"/> after its first. Incidents arrive in waves, so the window slides.</summary>
     public static readonly TimeSpan GroupingWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>The longest a request keeps taking alerts: no alert joins one more than this long after its first alert,
+    /// however steadily the alerts keep firing (#5632).</summary>
+    public static readonly TimeSpan GroupingWindowCap = TimeSpan.FromHours(4);
 
     /// <summary>The claims a request may take before it expires.</summary>
     public const int MaxClaims = 3;

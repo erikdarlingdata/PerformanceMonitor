@@ -24,8 +24,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// The dispatch hook of Level 1 investigations (#5632 Phase A, plan v2 section 4, ruling R1): for an alert that is about to be
 /// sent, or whose history row was just written, it resolves the alert's agent route and hands the alert to
 /// <see cref="InvestigationRequestStore.OpenOrJoinAsync"/>,
-/// which opens a request, joins the alert to an open or claimed one of the same server and family opened within the last
-/// 30 minutes, or refuses at the route's limit.
+/// which opens a request, joins the alert to an open or claimed one of the same server and family while its alerts keep
+/// firing (within 30 minutes of its latest alert, up to 4 hours after its first), or refuses at the route's limit.
 ///
 /// <para><b>Where it is called.</b> Three places write an alert row that can start an investigation, and each opens or joins
 /// once per row. <see cref="DarlingAlertDeliverer"/> per row (a Per-event split writes a row per incident, so each incident is

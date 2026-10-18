@@ -20,6 +20,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -30,37 +31,39 @@ using PerformanceMonitor.PlanAnalysis;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// #5632 step A2: <c>get_plan_force_precheck</c>, a store-only read that answers "may this Query Store plan be forced, and what
+/// #5632 step A2: <c>get_plan_force_precheck</c>, a store-only read that answers "can this Query Store plan be forced, and what
 /// should a person see first". It writes nothing and never connects to the monitored server. Nothing calls it automatically yet.
-/// <para><b>The verdict is one-sided.</b> <c>refuse</c> when any check fires, else <c>no_refusal_found</c>. The read never says a force
-/// is safe or will help. A check the store cannot answer is listed in <c>unknown</c> and is not a refusal; the one exception is the
-/// gate's own <c>state_unavailable</c>, which the gate treats as a blocker.</para>
+/// <para><b>The verdict blocks only a force that cannot work.</b> <c>blocked</c> when the plan is not among the query's Query Store
+/// rows (<c>plan_not_found</c>) or is already the query's forced plan (<c>plan_already_forced</c>), else <c>not_blocked</c>. Every
+/// other fact that fired is a <c>warning</c> the caller weighs: the product sets no limit on a force, each team's agent instructions
+/// decide (Erik, 10-18). The read never says a force is safe or will help. A check the store cannot answer is listed in
+/// <c>unknown</c>. Executions, the minutes since the query last ran and the rows per call are shown as facts, with no threshold.</para>
 /// <para><b>Reads.</b> The query's per-plan history from the grid's own tier (<see cref="DarlingMcpQueryStoreHistoryTools"/>'s helpers),
 /// the force gate (<see cref="ForcePlanBotPolicy.Blockers"/> over <see cref="DarlingForcePlanTargetStateReader"/>), the two stored
 /// plans, the statement text, the newest <c>query_store_health</c> row, the newest <c>index_object_stats</c> capture and the
 /// <c>job_history</c> names. Compiled parameter values are customer values: they ride under <c>compiled_value</c>, which
-/// <c>mcp.dataDetail</c> masks or withholds, and are never logged and never put in a refusal.</para>
+/// <c>mcp.dataDetail</c> masks or withholds, and are never logged and never put in a warning.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpPlanForcePrecheckTools
 {
-    /// <summary>Stable refusal codes (a consumer API: add freely, never respell). The gate's own blockers keep their own names.</summary>
+    /// <summary>Stable warning codes (a consumer API: add freely, never respell). The gate's own blockers keep their own names and ride as warnings.</summary>
     internal const string CodeRecompileHint = "recompile_hint";
     internal const string CodeTempTable = "temp_table";
     internal const string CodeQueryStoreReadOnly = "query_store_read_only";
-    internal const string CodeNotRunRecently = "not_run_recently";
-    internal const string CodeTooFewExecutions = "too_few_executions";
     internal const string CodePspVariant = "psp_variant";
-    internal const string CodeOutputDiffers = "output_differs";
 
-    /// <summary>A query whose newest execution, over any plan, is older than this before <c>as_of</c> has stopped running: a force there has nothing to act on.</summary>
-    internal static readonly TimeSpan NotRunRecentlyAfter = TimeSpan.FromHours(2);
+    internal const string VerdictBlocked = "blocked";
+    internal const string VerdictNotBlocked = "not_blocked";
 
-    /// <summary>
-    /// The per-plan execution floor: the same 25 PLAN_REGRESSION's per-plan group keeps (<c>HAVING SUM(execs) &gt;= 25</c> in
-    /// <c>PgFactCollector.QueryPerf</c>) and the force bot's review floor, taken from the bot's setting so there is one number.
-    /// </summary>
-    internal static readonly int MinPlanExecutions = ForcePlanBotSettings.Default.MinReviewExecutions;
+    /// <summary>The only two blockers: a force that cannot do anything.</summary>
+    internal const string BlockerPlanNotFound = "plan_not_found";
+    internal const string BlockerPlanAlreadyForced = "plan_already_forced";
+
+    /// <summary>The <c>unknown</c> check names this read owns besides the warning codes.</summary>
+    internal const string CheckRowsPerCall = "rows_per_call";
+    internal const string CheckCpuPerExecution = "cpu_per_execution";
+    internal const string CheckDurationPerExecution = "duration_per_execution";
 
     /// <summary>Most rows each of the shown lists carries.</summary>
     internal const int MaxListed = 20;
@@ -128,7 +131,8 @@ public sealed class DarlingMcpPlanForcePrecheckTools
         long PlanId, long Executions, double? CpuPerExecMs, double? DurationPerExecMs, double? AvgRows, DateTime? LastExecution,
         bool IsForced, long? FailureCount, string? FailureReason, string? ForcingType);
 
-    internal sealed record Refusal(string Code, string Sentence, object? Evidence);
+    /// <summary>One fact that fired: a blocker (a force that cannot work) or a warning (everything else). Same shape, two lists.</summary>
+    internal sealed record Finding(string Code, string Sentence, object? Evidence);
 
     internal sealed record Unknown(string Check, string Reason);
 
@@ -161,20 +165,30 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             var newest = members.OrderByDescending(r => r.CollectionTime).First();
             return new PlanFold(
                 g.Key, execs,
-                execs > 0 ? members.Sum(r => r.Executions * (r.CpuUs ?? 0)) / execs / 1000.0 : null,
-                execs > 0 ? members.Sum(r => r.Executions * (r.DurationUs ?? 0)) / execs / 1000.0 : null,
+                WeightedMs(members, r => r.CpuUs),
+                WeightedMs(members, r => r.DurationUs),
                 execs > 0 && members.All(r => r.Rows is not null) ? members.Sum(r => r.Executions * r.Rows!.Value) / execs : null,
                 members.Max(r => r.LastExecution), newest.IsForced, members.Max(r => r.FailureCount),
                 members.OrderByDescending(r => r.CollectionTime).Select(r => r.FailureReason).FirstOrDefault(s => !string.IsNullOrEmpty(s)),
                 newest.ForcingType);
         }).ToList();
 
-    /// <summary>True when the plan's rows per call differ by <see cref="PlanInputComparison.OutputGrowthRatio"/> or more, either way, each floored at <see cref="PlanInputComparison.RowFloor"/>.</summary>
-    internal static bool OutputDiffers(double candidateRows, double compareRows)
+    /// <summary>
+    /// The execution-weighted mean of a per-execution microsecond column, in milliseconds. An interval with no value is left out of
+    /// both the sum and the weight: a stored null is not a measured zero. Null when no interval has a value (or no execution ran).
+    /// </summary>
+    private static double? WeightedMs(List<PlanRow> members, Func<PlanRow, double?> column)
     {
-        var a = Math.Max(candidateRows, PlanInputComparison.RowFloor);
-        var b = Math.Max(compareRows, PlanInputComparison.RowFloor);
-        return a >= PlanInputComparison.OutputGrowthRatio * b || b >= PlanInputComparison.OutputGrowthRatio * a;
+        var withValue = members.Where(r => column(r) is not null).ToList();
+        var execs = withValue.Sum(r => r.Executions);
+        return execs > 0 ? withValue.Sum(r => r.Executions * column(r)!.Value) / execs / 1000.0 : null;
+    }
+
+    /// <summary>The larger of two rows-per-call averages over the smaller, or null when the smaller is not above zero (no ratio exists). A fact, with no threshold.</summary>
+    internal static double? RowsRatio(double a, double b)
+    {
+        var (low, high) = a <= b ? (a, b) : (b, a);
+        return low > 0 ? high / low : null;
     }
 
     /// <summary>What a stored plan says about the checks that read it. Null members mean the plan could not be read.</summary>
@@ -216,13 +230,14 @@ public sealed class DarlingMcpPlanForcePrecheckTools
     private static string Unbracket(string? name) => (name ?? "").Trim().TrimStart('[').TrimEnd(']');
 
     [McpServerTool(Name = "get_plan_force_precheck"), Description(
-        "Checks one Query Store plan before anyone forces it: verdict refuse (any refusal fired) or no_refusal_found, which never means the force is safe or will help. " +
-        "refusals each carry a stable code, one sentence and evidence numbers; shown holds what a person reads first; unknown lists checks the store could not answer, which are not refusals. <<GUIDE>> " +
-        "Store-only and read-only. Refusal codes: the force gate's own blockers by name (parameter_sensitivity_cofired, secondary_replica_evidence, apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently, " +
-        "state_unavailable, apc_enabled_for_database, apc_names_this_plan_as_regressed), recompile_hint (OPTION RECOMPILE), temp_table (the plan names a #temp table; a @table variable does not count), query_store_read_only (newest health row not READ_WRITE), " +
-        "not_run_recently (no execution of any plan in the 2 hours before as_of), too_few_executions (the plan ran under 25 times in the window), psp_variant (either plan is a Parameter Sensitive Plan variant) and output_differs (rows per call differ 10x or more between the two plans). " +
-        "compare_plan_id defaults to the query's plan with the newest last_execution_time; when that is plan_id itself the plan-to-plan checks go to unknown. " +
-        "Different compiled parameter values are shown (compiled_values, masked or withheld by mcp.dataDetail) with PlanInputComparison's judgement and are never a refusal. " +
+        "Reads one Query Store plan before anyone forces it. This read blocks only a force that cannot work: verdict blocked when the plan is not among the query's Query Store rows (plan_not_found) or is already the query's forced plan (plan_already_forced), else not_blocked, which never means the force is safe or will help. " +
+        "Everything else that fired is a warning, never a block: the agent's own instructions decide what to do with it. Each warning carries a stable code, one sentence and the evidence. <<GUIDE>> " +
+        "shown holds what a person reads first; unknown lists checks the store could not answer, which are neither blockers nor warnings. Store-only and read-only. " +
+        "Warning codes: the force gate's own findings by name (parameter_sensitivity_cofired, secondary_replica_evidence, apc_owns_it, already_forced (another plan of the query is forced; forcing this one replaces it), forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently, " +
+        "state_unavailable, apc_enabled_for_database, apc_names_this_plan_as_regressed, apc_enablement_unknown), recompile_hint (OPTION RECOMPILE), temp_table (the plan names a #temp table; a @table variable does not count), query_store_read_only (newest health row not READ_WRITE) and psp_variant (either plan is a Parameter Sensitive Plan variant). " +
+        "Shown as facts with no threshold: each plan's executions, the minutes from the query's newest last_execution_time to as_of, and both plans' average rows per call with their ratio. " +
+        "compare_plan_id defaults to the query's plan with the newest last_execution_time; when that is plan_id itself the plan-to-plan facts go to unknown. " +
+        "Different compiled parameter values are shown (compiled_values, masked or withheld by mcp.dataDetail) with PlanInputComparison's judgement and are never a warning. " +
         "Indexes the plan names that are not in the table's newest index_object_stats capture are 'not in the latest capture': the capture may not list every index. Agent jobs whose job or step name mentions forcing are a name match only; the store holds no job step command.")]
     public static async Task<string> GetPlanForcePrecheck(
         NpgsqlDataSource postgres,
@@ -271,14 +286,12 @@ public sealed class DarlingMcpPlanForcePrecheckTools
 
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
-                    ?? McpHelpers.Status("empty",
-                        $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched, so there is nothing to check.");
+                    ?? PlanNotFound(resolved.ServerName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, new List<PlanFold>());
 
             var plans = Fold(rows);
             var candidate = plans.FirstOrDefault(p => p.PlanId == plan_id);
             if (candidate is null)
-                return McpHelpers.Status("empty",
-                    $"plan_id {plan_id} has no Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched, so it cannot be checked.");
+                return PlanNotFound(resolved.ServerName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, plans);
 
             PlanFold? compare;
             if (compare_plan_id is long wanted)
@@ -294,12 +307,17 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             }
 
             var queryLastExecution = plans.Max(p => p.LastExecution);
-            var refusals = new List<Refusal>();
+            var blockers = new List<Finding>();
+            var warnings = new List<Finding>();
             var unknown = new List<Unknown>();
             var shown = new Dictionary<string, object?>();
 
-            /* 1. The existing gate. */
-            await AddGateRefusalsAsync(postgres, resolved.ServerId, database_name, query_id, candidate, windowEnd, logger, refusals, unknown, cancellationToken);
+            /* 1. The existing gate: its findings are warnings; the one that says this very plan is forced is the blocker below. */
+            var selfForcedByGate = await AddGateWarningsAsync(postgres, resolved.ServerId, database_name, query_id, candidate, windowEnd, logger, warnings, unknown, cancellationToken);
+            if (candidate.IsForced || selfForcedByGate)
+                blockers.Add(new Finding(BlockerPlanAlreadyForced,
+                    $"Plan {plan_id} is already the forced plan of query {query_id}, so a force would change nothing.",
+                    new { plan_id, is_forced_plan = true, plan_forcing_type = candidate.ForcingType }));
 
             /* 2. recompile_hint. */
             string? text;
@@ -317,29 +335,31 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             if (string.IsNullOrWhiteSpace(text) || WithheldStatementMarker.IsMarker(text))
                 unknown.Add(new Unknown(CodeRecompileHint, "the statement text is not stored for this query, or is withheld by the statement filter"));
             else if (PlanInputComparison.HasRecompileHint(text))
-                refusals.Add(new Refusal(CodeRecompileHint, "The statement has OPTION (RECOMPILE), so every call gets its own plan and a forced plan is not what runs.", new { has_recompile_hint = true }));
+                warnings.Add(new Finding(CodeRecompileHint, "The statement has OPTION (RECOMPILE), so every call gets its own plan and a forced plan is not what runs.", new { has_recompile_hint = true }));
 
-            /* 5. not_run_recently. */
-            if (queryLastExecution is { } lastRun && windowEnd - lastRun > NotRunRecentlyAfter)
-                refusals.Add(new Refusal(CodeNotRunRecently,
-                    $"No plan of this query has run in the {NotRunRecentlyAfter.TotalHours:0} hours before {FormatTime(windowEnd)}.",
-                    new { newest_last_execution_time = FormatTime(lastRun), as_of = FormatTime(windowEnd), threshold_hours = NotRunRecentlyAfter.TotalHours }));
-
-            /* 6. too_few_executions. */
-            if (candidate.Executions < MinPlanExecutions)
-                refusals.Add(new Refusal(CodeTooFewExecutions,
-                    $"Plan {plan_id} ran {candidate.Executions} times in the window, under the {MinPlanExecutions} PLAN_REGRESSION needs per plan.",
-                    new { executions = candidate.Executions, minimum = MinPlanExecutions, hours_back }));
-
-            /* 8. output_differs. */
+            /* Executions, the time since the query last ran and rows per call are shown as facts, with no threshold. */
+            var rowsPerCall = new Dictionary<string, object?>
+            {
+                ["candidate_plan_id"] = candidate.PlanId,
+                ["candidate_avg_rows"] = candidate.AvgRows,
+                ["compare_plan_id"] = compare?.PlanId,
+                ["compare_avg_rows"] = compare?.AvgRows,
+                ["larger_over_smaller"] = candidate.AvgRows is { } cr && compare?.AvgRows is { } kr ? RowsRatio(cr, kr) : null,
+            };
             if (compare is null)
-                unknown.Add(new Unknown(CodeOutputDiffers, compare_plan_id is null ? "plan_id is itself the query's newest plan and no compare_plan_id was given, so there is no second plan to compare" : "no second plan"));
-            else if (candidate.AvgRows is not { } candRows || compare.AvgRows is not { } compRows)
-                unknown.Add(new Unknown(CodeOutputDiffers, "a stored interval of one of the two plans has no avg_rowcount, so rows per call is not known"));
-            else if (OutputDiffers(candRows, compRows))
-                refusals.Add(new Refusal(CodeOutputDiffers,
-                    "The two plans return very different row counts per call, so their cost is not comparable and the cheaper plan may be cheap only because it returns less.",
-                    new { candidate_avg_rows = candRows, compare_avg_rows = compRows, ratio_threshold = PlanInputComparison.OutputGrowthRatio, row_floor = PlanInputComparison.RowFloor }));
+                unknown.Add(new Unknown(CheckRowsPerCall, compare_plan_id is null ? "plan_id is itself the query's newest plan and no compare_plan_id was given, so there is no second plan to compare" : "no second plan"));
+            else if (candidate.AvgRows is null || compare.AvgRows is null)
+                unknown.Add(new Unknown(CheckRowsPerCall, "a stored interval of one of the two plans has no avg_rowcount, so rows per call is not known"));
+            else if (rowsPerCall["larger_over_smaller"] is null)
+                unknown.Add(new Unknown(CheckRowsPerCall, "one plan averages 0 rows per call, so no ratio exists"));
+
+            foreach (var plan in compare is null ? new[] { candidate } : new[] { candidate, compare })
+            {
+                if (plan.CpuPerExecMs is null)
+                    unknown.Add(new Unknown(CheckCpuPerExecution, $"plan {plan.PlanId} has no avg_cpu_time_us in any stored interval, so its CPU per execution is not known"));
+                if (plan.DurationPerExecMs is null)
+                    unknown.Add(new Unknown(CheckDurationPerExecution, $"plan {plan.PlanId} has no avg_duration_us in any stored interval, so its duration per execution is not known"));
+            }
 
             /* 3, 7, the compiled values and the indexes: the two stored plans. */
             var candidateXml = await ReadPlanXmlAsync(postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken);
@@ -350,7 +370,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             if (candidateFacts is null)
                 unknown.Add(new Unknown(CodeTempTable, "the candidate plan's XML is not stored, is withheld by the statement filter, or cannot be read"));
             else if (candidateFacts.TempTables.Count > 0)
-                refusals.Add(new Refusal(CodeTempTable,
+                warnings.Add(new Finding(CodeTempTable,
                     "The plan reads or writes a temporary table; a force on such a statement failed when replayed.", new { tables = candidateFacts.TempTables }));
 
             var pspSides = new List<object>();
@@ -358,7 +378,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             if (compareFacts?.IsPspVariant == true) pspSides.Add(new { plan_id = compare!.PlanId, basis = compareFacts.PspBasis });
             if (pspSides.Count > 0)
             {
-                refusals.Add(new Refusal(CodePspVariant,
+                warnings.Add(new Finding(CodePspVariant,
                     "A plan is a Parameter Sensitive Plan variant; a force on a variant got 0 executions because the parent statement moved to another query and plan.", new { variants = pspSides }));
                 unknown.Add(new Unknown(CodePspVariant + "_siblings", "the parent query and the sibling variants cannot be named: the store keeps no parent_query_id for a variant"));
             }
@@ -366,10 +386,12 @@ public sealed class DarlingMcpPlanForcePrecheckTools
                 unknown.Add(new Unknown(CodePspVariant, "a plan's XML is not stored, is withheld or cannot be read, so whether it is a Parameter Sensitive Plan variant is not known"));
 
             /* 4. query_store_read_only. */
-            await AddReadOnlyAsync(postgres, resolved.ServerId, database_name, windowEnd, refusals, unknown, cancellationToken);
+            await AddReadOnlyAsync(postgres, resolved.ServerId, database_name, windowEnd, warnings, unknown, cancellationToken);
 
             /* Shown. */
             shown["query_last_execution_time"] = FormatTime(queryLastExecution);
+            shown["minutes_since_query_last_execution"] = queryLastExecution is { } lastRun ? Math.Round((windowEnd - lastRun).TotalMinutes, 1) : null;
+            shown["rows_per_call"] = rowsPerCall;
             var shownPlans = new List<object> { ShownPlan("candidate", candidate, candidateXml) };
             if (compare is not null) shownPlans.Add(ShownPlan("compare", compare, compareXml));
             shown["plans"] = shownPlans;
@@ -389,11 +411,12 @@ public sealed class DarlingMcpPlanForcePrecheckTools
                 ["as_of"] = FormatTime(windowEnd),
                 ["hours_back"] = hours_back,
                 ["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart),
-                ["verdict"] = refusals.Count > 0 ? "refuse" : "no_refusal_found",
-                ["refusals"] = refusals.Select(r => new { code = r.Code, sentence = r.Sentence, evidence = r.Evidence }),
+                ["verdict"] = blockers.Count > 0 ? VerdictBlocked : VerdictNotBlocked,
+                ["blockers"] = blockers.Select(r => new { code = r.Code, sentence = r.Sentence, evidence = r.Evidence }),
+                ["warnings"] = warnings.Select(r => new { code = r.Code, sentence = r.Sentence, evidence = r.Evidence }),
                 ["shown"] = shown,
                 ["unknown"] = unknown.Select(u => new { check = u.Check, reason = u.Reason }),
-                ["note"] = "no_refusal_found means no check fired; it does not mean the force is safe or will help."
+                ["note"] = "not_blocked means the force can be tried, not that it is safe or will help. Warnings are for the caller's own instructions to weigh."
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -401,6 +424,35 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             return McpHelpers.FormatError("get_plan_force_precheck", ex);
         }
     }
+
+    /// <summary>The blocked answer for a plan that is not among the query's Query Store rows in the window: nothing else is read, because there is nothing to force.</summary>
+    private static string PlanNotFound(
+        string serverName, string database, long queryId, long planId, long? comparePlanId, int hoursBack, DateTime windowEnd, DateTime effectiveStart, List<PlanFold> plans) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["server"] = serverName,
+            ["database_name"] = database,
+            ["query_id"] = queryId,
+            ["plan_id"] = planId,
+            ["compare_plan_id"] = comparePlanId,
+            ["as_of"] = FormatTime(windowEnd),
+            ["hours_back"] = hoursBack,
+            ["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart),
+            ["verdict"] = VerdictBlocked,
+            ["blockers"] = new[]
+            {
+                new
+                {
+                    code = BlockerPlanNotFound,
+                    sentence = $"plan_id {planId} is not among query_id {queryId}'s Query Store rows in database '{database}' in the {hoursBack}-hour window searched, so there is no plan to force.",
+                    evidence = (object)new { plans_in_window = plans.Count, plan_ids_in_window = plans.Select(p => p.PlanId).Take(MaxListed).ToList() },
+                },
+            },
+            ["warnings"] = Array.Empty<object>(),
+            ["shown"] = new Dictionary<string, object?>(),
+            ["unknown"] = Array.Empty<object>(),
+            ["note"] = "blocked means the force cannot work; the other checks were not run. not_blocked would not mean the force is safe or will help.",
+        }, McpHelpers.JsonOptions);
 
     private static string? FormatTime(DateTime? t) => t?.ToString("o", CultureInfo.InvariantCulture);
 
@@ -427,21 +479,74 @@ public sealed class DarlingMcpPlanForcePrecheckTools
     private static Task<string?> ReadPlanXmlAsync(NpgsqlDataSource postgres, int serverId, string database, long queryId, long planId, CancellationToken ct) =>
         DarlingStoredPlanReader.ReadQueryStorePlanByIdAsync(postgres, serverId, database, queryId, planId, cancellationToken: ct);
 
+    /// <summary>A test seam for the finding read: the store's own read logs and swallows its failures, so a pin on the throw path needs a read that throws. Null in the service.</summary>
+    internal static Func<int, DateTime, CancellationToken, Task<List<AnalysisFinding>>>? FindingReadForTests { get; set; }
+
+    /// <summary>
+    /// $1 server_id. The registry facts the force gate's <c>enablementIsCollected</c> asks the plan_correction collector about.
+    /// <c>postgres_major_version</c> is selected but not read: every SELECT of <c>sql_major_version</c> carries the engine, the
+    /// PostgreSQL major and the edition beside it (<c>EngineAwareVersionLabelTests</c>), and the engine kind decides first here.
+    /// </summary>
+    internal const string TargetFactsSql = "SELECT sql_engine_edition, sql_major_version, engine_kind, postgres_major_version FROM servers WHERE server_id = $1";
+
+    /// <summary>
+    /// Does the plan_correction collector run for this server (#4770)? The bot asks <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>
+    /// with its runtime's target; this read builds the same target from the registry row the connect stamped (edition, SQL major, engine kind).
+    /// Null when the row cannot be read, so the caller says so instead of guessing.
+    /// </summary>
+    private static async Task<bool?> ReadEnablementIsCollectedAsync(NpgsqlDataSource postgres, int serverId, CancellationToken ct)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(TargetFactsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var edition = 0;
+            var major = 0;
+            string? kind = null;
+            if (await reader.ReadAsync(ct))
+            {
+                edition = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
+                major = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+                kind = reader.IsDBNull(2) ? null : reader.GetString(2);
+            }
+
+            var target = new CollectorTargetInfo
+            {
+                Engine = MonitoredEngineKind.EngineOf(kind) ?? CollectorTargetEngine.SqlServer,
+                IsAzureSqlDb = edition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+                IsAzureManagedInstance = edition == CollectorEngineCapability.AzureManagedInstanceEngineEdition,
+                SqlMajorVersion = major,
+            };
+            return CollectorCatalog.AppliesTo(PlanCorrectionCollector.Instance, target);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// The gate. The target is the current PLAN_REGRESSION finding's own for this query when there is one (its replica role and
     /// parameter-sensitivity flag come from the finding, <see cref="FactRemediation.ExtractPlanRegressionTargets"/> builds it), with
     /// the plan swapped to plan_id. With no finding the target comes from the store rows: database, query and plan, the plan's last
     /// run as the best-plan age, and every finding-only field at its default (no replica role, no parameter-sensitivity flag, factor 0),
     /// and the two finding-only blockers go to <c>unknown</c> because nothing here can answer them.
+    /// <para>Every gate blocker rides as a warning under its own name. The one exception is <c>already_forced</c> on the candidate
+    /// itself: that is the pre-check's own <c>plan_already_forced</c> blocker, so it is left out of the warnings and the method
+    /// returns true. <c>already_forced</c> for another plan of the query stays a warning (an agent may replace a force).</para>
     /// </summary>
-    private static async Task AddGateRefusalsAsync(
+    private static async Task<bool> AddGateWarningsAsync(
         NpgsqlDataSource postgres, int serverId, string database, long queryId, PlanFold candidate, DateTime windowEnd, ILogger? logger,
-        List<Refusal> refusals, List<Unknown> unknown, CancellationToken ct)
+        List<Finding> warnings, List<Unknown> unknown, CancellationToken ct)
     {
         ForcePlanTarget? fromFinding = null;
+        var findingReadFailed = false;
         try
         {
-            var findings = await new PgFindingStore(postgres, logger).GetRecentFindingsAsync(serverId, 24, FindingOccurrences.WindowCoveringLimit, windowEnd, ct);
+            var findings = await (FindingReadForTests?.Invoke(serverId, windowEnd, ct)
+                ?? new PgFindingStore(postgres, logger).GetRecentFindingsAsync(serverId, 24, FindingOccurrences.WindowCoveringLimit, windowEnd, ct));
             fromFinding = findings
                 .Where(f => string.Equals(f.RootFactKey, "PLAN_REGRESSION", StringComparison.Ordinal) && f.Remediation?.Targets is { Count: > 0 })
                 .OrderByDescending(f => f.AnalysisTime)
@@ -451,7 +556,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(ex, "The PLAN_REGRESSION finding read for get_plan_force_precheck failed for server {ServerId}.", serverId);
-            unknown.Add(new Unknown("parameter_sensitivity_cofired", "the current PLAN_REGRESSION findings could not be read"));
+            findingReadFailed = true;
         }
 
         ForcePlanTarget target;
@@ -462,9 +567,18 @@ public sealed class DarlingMcpPlanForcePrecheckTools
         else
         {
             target = new ForcePlanTarget(database, queryId, candidate.PlanId, BestPlanLastSeenUtc: candidate.LastExecution);
-            unknown.Add(new Unknown(ForcePlanBlockerNames.ParameterSensitivityCoFired, "no current PLAN_REGRESSION finding for this query, so the parameter-sensitivity signature is not known"));
-            unknown.Add(new Unknown(ForcePlanBlockerNames.SecondaryReplicaEvidence, "no current PLAN_REGRESSION finding for this query, so the replica the regression was measured on is not known"));
+            /* One entry per check, whichever way the finding read went: a failed read is the reason, a missing finding is the other. */
+            unknown.Add(new Unknown(ForcePlanBlockerNames.ParameterSensitivityCoFired, findingReadFailed
+                ? "the current PLAN_REGRESSION findings could not be read, so the parameter-sensitivity signature is not known"
+                : "no current PLAN_REGRESSION finding for this query, so the parameter-sensitivity signature is not known"));
+            unknown.Add(new Unknown(ForcePlanBlockerNames.SecondaryReplicaEvidence, findingReadFailed
+                ? "the current PLAN_REGRESSION findings could not be read, so the replica the regression was measured on is not known"
+                : "no current PLAN_REGRESSION finding for this query, so the replica the regression was measured on is not known"));
         }
+
+        var enablementIsCollected = await ReadEnablementIsCollectedAsync(postgres, serverId, ct);
+        if (enablementIsCollected is null)
+            unknown.Add(new Unknown(ForcePlanBotPolicy.ReasonApcEnablementUnknown, "the server's registry row could not be read, so whether the plan_correction collector runs for it is not known"));
 
         var carrier = new AnalysisFinding
         {
@@ -475,12 +589,19 @@ public sealed class DarlingMcpPlanForcePrecheckTools
         var (states, reason) = await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, serverId, new[] { carrier }, windowEnd, logger, ct);
         ForcePlanTargetState? state = null;
         states?.TryGetValue(ForcePlanTargetKey.Of(target), out state);
-        foreach (var blocker in ForcePlanBotPolicy.Blockers(target, state, states is null ? reason : null, enablementIsCollected: false))
-            refusals.Add(new Refusal(blocker.Name, blocker.Evidence, null));
+        var selfForced = state?.PlanIsForced == true;
+        foreach (var blocker in ForcePlanBotPolicy.Blockers(target, state, states is null ? reason : null, enablementIsCollected == true))
+        {
+            /* This plan is the forced one: the pre-check's own blocker says so. A different plan forced stays this warning. */
+            if (selfForced && blocker.Name == ForcePlanBlockerNames.AlreadyForced) continue;
+            warnings.Add(new Finding(blocker.Name, blocker.Evidence, null));
+        }
+
+        return selfForced;
     }
 
     private static async Task AddReadOnlyAsync(
-        NpgsqlDataSource postgres, int serverId, string database, DateTime windowEnd, List<Refusal> refusals, List<Unknown> unknown, CancellationToken ct)
+        NpgsqlDataSource postgres, int serverId, string database, DateTime windowEnd, List<Finding> warnings, List<Unknown> unknown, CancellationToken ct)
     {
         await using var command = postgres.CreateCommand(HealthSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -498,7 +619,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
         var desired = reader.IsDBNull(1) ? null : reader.GetString(1);
         var readonlyReason = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
         if (!string.Equals(actual, "READ_WRITE", StringComparison.OrdinalIgnoreCase))
-            refusals.Add(new Refusal(CodeQueryStoreReadOnly,
+            warnings.Add(new Finding(CodeQueryStoreReadOnly,
                 $"Query Store is {actual} for this database, so a force is not recorded or kept.",
                 new
                 {
