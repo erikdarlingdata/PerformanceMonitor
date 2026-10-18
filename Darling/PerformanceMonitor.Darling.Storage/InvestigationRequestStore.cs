@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -160,17 +161,69 @@ WHERE r.route_id = $1
     internal const string SetFollowUpSql = @"
 UPDATE config.investigation_requests SET follow_up_at = $2 WHERE request_id = $1";
 
-    /* #6008: the reported requests whose follow-up is due and not yet opened, oldest first. Locked, so two passes never open one twice. $1 now. */
+    /* #6009: a deploy condition sits beside the time, written only when the report set one, for the same grant reason. */
+    internal const string SetFollowUpConditionSql = @"
+UPDATE config.investigation_requests SET follow_up_condition = $2 WHERE request_id = $1";
+
+    /// <summary>
+    /// #6009: how far back the due read looks in <c>collect.procedure_stats</c> for a changed module: the rows of the last this-many
+    /// minutes. The read runs every sweep (60 s) for each request with a condition, and no index covers the module names, so it must stay
+    /// a short window of one collection day (the busiest server wrote about a million rows a day). The collector stamps a watched module's
+    /// <c>modify_date</c> on every collection while the follow-up is pending, so a window of at least two collection intervals misses
+    /// nothing, and a service that was down simply sees the change on the next pass.
+    /// </summary>
+    internal const string DeployReadWindowMinutes = "30";
+
+    /// <summary>#6009: how far before a module's change the counts' "before" side reaches.</summary>
+    internal const string DeployCountsBeforeHours = "24";
+
+    /* #6008: the reported requests whose follow-up is due and not yet opened, oldest first. Locked, so two passes never open one twice. $1 now.
+       #6009: a request that names a module (follow_up_condition = 'module:db.schema.object') is also due when a collection of the last
+       DeployReadWindowMinutes carries a modify_date for that module later than the report: a module's modify_date is the time it was last
+       altered, so a later one means a deploy since the report, and no baseline is needed. Column 2 is that date (the newest), NULL for a
+       request with no condition or no change; the time rule keeps its own end for a deploy that never comes. */
     internal const string DueFollowUpsSql = @"
-SELECT r.request_id
+SELECT r.request_id, d.changed_to
 FROM config.investigation_requests AS r
-WHERE r.follow_up_at <= $1
-  AND r.state = 'reported'
+LEFT JOIN LATERAL (
+    SELECT max(p.module_modify_date) AS changed_to
+    FROM collect.procedure_stats AS p
+    WHERE p.server_id = r.server_id
+      AND p.collection_time >= ($1 AT TIME ZONE 'UTC') - INTERVAL '" + DeployReadWindowMinutes + @" minutes'
+      AND p.database_name = split_part(substr(r.follow_up_condition, 8), '.', 1)
+      AND p.schema_name = split_part(substr(r.follow_up_condition, 8), '.', 2)
+      AND p.object_name = split_part(substr(r.follow_up_condition, 8), '.', 3)
+      AND p.module_modify_date > (r.reported_at AT TIME ZONE 'UTC')
+) AS d ON r.follow_up_condition IS NOT NULL
+WHERE r.state = 'reported'
   AND r.practice_of IS NULL
+  AND r.follow_up_at IS NOT NULL
+  AND (r.follow_up_at <= $1 OR d.changed_to IS NOT NULL)
   AND NOT EXISTS (SELECT 1 FROM config.investigation_requests AS f WHERE f.follow_up_of = r.request_id)
 ORDER BY r.follow_up_at, r.request_id
 LIMIT 50
 FOR UPDATE OF r SKIP LOCKED";
+
+    /* #6009: the module's procedure stats around its change ($2, the new modify_date), split by collection_time against it: the 24 hours
+       before it and from it up to now ($3). Per side: how many collections, executions, and the CPU and elapsed time those executions
+       took (microseconds), and the newest modify_date a row of that side carries (NULL when none does). Runs once per wake and reads a
+       bounded span. $1 the request, $2 the change, $3 now. */
+    internal const string DeployCountsSql = @"
+SELECT (p.collection_time >= ($2 AT TIME ZONE 'UTC')) AS after_change, count(*), COALESCE(sum(p.delta_execution_count), 0)::bigint,
+       COALESCE(sum(p.delta_worker_time), 0)::bigint, COALESCE(sum(p.delta_elapsed_time), 0)::bigint, max(p.module_modify_date)
+FROM config.investigation_requests AS r
+JOIN collect.procedure_stats AS p ON p.server_id = r.server_id
+WHERE r.request_id = $1
+  AND p.database_name = split_part(substr(r.follow_up_condition, 8), '.', 1)
+  AND p.schema_name = split_part(substr(r.follow_up_condition, 8), '.', 2)
+  AND p.object_name = split_part(substr(r.follow_up_condition, 8), '.', 3)
+  AND p.collection_time >= ($2 AT TIME ZONE 'UTC') - INTERVAL '" + DeployCountsBeforeHours + @" hours'
+  AND p.collection_time <= ($3 AT TIME ZONE 'UTC')
+GROUP BY 1";
+
+    /* #6009: the module a request waits on, for the evidence section's name. $1 the request. */
+    internal const string FollowUpConditionSql = @"
+SELECT follow_up_condition FROM config.investigation_requests WHERE request_id = $1";
 
     /* #6008: the follow-up request copies its source's route, server, family, metric, story path, alert times, life and level, and
        names the source in follow_up_of, as a practice request names its case in practice_of. $1 new id, $2 source, $3 now. */
@@ -839,6 +892,10 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         if (report.FollowUpAtUtc is { } followUpAt)
         {
             await ExecAsync(connection, transaction, SetFollowUpSql, cancellationToken, P(report.RequestId), P(followUpAt));
+            if (report.FollowUpCondition is { } condition)
+            {
+                await ExecAsync(connection, transaction, SetFollowUpConditionSql, cancellationToken, P(report.RequestId), P(condition));
+            }
         }
 
         await JournalAsync(connection, transaction, now, report.RequestId, null, serverId, "reported", actor,
@@ -1293,6 +1350,59 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     }
 
     /// <summary>
+    /// The <c>deploy_follow_up</c> evidence section of a follow-up a deploy opened (#6009): the module, the change's date, and the
+    /// procedure-stats counts for the 24 hours before it and from it to now (collections, executions, average CPU and elapsed
+    /// milliseconds per execution), so the brief shows what the module did before and after the change. A ready section, frozen as every
+    /// evidence section is. Each side carries the newest <c>modify_date</c> its rows hold, null when none holds one.
+    /// </summary>
+    private async Task WriteDeployEvidenceAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid followUpId, Guid earlier,
+        DateTime changedAt, DateTime now, CancellationToken cancellationToken)
+    {
+        string? condition;
+        await using (var named = Command(connection, transaction, FollowUpConditionSql, P(earlier)))
+        {
+            condition = Convert.ToString(await named.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        }
+
+        var sides = new Dictionary<bool, (long Collections, long Executions, long Cpu, long Elapsed, DateTime? ModifyDate)>();
+        await using (var counts = Command(connection, transaction, DeployCountsSql, P(earlier), P(changedAt), P(now)))
+        await using (var reader = await counts.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                sides[reader.GetBoolean(0)] = (reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetInt64(4),
+                    reader.IsDBNull(5) ? null : reader.GetDateTime(5));
+            }
+        }
+
+        static JsonObject Side(bool after, IReadOnlyDictionary<bool, (long Collections, long Executions, long Cpu, long Elapsed, DateTime? ModifyDate)> sides)
+        {
+            sides.TryGetValue(after, out var s);
+            return new JsonObject
+            {
+                ["modify_date"] = s.ModifyDate?.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+                ["collections"] = s.Collections,
+                ["executions"] = s.Executions,
+                ["avg_cpu_ms"] = s.Executions > 0 ? Math.Round(s.Cpu / 1000.0 / s.Executions, 3) : null,
+                ["avg_duration_ms"] = s.Executions > 0 ? Math.Round(s.Elapsed / 1000.0 / s.Executions, 3) : null,
+            };
+        }
+
+        var content = new JsonObject
+        {
+            ["module"] = condition is { Length: > 7 } ? condition[7..] : condition,
+            ["changed_at"] = changedAt.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+            ["before"] = Side(false, sides),
+            ["after"] = Side(true, sides),
+        };
+        await ExecAsync(connection, transaction, EvidenceUpsertSql, cancellationToken,
+            P(followUpId), P(DeployEvidenceSection), P("ready"), P(content.ToJsonString()), P(now));
+    }
+
+    /// <summary>The evidence section a deploy follow-up carries (#6009).</summary>
+    public const string DeployEvidenceSection = "deploy_follow_up";
+
+    /// <summary>
     /// The follow-up sweep (#6008, D16): for each reported request whose <c>follow_up_at</c> has come and that has no follow-up
     /// yet, opens a new request that names it in <c>follow_up_of</c> (the way a practice request names its case) and journals one
     /// <c>follow_up</c> event for the new request, once per earlier request. It runs as the store owner: the journal's trigger
@@ -1302,18 +1412,20 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     private async Task<int> SweepFollowUpsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
         CancellationToken cancellationToken)
     {
-        var due = new List<Guid>();
+        var due = new List<(Guid Id, DateTime? ChangedTo)>();
         await using (var candidates = Command(connection, transaction, DueFollowUpsSql, P(now)))
         await using (var reader = await candidates.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                due.Add(reader.GetGuid(0));
+                due.Add((reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1)));
             }
         }
 
-        foreach (var earlier in due)
+        foreach (var (earlier, changedTo) in due)
         {
+            /* #6009: opened by a deploy when the module's modify_date moved, whatever the time says; the time ending is the rest. */
+            var deployed = changedTo is not null;
             var followUpId = Guid.NewGuid();
             int routeId, serverId;
             await using (var insert = Command(connection, transaction, OpenFollowUpSql, P(followUpId), P(earlier), P(now)))
@@ -1325,8 +1437,13 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
 
             await ExecAsync(connection, transaction, CopyFollowUpAlertsSql, cancellationToken, P(followUpId), P(earlier));
+            if (deployed)
+            {
+                await WriteDeployEvidenceAsync(connection, transaction, followUpId, earlier, changedTo!.Value, now, cancellationToken);
+            }
+
             await JournalAsync(connection, transaction, now, followUpId, routeId, serverId, InvestigationEvents.FollowUp, "service",
-                null, "{\"follow_up_of\":\"" + earlier.ToString("D") + "\"}", InvestigationEvents.FollowUpOnceKey(earlier), cancellationToken);
+                null, "{\"follow_up_of\":\"" + earlier.ToString("D") + "\",\"trigger\":\"" + (deployed ? "deploy" : "time") + "\"}", InvestigationEvents.FollowUpOnceKey(earlier), cancellationToken);
         }
 
         return due.Count;

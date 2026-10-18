@@ -93,6 +93,7 @@ internal static class InvestigationToolContract
             P("family_of", "string?", "null", "Optional. The request_id of the first report in this family; it must exist."),
             P("queries_run", "string?", "null", "Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + "."),
             P("follow_up_at", "string?", "null", "Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + "."),
+            P("follow_up_condition", "string?", "null", "Optional. Open the follow-up when a module is deployed: " + InvestigationReportFields.FollowUpConditionRule + "."),
         },
     };
 

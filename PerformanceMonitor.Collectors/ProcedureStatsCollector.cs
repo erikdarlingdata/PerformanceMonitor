@@ -128,6 +128,13 @@ public sealed class ProcedureStatsCollector : CollectorDefinitionBase<ProcedureS
         /// the plan reuse pass must skip it rather than count it as a miss.
         /// </summary>
         public bool PlanPhaseSkipped { get; init; }
+
+        /// <summary>
+        /// #6009: the module's <c>modify_date</c>, in UTC, set only by the module phase and only for a module a pending deploy
+        /// follow-up watches. Null for every other row. The Darling store writer stamps it onto the stored row after the COPY
+        /// (<c>collect.procedure_stats.module_modify_date</c>); <see cref="WritePayload"/> never writes it, so Lite's row is unchanged.
+        /// </summary>
+        public DateTime? ModuleModifyDate { get; init; }
     }
 
     /// <summary>The seven per-group deltas and the minimum interval of one row (see <see cref="Row.Precomputed"/>).</summary>
@@ -672,6 +679,192 @@ OPTION(RECOMPILE);");
             if (!covered.Contains(i))
             {
                 rows[i] = rows[i] with { PlanPhaseSkipped = true };
+            }
+        }
+    }
+
+    /// <summary>#6009: the most modules one database's module query names. A route holds at most 20 pending follow-ups, so this is slack.</summary>
+    public const int MaxWatchedModulesPerDatabase = 50;
+
+    /// <summary>#6009: one module a pending deploy follow-up waits on, as the three names its <c>module:</c> condition holds.</summary>
+    public readonly record struct WatchedModule(string DatabaseName, string SchemaName, string ObjectName);
+
+    /// <summary>#6009: one module phase result: the module's names and its <c>modify_date</c> as UTC.</summary>
+    public readonly record struct ModulePhaseResult(string SchemaName, string ObjectName, DateTime ModifyDate);
+
+    /// <summary>
+    /// #6009: the modules to look up, by database, for this collection: the watched modules that appear in <paramref name="rows"/>,
+    /// each once, at most <see cref="MaxWatchedModulesPerDatabase"/> per database. Empty when nothing is watched or no watched
+    /// module ran in the window, and an empty result means the host sends no module query at all.
+    /// </summary>
+    public static Dictionary<string, List<WatchedModule>> SelectWatchedModules(
+        IReadOnlyList<Row> rows, IReadOnlyCollection<WatchedModule> watched)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ArgumentNullException.ThrowIfNull(watched);
+
+        var byDatabase = new Dictionary<string, List<WatchedModule>>(StringComparer.OrdinalIgnoreCase);
+        if (watched.Count == 0)
+        {
+            return byDatabase;
+        }
+
+        var seen = new HashSet<WatchedModule>(WatchedModuleComparer.Instance);
+        foreach (var row in rows)
+        {
+            var module = new WatchedModule(row.DatabaseName, row.SchemaName, row.ObjectName);
+            if (!watched.Contains(module, WatchedModuleComparer.Instance) || !seen.Add(module))
+            {
+                continue;
+            }
+
+            if (!byDatabase.TryGetValue(module.DatabaseName, out var list))
+            {
+                list = new List<WatchedModule>();
+                byDatabase[module.DatabaseName] = list;
+            }
+
+            if (list.Count < MaxWatchedModulesPerDatabase)
+            {
+                list.Add(module);
+            }
+        }
+
+        return byDatabase;
+    }
+
+    private sealed class WatchedModuleComparer : IEqualityComparer<WatchedModule>
+    {
+        public static WatchedModuleComparer Instance { get; } = new();
+
+        public bool Equals(WatchedModule x, WatchedModule y) =>
+            string.Equals(x.DatabaseName, y.DatabaseName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(x.SchemaName, y.SchemaName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(x.ObjectName, y.ObjectName, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode(WatchedModule m) =>
+            HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(m.DatabaseName),
+                StringComparer.OrdinalIgnoreCase.GetHashCode(m.SchemaName),
+                StringComparer.OrdinalIgnoreCase.GetHashCode(m.ObjectName));
+    }
+
+    /// <summary>
+    /// #6009: the module phase, a small second query that reads <c>modify_date</c> for the watched modules of ONE database and nothing
+    /// else: <c>sys.objects</c> joined to <c>sys.schemas</c>, for exactly those names. The names are bound as parameters
+    /// (<c>@s0</c>, <c>@o0</c>, ...); the database name is bound as <c>@db</c> and quoted with <c>QUOTENAME</c> inside dynamic SQL on
+    /// a server that reads other databases by name. On Azure SQL Database the connection is already that database, which does not
+    /// accept a cross-database name, so the query reads the local catalog. <c>modify_date</c> is the server's local time; it is
+    /// returned as UTC by the server's current offset, so it compares with the store's UTC <c>reported_at</c>.
+    /// Read the result with <see cref="ReadModulePhaseAsync"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The list is empty or longer than <see cref="MaxWatchedModulesPerDatabase"/>.</exception>
+    public static CollectorQuery BuildModulePhaseQuery(CollectorContext context, string databaseName, IReadOnlyList<WatchedModule> modules)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(modules);
+
+        if (modules.Count == 0 || modules.Count > MaxWatchedModulesPerDatabase)
+        {
+            throw new InvalidOperationException(
+                "The module phase takes 1 to " + MaxWatchedModulesPerDatabase.ToString(CultureInfo.InvariantCulture)
+                + " modules; an empty list means no module query should be issued at all.");
+        }
+
+        var parameters = new List<CollectorParameter>(modules.Count * 2 + 1);
+        var values = new System.Text.StringBuilder();
+        var declarations = new System.Text.StringBuilder();
+        var arguments = new System.Text.StringBuilder();
+        for (var i = 0; i < modules.Count; i++)
+        {
+            var index = i.ToString(CultureInfo.InvariantCulture);
+            parameters.Add(new CollectorParameter("@s" + index, modules[i].SchemaName, CollectorParameterType.NVarChar128));
+            parameters.Add(new CollectorParameter("@o" + index, modules[i].ObjectName, CollectorParameterType.NVarChar128));
+            if (i > 0)
+            {
+                values.Append(", ");
+                declarations.Append(", ");
+                arguments.Append(", ");
+            }
+
+            values.Append("(@s").Append(index).Append(", @o").Append(index).Append(')');
+            declarations.Append("@s").Append(index).Append(" nvarchar(128), @o").Append(index).Append(" nvarchar(128)");
+            arguments.Append("@s").Append(index).Append(" = @s").Append(index).Append(", @o").Append(index).Append(" = @o").Append(index);
+        }
+
+        const string Select = @"SELECT /* PerformanceMonitorLite */
+    schema_name = sch.name,
+    object_name = o.name,
+    modify_date = CONVERT(datetime2(0), DATEADD(MINUTE, DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()), o.modify_date))";
+
+        if (context.Target.IsAzureSqlDb)
+        {
+            return new CollectorQuery(
+                "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n\n" + Select + @"
+FROM sys.objects AS o
+JOIN sys.schemas AS sch
+  ON sch.schema_id = o.schema_id
+WHERE EXISTS (SELECT 1 FROM (VALUES " + values + @") AS w (s, o) WHERE w.s = sch.name AND w.o = o.name)
+OPTION(RECOMPILE);",
+                parameters);
+        }
+
+        parameters.Add(new CollectorParameter("@db", databaseName, CollectorParameterType.NVarChar128));
+        return new CollectorQuery(
+            "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n\nDECLARE @sql nvarchar(max) = CAST(N'" + Select.Replace("'", "''", StringComparison.Ordinal) + @"
+FROM ' AS nvarchar(max)) + QUOTENAME(@db) + N'.sys.objects AS o
+JOIN ' + QUOTENAME(@db) + N'.sys.schemas AS sch
+  ON sch.schema_id = o.schema_id
+WHERE EXISTS (SELECT 1 FROM (VALUES " + values + @") AS w (s, o) WHERE w.s = sch.name AND w.o = o.name)
+OPTION(RECOMPILE);';
+
+EXECUTE sys.sp_executesql @sql, N'" + declarations + "', " + arguments + ";",
+            parameters);
+    }
+
+    /// <summary>#6009: reads <see cref="BuildModulePhaseQuery"/>'s result: schema name, object name, <c>modify_date</c> (UTC).</summary>
+    public static async ValueTask<List<ModulePhaseResult>> ReadModulePhaseAsync(DbDataReader reader, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+
+        var results = new List<ModulePhaseResult>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0) && !reader.IsDBNull(1) && !reader.IsDBNull(2))
+            {
+                results.Add(new ModulePhaseResult(reader.GetString(0), reader.GetString(1), reader.GetDateTime(2)));
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// #6009: puts the module phase's dates onto <paramref name="rows"/>: every row of <paramref name="databaseName"/> whose schema and
+    /// object match a result takes its <c>modify_date</c>. Every other row keeps null.
+    /// </summary>
+    public static void ApplyModulePhase(List<Row> rows, string databaseName, IReadOnlyList<ModulePhaseResult> results)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ArgumentNullException.ThrowIfNull(results);
+
+        if (results.Count == 0)
+        {
+            return;
+        }
+
+        var byName = new Dictionary<(string, string), DateTime>(results.Count);
+        foreach (var result in results)
+        {
+            byName[(result.SchemaName.ToUpperInvariant(), result.ObjectName.ToUpperInvariant())] = result.ModifyDate;
+        }
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (string.Equals(rows[i].DatabaseName, databaseName, StringComparison.OrdinalIgnoreCase)
+                && byName.TryGetValue((rows[i].SchemaName.ToUpperInvariant(), rows[i].ObjectName.ToUpperInvariant()), out var modifyDate))
+            {
+                rows[i] = rows[i] with { ModuleModifyDate = modifyDate };
             }
         }
     }

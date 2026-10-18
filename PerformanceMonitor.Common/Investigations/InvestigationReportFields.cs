@@ -60,6 +60,36 @@ public static class InvestigationReportFields
         return FollowUpProblem(utc, nowUtc) is { } problem ? problem : Accept(utc, out followUpAtUtc);
     }
 
+    /// <summary>The <c>follow_up_condition</c> rule as a tool description states it (#6009).</summary>
+    public const string FollowUpConditionRule = "module:<database>.<schema>.<object>, needs follow_up_at as its latest date";
+
+    /// <summary>The longest one name of a module condition may be (a SQL Server identifier).</summary>
+    public const int MaxModuleNameChars = 128;
+
+    /// <summary>
+    /// Parses the <c>follow_up_condition</c> argument (#6009, D16): null or blank is none; otherwise
+    /// <c>module:&lt;database&gt;.&lt;schema&gt;.&lt;object&gt;</c>, three non-empty names with no brackets, and only with a
+    /// <c>follow_up_at</c> (a deploy follow-up still needs an end). Gives one sentence (without the field name) when it is not.
+    /// </summary>
+    public static string? ValidateFollowUpCondition(string? condition, bool hasFollowUpAt, out string? normalized)
+    {
+        normalized = null;
+        if (string.IsNullOrWhiteSpace(condition))
+            return null;
+        var text = condition.Trim();
+        const string prefix = "module:";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal))
+            return "not a condition; give module:<database>.<schema>.<object>.";
+        var parts = text[prefix.Length..].Split('.');
+        if (parts.Length != 3 || parts.Any(p => p.Length == 0 || p.Length > MaxModuleNameChars
+                || p.IndexOfAny(['[', ']', '\'', '"', ';']) >= 0 || p.Any(char.IsControl)))
+            return "not a module; give module:<database>.<schema>.<object> with three names and no brackets or quotes.";
+        if (!hasFollowUpAt)
+            return "needs follow_up_at too: a deploy follow-up still opens at that time if the module has not changed.";
+        normalized = prefix + string.Join('.', parts);
+        return null;
+    }
+
     private static string? Accept(DateTime utc, out DateTime? followUpAtUtc)
     {
         followUpAtUtc = utc;
