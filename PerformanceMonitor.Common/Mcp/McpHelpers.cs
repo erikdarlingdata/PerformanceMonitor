@@ -965,6 +965,53 @@ internal static class McpHelpers
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
     }
 
+    /// <summary>True when <paramref name="answerJson"/> is a status envelope whose <c>status</c> is <c>empty</c> or <c>unavailable</c> (#6074).</summary>
+    public static bool IsEmptyOrUnavailableStatus(string answerJson)
+    {
+        try
+        {
+            return System.Text.Json.Nodes.JsonNode.Parse(answerJson) is System.Text.Json.Nodes.JsonObject node
+                && node["status"] is System.Text.Json.Nodes.JsonValue status
+                && status.TryGetValue<string>(out var word)
+                && (word == "empty" || word == "unavailable");
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="statusJson"/> (an envelope another helper built) with <paramref name="suffix"/> appended to its
+    /// <c>message</c> (#6074), so one extra sentence can ride on whichever empty answer a read produced without each
+    /// builder growing a parameter. A null or blank suffix, an answer with no string <c>message</c> and anything that is not a JSON object
+    /// come back unchanged.
+    /// </summary>
+    public static string AppendToMessage(string statusJson, string? suffix)
+    {
+        if (string.IsNullOrWhiteSpace(suffix))
+        {
+            return statusJson;
+        }
+
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(statusJson) is System.Text.Json.Nodes.JsonObject node
+                && node["message"] is System.Text.Json.Nodes.JsonValue value
+                && value.TryGetValue<string>(out var message))
+            {
+                node["message"] = message + suffix;
+                return node.ToJsonString(JsonOptions);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            /* Not an envelope: nothing to append to. */
+        }
+
+        return statusJson;
+    }
+
     /// <summary>
     /// <see cref="Status"/> for a read that takes <c>database_name</c> (#5244 review L2): the same <c>status</c>,
     /// <c>message</c> and optional <c>hints</c>, with the database echo beside them, so an empty answer says which

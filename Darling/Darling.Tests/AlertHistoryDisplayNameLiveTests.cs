@@ -96,12 +96,12 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, NULL, NULL)",
             await using var postgres = OpenDataSource(cs);
 
             var scoped = await DarlingAlertReader.GetAlertHistoryPageAsync(
-                postgres, now.AddHours(-1), now.AddMinutes(1), ServerId, 50, includeDismissed: false, ct);
+                postgres, now.AddHours(-1), now.AddMinutes(1), ServerId, 50, includeDismissed: false, cancellationToken: ct);
             Assert.Equal(2, scoped.Count);
             Assert.All(scoped, r => Assert.Equal(DisplayName, r.ServerName));
 
             var fleet = await DarlingAlertReader.GetAlertHistoryPageAsync(
-                postgres, now.AddHours(-1), now.AddMinutes(1), null, 500, includeDismissed: false, ct);
+                postgres, now.AddHours(-1), now.AddMinutes(1), null, 500, includeDismissed: false, cancellationToken: ct);
             var ours = fleet.Where(r => r.ServerId == ServerId).ToList();
             Assert.Equal(2, ours.Count);
             Assert.All(ours, r => Assert.Equal(DisplayName, r.ServerName));
