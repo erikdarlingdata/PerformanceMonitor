@@ -154,11 +154,12 @@ public sealed class McpPayloadContractCensusTests
     /// reason. One exception since #5916: <c>set_alert_threshold_override</c> answers two store faults an operator can act on
     /// with a status word rather than an error (<c>precondition</c> when the store role lacks the table grant, and a refusal
     /// naming a server removed from the configuration), because a client that reads <c>status</c> must see "do this" and not
-    /// a failed call.
+    /// a failed call. The same holds for <c>merge_deadlock_signatures</c> (#6006): <c>precondition</c> when the mcp role lacks the merge-table grant.
     /// </summary>
     public static readonly (string File, string Tool)[] AdHocErrorReturns =
     [
         ("DarlingMcpThresholdOverrideTools.cs", "set_alert_threshold_override"),
+        ("DarlingMcpSignatureMergeTools.cs", "merge_deadlock_signatures"),
     ];
 
     /// <summary>
