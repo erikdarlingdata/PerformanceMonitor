@@ -32,6 +32,9 @@ public sealed class QueryStoreReadOnlyHintTests : IClassFixture<SharedDuckDbFixt
     private readonly ServerManager _serverManager;
     private readonly int _serverId;
     private long _nextId = -1;
+    /* One collection run writes every database with the same capture_time, and v_query_store_health reads the server's newest
+       run, so the seeded rows share one instant the way the collector's do. */
+    private readonly DateTime _captureTime = DateTime.UtcNow.AddMinutes(-5);
 
     public QueryStoreReadOnlyHintTests(SharedDuckDbFixture fixture)
     {
@@ -82,7 +85,7 @@ public sealed class QueryStoreReadOnlyHintTests : IClassFixture<SharedDuckDbFixt
              stale_query_threshold_days, max_plans_per_query, interval_length_minutes)
             VALUES ($1, $2, $3, 'TestServer', $4, $5, 'READ_WRITE', 0, 0, 1000, 'AUTO', 30, 200, 60)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
-        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddMinutes(-5) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _captureTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = databaseName });
         cmd.Parameters.Add(new DuckDBParameter { Value = actualState });
