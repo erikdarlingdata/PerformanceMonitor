@@ -260,6 +260,188 @@ public sealed class LiteSignedWebhookTests : IDisposable
         Assert.Null(request.Header(WebhookSigning.SignatureHeader));
     }
 
+    // ---- round 2: a key is shown only after the flag's home took it ------------------------------
+
+    private static readonly string s_current = LiteWebhookSigningKeys.SettingsName(false);
+    private static readonly string s_previous = LiteWebhookSigningKeys.SettingsName(true);
+
+    [Fact]
+    public void AFirstKeyWhoseFlagWillNotSave_ReturnsNoKey_AnError_AndLeavesCredentialManagerEmpty()
+    {
+        var result = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, LiteSigningState.None, DateTime.UtcNow, _ => "the disk is full");
+
+        Assert.Null(result.NewKey);
+        Assert.NotNull(result.Error);
+        Assert.Contains("the disk is full", result.Error, StringComparison.Ordinal);
+        Assert.False(result.State.HasKey);
+        Assert.Equal("", _secrets.Read(s_current));
+        Assert.Equal("", _secrets.Read(s_previous));
+        Assert.Equal(0, _secrets.Count);
+    }
+
+    [Fact]
+    public void ARotationWhoseFlagWillNotSave_ReturnsNoKey_AndCredentialManagerHoldsTheOldCurrentAndPreviousKeys()
+    {
+        var saved = LiteSigningState.None;
+        var first = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, saved, DateTime.UtcNow, s => { saved = s; return null; });
+        var second = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, saved, DateTime.UtcNow, s => { saved = s; return null; });
+        Assert.NotNull(first.NewKey);
+        Assert.NotNull(second.NewKey);
+        Assert.Equal(second.NewKey, _secrets.Read(s_current));
+        Assert.Equal(first.NewKey, _secrets.Read(s_previous));
+        var before = saved;
+
+        var failed = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, saved, DateTime.UtcNow, _ => "settings.json could not be written");
+
+        Assert.Null(failed.NewKey);
+        Assert.NotNull(failed.Error);
+        Assert.Equal(before, failed.State);
+        Assert.Equal(second.NewKey, _secrets.Read(s_current));
+        Assert.Equal(first.NewKey, _secrets.Read(s_previous));
+    }
+
+    [Fact]
+    public void ARotationWithNoPreviousKeyWhoseFlagWillNotSave_LeavesTheCurrentKeyAndNoPreviousKey()
+    {
+        var saved = LiteSigningState.None;
+        var first = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, saved, DateTime.UtcNow, s => { saved = s; return null; });
+        Assert.NotNull(first.NewKey);
+
+        var failed = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, saved, DateTime.UtcNow, _ => throw new InvalidOperationException("boom"));
+
+        Assert.Null(failed.NewKey);
+        Assert.NotNull(failed.Error);
+        Assert.Equal(first.NewKey, _secrets.Read(s_current));
+        Assert.Equal("", _secrets.Read(s_previous));
+        Assert.DoesNotContain(s_previous, _secrets.Keys);
+    }
+
+    [Fact]
+    public void WhenTheFlagWillNotSaveAndCredentialManagerWillNotPutTheKeysBack_TheErrorSaysSo_AndShowsNoKey()
+    {
+        var saved = LiteSigningState.None;
+        _ = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, saved, DateTime.UtcNow, s => { saved = s; return null; });
+
+        var failed = LiteWebhookSigningKeys.Generate(_secrets.Access, s_current, s_previous, saved, DateTime.UtcNow, _ =>
+        {
+            _secrets.WriteGate = (_, _) => false;
+            return "settings.json could not be written";
+        });
+
+        Assert.Null(failed.NewKey);
+        Assert.Contains("could not be put back", failed.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain(_secrets.Read(s_current)[WebhookSigning.KeyPrefix.Length..], failed.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>Makes the next change of a route's flag to true fail the way a real write error would: a unique index on the flag
+    /// column, with one route already at true and another still at false.</summary>
+    private void MakeASecondTrueFlagFail()
+    {
+        using var connection = _db.CreateConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "CREATE UNIQUE INDEX ux_signing_flag_test ON notification_routes (generic_signing_set)";
+        command.ExecuteNonQuery();
+    }
+
+    [Fact]
+    public async Task ARouteWhoseFlagUpdateFails_ReturnsNoKeyAndAnError_AndLeavesCredentialManagerAsItWas()
+    {
+        using var endpoint = new RawEndpoint();
+        var first = await SaveRouteAsync(_store, endpoint.Url);
+        var second = await SaveRouteAsync(_store, endpoint.Url + "2");
+        var (firstKey, firstError) = await _store.GenerateSigningKeyAsync(first);
+        Assert.NotNull(firstKey);
+        Assert.Null(firstError);
+        MakeASecondTrueFlagFail();
+        var before = _secrets.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
+
+        var (key, error) = await _store.GenerateSigningKeyAsync(second);
+
+        Assert.Null(key);
+        Assert.NotNull(error);
+        Assert.Equal(before, _secrets.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList());
+        Assert.Equal("", _secrets.Read(LiteWebhookSigningKeys.RouteName(second, false)));
+        Assert.Equal(firstKey, _secrets.Read(LiteWebhookSigningKeys.RouteName(first, false)));
+        var state = await _store.SigningStateAsync(second);
+        Assert.False(state!.Value.State.HasKey);
+    }
+
+    [Fact]
+    public async Task ARouteWhoseFlagUpdateFailsOnRemove_SaysSettingsWereNotSaved_AndTheRouteIsHeldBack()
+    {
+        using var endpoint = new RawEndpoint();
+        var first = await SaveRouteAsync(_store, endpoint.Url);
+        var second = await SaveRouteAsync(_store, endpoint.Url + "2");
+        Assert.NotNull((await _store.GenerateSigningKeyAsync(first)).Key);
+        MakeASecondTrueFlagFail();
+
+        var error = await _store.RemoveSigningKeyAsync(first);
+
+        Assert.Equal(LiteWebhookSigningKeys.RemoveNotSavedText, error);
+        Assert.Contains("held back", error, StringComparison.Ordinal);
+        var state = await _store.SigningStateAsync(first);
+        Assert.True(state!.Value.State.HasKey);
+        Assert.True(state.Value.Unreadable);
+        Assert.False((await _store.SigningStateAsync(second))!.Value.State.HasKey);
+    }
+
+    // ---- round 2: the route dialog's facts come from the row ------------------------------------
+
+    [Fact]
+    public async Task TheStoresSigningRead_ReportsUnreadable_ForARouteWithTheFlagAndNoKeyInCredentialManager()
+    {
+        using var endpoint = new RawEndpoint();
+        var id = await SaveRouteAsync(_store, endpoint.Url);
+        Assert.NotNull((await _store.GenerateSigningKeyAsync(id)).Key);
+        Assert.False((await _store.SigningStateAsync(id))!.Value.Unreadable);
+        Assert.True(_secrets.Delete(LiteWebhookSigningKeys.RouteName(id, false)));
+
+        var read = await _store.SigningStateAsync(id);
+
+        Assert.True(read!.Value.State.HasKey);
+        Assert.True(read.Value.Unreadable);
+
+        /* The route as loaded has no key and its generic channel off: that is what the dialog could not tell from the URL case. */
+        var loaded = Assert.Single(await _store.ListAsync(Ct));
+        Assert.True(loaded.IsOffFor(NotificationRouter.GenericChannel));
+        Assert.False(loaded.GenericSigning!.HasKey);
+    }
+
+    [Fact]
+    public async Task TheStoresSigningRead_IsNotUnreadable_ForARouteWhoseGenericChannelIsOffBecauseItsUrlWillNotOpen()
+    {
+        using var endpoint = new RawEndpoint();
+        var id = await SaveRouteAsync(_store, endpoint.Url);
+        _secrets.Lose(id, NotificationRouter.GenericChannel);
+        Assert.True(Assert.Single(await _store.ListAsync(Ct)).IsOffFor(NotificationRouter.GenericChannel));
+
+        var read = await _store.SigningStateAsync(id);
+
+        Assert.False(read!.Value.State.HasKey);
+        Assert.False(read.Value.Unreadable);
+        Assert.Null(await _store.SigningStateAsync(id + 1000));
+    }
+
+    [Fact]
+    public async Task TheStoresSigningRead_ReportsTheRotationEndTheRowSaved()
+    {
+        using var endpoint = new RawEndpoint();
+        var id = await SaveRouteAsync(_store, endpoint.Url);
+        Assert.NotNull((await _store.GenerateSigningKeyAsync(id)).Key);
+        Assert.Null((await _store.SigningStateAsync(id))!.Value.State.PreviousUntilUtc);
+
+        /* The old key will not open, so the rotation saves no overlap: the dialog must not guess one. */
+        Assert.True(_secrets.Delete(LiteWebhookSigningKeys.RouteName(id, false)));
+        Assert.NotNull((await _store.GenerateSigningKeyAsync(id)).Key);
+        Assert.Null((await _store.SigningStateAsync(id))!.Value.State.PreviousUntilUtc);
+
+        Assert.NotNull((await _store.GenerateSigningKeyAsync(id)).Key);
+        var until = (await _store.SigningStateAsync(id))!.Value.State.PreviousUntilUtc;
+        Assert.NotNull(until);
+        Assert.True(until > DateTime.UtcNow.AddDays(6));
+    }
+
     internal sealed record Captured(string Head, byte[] Body)
     {
         public string? Header(string name) => Head.Split("\r\n")

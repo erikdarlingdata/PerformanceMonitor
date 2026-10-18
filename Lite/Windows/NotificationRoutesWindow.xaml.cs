@@ -102,7 +102,8 @@ public partial class NotificationRoutesWindow : Window
         if (RoutesGrid.SelectedItem is not NotificationRouteRow selected) return;
         var dialog = new NotificationRouteEditDialog(
             _scopeOptions, route => _store.UpdateAsync(route), selected.Route,
-            generateKey: id => _store.GenerateSigningKeyAsync(id), removeKey: id => _store.RemoveSigningKeyAsync(id)) { Owner = this };
+            generateKey: id => _store.GenerateSigningKeyAsync(id), removeKey: id => _store.RemoveSigningKeyAsync(id),
+            signingState: id => _store.SigningStateAsync(id)) { Owner = this };
         if (dialog.ShowDialog() == true)
         {
             await LoadRoutesAsync();

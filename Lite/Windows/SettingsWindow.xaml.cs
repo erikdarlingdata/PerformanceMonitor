@@ -1569,33 +1569,42 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>Writes the two plain facts to settings.json now: a key was just saved to Credential Manager, so the flag that says so
-    /// is saved with it, not left for the Save button.</summary>
-    private static bool PersistGenericSigning()
-    {
-        var saved = false;
-        App.WriteSetting("generic signing key", root =>
+    /// is saved with it, not left for the Save button. True only when the file was written.</summary>
+    private static bool PersistGenericSigning(LiteSigningState state) =>
+        App.TryWriteSetting("generic signing key", root =>
         {
-            root["generic_signing_set"] = App.GenericSigningSet;
-            root["generic_signing_until"] = App.GenericSigningUntilUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture) ?? "";
-            saved = true;
+            root["generic_signing_set"] = state.HasKey;
+            root["generic_signing_until"] = state.PreviousUntilUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture) ?? "";
         });
-        return saved;
+
+    /// <summary>The flag's save for a Generate or Rotate: the in-memory flag moves with the file, and goes back when the file is not
+    /// written. Null when saved, else why not (#6012).</summary>
+    private static string? SaveGenericSigningState(LiteSigningState next)
+    {
+        var before = GenericSigningState();
+        App.GenericSigningSet = next.HasKey;
+        App.GenericSigningUntilUtc = next.PreviousUntilUtc;
+        if (PersistGenericSigning(next))
+        {
+            return null;
+        }
+
+        App.GenericSigningSet = before.HasKey;
+        App.GenericSigningUntilUtc = before.PreviousUntilUtc;
+        return "settings.json could not be written";
     }
 
     private void GenericSigningGenerate_Click(object sender, RoutedEventArgs e)
     {
         var result = LiteWebhookSigningKeys.Generate(
             RouteSecretAccess.CredentialManager(), LiteWebhookSigningKeys.SettingsName(false), LiteWebhookSigningKeys.SettingsName(true),
-            GenericSigningState(), DateTime.UtcNow);
+            GenericSigningState(), DateTime.UtcNow, SaveGenericSigningState);
         if (result.Error is { } error)
         {
             MessageBox.Show(error, "Signing key", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        App.GenericSigningSet = result.State.HasKey;
-        App.GenericSigningUntilUtc = result.State.PreviousUntilUtc;
-        PersistGenericSigning();
         ShowGenericSigning();
 
         /* The key is shown once, in a read-only box to copy from. It is in no label, tooltip or log, and not on the clipboard. */
@@ -1618,9 +1627,17 @@ public partial class SettingsWindow : Window
             return;
         }
 
+        if (!PersistGenericSigning(state))
+        {
+            /* The keys are gone and settings.json still says one is saved. Keep the flag as the file has it (fail closed): the
+               destination reads as unreadable and posts to it are held back until Remove is tried again. */
+            ShowGenericSigning();
+            MessageBox.Show(LiteWebhookSigningKeys.RemoveNotSavedText, "Signing key", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         App.GenericSigningSet = state.HasKey;
         App.GenericSigningUntilUtc = state.PreviousUntilUtc;
-        PersistGenericSigning();
         ShowGenericSigning();
     }
 

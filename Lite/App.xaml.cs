@@ -1678,17 +1678,25 @@ public partial class App : Application
     /// <see cref="SettingsRootForWrite"/>, which is what keeps an unparseable file from being replaced
     /// unrecorded.
     /// </summary>
-    public static void WriteSetting(string what, Action<JsonNode> mutate)
+    public static void WriteSetting(string what, Action<JsonNode> mutate) => _ = TryWriteSetting(what, mutate);
+
+    /// <summary>
+    /// <see cref="WriteSetting"/> that says whether settings.json was written (#6012): true only when the file was written, false
+    /// when the document could not be read for write, <paramref name="mutate"/> threw, or the write failed. The error is logged
+    /// the same way. A caller that must not show something the file does not hold (a new signing key) uses this one.
+    /// </summary>
+    public static bool TryWriteSetting(string what, Action<JsonNode> mutate)
     {
         try
         {
             JsonNode root = SettingsRootForWrite();
             mutate(root);
-            WriteSettingsDocument(root, what);
+            return WriteSettingsDocument(root, what);
         }
         catch (Exception ex)
         {
             AppLogger.Error("Settings", $"Failed to save {what}: {ex.Message}");
+            return false;
         }
     }
 

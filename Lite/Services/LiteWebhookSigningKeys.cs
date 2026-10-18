@@ -23,6 +23,10 @@ public readonly record struct LiteSigningState(bool HasKey, DateTime? PreviousUn
     public static readonly LiteSigningState None = new(false, null);
 }
 
+/// <summary>What the route row says about a key and whether it opens: for the route dialog, which cannot learn it from the loaded
+/// route (a key that will not open turns the generic channel off and loads the route with no key).</summary>
+public readonly record struct LiteRouteSigning(LiteSigningState State, bool Unreadable);
+
 /// <summary>What a Generate or Rotate gave: the new key (shown once, never stored in a place that shows it back), the state to save,
 /// or the sentence for why nothing changed. The error never contains a key.</summary>
 public sealed record LiteSigningKeyResult(string? NewKey, LiteSigningState State, string? Error)
@@ -52,6 +56,10 @@ public static class LiteWebhookSigningKeys
 
     /// <summary>What a test or a send says when a saved key will not open.</summary>
     public const string UnreadableText = "Not sent: a generic webhook signing key could not be opened, and a signed destination is never sent unsigned.";
+
+    /// <summary>What Remove says when the keys are gone but the flag could not be saved (#6012): the flag still says a key is saved,
+    /// so the destination reads as unreadable and is held back, never sent unsigned.</summary>
+    public const string RemoveNotSavedText = "The keys were removed, but the settings could not be saved, so settings still say a key is saved. Posts to this URL are held back until you try Remove again.";
 
     /// <summary>The Credential Manager key of the settings row's generic signing key (current or previous).</summary>
     public static string SettingsName(bool previous) => previous ? "GenericWebhookSigningKeyPrevious" : "GenericWebhookSigningKey";
@@ -126,6 +134,93 @@ public static class LiteWebhookSigningKeys
         }
 
         return new LiteSigningKeyResult(newKey, new LiteSigningState(true, until), null);
+    }
+
+    /// <summary>
+    /// <see cref="Generate(RouteSecretAccess, string, string, LiteSigningState, DateTime)"/> plus the save of the flag's home
+    /// (#6012, round 2): a new key is returned only after Credential Manager and <paramref name="saveState"/> both took it.
+    /// <paramref name="saveState"/> writes the new state (settings.json for the settings row, the route's row for a route) and
+    /// returns null when it worked, else why not. When it fails or throws, both Credential Manager names are put back as they
+    /// were before the call, no key is returned, and the error says so; if the put-back fails too, the error says that.
+    /// The error never contains a key.
+    /// </summary>
+    public static LiteSigningKeyResult Generate(
+        RouteSecretAccess secrets, string currentName, string previousName, LiteSigningState state, DateTime nowUtc,
+        Func<LiteSigningState, string?> saveState)
+    {
+        ArgumentNullException.ThrowIfNull(secrets);
+        ArgumentNullException.ThrowIfNull(saveState);
+        string oldCurrent;
+        string oldPrevious;
+        try
+        {
+            oldCurrent = secrets.Read(currentName) ?? "";
+            oldPrevious = secrets.Read(previousName) ?? "";
+        }
+        catch (Exception ex)
+        {
+            return new LiteSigningKeyResult(null, state, "The saved key could not be read from Windows Credential Manager (" + ex.GetType().Name + "), so the key was not changed.");
+        }
+
+        var made = Generate(secrets, currentName, previousName, state, nowUtc);
+        if (made.Error is not null || made.NewKey is null)
+        {
+            /* Generate may have written the previous key before it stopped; put both back as they were. */
+            if (made.Error is not null)
+            {
+                _ = Restore(secrets, currentName, previousName, oldCurrent, oldPrevious);
+            }
+
+            return made;
+        }
+
+        string? saveFailure;
+        try
+        {
+            saveFailure = saveState(made.State);
+        }
+        catch (Exception ex)
+        {
+            saveFailure = "it failed (" + ex.GetType().Name + ")";
+        }
+
+        if (saveFailure is null)
+        {
+            return made;
+        }
+
+        var restoreFailure = Restore(secrets, currentName, previousName, oldCurrent, oldPrevious);
+        var message = "The new key was not kept: the signing setting could not be saved because " + saveFailure + ".";
+        message += restoreFailure is null
+            ? " Windows Credential Manager was put back as it was, so the key was not changed."
+            : " Windows Credential Manager could not be put back (" + restoreFailure + "), so it may hold a key that was never shown. Rotate the key again or remove it.";
+        return new LiteSigningKeyResult(null, state, message);
+    }
+
+    /// <summary>Puts the two Credential Manager names back to what they held. A name that held nothing is deleted. Null when both
+    /// are as they were, else a short reason. Never contains a key.</summary>
+    private static string? Restore(RouteSecretAccess secrets, string currentName, string previousName, string oldCurrent, string oldPrevious)
+    {
+        try
+        {
+            var ok = RestoreOne(secrets, currentName, oldCurrent);
+            ok &= RestoreOne(secrets, previousName, oldPrevious);
+            return ok ? null : "Windows Credential Manager refused the change";
+        }
+        catch (Exception ex)
+        {
+            return ex.GetType().Name;
+        }
+    }
+
+    private static bool RestoreOne(RouteSecretAccess secrets, string name, string old)
+    {
+        if (string.Equals(secrets.Read(name) ?? "", old, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return old.Length == 0 ? secrets.Delete(name) : secrets.Write(name, old) is null;
     }
 
     /// <summary>Removes both keys. Returns the new state (none), or the same state and an error when a key would not go.</summary>
