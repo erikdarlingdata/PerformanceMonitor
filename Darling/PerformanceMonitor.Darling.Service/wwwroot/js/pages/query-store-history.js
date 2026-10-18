@@ -148,7 +148,7 @@ function planTable(server, data, scope) {
       cell(num(p.total_cpu_ms, fmtMs), "num"),
       cell(p.first_execution_time == null ? null : localTime(p.first_execution_time)),
       cell(p.last_execution_time == null ? null : localTime(p.last_execution_time)),
-      cell(p.is_forced_plan ? "Yes" : "No"),
+      cell(p.forced_state ? "Yes (" + p.forced_state.toLowerCase().replace("_", " ") + ")" : p.is_forced_plan ? "Yes" : "No"),
       el("td", {}, [
         planSourceCell(
           server,

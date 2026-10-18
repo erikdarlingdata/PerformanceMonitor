@@ -231,6 +231,44 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
     }
 
     [Fact]
+    public async Task TheHistoryTool_ListsAForcedPlanWithNoExecutionsInTheWindow_AndNotARemovedOne()
+    {
+        await WithStoreAsync(async (rig, ct) =>
+        {
+            await SeedStatesAsync(rig.Connection, ct);
+            var asOf = AsOf.ToString("o", CultureInfo.InvariantCulture);
+
+            /* Query 2's forced plan 21 never ran: the old read had no row for it and answered "empty". */
+            using (var never = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, "StateDb", 2, ServerName, 24, asOf, ct)))
+            {
+                var plan = Assert.Single(never.RootElement.GetProperty("plans").EnumerateArray());
+                Assert.Equal(21, plan.GetProperty("plan_id").GetInt64());
+                Assert.Equal(0, plan.GetProperty("execution_count").GetInt64());
+                Assert.True(plan.GetProperty("is_forced_plan").GetBoolean());
+                Assert.Equal("NOT_EXERCISED", plan.GetProperty("forced_state").GetString());
+                Assert.Equal("NOT_EXERCISED", Assert.Single(never.RootElement.GetProperty("forced_plans").EnumerateArray()).GetProperty("state").GetString());
+            }
+
+            /* Query 3: both its plans ran, and the forced one carries its state. */
+            using (var ignored = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, "StateDb", 3, ServerName, 24, asOf, ct)))
+            {
+                var byPlan = ignored.RootElement.GetProperty("plans").EnumerateArray().ToDictionary(e => e.GetProperty("plan_id").GetInt64());
+                Assert.Equal("IGNORED", byPlan[31].GetProperty("forced_state").GetString());
+                Assert.Equal(JsonValueKind.Null, byPlan[32].GetProperty("forced_state").ValueKind);
+            }
+
+            /* Query 5: its force was removed, so plan 51 is no longer listed as forced. */
+            using (var removed = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, "StateDb", 5, ServerName, 24, asOf, ct)))
+            {
+                Assert.Empty(removed.RootElement.GetProperty("forced_plans").EnumerateArray());
+                Assert.Equal(JsonValueKind.Null, Assert.Single(removed.RootElement.GetProperty("plans").EnumerateArray()).GetProperty("forced_state").ValueKind);
+            }
+
+            return 0;
+        });
+    }
+
+    [Fact]
     public void Classify_AppliesTheRulesInOrder()
     {
         Assert.Equal(ForcedPlanState.Removed, DarlingForcedPlanStateReader.Classify(false, 3, "X", true, true));

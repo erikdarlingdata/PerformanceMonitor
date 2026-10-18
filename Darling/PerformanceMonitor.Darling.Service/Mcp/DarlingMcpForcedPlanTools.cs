@@ -155,7 +155,7 @@ public sealed class DarlingMcpForcedPlanTools
         forced_plan_count = c.ForcedPlanCount,
     };
 
-    private static object ForceNode(ForcedPlanFact p) => new
+    internal static object ForceNode(ForcedPlanFact p) => new
     {
         database_name = p.DatabaseName,
         query_id = p.QueryId,

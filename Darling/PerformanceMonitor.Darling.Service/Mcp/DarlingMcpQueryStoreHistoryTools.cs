@@ -269,12 +269,34 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         }
     }
 
+    /// <summary>
+    /// The forces of one query that stand in their database's newest forced-plan capture in the window (#5632), with their state. A read that
+    /// fails leaves the history answer whole and says so in <c>forced_plans_status</c>: a history is still worth giving without the forces.
+    /// </summary>
+    private static async Task<(List<ForcedPlanFact> Facts, string Status)> TryReadForcedPlansAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var read = await DarlingForcedPlanStateReader.ReadAsync(
+                postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var facts = read.Plans.Where(f => f.QueryId == queryId && f.State != ForcedPlanState.Removed).Take(MaxPlans).ToList();
+            return (facts, read.Captures.Count == 0 ? "no_capture_in_window" : "ok");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.NoteFallback(ReadFallback.FallbackRaw, "#5632 forced plans read", ex);
+            return (new List<ForcedPlanFact>(), "unavailable");
+        }
+    }
+
     [McpServerTool(Name = "get_query_store_query_history"), Description(
         "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. window_truncated marks a history floor. <<GUIDE>>" +
         "Per-plan averages are execution-weighted (total over executions), so they can differ from get_query_store_top, which averages the interval averages. " +
         "Outcomes (Regular, Aborted, Exception) and replica roles are combined, execution-weighted, into one value per plan and collection time. " +
         "Reads the raw tier, or the per-interval table (kept 10 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
-        "points keeps the newest 150 of the listed plans (points_truncated) and plans the 20 longest by total duration (plans_truncated).")]
+        "points keeps the newest 150 of the listed plans (points_truncated) and plans the 20 longest by total duration (plans_truncated). " +
+        "Every plan of the query forced in its database's newest forced-plan capture is listed (forced_state: WORKING, NOT_EXERCISED, IGNORED or FAILING; get_forced_plans explains the states), even with no executions in the window.")]
     public static async Task<string> GetQueryStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
@@ -338,7 +360,11 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                 emptyHints = DarlingMcpWindowNotice.Build(floor, start, "query_store_stats", emptyAnswer: true).AsHints();
             }
 
-            if (rows.Count == 0)
+            /* #5632: the forced plans of this query, read apart from the history rows (HistorySql and HistoryTableSql are unchanged), so a forced
+               plan that never ran in the window still appears. */
+            var forced = await TryReadForcedPlansAsync(postgres, resolved.ServerId, database_name, query_id, start, windowEnd, cancellationToken);
+
+            if (rows.Count == 0 && forced.Facts.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched.",
@@ -347,6 +373,13 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             var allPlans = FoldPlans(rows);
             var plansTruncated = allPlans.Count > MaxPlans;
             var plans = plansTruncated ? allPlans.OrderByDescending(p => p.TotalDurationMs).Take(MaxPlans).OrderBy(p => p.PlanId).ToList() : allPlans;
+            var forcedById = forced.Facts.ToDictionary(f => f.PlanId);
+            /* A plan forced in the newest capture is always listed, cut or not, run or not. */
+            plans = plans
+                .Concat(allPlans.Where(p => forcedById.ContainsKey(p.PlanId) && !plans.Any(k => k.PlanId == p.PlanId)))
+                .Concat(forced.Facts.Where(f => !allPlans.Any(p => p.PlanId == f.PlanId))
+                    .Select(f => new PlanTotals(f.PlanId, 0, null, 0, null, 0, null, null, true)))
+                .OrderBy(p => p.PlanId).ToList();
             var allPoints = BuildPoints(rows, plans.Select(p => p.PlanId));
             var points = NewestWithinBudget(allPoints, p => JsonSerializer.SerializeToUtf8Bytes(p, McpHelpers.JsonOptions).Length, MaxPoints, PointByteBudget);
             var pointsTruncated = points.Count < allPoints.Count;
@@ -366,9 +399,12 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                     total_cpu_ms = p.TotalCpuMs,
                     first_execution_time = p.FirstExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
                     last_execution_time = p.LastExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
-                    is_forced_plan = p.IsForcedPlan
+                    is_forced_plan = p.IsForcedPlan || forcedById.ContainsKey(p.PlanId),
+                    forced_state = forcedById.TryGetValue(p.PlanId, out var forcedFact) ? DarlingMcpForcedPlanTools.StateName(forcedFact.State) : null
                 }),
                 plans_truncated = plansTruncated,
+                forced_plans = forced.Facts.Select(DarlingMcpForcedPlanTools.ForceNode),
+                forced_plans_status = forced.Status,
                 points,
                 points_truncated = pointsTruncated
             }, McpHelpers.JsonOptions);
