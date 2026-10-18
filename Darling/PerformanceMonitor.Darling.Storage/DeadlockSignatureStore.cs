@@ -245,7 +245,7 @@ RETURNING merge_id";
             return new MergeProblem("invalid", $"A deadlock signature starts with {DeadlockSignaturePrefix}. Use the signatures from the deadlock_digest event.");
         }
 
-        await using var command = new NpgsqlCommand(MergeStateSql, connection, transaction);
+        await using var command = new NpgsqlCommand(MergeStateSql, connection, transaction) { CommandTimeout = MergeCommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = signature });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = mergedInto });
@@ -276,7 +276,7 @@ RETURNING merge_id";
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string signature, string mergedInto,
         string reason, string mergedBy, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(InsertMergeSql, connection, transaction);
+        await using var command = new NpgsqlCommand(InsertMergeSql, connection, transaction) { CommandTimeout = MergeCommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = signature });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = mergedInto });
@@ -288,10 +288,14 @@ RETURNING merge_id";
     /// <summary>Serialises merges on one server for the rest of the transaction.</summary>
     public static async Task LockMergesAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand("SELECT pg_advisory_xact_lock(6006, $1)", connection, transaction);
+        await using var command = new NpgsqlCommand("SELECT pg_advisory_xact_lock(6006, $1)", connection, transaction) { CommandTimeout = MergeCommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    /// <summary>The deadline of the merge tool's three statements (the lock, the check and the insert), which run inside the gate's
+    /// write transaction as the mcp login; each is a keyed lookup or one-row insert (#6006).</summary>
+    internal const int MergeCommandTimeoutSeconds = 30;
 
     private const string DeadlockSignaturePrefix = "dl1-";
 
