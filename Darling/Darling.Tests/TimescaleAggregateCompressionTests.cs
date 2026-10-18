@@ -321,7 +321,7 @@ public sealed class TimescaleAggregateCompressionTests
             var sql = TimescaleSupport.AddAggregateCompressionPolicySql(view, night);
 
             Assert.StartsWith($"SELECT add_compression_policy('collect.{view}', ", sql, StringComparison.Ordinal);
-            Assert.Contains($"compress_after => INTERVAL '{(hourly ? "2 days" : "4 days")}'", sql, StringComparison.Ordinal);
+            Assert.Contains($"compress_after => INTERVAL '{(hourly ? "2 days" : view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "5 days" : "4 days")}'", sql, StringComparison.Ordinal);
             Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
             Assert.Contains(
