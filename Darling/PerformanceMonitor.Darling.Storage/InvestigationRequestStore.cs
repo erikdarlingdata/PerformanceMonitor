@@ -190,9 +190,9 @@ LEFT JOIN LATERAL (
     FROM collect.procedure_stats AS p
     WHERE p.server_id = r.server_id
       AND p.collection_time >= ($1 AT TIME ZONE 'UTC') - INTERVAL '" + DeployReadWindowMinutes + @" minutes'
-      AND p.database_name = split_part(substr(r.follow_up_condition, 8), '.', 1)
-      AND p.schema_name = split_part(substr(r.follow_up_condition, 8), '.', 2)
-      AND p.object_name = split_part(substr(r.follow_up_condition, 8), '.', 3)
+      AND lower(p.database_name) = lower(split_part(substr(r.follow_up_condition, 8), '.', 1))
+      AND lower(p.schema_name) = lower(split_part(substr(r.follow_up_condition, 8), '.', 2))
+      AND lower(p.object_name) = lower(split_part(substr(r.follow_up_condition, 8), '.', 3))
       AND p.module_modify_date > (r.reported_at AT TIME ZONE 'UTC')
 ) AS d ON r.follow_up_condition IS NOT NULL
 WHERE r.state = 'reported'
@@ -214,9 +214,9 @@ SELECT (p.collection_time >= ($2 AT TIME ZONE 'UTC')) AS after_change, count(*),
 FROM config.investigation_requests AS r
 JOIN collect.procedure_stats AS p ON p.server_id = r.server_id
 WHERE r.request_id = $1
-  AND p.database_name = split_part(substr(r.follow_up_condition, 8), '.', 1)
-  AND p.schema_name = split_part(substr(r.follow_up_condition, 8), '.', 2)
-  AND p.object_name = split_part(substr(r.follow_up_condition, 8), '.', 3)
+  AND lower(p.database_name) = lower(split_part(substr(r.follow_up_condition, 8), '.', 1))
+  AND lower(p.schema_name) = lower(split_part(substr(r.follow_up_condition, 8), '.', 2))
+  AND lower(p.object_name) = lower(split_part(substr(r.follow_up_condition, 8), '.', 3))
   AND p.collection_time >= ($2 AT TIME ZONE 'UTC') - INTERVAL '" + DeployCountsBeforeHours + @" hours'
   AND p.collection_time <= ($3 AT TIME ZONE 'UTC')
 GROUP BY 1";
