@@ -55,14 +55,14 @@ public sealed class InvestigationDeployFollowUpLiveTests
     }
 
     /// <summary>Reports a request on server 7 with a deploy condition on <see cref="Module"/> and a time 20 days out.</summary>
-    private async Task<Guid> ReportedAsync(InvestigationRequestStore store, CancellationToken ct)
+    private async Task<Guid> ReportedAsync(InvestigationRequestStore store, CancellationToken ct, string condition = Module)
     {
         var alert = new InvestigationAlert(1, 7, "srv-7", "blocking", "Blocking", _now, new[] { "key" }, null, 500, 500, LeaseMinutes: 15, ExpiryMinutes: 240);
         var id = (await store.OpenOrJoinAsync(alert, ct)).RequestId!.Value;
         var claim = (await store.ClaimAsync(id, "agent-a", ct)).ClaimId!.Value;
         var answer = JsonDocument.Parse(await DarlingMcpInvestigationTools.SubmitAsync(store, id.ToString(), claim.ToString(), 1, "needs_person",
             "a blocking chain", Evidence, "summary", null, null, ct,
-            follow_up_at: DateTime.UtcNow.AddDays(20).ToString("o", CultureInfo.InvariantCulture), follow_up_condition: Module));
+            follow_up_at: DateTime.UtcNow.AddDays(20).ToString("o", CultureInfo.InvariantCulture), follow_up_condition: condition));
         Assert.Equal("reported", answer.RootElement.GetProperty("status").GetString());
         return id;
     }
@@ -235,6 +235,30 @@ VALUES ($1, $2, 7, 'srv-7', 'Shop', 'dbo', 'usp_Orders', $3, $4, $5, 300, $6)", 
             Assert.Equal(300, after.GetProperty("executions").GetInt64());
             Assert.Equal(4.0, after.GetProperty("avg_cpu_ms").GetDouble());
             Assert.Equal(8.0, after.GetProperty("avg_duration_ms").GetDouble());
+        });
+    }
+
+    [Fact]
+    public async Task AConditionTypedInAnotherCase_StillOpensEarly_AndItsBriefReadsTheModulesRows()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var earlier = await ReportedAsync(store, ct, "module:SHOP.Dbo.USP_ORDERS");
+            await SeedAsync(connection, 1, _now.AddHours(-1), Deployed1, 100, 10, 20, ct);
+            await SeedAsync(connection, 2, RecentCollection, Deployed2, 300, 4, 8, ct);
+
+            var later = new InvestigationRequestStore(dataSource, 30, () => SweepAt);
+            Assert.Equal(1, (await later.SweepAsync(ct)).FollowUps);
+            Assert.Equal("deploy", await ScalarAsync(connection,
+                "SELECT detail::jsonb ->> 'trigger' FROM config.investigation_journal WHERE event = 'follow_up'", ct));
+            var followUpId = Guid.Parse((await ScalarAsync(connection,
+                $"SELECT request_id::text FROM config.investigation_requests WHERE follow_up_of = '{earlier}'", ct))!);
+
+            var sources = await new PgInvestigationBriefSourceReader(dataSource, utcNow: () => SweepAt).ReadAsync(followUpId, ct);
+            var section = Assert.Single(sources!.Evidence!, e => e.Section == "deploy_follow_up");
+            var content = JsonDocument.Parse(section.ContentJson!).RootElement;
+            Assert.Equal(100, content.GetProperty("before").GetProperty("executions").GetInt64());
+            Assert.Equal(300, content.GetProperty("after").GetProperty("executions").GetInt64());
         });
     }
 
