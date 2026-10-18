@@ -93,7 +93,7 @@ public sealed class AgentChangeUndo
     public static readonly TimeSpan Window = TimeSpan.FromDays(365);
 
     /// <summary>The kinds an undo exists for.</summary>
-    public static readonly IReadOnlySet<string> UndoableKinds = new HashSet<string>(StringComparer.Ordinal) { AgentChangeKinds.Mute, AgentChangeKinds.CustomRule, AgentChangeKinds.ThresholdOverride };
+    public static readonly IReadOnlySet<string> UndoableKinds = new HashSet<string>(StringComparer.Ordinal) { AgentChangeKinds.Mute, AgentChangeKinds.CustomRule, AgentChangeKinds.ThresholdOverride, AgentChangeKinds.SignatureMerge };
 
     private sealed record Spec(string Table, (string Name, ImageColumnType Type)[] Fields);
 
@@ -101,6 +101,7 @@ public sealed class AgentChangeUndo
     private static readonly Spec MuteSpec = new(MuteRuleImage.Table, ImageColumns.Of<MuteRuleImage>());
     private static readonly Spec RuleSpec = new(CustomAlertRuleImage.Table, ImageColumns.Of<CustomAlertRuleImage>());
     private static readonly Spec OverrideSpec = new(ThresholdOverrideImage.Table, ImageColumns.Of<ThresholdOverrideImage>());
+    private static readonly Spec MergeSpec = new(SignatureMergeImage.Table, ImageColumns.Of<SignatureMergeImage>());
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -361,6 +362,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             AgentChangeKinds.Mute => MuteSpec,
             AgentChangeKinds.CustomRule => RuleSpec,
             AgentChangeKinds.ThresholdOverride => OverrideSpec,
+            AgentChangeKinds.SignatureMerge => MergeSpec,
             _ => null,
         };
         if (kind is null || spec is null)
@@ -391,11 +393,17 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             return AgentUndoResult.Refused("not_undoable", "This change's target is not recorded.");
 
         var current = await ReadCurrentAsync(connection, transaction, spec, key, cancellationToken);
-        var label = kind switch { AgentChangeKinds.Mute => "mute rule", AgentChangeKinds.CustomRule => "custom alert rule", _ => "threshold override" };
+        var label = kind switch { AgentChangeKinds.Mute => "mute rule", AgentChangeKinds.CustomRule => "custom alert rule", AgentChangeKinds.SignatureMerge => "deadlock signature merge", _ => "threshold override" };
         if (!Equal(spec, current, after))
             return AgentUndoResult.Refused("changed_since", $"Not undone: the {label} changed since the agent's change, so its current settings are kept. Review it and change it by hand if you still want it back.");
 
-        if (after is not null && before is null)
+        if (after is not null && before is null && kind == AgentChangeKinds.SignatureMerge)
+        {
+            /* #6006: the merge row is the record of the decision, so an undo stamps it and keeps it (the live index counts only
+               rows with no undone_at). */
+            await StampMergeUndoneAsync(connection, transaction, key, actor, cancellationToken);
+        }
+        else if (after is not null && before is null)
         {
             await DeleteAsync(connection, transaction, spec, key, cancellationToken);
         }
@@ -449,6 +457,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     {
         AgentChangeKinds.Mute => ImageColumns.ToObject<MuteRuleImage>(node),
         AgentChangeKinds.CustomRule => ImageColumns.ToObject<CustomAlertRuleImage>(node),
+        AgentChangeKinds.SignatureMerge => ImageColumns.ToObject<SignatureMergeImage>(node),
         _ => ImageColumns.ToObject<ThresholdOverrideImage>(node),
     };
 
@@ -464,7 +473,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             return long.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? new RowKey(kind, id, n, 0, null) : null;
         }
 
-        if (kind == AgentChangeKinds.ThresholdOverride)
+        if (kind is AgentChangeKinds.ThresholdOverride or AgentChangeKinds.SignatureMerge)
             return serverId is int sid ? new RowKey(kind, id, null, sid, database) : null;
         return new RowKey(kind, id, null, 0, null);
     }
@@ -473,6 +482,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     {
         AgentChangeKinds.Mute => "id = $1",
         AgentChangeKinds.CustomRule => "id = $1",
+        AgentChangeKinds.SignatureMerge => "server_id = $1 AND signature = $2 AND undone_at IS NULL",
         _ => "server_id = $1 AND coalesce(database_name, '') = coalesce($2::text, '') AND threshold_key = $3",
     };
 
@@ -480,6 +490,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     {
         AgentChangeKinds.Mute => [PText(key.Id)],
         AgentChangeKinds.CustomRule => [P(key.RuleId!.Value)],
+        AgentChangeKinds.SignatureMerge => [P(key.ServerId), PText(key.Id)],
         _ => [P(key.ServerId), PText(key.Database), PText(key.Id)],
     };
 
@@ -557,6 +568,13 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     private static JsonNode? Structured(JsonNode node) =>
         node is JsonValue v && v.TryGetValue(out string? s) && s is not null && (s.TrimStart().StartsWith('{') || s.TrimStart().StartsWith('['))
             ? JsonNode.Parse(s) : node;
+
+    private async Task StampMergeUndoneAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, RowKey key, string actor, CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction,
+            $"UPDATE {SignatureMergeImage.Table} SET undone_at = now(), undone_by = $3 WHERE {Where(key)}", [.. KeyParams(key), PText(actor)]);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
 
     private async Task DeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Spec spec, RowKey key, CancellationToken cancellationToken)
     {

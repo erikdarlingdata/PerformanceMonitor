@@ -26,8 +26,22 @@ public sealed record SignatureDayStats(string Signature, int Today, int Yesterda
 /// </summary>
 public sealed class DeadlockSignatureStore
 {
+    /* #6006: a signature merged into another is counted as that other (one level: a merge is refused when either side is already
+       part of a live merge). CanonicalSql is the one place that rule is written; the three reads below use it. */
+    internal const string CanonicalSql = @"
+SELECT signature, merged_into FROM config.investigation_signature_merges
+WHERE server_id = $1 AND undone_at IS NULL AND signature = ANY ($2)";
+
+    /* A signature is known when any day row counts under the same canonical signature: its own, or a merged-in sibling's. */
     internal const string ExistingSql = @"
-SELECT DISTINCT signature FROM config.investigation_signature_days WHERE server_id = $1 AND signature = ANY ($2)";
+SELECT s.sig FROM unnest($2::text[]) AS s(sig)
+WHERE EXISTS (
+    SELECT 1 FROM config.investigation_signature_days AS d
+    WHERE d.server_id = $1
+      AND COALESCE((SELECT m.merged_into FROM config.investigation_signature_merges AS m
+                    WHERE m.server_id = d.server_id AND m.signature = d.signature AND m.undone_at IS NULL), d.signature)
+        = COALESCE((SELECT m.merged_into FROM config.investigation_signature_merges AS m
+                    WHERE m.server_id = $1 AND m.signature = s.sig AND m.undone_at IS NULL), s.sig))";
 
     internal const string UpsertSql = @"
 INSERT INTO config.investigation_signature_days (server_id, signature, day, count)
@@ -35,13 +49,15 @@ VALUES ($1, $2, $3, $4)
 ON CONFLICT (server_id, signature, day) DO UPDATE SET count = config.investigation_signature_days.count + EXCLUDED.count";
 
     internal const string StatsSql = @"
-SELECT signature,
-       COALESCE(sum(count) FILTER (WHERE day = $2), 0)::integer,
-       COALESCE(sum(count) FILTER (WHERE day = $2 - 1), 0)::integer,
-       COALESCE(sum(count) FILTER (WHERE day >= $2 - 7 AND day < $2), 0)::integer
-FROM config.investigation_signature_days
-WHERE server_id = $1 AND day >= $2 - 7
-GROUP BY signature";
+SELECT COALESCE(m.merged_into, d.signature) AS signature,
+       COALESCE(sum(d.count) FILTER (WHERE d.day = $2), 0)::integer,
+       COALESCE(sum(d.count) FILTER (WHERE d.day = $2 - 1), 0)::integer,
+       COALESCE(sum(d.count) FILTER (WHERE d.day >= $2 - 7 AND d.day < $2), 0)::integer
+FROM config.investigation_signature_days AS d
+LEFT JOIN config.investigation_signature_merges AS m
+       ON m.server_id = d.server_id AND m.signature = d.signature AND m.undone_at IS NULL
+WHERE d.server_id = $1 AND d.day >= $2 - 7
+GROUP BY COALESCE(m.merged_into, d.signature)";
 
     /* The digest has to name a request: the journal's readers join an event to its request for the route. It attaches to the
        server's newest live-family request on an agent route (any state, never a practice one). */
@@ -86,6 +102,7 @@ ORDER BY opened_at DESC LIMIT 1";
             }
         }
 
+        var canonical = await CanonicalAsync(connection, transaction, serverId, counts.Keys, cancellationToken);
         foreach (var (signature, count) in counts)
         {
             await using var upsert = Command(connection, transaction, UpsertSql,
@@ -96,12 +113,39 @@ ORDER BY opened_at DESC LIMIT 1";
             await upsert.ExecuteNonQueryAsync(cancellationToken);
             if (!existing.Contains(signature))
             {
-                fresh.Add(signature);
+                fresh.Add(canonical.GetValueOrDefault(signature, signature));
             }
         }
 
         await transaction.CommitAsync(cancellationToken);
         return fresh;
+    }
+
+    /// <summary>
+    /// Each signature in <paramref name="signatures"/> with a live merge, mapped to the signature it is merged into. A signature
+    /// with no live merge is not in the answer.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, string>> CanonicalAsync(
+        int serverId, IEnumerable<string> signatures, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await CanonicalAsync(connection, null, serverId, signatures, cancellationToken);
+    }
+
+    private async Task<Dictionary<string, string>> CanonicalAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, IEnumerable<string> signatures, CancellationToken cancellationToken)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using var command = Command(connection, transaction, CanonicalSql,
+            new NpgsqlParameter<int> { TypedValue = serverId },
+            new NpgsqlParameter<string[]> { TypedValue = signatures.ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            map[reader.GetString(0)] = reader.GetString(1);
+        }
+
+        return map;
     }
 
     /// <summary>The day rows of every signature the server has counted in the 7 days up to <paramref name="today"/>.</summary>
@@ -159,6 +203,97 @@ ORDER BY opened_at DESC LIMIT 1";
         await transaction.CommitAsync(cancellationToken);
         return written > 0 ? 1 : 0;
     }
+
+    /// <summary>The refusal word for a merge that cannot be made (<c>invalid</c>, <c>unknown_signature</c>, <c>already_merged</c>, <c>merge_chain</c>).</summary>
+    public sealed record MergeProblem(string Code, string Message);
+
+    internal const string MergeStateSql = @"
+SELECT
+  EXISTS (SELECT 1 FROM config.investigation_signature_days WHERE server_id = $1 AND signature = $2),
+  EXISTS (SELECT 1 FROM config.investigation_signature_days WHERE server_id = $1 AND signature = $3),
+  EXISTS (SELECT 1 FROM config.investigation_signature_merges WHERE server_id = $1 AND signature = $2 AND undone_at IS NULL),
+  EXISTS (SELECT 1 FROM config.investigation_signature_merges WHERE server_id = $1 AND signature = $3 AND undone_at IS NULL),
+  EXISTS (SELECT 1 FROM config.investigation_signature_merges WHERE server_id = $1 AND merged_into = $2 AND undone_at IS NULL)";
+
+    internal const string InsertMergeSql = @"
+INSERT INTO config.investigation_signature_merges (server_id, signature, merged_into, reason, merged_by)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING merge_id";
+
+    /// <summary>
+    /// Why a merge of <paramref name="signature"/> into <paramref name="mergedInto"/> on the server is refused, or null when it may
+    /// go ahead. Merges are one level deep: the target must not itself be merged away, and the merged signature must not be a
+    /// target. Both signatures must have been counted (a day row inside the 30 days the rollup keeps).
+    /// </summary>
+    public static async Task<MergeProblem?> CheckMergeAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, int serverId, string signature, string mergedInto,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(signature) || string.IsNullOrWhiteSpace(mergedInto))
+        {
+            return new MergeProblem("invalid", "signature and merged_into are both required.");
+        }
+
+        if (string.Equals(signature, mergedInto, StringComparison.Ordinal))
+        {
+            return new MergeProblem("invalid", "A signature cannot be merged into itself.");
+        }
+
+        if (!signature.StartsWith(DeadlockSignaturePrefix, StringComparison.Ordinal)
+            || !mergedInto.StartsWith(DeadlockSignaturePrefix, StringComparison.Ordinal))
+        {
+            return new MergeProblem("invalid", $"A deadlock signature starts with {DeadlockSignaturePrefix}. Use the signatures from the deadlock_digest event.");
+        }
+
+        await using var command = new NpgsqlCommand(MergeStateSql, connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = signature });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = mergedInto });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        var (knownFrom, knownTo, fromMerged, toMerged, fromIsTarget) =
+            (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4));
+        if (!knownFrom || !knownTo)
+        {
+            return new MergeProblem("unknown_signature", "Both signatures must be ones this server has counted in the last 30 days (see the deadlock_digest event).");
+        }
+
+        if (fromMerged)
+        {
+            return new MergeProblem("already_merged", "The first signature is already merged into another. Undo that merge first.");
+        }
+
+        if (toMerged || fromIsTarget)
+        {
+            return new MergeProblem("merge_chain", "Merges are one level deep: merge into the signature the others already merge into, not into one that is merged away, and not away from one that others merge into.");
+        }
+
+        return null;
+    }
+
+    /// <summary>Writes the merge row inside the caller's transaction and answers its id. Takes the server's merge lock first, so two merges cannot build a chain between them.</summary>
+    public static async Task<long> InsertMergeAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string signature, string mergedInto,
+        string reason, string mergedBy, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(InsertMergeSql, connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = signature });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = mergedInto });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = reason });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = mergedBy });
+        return (long)(await command.ExecuteScalarAsync(cancellationToken))!;
+    }
+
+    /// <summary>Serialises merges on one server for the rest of the transaction.</summary>
+    public static async Task LockMergesAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand("SELECT pg_advisory_xact_lock(6006, $1)", connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private const string DeadlockSignaturePrefix = "dl1-";
 
     private NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, params NpgsqlParameter[] parameters)
     {

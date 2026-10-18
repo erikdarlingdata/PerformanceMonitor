@@ -144,14 +144,14 @@ public sealed class DarlingMcpInvestigationToolsTests
             Assert.False(byName[name].DestructiveHint);
         }
 
-        /* #5915, #5916: the investigations arm serves exactly the eight Level 2 action tools of the writes, each through the gate. The
+        /* #5915, #5916: the investigations arm serves exactly the nine Level 2 action tools of the writes, each through the gate. The
            literal is the behaviour pin: a write added to or dropped from the served set changes this list on purpose. */
         var servedWrites = byName.Keys.Where(DarlingMcpWritePolicy.IsWrite).OrderBy(n => n, StringComparer.Ordinal).ToArray();
         Assert.Equal(
             new[]
             {
                 "create_custom_alert_rule", "create_mute_rule", "delete_custom_alert_rule", "delete_mute_rule",
-                "set_alert_threshold_override", "set_mute_rule_enabled", "update_custom_alert_rule", "update_mute_rule",
+                "merge_deadlock_signatures", "set_alert_threshold_override", "set_mute_rule_enabled", "update_custom_alert_rule", "update_mute_rule",
             },
             servedWrites);
         /* Every other write stays unserved: alert settings, the finding mute, routes, Custom Views, server tags, server admin. */

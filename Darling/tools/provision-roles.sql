@@ -1989,8 +1989,9 @@ END $do$;
 
 -- 3l. Phase C tables (V193, #5997), mirroring managed provisioning's section 10f grant for grant. Only the store owner (the
 --     service) writes them. REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege from PUBLIC
---     and the three roles, and SELECT goes back to all three: the web dashboard and the MCP tools read them. A later slice that
---     lets a role write one adds that single grant here and in managed section 10f.
+--     and the three roles, and SELECT goes back to all three: the web dashboard and the MCP tools read them. The merge table's two
+--     grants (#6006) are the first such writes. A later slice that lets a role write one adds that single grant here and in
+--     managed section 10f.
 --     The three tables are created by V193: on a store below it the block warns and skips, so the rest of the script still
 --     runs; re-run the script once the service has migrated the store to V193.
 DO $do$
@@ -2005,6 +2006,10 @@ BEGIN
    REVOKE ALL ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges FROM PUBLIC, admin, viewer, mcp CASCADE;
    GRANT SELECT ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges TO admin, viewer;
    GRANT SELECT ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges TO mcp;
+   -- #6006: the one write a role gets here. The gated merge tool runs as mcp and adds a merge row, naming only the columns an
+   -- agent supplies (merge_id and merged_at are the table's own); a person's undo runs as admin and stamps undone_at and undone_by.
+   GRANT INSERT (server_id, signature, merged_into, reason, merged_by) ON config.investigation_signature_merges TO mcp;
+   GRANT UPDATE (undone_at, undone_by) ON config.investigation_signature_merges TO admin;
 END $do$;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the

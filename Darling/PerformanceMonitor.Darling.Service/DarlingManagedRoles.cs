@@ -1830,6 +1830,10 @@ GRANT SELECT ON {config}.investigation_evidence, {config}.investigation_signatur
    TO {admin}, {viewer};
 GRANT SELECT ON {config}.investigation_evidence, {config}.investigation_signature_days, {config}.investigation_signature_merges
    TO {mcp};
+-- #6006: the one write a role gets here. The gated merge tool runs as mcp and adds a merge row, naming only the columns an
+-- agent supplies (merge_id and merged_at are the table's own); a person's undo runs as admin and stamps undone_at and undone_by.
+GRANT INSERT (server_id, signature, merged_into, reason, merged_by) ON {config}.investigation_signature_merges TO {mcp};
+GRANT UPDATE (undone_at, undone_by) ON {config}.investigation_signature_merges TO {admin};
 
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,

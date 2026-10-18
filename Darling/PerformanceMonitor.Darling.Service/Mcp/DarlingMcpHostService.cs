@@ -1496,6 +1496,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                served only under DarlingMcpWritePolicy's investigations arm (a token, mcp.allowWrites off). */
             .WithGeminiCompatibleTools<DarlingMcpInvestigationTools>()
             .WithGeminiCompatibleTools<DarlingMcpThresholdOverrideTools>()
+            .WithGeminiCompatibleTools<DarlingMcpSignatureMergeTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
             .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
             /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central

@@ -38,6 +38,7 @@ public static class AgentChangeKinds
     public const string Mute = "mute";
     public const string CustomRule = "custom_rule";
     public const string ThresholdOverride = "threshold_override";
+    public const string SignatureMerge = "signature_merge";
 }
 
 /// <summary>A mute rule as <c>config.config_mute_rules</c> holds it. Also the wire shape of the mute tools' <c>mute_rule</c> object.</summary>
@@ -84,6 +85,19 @@ public sealed record ThresholdOverrideImage(
 {
     public const string Kind = AgentChangeKinds.ThresholdOverride;
     public const string Table = "config.config_threshold_overrides";
+}
+
+/// <summary>
+/// A deadlock signature merge as <c>config.investigation_signature_merges</c> holds it (#6006). Its key (server, merged
+/// signature) is the journal's target; an undo stamps <c>undone_at</c> and <c>undone_by</c> and keeps the row.
+/// </summary>
+public sealed record SignatureMergeImage(
+    [property: JsonPropertyName("merge_id")] long MergeId,
+    [property: JsonPropertyName("signature")] string Signature,
+    [property: JsonPropertyName("merged_into"), ImageColumn(ImageColumnType.Text)] string MergedInto)
+{
+    public const string Kind = AgentChangeKinds.SignatureMerge;
+    public const string Table = "config.investigation_signature_merges";
 }
 
 /// <summary>Reads an image record's column list from its attributes, so the undo's SQL names the columns the record names and no list is kept twice.</summary>

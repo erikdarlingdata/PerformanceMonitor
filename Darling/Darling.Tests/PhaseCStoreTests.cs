@@ -348,6 +348,35 @@ public sealed class PhaseCStoreGrantLiveTests
         /* The desktop Viewer connects as admin and manages the keys, so admin is not carved. */
         await using var admin = await LoginAsync(scratch, "admin", adminPassword, ct);
         await ExecAsync(admin, "SELECT signing_key, previous_signing_key FROM config.config_notification_routes", ct);
+
+        /* #6006: the signature merge is the one Phase C write. mcp adds a merge row (only the columns it supplies); admin stamps the
+           undo; nobody else writes, and mcp cannot rewrite or undo one. */
+        await using (var mcp = await LoginAsync(scratch, "mcp", mcpPassword, ct))
+        {
+            await ExecAsync(mcp, "INSERT INTO config.investigation_signature_merges (server_id, signature, merged_into, reason, merged_by) VALUES (1, 'dl1-a', 'dl1-b', 'same', 'agent:a')", ct);
+            foreach (var denied in new[]
+            {
+                "UPDATE config.investigation_signature_merges SET undone_at = now(), undone_by = 'x'",
+                "UPDATE config.investigation_signature_merges SET merged_into = 'dl1-z'",
+                "DELETE FROM config.investigation_signature_merges",
+                "INSERT INTO config.investigation_signature_days (server_id, signature, day, count) VALUES (1, 'dl1-a', current_date, 1)",
+            })
+            {
+                var ex = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(mcp, denied, ct));
+                Assert.Equal("42501", ex.SqlState);
+            }
+        }
+
+        await using (var viewer = await LoginAsync(scratch, "viewer", viewerPassword, ct))
+        {
+            var ex = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(viewer,
+                "INSERT INTO config.investigation_signature_merges (server_id, signature, merged_into, reason, merged_by) VALUES (1, 'dl1-c', 'dl1-d', 'same', 'x')", ct));
+            Assert.Equal("42501", ex.SqlState);
+        }
+
+        await ExecAsync(admin, "UPDATE config.investigation_signature_merges SET undone_at = now(), undone_by = 'person:erik'", ct);
+        var adminDenied = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(admin, "DELETE FROM config.investigation_signature_merges", ct));
+        Assert.Equal("42501", adminDenied.SqlState);
     }
 
     [Fact]
