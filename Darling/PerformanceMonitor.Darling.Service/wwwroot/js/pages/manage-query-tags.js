@@ -23,9 +23,18 @@
  * live in module scope (`selectedId`, `form`), so a tick re-reads and repaints the tree, the assignments and the rule list
  * without rebuilding the open form's inputs: focus, caret and unsaved edits stay. Every write handler is guarded by `busy`,
  * so a double click sends one request. All server text reaches the DOM through el()/textContent.
+ *
+ * Servers (#5971): a rule or an assignment names its server by id, and list_servers rows carry no id, so the names come from
+ * the fleet read's cards (server_id, display_name, server_name), the read the sidebar already makes each tick. A server-scoped
+ * rule shows its server's display name, then its server name, then "server N" for an id the fleet no longer lists (a removed
+ * server). The rule list has a server filter: "Every server" asks GET /api/query-tag-rules with no server_id, one server sends
+ * ?server_id=N and shows what the route answered (that server's rules plus the every-server rules). The filter is module scope,
+ * so the 60 s repaint keeps it. The rule and assignment forms pick a server from the same list; when the fleet read failed
+ * they keep the typed id, so a write is never blocked by a failed name lookup.
  */
 
-import { el, mount, apiGet, apiWrite, loadingStrip, errorStrip, emptyStrip } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, apiWrite, loadingStrip, errorStrip, emptyStrip } from "../util.js";
+import { orderServers } from "../server-order.js";
 import { getSession } from "../views-api.js";
 import { PALETTE, safeColour, treeRows, subtreeIds, formToCreateBody, buildPatch } from "./manage-tags.js";
 
@@ -144,6 +153,8 @@ let notice = null;
 let pendingDelete = null;
 /* True while a write is in flight: a second click on any write control does nothing until it settles. */
 let busy = false;
+/* The rule list's server filter (#5971): "" is every server, otherwise a server id as text. Module scope, so the 60 s repaint keeps it. */
+let ruleServerFilter = "";
 const lockable = new Set();
 
 function lockButton(props) {
@@ -181,7 +192,7 @@ export async function renderManageQueryTags(main) {
   const formBox = el("div", {});
   const body = el("div", {});
   mount(main, [headEl, noticeBox, formBox, body]);
-  live = { main, headEl, noticeBox, formBox, body, canEdit, tags: [], rules: [], map: null, rulesError: null };
+  live = { main, headEl, noticeBox, formBox, body, canEdit, tags: [], rules: [], map: null, rulesError: null, servers: [], filterSel: null };
   if (form) mount(formBox, formNode());
   mount(body, loadingStrip("Loading query tags…"));
   await refresh(live);
@@ -191,7 +202,12 @@ export async function renderManageQueryTags(main) {
 const bodyOf = (res) => (res.kind === "data" || res.kind === "empty" ? res.data || {} : null);
 
 async function refresh(state) {
-  const [tagRes, ruleRes] = await Promise.all([apiGet("/api/read/list_query_tags"), apiGet("/api/query-tag-rules")]);
+  const filter = ruleServerFilter;
+  const [tagRes, ruleRes] = await Promise.all([
+    apiGet("/api/read/list_query_tags"),
+    apiGet("/api/query-tag-rules" + (filter === "" ? "" : "?server_id=" + encodeURIComponent(filter))),
+    loadServers(state),
+  ]);
   const t = bodyOf(tagRes);
   if (!t) return mount(state.body, errorStrip(tagRes.message || "The query tags could not be read."));
   state.tags = (Array.isArray(t.tags) ? t.tags : []).map(tagRow);
@@ -199,9 +215,35 @@ async function refresh(state) {
   const r = bodyOf(ruleRes);
   state.rulesError = r ? null : ruleRes.message || "The rules could not be read.";
   if (r) state.rules = Array.isArray(r.rules) ? r.rules : [];
+  state.rulesFilter = filter;
   if (selectedId != null && !state.tags.some((x) => x.id === selectedId)) selectedId = null;
   draw(state);
   refreshOptions(state);
+}
+
+/* The fleet's servers, in the sidebar's order, as { id, label }. Read once per page load: a failed read is tried again on the next
+   tick, and until it lands the page names every server "server N" and the forms keep their typed id. */
+async function loadServers(state) {
+  if (state.serversLoaded) return;
+  const res = await apiGetFleet();
+  if (res.kind !== "data" || !res.data) return;
+  const cards = Array.isArray(res.data.cards) ? res.data.cards : [];
+  state.servers = orderServers(cards.filter((c) => c && Number.isInteger(c.server_id)))
+    .map((c) => ({ id: c.server_id, label: c.display_name || c.server_name || "server " + c.server_id }));
+  state.serversLoaded = true;
+}
+
+/** A server's name for the page: its display name or server name, "server N" when the fleet does not list it. */
+function serverLabel(state, id) {
+  const known = state.servers.find((s) => s.id === Number(id));
+  return known ? known.label : "server " + id;
+}
+
+/** The options of a server pick list: the blank choice first, then every server; a value the fleet no longer lists stays selectable. */
+function serverOptions(state, blankLabel, current) {
+  const opts = [{ value: "", label: blankLabel }, ...state.servers.map((s) => ({ value: String(s.id), label: s.label }))];
+  if (current !== "" && current != null && !opts.some((o) => o.value === String(current))) opts.push({ value: String(current), label: serverLabel(state, current) });
+  return opts;
 }
 
 /* list_query_tags names the id tag_id; manage-tags.js's tree helpers read id. */
@@ -281,7 +323,7 @@ function detailNode(state) {
       ])
     : null;
   const rows = tag.assignments.map((a) => el("li", { "data-assignment-id": a.assignment_id }, [
-    el("span", { text: a.kind + " " + keyText(a) + " — " + (a.server_name || (a.server_id == null ? "every server" : "server " + a.server_id)) }),
+    el("span", { text: a.kind + " " + keyText(a) + " — " + (a.server_name || (a.server_id == null ? "every server" : serverLabel(state, a.server_id))) }),
     state.canEdit ? lockButton({ class: "btn", type: "button", text: "Remove", "aria-label": "Remove assignment " + keyText(a), onClick: () => unassign(tag, a) }) : null,
   ]));
   return el("div", {}, [
@@ -293,16 +335,34 @@ function detailNode(state) {
 
 /* ─────────────────────────── rules ─────────────────────────── */
 
+/* The filter select is built once and re-used by every repaint, so its handler and chosen value outlive a tick. */
+function filterNode(state) {
+  if (!state.filterSel) {
+    state.filterSel = el("select", { class: "tag-input", "aria-label": "Show rules for server", "data-field": "rule_server_filter" });
+    state.filterSel.addEventListener("change", () => {
+      ruleServerFilter = state.filterSel.value;
+      refresh(state);
+    });
+  }
+  mount(state.filterSel, serverOptions(state, "Every server", ruleServerFilter).map((o) => el("option", { value: o.value, text: o.label })));
+  state.filterSel.value = ruleServerFilter;
+  return el("div", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Server" }), state.filterSel]);
+}
+
 function rulesNode(state) {
   const head = el("h3", { text: "Rules (in the order they apply: priority, then id)" });
-  if (state.rulesError) return el("div", { class: "tags-rules" }, [head, errorStrip(state.rulesError)]);
-  if (!state.rules.length) return el("div", { class: "tags-rules" }, [head, emptyStrip("No rules are defined." + (state.canEdit ? " Use New rule to create one." : ""))]);
+  const filter = filterNode(state);
+  if (state.rulesError) return el("div", { class: "tags-rules" }, [head, filter, errorStrip(state.rulesError)]);
+  if (!state.rules.length) {
+    const none = state.rulesFilter ? "No rules apply to " + serverLabel(state, state.rulesFilter) + "." : "No rules are defined." + (state.canEdit ? " Use New rule to create one." : "");
+    return el("div", { class: "tags-rules" }, [head, filter, emptyStrip(none)]);
+  }
   const rows = state.rules.map((r) => el("li", { "data-rule-id": r.id }, [
-    el("span", { text: "#" + r.priority + " " + r.field + (r.field === "text_tag" ? "" : " ~ " + r.pattern) + " → " + (r.tag || (r.field === "text_tag" ? "tag named in the comment" : "(no tag)")) + (r.server_id == null ? "" : " (server " + r.server_id + ")") + (r.enabled ? "" : " [disabled]") }),
+    el("span", { text: "#" + r.priority + " " + r.field + (r.field === "text_tag" ? "" : " ~ " + r.pattern) + " → " + (r.tag || (r.field === "text_tag" ? "tag named in the comment" : "(no tag)")) + (r.server_id == null ? "" : " (" + serverLabel(state, r.server_id) + ")") + (r.enabled ? "" : " [disabled]") }),
     state.canEdit ? lockButton({ class: "btn", type: "button", text: "Edit rule", "aria-label": "Edit rule " + r.id, onClick: () => openForm(ruleFormFor(r)) }) : null,
     state.canEdit ? lockButton({ class: "btn", type: "button", text: "Delete rule", "aria-label": "Delete rule " + r.id, onClick: () => removeRule(r) }) : null,
   ]));
-  return el("div", { class: "tags-rules" }, [head, el("ul", { class: "rule-list" }, rows)]);
+  return el("div", { class: "tags-rules" }, [head, filter, el("ul", { class: "rule-list" }, rows)]);
 }
 
 /* ─────────────────────────── writes ─────────────────────────── */
@@ -443,6 +503,15 @@ function reflow() {
   if (live && form) mount(live.formBox, formNode());
 }
 
+/* A server pick list (#5971) with "every server" as the blank choice. With no fleet read to build it from, the typed id stays. */
+function serverField(label, field) {
+  if (!live.servers.length) return input(label, field);
+  const node = el("select", { class: "tag-input", "aria-label": label, "data-field": field }, serverOptions(live, "Every server", form.values[field]).map((o) => el("option", { value: o.value, text: o.label })));
+  node.value = form.values[field];
+  node.addEventListener("change", () => { form.values[field] = node.value; });
+  return el("div", { class: "tag-field" }, [el("span", { class: "mute-label", text: label }), node]);
+}
+
 function tagSelectField(label, field, options) {
   const node = el("select", { class: "tag-input", "aria-label": label, "data-field": field }, options.map((o) => el("option", { value: o.value, text: o.label })));
   node.value = form.values[field];
@@ -469,7 +538,7 @@ function formNode() {
     fields = [select2("Key kind", "kind", ["hash", "object"])];
     if (v.kind === "hash") fields.push(input("Query hash", "query_hash", { placeholder: "0x..." }));
     else fields.push(input("Database", "database_name"), input("Schema", "schema_name"), input("Object", "object_name"));
-    fields.push(input("Server id (blank for every server)", "server_id"), input("Query id (display only, optional)", "query_id"));
+    fields.push(serverField("Server (blank for every server)", "server_id"), input("Query id (display only, optional)", "query_id"));
   } else {
     title = form.mode === "create" ? "New rule" : "Edit rule " + form.id;
     const v = form.values;
@@ -480,7 +549,7 @@ function formNode() {
       form.tagSelect = null;
       fields.push(el("div", { class: "meta", text: "A text_tag rule reads the tag name from a /* tag:NAME */ comment in the query text." }));
     }
-    fields.push(input("Priority (lower runs first)", "priority"), input("Server id (blank for every server)", "server_id"));
+    fields.push(input("Priority (lower runs first)", "priority"), serverField("Server (blank for every server)", "server_id"));
     const enabled = el("input", { type: "checkbox", "data-field": "enabled", "aria-label": "Enabled" });
     enabled.checked = !!v.enabled;
     enabled.addEventListener("change", () => { form.values.enabled = enabled.checked; });

@@ -151,6 +151,49 @@ public sealed class ManageQueryTagsBehaviourTests
     }
 
     [Fact]
+    public void ARuleOnAKnownServer_ShowsItsName_AnUnlistedIdFallsBackToServerN_AndANameLessCardShowsTheServerName()
+    {
+        if (!TryRun("ruleServerNames", out var r)) return;
+
+        var rules = Strings(r.GetProperty("rules"));
+        Assert.Contains("(Server G)", rules[1]);
+        Assert.DoesNotContain("server 7", rules[1]);
+        Assert.Contains("(server 99)", rules[2]);
+        Assert.Contains("(srv-i)", rules[3]);
+        Assert.Equal(new[] { "Every server", "Server G", "Server H", "srv-i" }, Strings(r.GetProperty("options")));
+    }
+
+    [Fact]
+    public void TheRuleServerFilter_SendsServerIdOnlyWhenAServerIsChosen_AndKeepsItAcrossThePoll()
+    {
+        if (!TryRun("ruleServerFilter", out var r)) return;
+
+        Assert.Equal(new[] { "/api/query-tag-rules" }, Strings(r.GetProperty("first")));
+        var picked = r.GetProperty("picked");
+        Assert.Equal(new[] { "/api/query-tag-rules", "/api/query-tag-rules?server_id=8" }, Strings(picked.GetProperty("reads")));
+        Assert.Equal(new[] { "5" }, Strings(picked.GetProperty("rules")));
+        Assert.Equal("8", picked.GetProperty("shown").GetString());
+        Assert.Equal("/api/query-tag-rules?server_id=8", r.GetProperty("tickRead").GetString());
+        Assert.Equal("8", r.GetProperty("afterTick").GetProperty("shown").GetString());
+        Assert.Equal(new[] { "5" }, Strings(r.GetProperty("afterTick").GetProperty("rules")));
+        Assert.Equal("/api/query-tag-rules", r.GetProperty("back").GetProperty("read").GetString());
+        Assert.Equal(new[] { "5", "6" }, Strings(r.GetProperty("back").GetProperty("rules")));
+    }
+
+    [Fact]
+    public void TheServerFields_ArePickLists_AndFallBackToTheTypedIdWhenTheFleetReadFails()
+    {
+        if (!TryRun("ruleServerPick", out var pick)) return;
+        Assert.Equal("select", pick.GetProperty("tag").GetString());
+        Assert.Equal(new[] { "Every server", "Server G", "Server H", "srv-i" }, Strings(pick.GetProperty("options")));
+        Assert.Equal(8, pick.GetProperty("calls")[0].GetProperty("body").GetProperty("server_id").GetInt32());
+
+        if (!TryRun("fleetDown", out var down)) return;
+        Assert.Equal("input", down.GetProperty("serverInput").GetString());
+        Assert.Contains("(server 7)", Strings(down.GetProperty("rules"))[1]);
+    }
+
+    [Fact]
     public void TheOpenForm_SurvivesThePoll_AndADoubleClickOnSave_SendsOneRequest()
     {
         if (!TryRun("pollKeepsForm", out var poll)) return;
