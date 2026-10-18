@@ -335,12 +335,15 @@ public sealed class LiteSignedWebhookTests : IDisposable
 
     /// <summary>Makes the next change of a route's flag to true fail the way a real write error would: a unique index on the flag
     /// column, with one route already at true and another still at false.</summary>
-    private void MakeASecondTrueFlagFail()
+    private void MakeASecondTrueFlagFail(bool otherRoutesAreFalse = false)
     {
         using var connection = _db.CreateConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "CREATE UNIQUE INDEX ux_signing_flag_test ON notification_routes (generic_signing_set)";
+        /* A new route's flag is NULL, and a unique index lets NULLs repeat; a failing REMOVE needs the other route at false, so
+           that the first route going from true to false is the duplicate. */
+        command.CommandText = (otherRoutesAreFalse ? "UPDATE notification_routes SET generic_signing_set = false WHERE generic_signing_set IS NULL; " : "")
+            + "CREATE UNIQUE INDEX ux_signing_flag_test ON notification_routes (generic_signing_set)";
         command.ExecuteNonQuery();
     }
 
@@ -374,7 +377,7 @@ public sealed class LiteSignedWebhookTests : IDisposable
         var first = await SaveRouteAsync(_store, endpoint.Url);
         var second = await SaveRouteAsync(_store, endpoint.Url + "2");
         Assert.NotNull((await _store.GenerateSigningKeyAsync(first)).Key);
-        MakeASecondTrueFlagFail();
+        MakeASecondTrueFlagFail(otherRoutesAreFalse: true);
 
         var error = await _store.RemoveSigningKeyAsync(first);
 
