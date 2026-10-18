@@ -52,7 +52,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
-| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_store_query_history`, `get_query_duration_trend`, `get_query_trend`, `get_resource_use_by_tag` |
+| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_store_aborts`, `get_query_store_query_history`, `get_query_duration_trend`, `get_query_trend`, `get_resource_use_by_tag` |
 | Active Queries | `get_active_queries` |
 | CPU | `get_cpu_utilization` |
 | Memory | `get_memory_stats`, `get_memory_trend`, `get_memory_clerks`, `get_memory_grants`, `get_resource_semaphore` |
