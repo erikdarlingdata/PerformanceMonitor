@@ -146,6 +146,7 @@ public sealed class StoreObjectConvergenceTests
         var refreshConverge = At("ConvergeContinuousAggregateRefreshAsync");
         var batchingConverge = At("ConvergeContinuousAggregateBatchingAsync");
         var aggregates = At("EnsureContinuousAggregatesAsync");
+        var dailyChildWindow = At("ConvergeDailyChildRefreshWindowAsync");
         var dedupIndexes = At("EnsureIntervalDedupMaterializationIndexesAsync");
         var aggregateCompression = At("EnsureAggregateCompressionAsync");
         var retiredBaselines = At("DropRetiredBaselineAggregatesAsync");
@@ -171,6 +172,8 @@ public sealed class StoreObjectConvergenceTests
            DailyRefreshBatchingTests. */
         Assert.True(refreshConverge < batchingConverge && batchingConverge < aggregates,
             "#3745: the daily batching converge sits with the window converge, before the aggregate ensure that cannot reconcile an existing policy's config");
+        Assert.True(dailyChildWindow < aggregates,
+            "#6070: the daily child window converge precedes the aggregate ensure, or the ensure raises 22023 against the job's 3-day window");
         Assert.True(aggregates < dedupIndexes, "#3597: the dedup-index sweep needs the aggregates to exist");
         Assert.True(aggregates < aggregateCompression, "#3581: the aggregate-compression ensure needs the aggregates to exist");
         Assert.True(retiredBaselines < fallbackViews, "#2007: the retirement drop precedes the fallback ensure");

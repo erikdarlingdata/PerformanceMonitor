@@ -1001,7 +1001,9 @@ public sealed class TimescaleContinuousAggregateTests
             var sql = TimescaleSupport.AddDailyRefreshPolicySql(view);
 
             Assert.Contains($"add_continuous_aggregate_policy('collect.{view}'", sql, StringComparison.Ordinal);
-            Assert.Contains("start_offset => INTERVAL '3 days'", sql, StringComparison.Ordinal);
+            /* #6070: a daily built on another daily takes the one-bucket-wider window; every other daily keeps 3 days. */
+            var expectedStart = view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "4 days" : "3 days";
+            Assert.Contains($"start_offset => INTERVAL '{expectedStart}'", sql, StringComparison.Ordinal);
             Assert.Contains("end_offset => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);

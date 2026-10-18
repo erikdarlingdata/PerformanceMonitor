@@ -406,6 +406,13 @@ public sealed class DarlingWorker : BackgroundService
         new("aggregate batching converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergeContinuousAggregateBatchingAsync(connection, logger, ct)),
 
+        /* #6070: a daily whose parent is another daily keeps a window one bucket wider than the 3-day one, so the
+           day its parent writes after it ran is still in its window the next run. config only (start_offset),
+           no schedule, so the daily tier keeps finish-to-start. Before the ensure for the same 22023 reason as
+           the window converge above. */
+        new("daily child window converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.ConvergeDailyChildRefreshWindowAsync(connection, logger, ct)),
+
         /* CREATE MATERIALIZED VIEW IF NOT EXISTS per aggregate plus its refresh policy (a quiet -1 once the
            converge above has made the windows match). THE step the issue is loudest about: its per-aggregate
            failure isolation is what leaves one rollup family missing on an otherwise healthy store. */
@@ -5385,6 +5392,12 @@ LIMIT 1";
                at the same time and collection never waits on it. Isolated in its own method: a heal failure
                never changes the stamp above, the summary line above, or the start. */
             await RunPartialDailyHealAsync(connection, stoppingToken);
+
+            /* #6070: then the days a daily-parented daily is missing although its parent daily has them, which
+               neither the hole scan (it skips a daily that has materialized nothing) nor the heal (it leaves a
+               source-with-rows, daily-without-row day to the scan) reaches. Same connection and flag, same
+               isolation: a failure here changes nothing above. */
+            await RunDailyChildHoleRepairAsync(connection, stoppingToken);
         }
         catch (OperationCanceledException)
         {
@@ -5435,6 +5448,34 @@ LIMIT 1";
             _logger.LogWarning(
                 "Partial-daily heal (#4716) could not run — a daily it had not finished has no marker, so the next start walks it again: {ExceptionType}{SqlState}",
                 ex.GetType().Name, sqlState is null ? "" : $", SQLSTATE {sqlState}");
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="TimescaleSupport.RepairDailyChildHolesAsync"/> (#6070) on the hole repair's own connection and
+    /// writes ONE INFORMATION line whatever it found, so "nothing to do" differs from "never ran" (#3756). A
+    /// failure is one WARNING and stops nowhere else.
+    /// </summary>
+    private async Task RunDailyChildHoleRepairAsync(NpgsqlConnection connection, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await TimescaleSupport.RepairDailyChildHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+            _logger.LogInformation(
+                "Daily-child hole repair (#6070): {Scanned} daily-parented rollup(s) scanned, {Found} day(s) missing that the parent holds, {Refreshed} refreshed, {Failures} failure(s){More}, in {Seconds:F1} s",
+                summary.DailiesScanned, summary.DaysFound, summary.DaysRefreshed, summary.Failures,
+                summary.DaysRemaining ? " - more remain for the next start" : string.Empty, summary.Elapsed.TotalSeconds);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogInformation(
+                "Daily-child hole repair (#6070) was cancelled before it could report - at shutdown that is expected, and the next start scans again.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Daily-child hole repair (#6070) could not run - the next start scans again: {ExceptionType}",
+                ex.GetType().Name);
         }
     }
 

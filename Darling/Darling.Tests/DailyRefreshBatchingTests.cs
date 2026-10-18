@@ -65,7 +65,11 @@ public sealed class DailyRefreshBatchingTests
             /* The window is UNCHANGED by this treatment, pinned beside the batching so the two cannot be
                confused for each other: the 3-day reach is what the hourly tier's retention leans on, and
                "we fixed the daily refresh" must never come to mean it was shortened. */
-            Assert.Contains("start_offset => INTERVAL '3 days'", sql, StringComparison.Ordinal);
+            Assert.Contains(
+                view == TimescaleSupport.QueryStoreStatsDayGrainDailyView
+                    ? "start_offset => INTERVAL '4 days'"   // #6070: the one daily built on another daily
+                    : "start_offset => INTERVAL '3 days'",
+                sql, StringComparison.Ordinal);
 
             /* And no initial_start: a batching change must not also re-schedule the tier. */
             Assert.DoesNotContain("initial_start", sql, StringComparison.Ordinal);

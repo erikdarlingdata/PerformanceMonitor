@@ -1736,6 +1736,168 @@ FROM d";
         }
     }
 
+    /* ─────────────── #6070: the days a daily's parent daily holds and the daily itself does not ─────────────── */
+
+    /// <summary>
+    /// #6070: how many days one start may refresh per daily-parented daily. Its own number rather than
+    /// <see cref="MaterializationHoleRepairCapBuckets"/>: that cap is "one ordinary policy run's worth" (3 days),
+    /// and a daily-parented daily that never filled can be a dozen days short on the first start after the fix.
+    /// A day of the day-grain daily is about 600 rows at composer grain and reads one parent day, so a month is
+    /// cheap; anything past the cap is left for the next start, newest first, and the summary says how many.
+    /// </summary>
+    public const int DailyChildHoleRepairCapDays = 31;
+
+    /// <summary>
+    /// #6070: the daily-parented dailies to scan, each with its parent daily — the pairs of
+    /// <see cref="PartialDailyHealOrder"/> whose source is itself a daily. Derived, never hand-listed
+    /// (today only <see cref="QueryStoreStatsDayGrainDailyView"/> over <see cref="QueryStoreStatsIntervalDailyView"/>).
+    /// </summary>
+    public static IReadOnlyList<(string Daily, string Parent)> DailyChildHoleTargets() =>
+        PartialDailyHealOrder()
+            .Where(p => IsDailyParentedDaily(p.Daily))
+            .Select(p => (p.Daily, p.Source))
+            .ToArray();
+
+    /// <summary>
+    /// #6070: the SQL behind the daily-child scan. The days (<c>bucket</c>) the PARENT daily's materialization holds
+    /// and the child's does not, newest first, <c>LIMIT</c>ed to <c>$3</c>: <c>$1</c> the oldest day to consider
+    /// (inclusive), <c>$2</c> the newest (inclusive; the caller passes the last COMPLETE day). Read off the
+    /// materialization hypertables, never the views (a real-time view shows rows that are not materialized), and
+    /// "the child has no bucket for the day" is a plain anti-join: every parent row maps to a child row, so a
+    /// materialized parent day with an empty child day is by construction a hole, never a day the source lacks.
+    /// </summary>
+    public static string DailyChildHoleDaysSql((string Schema, string Name) parent, (string Schema, string Name) child)
+    {
+        var parentRelation = $"{QuoteIdentifier(parent.Schema)}.{QuoteIdentifier(parent.Name)}";
+        var childRelation = $"{QuoteIdentifier(child.Schema)}.{QuoteIdentifier(child.Name)}";
+        return $@"
+SELECT d.bucket
+FROM (SELECT DISTINCT p.bucket FROM {parentRelation} AS p WHERE p.bucket >= $1::timestamp AND p.bucket <= $2::timestamp) AS d
+WHERE NOT EXISTS (SELECT 1 FROM (SELECT c.bucket FROM {childRelation} AS c WHERE c.bucket = d.bucket OFFSET 0) AS x)
+ORDER BY d.bucket DESC
+LIMIT $3";
+    }
+
+    /// <summary>What the daily-child scan did. <see cref="DaysFound"/> is the holes it read (at most the cap per
+    /// daily), <see cref="DaysRefreshed"/> those it refreshed, <see cref="Failures"/> the dailies whose scan or
+    /// refresh threw. <see cref="DaysRemaining"/> is true when a daily hit the cap, so a later start has more.</summary>
+    public sealed record DailyChildHoleRepairSummary(
+        int DailiesScanned, int DaysFound, int DaysRefreshed, int Failures, bool DaysRemaining, TimeSpan Elapsed);
+
+    /// <summary>
+    /// #6070: refreshes each day a daily-parented daily is missing although its parent daily has it, newest first,
+    /// at most <see cref="DailyChildHoleRepairCapDays"/> per daily, within the parent's materialized extent and only
+    /// for COMPLETE days (<paramref name="utcNow"/> aligned down to a day). This is the gap the
+    /// materialization-hole scan cannot see: a daily that has materialized NOTHING is skipped there ("the
+    /// backfill's case, not a hole"), and the partial-daily heal leaves "a source with rows and no daily row" to
+    /// that scan — so a daily-parented daily whose job always ran before its parent's (the cause #6070 fixes) stood
+    /// empty through both, and a day older than its policy window is never refreshed again.
+    ///
+    /// <para>Each day uses the repair path the hole scan and the heal use: <see cref="RollupBackfill.RepairAsync"/>
+    /// (a forced refresh over the one day; plain refresh where the engine has no forced form, SQLSTATE 42883).
+    /// Failure-isolated per daily: a throw is one Warning and the next daily still runs; cancellation propagates.
+    /// A store without TimescaleDB, or where the pair is not a continuous aggregate, scans nothing.</para>
+    /// </summary>
+    public static async Task<DailyChildHoleRepairSummary> RepairDailyChildHolesAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var clock = Stopwatch.StartNew();
+        var scanned = 0;
+        var found = 0;
+        var refreshedDays = 0;
+        var failures = 0;
+        var remaining = false;
+
+        if (!await DetectAsync(connection, cancellationToken))
+        {
+            return new DailyChildHoleRepairSummary(0, 0, 0, 0, false, clock.Elapsed);
+        }
+
+        var disclosure = new RefreshDisclosure(message => logger?.LogWarning(
+            "Daily-child hole repair (#6070): {Message}", message));
+        var lastCompleteDay = AlignDown(utcNow, DailyBucket) - DailyBucket;
+
+        foreach (var (daily, parent) in DailyChildHoleTargets())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DateTime? currentDay = null;
+            try
+            {
+                var childMaterialization = await ResolveMaterializationAsync(connection, daily, cancellationToken);
+                var parentMaterialization = await ResolveMaterializationAsync(connection, parent, cancellationToken);
+                if (childMaterialization is null || parentMaterialization is null)
+                {
+                    continue;
+                }
+
+                scanned++;
+                DateTime? parentOldest;
+                using (var span = new NpgsqlCommand(MaterializationSpanSql(parentMaterialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+                await using (var reader = await span.ExecuteReaderAsync(cancellationToken))
+                {
+                    parentOldest = await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetDateTime(0) : null;
+                }
+
+                if (parentOldest is null)
+                {
+                    continue;
+                }
+
+                var days = new List<DateTime>();
+                using (var scan = new NpgsqlCommand(DailyChildHoleDaysSql(parentMaterialization.Value, childMaterialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    scan.Parameters.AddWithValue(DateTime.SpecifyKind(parentOldest.Value, DateTimeKind.Unspecified));
+                    scan.Parameters.AddWithValue(DateTime.SpecifyKind(lastCompleteDay, DateTimeKind.Unspecified));
+                    scan.Parameters.AddWithValue(DailyChildHoleRepairCapDays);
+                    await using var reader = await scan.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        days.Add(reader.GetDateTime(0));
+                    }
+                }
+
+                found += days.Count;
+                remaining |= days.Count >= DailyChildHoleRepairCapDays;
+                var refreshedHere = 0;
+                foreach (var day in days)
+                {
+                    currentDay = day;
+                    try
+                    {
+                        await RollupBackfill.RepairAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == RollupBackfill.UndefinedFunctionSqlState)
+                    {
+                        await RollupBackfill.RunSliceAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                    }
+
+                    refreshedDays++;
+                    refreshedHere++;
+                }
+
+                if (days.Count > 0)
+                {
+                    logger?.LogInformation(
+                        "Daily-child hole repair (#6070): {Daily} had no bucket for {Days} day(s) that its parent {Parent} holds ({Newest} back to {Oldest}); refreshed {Refreshed}, newest first.",
+                        daily, days.Count, parent,
+                        days[0].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), days[^1].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), refreshedHere);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures++;
+                var code = ex is PostgresException { SqlState: { Length: > 0 } sqlState } ? sqlState : ex.GetType().Name;
+                logger?.LogWarning(
+                    "Daily-child hole repair (#6070): stopped {Daily} at {Day} with {Code} - the next start scans it again: {Message}",
+                    daily, currentDay?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "the scan", code, ex.Message);
+            }
+        }
+
+        return new DailyChildHoleRepairSummary(scanned, found, refreshedDays, failures, remaining, clock.Elapsed);
+    }
+
     /// <summary>
     /// #4300: how many hours of open legacy/successor seam still stand, across every legacy-paired target,
     /// after a seam-only pass is cut short by its own budget — a cheap re-read (one span read, one raw-floor

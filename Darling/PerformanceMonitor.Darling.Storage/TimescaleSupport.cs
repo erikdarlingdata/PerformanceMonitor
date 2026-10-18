@@ -3582,6 +3582,47 @@ WITH NO DATA";
     /// TimescaleContinuousAggregateTests.</summary>
     public static readonly TimeSpan DailyRefreshStartSpan = TimeSpan.FromDays(3);
 
+    /// <summary>
+    /// The refresh window of a daily whose PARENT is another daily (#6070): one bucket wider than
+    /// <see cref="DailyRefreshStartOffset"/>, so 4 days. Today that is only
+    /// <see cref="QueryStoreStatsDayGrainDailyView"/> (hourly, then <c>interval_daily</c>, then
+    /// <c>daygrain_daily</c>); <see cref="IsDailyParentedDaily"/> derives the set from the parent relation.
+    ///
+    /// <para><b>Why one bucket wider.</b> A daily policy's window <c>[now - start, now - 1 day]</c> holds
+    /// exactly <c>start - 1</c> whole buckets at any run time, and the daily tier is on finish-to-start
+    /// scheduling, so two daily jobs have no fixed order. When the child's job runs before its parent's, the
+    /// child refreshes a day the parent has not written yet and gets nothing; the parent then writes that day
+    /// and logs an invalidation the child's window has moved past by the next run, so the day is never
+    /// refreshed. Finish-to-start keeps that order for good (the parent's run is the longer one, so its next
+    /// start drifts later), and the child stays empty. With one more bucket in the window every day is
+    /// refreshed once more on the day AFTER its parent wrote it, whichever job runs first. An hourly-parented
+    /// daily needs no extra bucket: its parent is refreshed every hour, so it wrote the day long before.</para>
+    ///
+    /// <para>Not an <c>initial_start</c> or a fixed schedule: the daily tier keeps finish-to-start (see
+    /// <see cref="AddDailyRefreshPolicySql"/>). The window stays below <see cref="HourlyRetentionSpan"/>, and the
+    /// view's compress_after follows it (<see cref="AggregateCompressAfterSpanFor"/>).</para>
+    /// </summary>
+    public const string DailyChildRefreshStartOffset = "4 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="DailyChildRefreshStartOffset"/>.</summary>
+    public static readonly TimeSpan DailyChildRefreshStartSpan = TimeSpan.FromDays(4);
+
+    /// <summary>Whether <paramref name="view"/> is a daily whose parent (the relation its CREATE selects FROM,
+    /// per <see cref="RollupViews"/>) is itself a daily. Derived from the parent relation, never by name.</summary>
+    public static bool IsDailyParentedDaily(string view)
+        => RollupViews.Any(r => string.Equals(r.View, view, StringComparison.Ordinal)
+            && r.BucketWidth == DailyBucket
+            && RollupViews.Any(p => string.Equals(p.View, r.Source, StringComparison.Ordinal) && p.BucketWidth == DailyBucket));
+
+    /// <summary>The <c>start_offset</c> text a daily's refresh policy carries: <see cref="DailyChildRefreshStartOffset"/>
+    /// for a daily-parented daily, <see cref="DailyRefreshStartOffset"/> for every other.</summary>
+    public static string DailyRefreshStartOffsetFor(string view)
+        => IsDailyParentedDaily(view) ? DailyChildRefreshStartOffset : DailyRefreshStartOffset;
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="DailyRefreshStartOffsetFor"/>.</summary>
+    public static TimeSpan DailyRefreshStartSpanFor(string view)
+        => IsDailyParentedDaily(view) ? DailyChildRefreshStartSpan : DailyRefreshStartSpan;
+
     /// <summary>The daily refresh cadence, and also the daily <c>end_offset</c>.</summary>
     public const string DailyRefreshScheduleInterval = "1 day";
 
@@ -6010,12 +6051,13 @@ WITH NO DATA";
     /// A DAILY continuous aggregate's refresh policy: <see cref="DailyRefreshStartOffset"/> of window on a
     /// daily cadence, and NO <c>initial_start</c> — the daily tier keeps TimescaleDB's finish-to-start
     /// scheduling, exactly as it did before #3012, because it was never near its own cadence and never
-    /// appeared in the convoy.
+    /// appeared in the convoy. A daily whose parent is another daily takes the one-bucket-wider
+    /// <see cref="DailyChildRefreshStartOffset"/> instead (#6070, <see cref="DailyRefreshStartOffsetFor"/>).
     /// </summary>
     public static string AddDailyRefreshPolicySql(string view)
         => AddContinuousAggregatePolicySql(
             view,
-            DailyRefreshStartOffset,
+            DailyRefreshStartOffsetFor(view),
             DailyRefreshScheduleInterval,
             DailyRefreshScheduleInterval,
             phaseMinutes: null,
@@ -6736,6 +6778,90 @@ AND   ca.view_schema = 'collect'";
             logger?.LogInformation(
                 "Continuous-aggregate batching: {Converged} daily policies set to {Buckets} bucket(s) per batch, {Already} already converged",
                 converged, DailyRefreshBucketsPerBatch, already);
+        }
+
+        return converged;
+    }
+
+    /// <summary>
+    /// Sets <c>start_offset</c> on ONE existing refresh policy and touches nothing else (#6070). <c>$1</c> the job
+    /// id (<c>::integer</c>, the #1586 trap), <c>$2</c> the interval text. Like
+    /// <see cref="SetContinuousAggregateBatchingSql"/> it names only <c>config</c> and writes only the ONE key
+    /// inside it, so <c>end_offset</c>, <c>buckets_per_batch</c> and <c>mat_hypertable_id</c> survive; no
+    /// <c>initial_start</c> or <c>fixed_schedule</c> (the daily tier keeps finish-to-start) and no
+    /// <c>scheduled</c> (an un-named <c>alter_job</c> parameter is left unchanged, so a paused job stays paused).
+    /// </summary>
+    public const string SetDailyRefreshWindowSql = "SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{start_offset}', to_jsonb($2::text))) FROM timescaledb_information.jobs AS j WHERE j.job_id = $1::integer";
+
+    /// <summary>
+    /// Converges the refresh window of every daily whose parent is a daily (<see cref="IsDailyParentedDaily"/>)
+    /// onto <see cref="DailyChildRefreshStartOffset"/> (#6070). A store made before the fix keeps the 3-day
+    /// window, because <c>add_continuous_aggregate_policy(... if_not_exists)</c> does not reconcile an existing
+    /// policy (and raises 22023 against a different window, so this must run BEFORE the aggregate ensure, like
+    /// <see cref="ConvergeContinuousAggregateRefreshAsync"/>).
+    ///
+    /// <para>One catalog read per pass (<see cref="ContinuousAggregateRefreshStateSql"/>, the window in seconds);
+    /// a converged store issues no <c>alter_job</c>. Failure-isolated per job: one that fails (often a
+    /// least-privilege store whose login does not own the job) logs a warning and leaves the rest. Never arms,
+    /// pauses or re-schedules a job (<see cref="SetDailyRefreshWindowSql"/>). Returns how many it changed.</para>
+    /// </summary>
+    public static async Task<int> ConvergeDailyChildRefreshWindowAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var stale = new List<(int JobId, string View, long? WasSeconds)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(ContinuousAggregateRefreshStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(1);
+                if (!IsDailyParentedDaily(view) || !DailyAggregates.Any(a => string.Equals(a.View, view, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                var seconds = reader.IsDBNull(2) ? (long?)null : reader.GetInt64(2);
+                if (seconds == (long)DailyRefreshStartSpanFor(view).TotalSeconds)
+                {
+                    continue;
+                }
+
+                stale.Add((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), view, seconds));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Daily child refresh-window converge: could not read policy jobs: {Message}", ex.Message);
+            return 0;
+        }
+
+        var converged = 0;
+        foreach (var (jobId, view, wasSeconds) in stale)
+        {
+            try
+            {
+                using var alter = new NpgsqlCommand(SetDailyRefreshWindowSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                alter.Parameters.AddWithValue(DailyRefreshStartOffsetFor(view));
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: {View}'s daily refresh policy (job {JobId}) now refreshes a {Window} window (was {WasSeconds}s) - its parent is a daily too, so the job can run before the parent has written a day, and the extra bucket brings it back to that day the next run (#6070).",
+                    view, jobId, DailyRefreshStartOffsetFor(view), wasSeconds);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not widen {View}'s daily refresh policy (job {JobId}) to a {Window} window - it keeps a window that can miss the day its parent daily writes after it (often a permission issue: the store login must own the job): {Message}",
+                    view, jobId, DailyRefreshStartOffsetFor(view), ex.Message);
+            }
         }
 
         return converged;
@@ -8577,9 +8703,12 @@ AND   j.hypertable_name = '{relation}'";
 
     /// <summary>Which <c>compress_after</c> <paramref name="view"/> takes, decided by its refresh tier — the
     /// hourly one for every hourly-refreshed aggregate (including the baselines), the daily one for the
-    /// daily tier.</summary>
+    /// daily tier. A daily-parented daily's refresh window is a bucket wider (#6070), so its
+    /// <c>compress_after</c> is a bucket longer: the same <c>start_offset + margin</c> rule.</summary>
     public static TimeSpan AggregateCompressAfterSpanFor(string view)
-        => AggregateCompressionTargetFor(view).Hourly ? HourlyAggregateCompressAfterSpan : DailyAggregateCompressAfterSpan;
+        => AggregateCompressionTargetFor(view).Hourly
+            ? HourlyAggregateCompressAfterSpan
+            : DailyRefreshStartSpanFor(view) + AggregateCompressMarginSpan;
 
     /// <summary>The INTERVAL literal of <see cref="AggregateCompressAfterSpanFor"/>.</summary>
     public static string AggregateCompressAfterFor(string view)
@@ -9624,7 +9753,11 @@ ORDER BY i.indexname";
 
         var inPlace = states.Values.Count(s => s.JobId is not null) + added;
         var hourlyTier = AggregateCompressionTargets.Where(t => t.Hourly).Select(t => t.View).ToArray();
-        var dailyTier = AggregateCompressionTargets.Where(t => !t.Hourly).Select(t => t.View).ToArray();
+        /* #6070: a daily-parented daily compresses a bucket later than the rest of the tier (its refresh window is
+           a bucket wider), so it is named with its own window rather than folded into the tier's. */
+        var dailyTier = AggregateCompressionTargets.Where(t => !t.Hourly)
+            .Select(t => AggregateCompressAfterFor(t.View) == DailyAggregateCompressAfter ? t.View : $"{t.View} at {AggregateCompressAfterFor(t.View)}")
+            .ToArray();
 
         /* EVERY aggregate is named with its window, and the windows are interpolated rather than restated
            (#1958's rule for the retention line): an operator cross-checking timescaledb_information.jobs meets

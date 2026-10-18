@@ -130,10 +130,12 @@ public sealed class TimescaleAggregateCompressionTests
                 StringComparer.Ordinal);
 
             Assert.Equal(
-                hourly ? TimescaleSupport.HourlyAggregateCompressAfterSpan : TimescaleSupport.DailyAggregateCompressAfterSpan,
+                hourly ? TimescaleSupport.HourlyAggregateCompressAfterSpan
+                    : TimescaleSupport.DailyRefreshStartSpanFor(view) + TimescaleSupport.AggregateCompressMarginSpan,   // #6070: a daily-parented daily's window is a bucket wider
                 TimescaleSupport.AggregateCompressAfterSpanFor(view));
             Assert.Equal(
-                hourly ? TimescaleSupport.HourlyAggregateCompressAfter : TimescaleSupport.DailyAggregateCompressAfter,
+                hourly ? TimescaleSupport.HourlyAggregateCompressAfter
+                    : TimescaleSupport.WholeDaysInterval(TimescaleSupport.DailyRefreshStartSpanFor(view) + TimescaleSupport.AggregateCompressMarginSpan),
                 TimescaleSupport.AggregateCompressAfterFor(view));
         }
 
@@ -649,7 +651,7 @@ public sealed class TimescaleAggregateCompressionTests
 
                 Assert.True(reader.GetBoolean(0), $"{view} is not compression-enabled");
                 Assert.Equal(1L, reader.GetInt64(1));
-                Assert.Equal((long)(hourly ? TimescaleSupport.HourlyAggregateCompressAfterSpan : TimescaleSupport.DailyAggregateCompressAfterSpan).TotalSeconds, reader.GetInt64(2));
+                Assert.Equal((long)TimescaleSupport.AggregateCompressAfterSpanFor(view).TotalSeconds, reader.GetInt64(2));
                 Assert.Equal((long)TimescaleSupport.AggregateCompressionScheduleSpan.TotalSeconds, reader.GetInt64(3));
                 Assert.True(reader.GetBoolean(4), $"{view}'s compression job is not on a fixed schedule");
                 Assert.Equal(TimescaleSupport.AggregateCompressionBandHourFor(view), reader.GetInt32(5));
