@@ -378,21 +378,22 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             shown["indexes_not_in_latest_capture"] = await MissingIndexesAsync(postgres, resolved.ServerId, database_name, windowEnd, candidateFacts, unknown, cancellationToken);
             shown["job_name_matches"] = await JobNameMatchesAsync(postgres, resolved.ServerId, windowEnd, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            /* A dictionary, not an anonymous object: "shown" is this read's own section, not a page cut (the cut-key census reads a `shown =` member as one). */
+            return JsonSerializer.Serialize(new Dictionary<string, object?>
             {
-                server = resolved.ServerName,
-                database_name,
-                query_id,
-                plan_id,
-                compare_plan_id = compare?.PlanId,
-                as_of = FormatTime(windowEnd),
-                hours_back,
-                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
-                verdict = refusals.Count > 0 ? "refuse" : "no_refusal_found",
-                refusals = refusals.Select(r => new { code = r.Code, sentence = r.Sentence, evidence = r.Evidence }),
-                shown,
-                unknown = unknown.Select(u => new { check = u.Check, reason = u.Reason }),
-                note = "no_refusal_found means no check fired; it does not mean the force is safe or will help."
+                ["server"] = resolved.ServerName,
+                ["database_name"] = database_name,
+                ["query_id"] = query_id,
+                ["plan_id"] = plan_id,
+                ["compare_plan_id"] = compare?.PlanId,
+                ["as_of"] = FormatTime(windowEnd),
+                ["hours_back"] = hours_back,
+                ["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart),
+                ["verdict"] = refusals.Count > 0 ? "refuse" : "no_refusal_found",
+                ["refusals"] = refusals.Select(r => new { code = r.Code, sentence = r.Sentence, evidence = r.Evidence }),
+                ["shown"] = shown,
+                ["unknown"] = unknown.Select(u => new { check = u.Check, reason = u.Reason }),
+                ["note"] = "no_refusal_found means no check fired; it does not mean the force is safe or will help."
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

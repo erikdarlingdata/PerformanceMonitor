@@ -98,6 +98,18 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         """ + " " + HistoryOrder;
 
     /// <summary>
+    /// The interval-table read's FROM and WHERE (#5300, #5807, #5523), shared with <c>get_plan_force_precheck</c> (#5632) so a
+    /// second reader of the same table takes the same index-friendly predicates and cannot drift from them.
+    /// </summary>
+    internal static readonly string HistoryTableFromWhere = $$"""
+        FROM query_store_interval_wide
+        WHERE server_id = $1 AND database_name = $2 AND query_id = $3
+        AND collection_time >= $4 AND collection_time <= $5
+        AND first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+        AND first_execution_time <= $5 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+        """;
+
+    /// <summary>
     /// The interval table's twin of <see cref="HistorySql"/> (#5300), the tier the grid reads below raw retention:
     /// <c>query_store_interval_wide</c> already holds ONE row per interval identity, its latest snapshot (the dedupe above,
     /// kept as the table is written), so this reads it directly. $4 is the gate's <c>ReadStart</c>. The
@@ -119,18 +131,6 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                CAST(avg_cpu_time_us AS double precision) / 1000.0,
                first_execution_time, last_execution_time, is_forced_plan
         """ + "\n" + HistoryTableFromWhere + " " + HistoryOrder;
-
-    /// <summary>
-    /// The interval-table read's FROM and WHERE (#5300, #5807, #5523), shared with <c>get_plan_force_precheck</c> (#5632) so a
-    /// second reader of the same table takes the same index-friendly predicates and cannot drift from them.
-    /// </summary>
-    internal static readonly string HistoryTableFromWhere = $$"""
-        FROM query_store_interval_wide
-        WHERE server_id = $1 AND database_name = $2 AND query_id = $3
-        AND collection_time >= $4 AND collection_time <= $5
-        AND first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-        AND first_execution_time <= $5 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-        """;
 
     internal readonly record struct HistoryRow(
         long PlanId, DateTime CollectionTime, long ExecutionCount, double? AvgDurationMs, double? AvgCpuMs,
