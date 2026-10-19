@@ -151,10 +151,11 @@ public sealed class DarlingMcpWhoDroveItTools
     internal const int MaxStatements = 10;
 
     [McpServerTool(Name = "get_load_by_caller"), Description(
-        "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, each with its samples, CPU and elapsed time, their shares of the window total, and its top statements. " +
-        "cpu_ms and elapsed_ms sum the cumulative figures of every snapshot, so a request seen in ten captures counts ten times: they weigh how much and how long a caller ran, not completed work. Shares are of every caller, not of the page. login_name and host_name are masked by mcp.dataDetail. <<GUIDE>> " +
-        "Samples are snapshots (one per running request per capture); captures counts the distinct capture times. " +
-        "Rows: host_name, program_name, login_name (null = the snapshot carried none), samples, captures, cpu_ms, cpu_share, elapsed_ms, elapsed_share, sample_share, first_seen, last_seen, top_statements (query_hash, samples, cpu_ms, query_text preview masked by mcp.dataDetail). WAITFOR shells are dropped, as get_active_queries drops them. " +
+        "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, with requests, CPU, elapsed time, shares of the window and top statements. " +
+        "Each request counts once, at the largest CPU any capture saw. Shares are of the window, not of the page. login_name and host_name are masked by mcp.dataDetail. <<GUIDE>> " +
+        "A request is a session and its start (capture time minus its elapsed time, to the second). Its cpu_ms and elapsed_ms are the largest cumulative figures any capture saw, so a request seen in ten captures is one request. A request that started before the window or ran on after it counts only what the captures saw, and one shorter than the capture interval may not be seen at all. " +
+        "requests counts the distinct requests, samples the snapshots (one per running request per capture), captures the distinct capture times. " +
+        "Rows: host_name, program_name, login_name (null = the snapshot carried none), requests, samples, captures, cpu_ms, cpu_share, elapsed_ms, elapsed_share, sample_share, first_seen, last_seen, top_statements (query_hash, requests, samples, cpu_ms, query_text preview masked by mcp.dataDetail). WAITFOR shells are dropped, as get_active_queries drops them. " +
         "An empty answer says why: query_snapshots was not collected, or the window held no active request. top caps at 100 groups and truncated says more matched; statements per group default 3, at most 10. Reads the snapshots the collector wrote; it does not see a request that finished between two captures.")]
     public static Task<string> GetLoadByCaller(
         NpgsqlDataSource postgres,
@@ -207,6 +208,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 host_name = Blank(g.HostName),
                 program_name = Blank(g.ProgramName),
                 login_name = Blank(g.LoginName),
+                requests = g.Requests,
                 samples = g.Samples,
                 captures = g.Captures,
                 cpu_ms = Math.Round(g.CpuMs, 1),
@@ -219,6 +221,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 top_statements = g.Statements.Select(x => new
                 {
                     query_hash = x.QueryHash,
+                    requests = x.Requests,
                     samples = x.Samples,
                     cpu_ms = Math.Round(x.CpuMs, 1),
                     query_text = McpHelpers.TruncateStatement(x.QueryText, QueryTextPreviewLength),
@@ -234,10 +237,11 @@ public sealed class DarlingMcpWhoDroveItTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 source = "query_snapshots",
+                total_requests = first.TotalRequests,
                 total_samples = first.TotalSamples,
                 total_cpu_ms = Math.Round(first.TotalCpuMs, 1),
                 total_elapsed_ms = Math.Round(first.TotalElapsedMs, 1),
-                sampling_note = "cpu_ms and elapsed_ms are summed over snapshots; a request that stays in the DMV is counted at every capture it appears in, with its cumulative figure. Shares are of the window's total over every caller.",
+                sampling_note = "Each request counts once, by its largest cumulative cpu_ms and elapsed_ms over the captures that saw it (a request is a session and its start, to the second). A request that started before the window or ran on after it counts only what the captures saw, and one shorter than the capture interval may not be seen at all. Shares are of the window's total over every caller, not of the page.",
                 callers_returned = callers.Count,
                 truncated = cut,
                 callers,

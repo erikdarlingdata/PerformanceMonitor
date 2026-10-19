@@ -247,18 +247,25 @@ internal static class DarlingWhoDroveItReader
 
     /// <summary>One caller group (host, program, login) over the active-query snapshots, with its heaviest statements.</summary>
     internal sealed record CallerGroup(
-        string HostName, string ProgramName, string LoginName, long Samples, long Captures, double CpuMs, double ElapsedMs,
-        double TotalCpuMs, double TotalElapsedMs, long TotalSamples, DateTime FirstSeen, DateTime LastSeen,
+        string HostName, string ProgramName, string LoginName, long Samples, long Captures, long Requests, double CpuMs, double ElapsedMs,
+        double TotalCpuMs, double TotalElapsedMs, long TotalSamples, long TotalRequests, DateTime FirstSeen, DateTime LastSeen,
         List<CallerStatement> Statements);
 
-    internal sealed record CallerStatement(string QueryHash, long Samples, double CpuMs, string? QueryText);
+    internal sealed record CallerStatement(string QueryHash, long Samples, long Requests, double CpuMs, string? QueryText);
 
     /// <summary>
-    /// The active-query snapshots of the window grouped by (host_name, program_name, login_name), ranked by summed cpu_time_ms. $1 server_id,
-    /// $2/$3 window (naive UTC), $4 groups on the page, $5 statements per group. A sampled request carries its CUMULATIVE cpu_time_ms at
-    /// each capture, so the sums count a long request once per capture it appears in: they weigh a caller by how much and how long it was
-    /// running, not by completed work. The WAITFOR shells get_active_queries drops are dropped here too. The totals are window functions over every
-    /// group BEFORE the cap, so a share is a share of the server. Statement text is fetched in the same pass, for the top statements only.
+    /// The active-query snapshots of the window grouped by (host_name, program_name, login_name), ranked by cpu_ms. $1 server_id,
+    /// $2/$3 window (naive UTC), $4 groups on the page, $5 statements per group. A sampled request carries its CUMULATIVE cpu_time_ms and
+    /// total_elapsed_time_ms at each capture, so each request is counted ONCE: its largest figure over its captures, and the groups sum those.
+    /// A request is a session_id plus its start, collection_time minus total_elapsed_time_ms (the table has no request start column), cut to
+    /// the second with date_trunc. The start is re-derived at every capture from two clocks, so it jitters by a few milliseconds: cutting to the
+    /// second keeps nearly every capture of one request together. A start that lands within that jitter of a second boundary can fall into two
+    /// buckets, and the request is then counted twice (an overcount of one request, never a loss), the price of a key with no request id.
+    /// A session that runs two requests one after the other has two starts, so they count as two. The figure is what the captures saw: a request
+    /// that began before the window or ran on after it counts only the captures inside, and one shorter than the capture interval may not be seen at all.
+    /// A request that runs several statements adds its figure to each statement's per-hash total, so the per-statement figures can add up to
+    /// more than the caller's. The WAITFOR shells get_active_queries drops are dropped here too. The totals are window functions over every
+    /// group BEFORE the cap, so a share is a share of the window. Statement text is fetched in the same pass, for the top statements only.
     /// Reads query_snapshots by (server_id, collection_time) range; no index is added.
     /// </summary>
     internal const string LoadByCallerSql = """
@@ -266,6 +273,8 @@ internal static class DarlingWhoDroveItReader
             SELECT COALESCE(host_name, '') AS host_name,
                    COALESCE(program_name, '') AS program_name,
                    COALESCE(login_name, '') AS login_name,
+                   COALESCE(session_id, -1) AS session_id,
+                   date_trunc('second', collection_time - COALESCE(total_elapsed_time_ms, 0) * INTERVAL '1 millisecond') AS request_start,
                    query_hash,
                    collection_time,
                    COALESCE(cpu_time_ms, 0) AS cpu_ms,
@@ -277,33 +286,56 @@ internal static class DarlingWhoDroveItReader
             AND   collection_time <= $3
             AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
         ),
-        grp AS (
+        req AS (
+            SELECT host_name, program_name, login_name, session_id, request_start,
+                   MAX(cpu_ms) AS cpu_ms, MAX(elapsed_ms) AS elapsed_ms
+            FROM snap
+            GROUP BY host_name, program_name, login_name, session_id, request_start
+        ),
+        grp_req AS (
+            SELECT host_name, program_name, login_name,
+                   COUNT(*) AS requests, SUM(cpu_ms) AS cpu_ms, SUM(elapsed_ms) AS elapsed_ms
+            FROM req
+            GROUP BY host_name, program_name, login_name
+        ),
+        grp_snap AS (
             SELECT host_name, program_name, login_name,
                    COUNT(*) AS samples,
                    COUNT(DISTINCT collection_time) AS captures,
-                   SUM(cpu_ms) AS cpu_ms,
-                   SUM(elapsed_ms) AS elapsed_ms,
                    MIN(collection_time) AS first_seen,
                    MAX(collection_time) AS last_seen
             FROM snap
             GROUP BY host_name, program_name, login_name
+        ),
+        grp AS (
+            SELECT host_name, program_name, login_name, s.samples, s.captures, s.first_seen, s.last_seen,
+                   r.requests, r.cpu_ms, r.elapsed_ms
+            FROM grp_snap AS s
+            JOIN grp_req AS r USING (host_name, program_name, login_name)
         ),
         ranked AS (
             SELECT g.*,
                    SUM(cpu_ms) OVER () AS total_cpu_ms,
                    SUM(elapsed_ms) OVER () AS total_elapsed_ms,
                    SUM(samples) OVER () AS total_samples,
+                   SUM(requests) OVER () AS total_requests,
                    ROW_NUMBER() OVER (ORDER BY cpu_ms DESC, samples DESC, host_name, program_name, login_name) AS rk
             FROM grp AS g
         ),
         page AS (SELECT * FROM ranked WHERE rk <= $4),
-        per_hash AS (
-            SELECT s.host_name, s.program_name, s.login_name, s.query_hash,
-                   COUNT(*) AS samples, SUM(s.cpu_ms) AS cpu_ms
+        hash_req AS (
+            SELECT s.host_name, s.program_name, s.login_name, s.session_id, s.request_start, s.query_hash,
+                   COUNT(*) AS samples, MAX(s.cpu_ms) AS cpu_ms
             FROM snap AS s
             JOIN page AS p USING (host_name, program_name, login_name)
             WHERE s.query_hash IS NOT NULL
-            GROUP BY s.host_name, s.program_name, s.login_name, s.query_hash
+            GROUP BY s.host_name, s.program_name, s.login_name, s.session_id, s.request_start, s.query_hash
+        ),
+        per_hash AS (
+            SELECT host_name, program_name, login_name, query_hash,
+                   SUM(samples) AS samples, COUNT(*) AS requests, SUM(cpu_ms) AS cpu_ms
+            FROM hash_req
+            GROUP BY host_name, program_name, login_name, query_hash
         ),
         top_hash AS (
             SELECT * FROM (
@@ -320,12 +352,13 @@ internal static class DarlingWhoDroveItReader
             ORDER BY s.query_hash, s.collection_time DESC
         )
         SELECT p.host_name, p.program_name, p.login_name,
-               CAST(p.samples AS bigint) AS samples, CAST(p.captures AS bigint) AS captures,
+               CAST(p.samples AS bigint) AS samples, CAST(p.captures AS bigint) AS captures, CAST(p.requests AS bigint) AS requests,
                CAST(p.cpu_ms AS double precision) AS cpu_ms, CAST(p.elapsed_ms AS double precision) AS elapsed_ms,
                CAST(p.total_cpu_ms AS double precision) AS total_cpu_ms, CAST(p.total_elapsed_ms AS double precision) AS total_elapsed_ms,
-               CAST(p.total_samples AS bigint) AS total_samples,
+               CAST(p.total_samples AS bigint) AS total_samples, CAST(p.total_requests AS bigint) AS total_requests,
                p.first_seen, p.last_seen, p.rk,
-               t.query_hash, CAST(t.samples AS bigint) AS statement_samples, CAST(t.cpu_ms AS double precision) AS statement_cpu_ms,
+               t.query_hash, CAST(t.samples AS bigint) AS statement_samples, CAST(t.requests AS bigint) AS statement_requests,
+               CAST(t.cpu_ms AS double precision) AS statement_cpu_ms,
                x.query_text
         FROM page AS p
         LEFT JOIN top_hash AS t
@@ -345,20 +378,20 @@ internal static class DarlingWhoDroveItReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var rank = reader.GetInt64(12);
+            var rank = reader.GetInt64(14);
             if (rank != lastRank)
             {
                 lastRank = rank;
                 result.Add(new CallerGroup(
-                    reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3), reader.GetInt64(4),
-                    Dbl(reader, 5), Dbl(reader, 6), Dbl(reader, 7), Dbl(reader, 8), reader.GetInt64(9),
-                    reader.GetDateTime(10), reader.GetDateTime(11), []));
+                    reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5),
+                    Dbl(reader, 6), Dbl(reader, 7), Dbl(reader, 8), Dbl(reader, 9), reader.GetInt64(10), reader.GetInt64(11),
+                    reader.GetDateTime(12), reader.GetDateTime(13), []));
             }
 
-            if (!reader.IsDBNull(13))
+            if (!reader.IsDBNull(15))
             {
                 result[^1].Statements.Add(new CallerStatement(
-                    reader.GetString(13), reader.GetInt64(14), Dbl(reader, 15), reader.IsDBNull(16) ? null : reader.GetString(16)));
+                    reader.GetString(15), reader.GetInt64(16), reader.GetInt64(17), Dbl(reader, 18), reader.IsDBNull(19) ? null : reader.GetString(19)));
             }
         }
 

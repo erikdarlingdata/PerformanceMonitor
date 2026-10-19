@@ -198,16 +198,17 @@ public sealed class WhoDroveItLiveTests
     /* ───────────────────────── get_load_by_caller ───────────────────────── */
 
     /// <summary>
-    /// (APP01, SSMS, sa): two samples at 3,000 ms CPU, with hashes HA (twice). (WEB01, api, svc): three samples at 1,000 ms (HB twice, HC once).
-    /// (WEB02, api, svc2): one sample at 1,000 ms. Total 10,000 ms CPU, 6 samples.
+    /// (APP01, SSMS, sa): one request (session 51) seen twice, a minute apart, at 3,000 ms CPU, with hash HA (twice), 4 s then 64 s elapsed.
+    /// (WEB01, api, svc): session 60 seen twice (one request, 1,000 ms, HB twice) and session 61 once (a second request, 1,000 ms, HC).
+    /// (WEB02, api, svc2): one request at 1,000 ms. Total 6,000 ms CPU, 4 requests, 6 samples. Elapsed grows with the capture time, as it does for a live request.
     /// </summary>
     private static async Task SeedCallersAsync(NpgsqlDataSource postgres, CancellationToken ct)
     {
         var t = End.AddMinutes(-30);
         await SnapshotAsync(postgres, ct, t, 51, "0xHA", "sa", "APP01", "SSMS", 3000, 4000, text: "SELECT secret FROM dbo.Payroll WHERE ssn = '123-45-6789'");
-        await SnapshotAsync(postgres, ct, t.AddMinutes(1), 51, "0xHA", "sa", "APP01", "SSMS", 3000, 5000, text: "SELECT secret FROM dbo.Payroll WHERE ssn = '123-45-6789'");
+        await SnapshotAsync(postgres, ct, t.AddMinutes(1), 51, "0xHA", "sa", "APP01", "SSMS", 3000, 64000, text: "SELECT secret FROM dbo.Payroll WHERE ssn = '123-45-6789'");
         await SnapshotAsync(postgres, ct, t, 60, "0xHB", "svc", "WEB01", "api", 1000, 1500, text: "SELECT 1");
-        await SnapshotAsync(postgres, ct, t.AddMinutes(1), 60, "0xHB", "svc", "WEB01", "api", 1000, 1500, text: "SELECT 1");
+        await SnapshotAsync(postgres, ct, t.AddMinutes(1), 60, "0xHB", "svc", "WEB01", "api", 1000, 61500, text: "SELECT 1");
         await SnapshotAsync(postgres, ct, t.AddMinutes(2), 61, "0xHC", "svc", "WEB01", "api", 1000, 1500, text: "SELECT 3");
         await SnapshotAsync(postgres, ct, t, 70, "0xHD", "svc2", "WEB02", "api", 1000, 1500, text: "SELECT 4");
         /* A WAITFOR shell is not load. */
@@ -223,25 +224,29 @@ public sealed class WhoDroveItLiveTests
         var callers = root.GetProperty("callers").EnumerateArray().ToArray();
         Assert.Equal(new[] { "APP01", "WEB01", "WEB02" }, callers.Select(c => c.GetProperty("host_name").GetString()));
         Assert.Equal(6, root.GetProperty("total_samples").GetInt64());
-        Assert.Equal(10000.0, root.GetProperty("total_cpu_ms").GetDouble(), 3);
+        Assert.Equal(6000.0, root.GetProperty("total_cpu_ms").GetDouble(), 3);
+        Assert.Equal(4, root.GetProperty("total_requests").GetInt64());
 
         var app = callers[0];
         Assert.Equal("SSMS", app.GetProperty("program_name").GetString());
         Assert.Equal("sa", app.GetProperty("login_name").GetString());
         Assert.Equal(2, app.GetProperty("samples").GetInt64());
         Assert.Equal(2, app.GetProperty("captures").GetInt64());
-        Assert.Equal(6000.0, app.GetProperty("cpu_ms").GetDouble(), 3);
-        Assert.Equal(0.6, app.GetProperty("cpu_share").GetDouble(), 4);
-        Assert.Equal(9000.0, app.GetProperty("elapsed_ms").GetDouble(), 3);
+        Assert.Equal(1, app.GetProperty("requests").GetInt64());
+        Assert.Equal(3000.0, app.GetProperty("cpu_ms").GetDouble(), 3);
+        Assert.Equal(0.5, app.GetProperty("cpu_share").GetDouble(), 4);
+        Assert.Equal(64000.0, app.GetProperty("elapsed_ms").GetDouble(), 3);
         Assert.Equal(Math.Round(2 / 6.0, 4), app.GetProperty("sample_share").GetDouble(), 4);
         Assert.Equal("0xHA", Assert.Single(app.GetProperty("top_statements").EnumerateArray()).GetProperty("query_hash").GetString());
 
         var web = callers[1];
         Assert.Equal(3, web.GetProperty("samples").GetInt64());
-        Assert.Equal(0.3, web.GetProperty("cpu_share").GetDouble(), 4);
+        Assert.Equal(2, web.GetProperty("requests").GetInt64());
+        Assert.Equal(2000.0, web.GetProperty("cpu_ms").GetDouble(), 3);
+        Assert.Equal(Math.Round(2000 / 6000.0, 4), web.GetProperty("cpu_share").GetDouble(), 4);
         /* Two statements asked, most CPU first: HB has two samples, HC one. The WAITFOR shell is in neither the samples nor the totals. */
         Assert.Equal(new[] { "0xHB", "0xHC" }, web.GetProperty("top_statements").EnumerateArray().Select(s => s.GetProperty("query_hash").GetString()));
-        Assert.Equal(0.1, callers[2].GetProperty("cpu_share").GetDouble(), 4);
+        Assert.Equal(Math.Round(1000 / 6000.0, 4), callers[2].GetProperty("cpu_share").GetDouble(), 4);
     });
 
     [Fact]
@@ -268,7 +273,7 @@ public sealed class WhoDroveItLiveTests
         /* One login is one number everywhere; two logins never share one. */
         Assert.Equal(3, callers.Select(c => c.GetProperty("login_name").GetString()).Distinct().Count());
         Assert.Equal(new[] { "SSMS", "api", "api" }, callers.Select(c => c.GetProperty("program_name").GetString()));
-        Assert.Equal(6000.0, callers[0].GetProperty("cpu_ms").GetDouble(), 3);
+        Assert.Equal(3000.0, callers[0].GetProperty("cpu_ms").GetDouble(), 3);
     });
 
     [Fact]
@@ -280,6 +285,97 @@ public sealed class WhoDroveItLiveTests
         Assert.Contains("No active-query snapshots", empty.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
         using var refused = JsonDocument.Parse(await DarlingMcpWhoDroveItTools.GetLoadByCallerCore(postgres, ServerName, 1, 20, DarlingMcpWhoDroveItTools.MaxStatements + 1, AsOf, ct));
         Assert.Equal("invalid", refused.RootElement.GetProperty("status").GetString());
+    });
+
+    /// <summary>Reads get_load_by_caller for the window and returns its parsed document.</summary>
+    private static async Task<JsonDocument> LoadByCallerAsync(NpgsqlDataSource postgres, CancellationToken ct, int top = 20) =>
+        JsonDocument.Parse(await DarlingMcpWhoDroveItTools.GetLoadByCallerCore(postgres, ServerName, 1, top, 2, AsOf, ct));
+
+    /// <summary>
+    /// Ten captures of one request on session 80: CPU 100, 200 ... 1000 ms, elapsed growing with the capture time. The request started 5.5 s before the
+    /// first capture, so the few-millisecond jitter added to each elapsed figure stays inside one second of the start and keeps the captures together.
+    /// </summary>
+    private static async Task SeedOneRequestAsync(NpgsqlDataSource postgres, CancellationToken ct, DateTime t, int session, string host)
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            await SnapshotAsync(postgres, ct, t.AddSeconds(10 * i), session, "0xHL", "svc", host, "api", 100 * (i + 1), 5500 + 10_000 * i + (i % 3));
+        }
+    }
+
+    [Fact]
+    public Task LoadByCaller_ARequestSeenInTenCaptures_CountsOnceAtItsLargestCpu() => RunAsync(async (postgres, ct) =>
+    {
+        await SeedOneRequestAsync(postgres, ct, End.AddMinutes(-30), 80, "LONG01");
+        using var doc = await LoadByCallerAsync(postgres, ct);
+        var caller = Assert.Single(doc.RootElement.GetProperty("callers").EnumerateArray());
+        Assert.Equal(1, caller.GetProperty("requests").GetInt64());
+        Assert.Equal(10, caller.GetProperty("samples").GetInt64());
+        Assert.Equal(10, caller.GetProperty("captures").GetInt64());
+        Assert.Equal(1000.0, caller.GetProperty("cpu_ms").GetDouble(), 3);
+        Assert.Equal(95_500.0, caller.GetProperty("elapsed_ms").GetDouble(), 3);
+        Assert.Equal(1000.0, doc.RootElement.GetProperty("total_cpu_ms").GetDouble(), 3);
+        var statement = Assert.Single(caller.GetProperty("top_statements").EnumerateArray());
+        Assert.Equal(1, statement.GetProperty("requests").GetInt64());
+        Assert.Equal(1000.0, statement.GetProperty("cpu_ms").GetDouble(), 3);
+    });
+
+    [Fact]
+    public Task LoadByCaller_OneLongRequest_RanksBelowFiveShortOnesThatUsedMoreCpu() => RunAsync(async (postgres, ct) =>
+    {
+        var t = End.AddMinutes(-30);
+        await SeedOneRequestAsync(postgres, ct, t, 80, "LONG01");
+        for (var i = 0; i < 5; i++)
+        {
+            await SnapshotAsync(postgres, ct, t.AddSeconds(20 * i), 90 + i, "0xHS", "svc2", "SHORT01", "api", 300, 2500);
+        }
+
+        using var doc = await LoadByCallerAsync(postgres, ct);
+        var callers = doc.RootElement.GetProperty("callers").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "SHORT01", "LONG01" }, callers.Select(c => c.GetProperty("host_name").GetString()));
+        Assert.Equal(5, callers[0].GetProperty("requests").GetInt64());
+        Assert.Equal(1500.0, callers[0].GetProperty("cpu_ms").GetDouble(), 3);
+        Assert.Equal(1, callers[1].GetProperty("requests").GetInt64());
+        Assert.Equal(1000.0, callers[1].GetProperty("cpu_ms").GetDouble(), 3);
+        Assert.Equal(Math.Round(1500 / 2500.0, 4), callers[0].GetProperty("cpu_share").GetDouble(), 4);
+    });
+
+    [Fact]
+    public Task LoadByCaller_TwoRequestsOnOneSession_OneAfterTheOther_CountAsTwo() => RunAsync(async (postgres, ct) =>
+    {
+        var t = End.AddMinutes(-30);
+        /* The first request is seen at t and finishes. A minute later the same session starts another: its elapsed time restarts, so its start differs. */
+        await SnapshotAsync(postgres, ct, t, 70, "0xHA", "svc", "APP01", "api", 400, 5500);
+        await SnapshotAsync(postgres, ct, t.AddMinutes(1), 70, "0xHB", "svc", "APP01", "api", 700, 5500);
+        using var doc = await LoadByCallerAsync(postgres, ct);
+        var caller = Assert.Single(doc.RootElement.GetProperty("callers").EnumerateArray());
+        Assert.Equal(2, caller.GetProperty("requests").GetInt64());
+        Assert.Equal(1100.0, caller.GetProperty("cpu_ms").GetDouble(), 3);
+        Assert.Equal(11_000.0, caller.GetProperty("elapsed_ms").GetDouble(), 3);
+        Assert.Equal(2, doc.RootElement.GetProperty("total_requests").GetInt64());
+    });
+
+    [Fact]
+    public Task LoadByCaller_WithTopBelowTheCallerCount_EachShareIsOfTheWholeWindow() => RunAsync(async (postgres, ct) =>
+    {
+        var t = End.AddMinutes(-30);
+        await SnapshotAsync(postgres, ct, t, 51, "0xHA", "sa", "APP01", "SSMS", 5000, 5500);
+        await SnapshotAsync(postgres, ct, t, 60, "0xHB", "svc", "WEB01", "api", 3000, 5500);
+        await SnapshotAsync(postgres, ct, t, 61, "0xHB", "svc", "WEB01", "api", 0, 5500);
+        await SnapshotAsync(postgres, ct, t, 70, "0xHD", "svc2", "WEB02", "api", 2000, 5500);
+        using var doc = await LoadByCallerAsync(postgres, ct, top: 2);
+        var root = doc.RootElement;
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        var callers = root.GetProperty("callers").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "APP01", "WEB01" }, callers.Select(c => c.GetProperty("host_name").GetString()));
+        /* The page holds 8,000 of the window's 10,000 ms. A share of the page would read 0.625 and 0.375. */
+        Assert.Equal(10_000.0, root.GetProperty("total_cpu_ms").GetDouble(), 3);
+        Assert.Equal(0.5, callers[0].GetProperty("cpu_share").GetDouble(), 4);
+        Assert.Equal(0.3, callers[1].GetProperty("cpu_share").GetDouble(), 4);
+        Assert.Equal(4, root.GetProperty("total_samples").GetInt64());
+        Assert.Equal(0.25, callers[0].GetProperty("sample_share").GetDouble(), 4);
+        Assert.Equal(0.5, callers[1].GetProperty("sample_share").GetDouble(), 4);
+        Assert.Equal(0.25, callers[0].GetProperty("elapsed_share").GetDouble(), 4);
     });
 
     /* ───────────────────────── get_query_pileups ───────────────────────── */
