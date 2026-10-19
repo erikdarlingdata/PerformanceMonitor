@@ -63,11 +63,34 @@ public sealed class LiteInvestigationGoldenTests
     [InlineData(McpDataDetail.MetadataOnly, "CD0442961146963B9162A96E5395B181B8238FD232AA1E651F6771745A5BCE3E")]
     public void TheLiteBrief_ForAFixedInput_IsByteForByteUnchanged(McpDataDetail mode, string expectedSha)
     {
+        /* No key: the brief numbers logins per answer (login#1), as before #6066, so this pin did not move. */
         var brief = InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, mode, At);
 
         Assert.True(expectedSha == Sha(brief), $"The Lite brief at {mode} moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
         Assert.DoesNotContain("prior_links", brief, StringComparison.Ordinal);
         Assert.DoesNotContain("request_url", brief, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6066: the same brief at <c>metadataOnly</c> with the fixed test key (the 32 bytes 0x00 to 0x1f, the same key Darling's
+    /// pseudonym tests use). Re-pinned in the same PR as the change, because every login in it is now <c>login#</c> plus 8 hex instead of
+    /// <c>login#1</c>.
+    /// </summary>
+    [Fact]
+    public void TheLiteBrief_AtMetadataOnly_WithTheFixedKey_IsByteForByteUnchanged()
+    {
+        var brief = InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, At, FixedKey());
+
+        Assert.True("KEYED_BRIEF_SHA" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
+        Assert.DoesNotContain("corp", brief, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("alice", brief, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static PseudonymKey FixedKey()
+    {
+        var bytes = new byte[32];
+        for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)i;
+        return new PseudonymKey(bytes);
     }
 
     [Fact]
