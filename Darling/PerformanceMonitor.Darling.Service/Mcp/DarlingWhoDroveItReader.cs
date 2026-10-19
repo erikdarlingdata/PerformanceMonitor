@@ -140,7 +140,7 @@ internal static class DarlingWhoDroveItReader
             """;
     }
 
-    /// <summary>The newest raw text of each statement on the page, by hash (index <c>idx_query_stats_server_hash_time</c>). $1 server_id, $2/$3 window, $4 hashes.</summary>
+    /// <summary>The newest raw text of each statement on the page, by hash (the window's range scan on <c>idx_query_stats_time</c>). $1 server_id, $2/$3 window, $4 hashes.</summary>
     internal const string StatementTextSql = """
         SELECT DISTINCT ON (q.database_name, q.query_hash)
                COALESCE(q.database_name, '') AS database_name,
