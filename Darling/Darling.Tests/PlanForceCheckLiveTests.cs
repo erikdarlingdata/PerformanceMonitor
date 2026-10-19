@@ -532,10 +532,15 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
             Assert.Equal(1, (await at(T.AddMinutes(6)).SweepAsync(ct)).FollowUps);
             Assert.Equal("not reviewed yet", Review(await ReadAt(T.AddMinutes(7))));
 
-            /* One answered, one opened: "checks answered 1 of 2". */
-            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported' WHERE force_check_of = {force.CalledId}", ct);
+            /* One answered, one opened: "checks answered 1 of 2". The report stamps reported_at, as the submit path does. */
+            var reportedAt = T.AddMinutes(8).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported', reported_at = '{reportedAt}+00' WHERE force_check_of = {force.CalledId}", ct);
             Assert.Equal(1, (await at(T.AddMinutes(11)).SweepAsync(ct)).FollowUps);
             Assert.Equal("checks answered 1 of 2", Review(await ReadAt(T.AddMinutes(12))));
+
+            /* A person closes the answered check in the Viewer (state closed, reported_at kept): it was still answered. */
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'closed', closed_at = now() WHERE force_check_of = {force.CalledId} AND reported_at IS NOT NULL", ct);
+            Assert.Equal("checks answered 1 of 2", Review(await ReadAt(T.AddMinutes(13))));
 
             /* The schedule ended (past T + 25 h) with one answered: the mark still counts it. */
             Assert.Equal("checks answered 1 of 2", Review(await ReadAt(T.AddHours(26))));

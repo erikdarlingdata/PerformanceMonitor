@@ -191,7 +191,7 @@ WHERE a.muted
     internal const string ForceReviewSql = @"
 SELECT d.event_time,
        (SELECT count(*) FROM config.investigation_requests AS f WHERE f.force_check_of = c.journal_id),
-       (SELECT count(*) FROM config.investigation_requests AS f WHERE f.force_check_of = c.journal_id AND f.state = 'reported'),
+       (SELECT count(*) FROM config.investigation_requests AS f WHERE f.force_check_of = c.journal_id AND f.reported_at IS NOT NULL),
        (EXISTS (SELECT 1 FROM config.investigation_journal AS u
                 WHERE u.request_id = c.request_id AND u.event = 'action_undone' AND u.detail->>'called_id' = c.journal_id::text)
         OR EXISTS (
