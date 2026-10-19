@@ -361,7 +361,7 @@ public partial class MainWindow : Window
 
         if (settings is null)
         {
-            ShowConnectionFailure("darling.json not found — copy darling.sample.json from the service and point DARLING_CONFIG at it.");
+            ShowConnectionFailure(ViewerConfigDiagnostics.ConfigNotFoundMessage);
             return;
         }
 

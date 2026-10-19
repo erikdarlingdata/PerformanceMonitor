@@ -84,7 +84,7 @@ public static class HeadlessSelfTest
 
         if (settings is null)
         {
-            Print("darling.json not found — copy darling.sample.json from the service and point DARLING_CONFIG at it (or pass --config <path>).");
+            Print(ViewerConfigDiagnostics.ConfigNotFoundMessage);
             return Finish(1);
         }
 
