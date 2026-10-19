@@ -38,6 +38,7 @@
  */
 
 import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, readErrorCount, isSessionExpired, onSessionExpired } from "./util.js";
+import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
@@ -172,6 +173,8 @@ function finopsRoute(rest) {
  * that card's last-fetched payload instead of re-fetching (the profile it reports changes rarely — a hardware
  * or version change, never per-tick). Every other renderX() call below still ignores it.
  */
+const resetScrollOnRouteChange = makeScrollReset(() => window.scrollTo(0, 0));
+
 function route(opts) {
   /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
      see showSignedOutState/onSessionExpired below (#4187). hashchange keeps calling this (a stray click, the
@@ -180,6 +183,7 @@ function route(opts) {
   if (isSessionExpired()) return;
 
   const r = currentRoute();
+  resetScrollOnRouteChange(r, !!(opts && opts.poll === true)); // #6159: another page, server or tab opens at the top
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);

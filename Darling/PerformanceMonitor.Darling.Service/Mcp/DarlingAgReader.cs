@@ -186,12 +186,17 @@ internal static class DarlingAgReader
                honest "something needs a look" reading; the label stays "Stale". Otherwise a group with no PRIMARY in view is never Healthy: with
                nobody holding the role the group is not serving, and all-green replicas around a missing primary
                were the "Healthy, No primary reported" card. Warning is the floor, a worse band stays. */
+            /* #6159: a card built from a SECONDARY's own view lists the replicas that secondary can see, and the primary's row is not always among
+               them. The local replica holding the SECONDARY role means a primary exists, so a missing primary row here is a limit of the view, not a
+               group with no primary: the card says so and is not raised to Warning for it. */
+            var primaryNotVisible = !replicaViews.Any(r => r.IsPrimary)
+                && replicaViews.Any(r => r.IsLocal == true && string.Equals(r.RoleDesc, "SECONDARY", StringComparison.OrdinalIgnoreCase));
             var isStale = nowUtc - first.CollectionTime > ServerHealthThresholds.OfflineThreshold;
             if (isStale)
             {
                 worst = HealthSeverity.Warning;
             }
-            else if (!replicaViews.Any(r => r.IsPrimary) && worst < HealthSeverity.Warning)
+            else if (!replicaViews.Any(r => r.IsPrimary) && !primaryNotVisible && worst < HealthSeverity.Warning)
             {
                 worst = HealthSeverity.Warning;
             }
@@ -207,6 +212,7 @@ internal static class DarlingAgReader
                 CollectionTime = first.CollectionTime,
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
                 PrimaryReplica = replicaViews.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
+                PrimaryNotVisible = primaryNotVisible,
                 Severity = worst,
                 SeverityLabel = isStale ? "Stale" : SeverityLabel(worst),
                 IsStale = isStale,
@@ -437,6 +443,7 @@ internal static class DarlingAgReader
             ReplicaServerName = row.ReplicaServerName,
             RoleDesc = row.RoleDesc,
             RoleSeverity = role,
+            IsLocal = row.IsLocal,
             IsPrimary = string.Equals(row.RoleDesc, "PRIMARY", StringComparison.OrdinalIgnoreCase),
             OperationalStateDesc = row.OperationalStateDesc,
             OperationalStateSeverity = operational,
@@ -799,6 +806,10 @@ public sealed class AvailabilityGroupView
 
     /// <summary>The replica currently holding the PRIMARY role in this view, or null when no row reports one.</summary>
     [JsonPropertyName("primary_replica")] public string? PrimaryReplica { get; init; }
+
+    /// <summary>True when no replica row in this view holds the PRIMARY role but the reporting replica is a SECONDARY, which means a primary
+    /// exists and this view just does not list it (#6159). Not a finding; the card says the primary is not visible from this secondary.</summary>
+    [JsonPropertyName("primary_not_visible")] public bool PrimaryNotVisible { get; init; }
 
     /// <summary>The worst band anywhere in the group — across the replicas' sync health / connected /
     /// operational state and every database's synchronization state.</summary>

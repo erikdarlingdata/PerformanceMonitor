@@ -201,6 +201,29 @@ public sealed class DarlingAgReaderTests
         Assert.Equal(HealthSeverity.Warning, group.Severity);
     }
 
+    [Fact]
+    public void Build_ACardFromASecondaryThatDoesNotListThePrimary_IsNotWarning_AndSaysThePrimaryIsNotVisible()
+    {
+        // #6159: the reporting replica (is_local) is a SECONDARY, so a primary exists; its own view just does not list it.
+        var replicas = new[] { Replica(1, "NODE2", "AG1", "NODE2", "SECONDARY", isLocal: true) };
+
+        var group = Assert.Single(Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0)).AvailabilityGroups);
+        Assert.Null(group.PrimaryReplica);
+        Assert.True(group.PrimaryNotVisible);
+        Assert.Equal(HealthSeverity.Healthy, group.Severity);
+    }
+
+    [Fact]
+    public void Build_NoPrimaryAndNoLocalSecondary_StillWarns_AndIsNotCalledNotVisible()
+    {
+        // Nothing says the reporter is a secondary (no is_local row), so a missing primary is still a finding.
+        var replicas = new[] { Replica(1, "NODE1", "AG1", "NODE1", "RESOLVING", isLocal: true), Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY", isLocal: false) };
+
+        var group = Assert.Single(Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0)).AvailabilityGroups);
+        Assert.False(group.PrimaryNotVisible);
+        Assert.Equal(HealthSeverity.Warning, group.Severity);
+    }
+
     /* ─────────────────────────── database-grain banding ─────────────────────────── */
 
     [Fact]

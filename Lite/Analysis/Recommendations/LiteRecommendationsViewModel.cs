@@ -99,6 +99,9 @@ public sealed class LiteRecommendationCardViewModel
     /// <summary>The card heading.</summary>
     public string Title => Item.Title;
 
+    /// <summary>#6159: false when the card is the only finding in its section, whose expander header already carries the title.</summary>
+    public bool ShowTitle { get; internal set; } = true;
+
     /// <summary>
     /// The affected database wrapped in brackets for display, or empty for a server-scoped
     /// finding (so the database line collapses).
@@ -413,6 +416,7 @@ public sealed class LiteRecommendationsViewModel
             .Select(i => new LiteRecommendationCardViewModel(i, serverClock))
             .ToList();
         var primary = cards[0]; // reader sorted severity-desc -> the first card is the incident primary
+        if (cards.Count == 1) primary.ShowTitle = false; // the section header already names it (#6159)
         var severity = primary.Severity;
         var label = severity switch
         {

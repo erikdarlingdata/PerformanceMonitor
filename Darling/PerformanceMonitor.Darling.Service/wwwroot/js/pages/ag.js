@@ -164,12 +164,18 @@ function agCard(g) {
       el("div", { class: "spacer" }),
       g.primary_replica
         ? el("span", { class: "ag-primary-note", text: "Primary: " + g.primary_replica })
-        : el("span", { class: "ag-primary-note muted", text: "No primary reported" }),
+        : el("span", { class: "ag-primary-note muted", text: primaryNote(g) }),
     ]),
     el("div", { class: "status-line", text: viewSubtitle(g) }),
     el("div", { class: "ag-replicas" }, (g.replicas || []).map(replicaChip)),
     databaseGrid(g),
   ]);
+}
+
+/* #6159: the line where the primary would be named. A card from a secondary's own view may not list the primary; that is said plainly and is
+   not a finding, where a group with no primary at all stays "No primary reported". */
+export function primaryNote(g) {
+  return g && g.primary_not_visible ? "Primary not visible from this secondary" : "No primary reported";
 }
 
 /* Whose view this is, and how fresh. The two collector sweeps land independently, so the database grain gets its

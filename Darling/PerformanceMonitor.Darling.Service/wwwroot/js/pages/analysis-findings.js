@@ -137,7 +137,8 @@ function severityText(severity) {
   return Number.isFinite(n) ? " " + n.toFixed(2) : "";
 }
 
-function card(server, f) {
+/* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
+function card(server, f, showTitle) {
   const label = severityLabel(f.severity);
   const advice = f.advice || {};
   const kids = [
@@ -145,7 +146,7 @@ function card(server, f) {
       el("span", { class: badgeClass(label), text: label.toUpperCase() + severityText(f.severity) }),
       f.category ? el("span", { class: "muted", text: " " + f.category }) : null,
     ]),
-    el("h4", { text: findingTitle(f) }),
+    showTitle ? el("h4", { text: findingTitle(f) }) : null,
     advice.investigation ? el("p", { class: "reco-advice", text: advice.investigation }) : null,
     advice.remediation ? el("p", { class: "reco-advice", text: advice.remediation }) : null,
     el("div", { class: "muted", text: "Seen " + f.occurrences + "× · last " + localTime(f.last_seen) + (f.recurring_at_this_hour ? " · recurs at this hour" : "") }),
@@ -165,7 +166,7 @@ function card(server, f) {
 function groupNode(server, group) {
   const details = el("details", { class: "reco-group" }, [
     el("summary", { class: "disc-summary" }, [groupHeader(group)]),
-    el("div", { class: "disc-body" }, group.items.map((f) => card(server, f))),
+    el("div", { class: "disc-body" }, group.items.map((f) => card(server, f, group.items.length > 1))),
   ]);
   if (isOpen(server, group)) details.setAttribute("open", "");
   details.addEventListener("toggle", () => setOpen(server, group.key, !!details.open));

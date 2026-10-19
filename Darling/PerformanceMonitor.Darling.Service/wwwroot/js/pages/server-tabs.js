@@ -3091,7 +3091,7 @@ const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
 const PROPERTY_STATS = [
   { key: "product_version", label: "Version", format: "text", small: true },
   { key: "edition", label: "Edition", format: "text", small: true },
-  { key: "product_level", label: "Level", format: "text", small: true },
+  { key: "product_level", label: "Level", format: "text", small: true, appendKey: "product_update_level" },
   { key: "cpu_count", label: "Logical CPUs", format: "int" },
   { key: "socket_count", label: "Sockets", format: "int", hideWhen: AZURE_SQL_DATABASE },
   { key: "cores_per_socket", label: "Cores/socket", format: "int", hideWhen: AZURE_SQL_DATABASE },

@@ -1246,6 +1246,7 @@
 
                                     <!-- Title -->
                                     <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="13"
+                                               Visibility="{Binding ShowTitle, Converter={StaticResource RecoBoolToVis}}"
                                                TextWrapping="Wrap"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
 
