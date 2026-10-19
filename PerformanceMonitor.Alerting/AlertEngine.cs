@@ -2947,6 +2947,9 @@ public sealed class AlertEngine
         {
             var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
             readClock.Restart();
+            /* #6098: the fleet-wide excluded volumes go BEFORE the breach test, so the worst-volume pick, the tier and the
+               context all come from the volumes that remain, and a server whose only low volumes are excluded resolves. */
+            volumes = VolumeExclusions.Filter(volumes, _settings.ExcludedVolumes);
             var breached = AlertContextBuilders.GetBreachedVolumes(volumes, lowDiskPercent, lowDiskGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 

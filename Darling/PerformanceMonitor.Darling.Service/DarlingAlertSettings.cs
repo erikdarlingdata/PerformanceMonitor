@@ -302,6 +302,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
 
     public IReadOnlyList<string> ExcludedDatabases => _config.Alerts.ExcludedDatabases;
 
+    /* #6098: the Volume Free Space alert's fleet-wide excluded mount points, by reference like ExcludedDatabases so
+       the store's value (loaded over the file's) is what the engine reads. */
+    public IReadOnlyList<string> ExcludedVolumes => _config.Alerts.ExcludedVolumes;
+
     /// <summary>
     /// The GLOBAL deadlock/blocking delivery mode (#1141), read live through the by-reference config seam so a
     /// store reload reflects immediately. The deliverer resolves a per-server override against this via the

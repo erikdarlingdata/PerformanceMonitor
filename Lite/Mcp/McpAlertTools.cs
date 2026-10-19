@@ -367,6 +367,7 @@ public sealed class McpAlertTools
                 },
                 cooldown_minutes = App.AlertCooldownMinutes,
                 excluded_databases = App.AlertExcludedDatabases,
+                excluded_volumes = App.AlertExcludedVolumes,
                 delivery = new
                 {
                     /* The second value-level alignment after cpu.mode — and the one place ToString() is the

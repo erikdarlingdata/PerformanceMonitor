@@ -108,6 +108,11 @@
   // Applies to every alert type. Names only; anything blank is dropped on read.
   "alert_excluded_databases": [],
 
+  // ---- Volume exclusions ----------------------------------------------------------------
+  // Mount points the Volume Free Space alert ignores on every server, e.g. ["S:\\", "/mnt/scratch"].
+  // The whole mount point, any case; a trailing \ or / is ignored. Anything blank is dropped on read.
+  "alert_excluded_volumes": [],
+
   // ---- tempdb ---------------------------------------------------------------------------
   "alert_tempdb_space_enabled": true,
   "alert_tempdb_space_threshold_percent": 80,

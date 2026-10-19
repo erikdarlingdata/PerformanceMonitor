@@ -62,11 +62,12 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
             Assert.Contains(column + " = EXCLUDED." + column, ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
         }
 
-        Assert.EndsWith(
-            "client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute FROM config_alert_settings WHERE id = 1",
+        /* The three columns sit together, in this order (their ordinals are pinned below). Columns appended after them (V200's
+           excluded_volumes) do not move them. */
+        Assert.Contains(
+            "client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute",
             ViewerDataService.AlertSettingsSelectSql, StringComparison.Ordinal);
         Assert.Contains("$76,", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$77", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -81,8 +82,8 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         var viewerColumns = ViewerDataService.AlertSettingsSelectSql
             .Replace("SELECT ", "", StringComparison.Ordinal).Split(" FROM ")[0]
             .Split(',').Select(c => c.Trim()).ToList();
-        Assert.Equal(76, viewerColumns.Count);
-        Assert.Equal(Expected, viewerColumns.Skip(73).ToArray());
+        Assert.Equal(77, viewerColumns.Count);
+        Assert.Equal(Expected, viewerColumns.Skip(73).Take(3).ToArray());
 
         var service = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs"));
         var start = service.IndexOf("ReadAlertSettingsAsync(NpgsqlConnection connection", StringComparison.Ordinal);
@@ -90,8 +91,8 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         var select = service[start..];
         select = select[(select.IndexOf("SELECT", StringComparison.Ordinal) + 6)..select.IndexOf("FROM config_alert_settings WHERE id = 1", StringComparison.Ordinal)];
         var serviceColumns = select.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
-        Assert.Equal(76, serviceColumns.Count);
-        Assert.Equal(Expected, serviceColumns.Skip(73).ToArray());
+        Assert.Equal(77, serviceColumns.Count);
+        Assert.Equal(Expected, serviceColumns.Skip(73).Take(3).ToArray());
         Assert.Contains("ClientTimeoutsEnabled = reader.GetBoolean(73),", service, StringComparison.Ordinal);
         Assert.Contains("ClientTimeoutsWarningPerMinute = reader.GetInt32(74),", service, StringComparison.Ordinal);
         Assert.Contains("ClientTimeoutsCriticalPerMinute = reader.GetInt32(75),", service, StringComparison.Ordinal);
@@ -106,20 +107,20 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         var mcpColumns = DarlingAlertReader.AlertSettingsSelectSql
             .Split("FROM config_alert_settings")[0].Replace("SELECT", "", StringComparison.Ordinal)
             .Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
-        Assert.Equal(76, mcpColumns.Count);
-        Assert.Equal(Expected, mcpColumns.Skip(73).ToArray());
+        Assert.Equal(77, mcpColumns.Count);
+        Assert.Equal(Expected, mcpColumns.Skip(73).Take(3).ToArray());
         var parameters = typeof(DarlingAlertReader.AlertSettingsReadRow).GetConstructors().Single().GetParameters();
-        Assert.Equal(76, parameters.Length);
+        Assert.Equal(77, parameters.Length);
         Assert.Equal(new[] { "ClientTimeoutsEnabled", "ClientTimeoutsWarningPerMinute", "ClientTimeoutsCriticalPerMinute" },
-            parameters.Skip(73).Select(p => p.Name!).ToArray());
+            parameters.Skip(73).Take(3).Select(p => p.Name!).ToArray());
         Assert.Equal(typeof(bool), parameters[73].ParameterType);
         Assert.Equal(typeof(int), parameters[74].ParameterType);
         Assert.Equal(typeof(int), parameters[75].ParameterType);
 
-        /* The viewer's bind supplies $74 to $76 at indexes 73 to 75, in column order, and nothing after them. */
+        /* The viewer's bind supplies $74 to $76 at indexes 73 to 75, in column order (V200's excluded_volumes follows at 76). */
         var row = new AlertSettingsRow { ClientTimeoutsEnabled = true, ClientTimeoutsWarningPerMinute = 5, ClientTimeoutsCriticalPerMinute = 11 };
         var command = Bind(row);
-        Assert.Equal(76, command.Parameters.Count);
+        Assert.Equal(77, command.Parameters.Count);
         Assert.Equal(true, command.Parameters[73].Value);
         Assert.Equal(5, command.Parameters[74].Value);
         Assert.Equal(11, command.Parameters[75].Value);

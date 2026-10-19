@@ -116,6 +116,7 @@ public sealed class AlertStoredValueTests
         public int FailedJobLookbackMinutes { get; set; } = 60;
         public int CooldownMinutes { get; set; } = 5;
         public IReadOnlyList<string> ExcludedDatabases => Array.Empty<string>();
+        public IReadOnlyList<string> ExcludedVolumes => Array.Empty<string>();
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 

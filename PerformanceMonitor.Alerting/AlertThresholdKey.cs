@@ -138,6 +138,7 @@ public static class AlertThresholdKeys
         [nameof(IAlertEngineSettings.LongRunningQueryExcludedProgramNamePrefixes)] = "Not an integer: a long-running query exclusion list.",
         [nameof(IAlertEngineSettings.LongRunningQueryExcludedLogins)] = "Not an integer: a long-running query exclusion list.",
         [nameof(IAlertEngineSettings.ExcludedDatabases)] = "Not an integer: the excluded-database list.",
+        [nameof(IAlertEngineSettings.ExcludedVolumes)] = "Not an integer: the excluded-volume list.",
         [nameof(IAlertEngineSettings.DeadlockRateThresholds)] = "Not an integer: the deadlock rate tiers grade a fire and decide none.",
         [nameof(IAlertEngineSettings.CpuAlertMode)] = "Not an integer: which CPU figure is compared.",
     };

@@ -261,7 +261,12 @@
     // store row wins afterwards, and a list cleared there stays cleared. [] excludes nothing on that arm.
     "longRunningQueryExcludedProgramNamePrefixes": ["SQLAgent - TSQL JobStep"],
     "longRunningQueryExcludedLogins": ["NT AUTHORITY\\SYSTEM", "NT AUTHORITY\\NETWORK SERVICE"],
-    "excludedDatabases": []
+    "excludedDatabases": [],
+    // Mount points the Volume Free Space alert ignores on every server, e.g. ["S:\\", "/mnt/scratch"]. The
+    // whole mount point, any case; a trailing \ or / on either side is ignored (S: = S:\ = s:\). Dropped
+    // before the breach test, so a server whose only low volumes are excluded resolves. Seeded into the store
+    // on first run (V200); the store row wins afterwards. [] (the default) excludes nothing.
+    "excludedVolumes": []
   },
 
   // Scheduled analysis (optional section). The engine analyzes each server on a cadence and persists

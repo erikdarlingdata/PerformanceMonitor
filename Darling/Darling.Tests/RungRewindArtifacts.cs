@@ -354,6 +354,12 @@ ALTER TABLE IF EXISTS collect.dmv_blocking_snapshots
     DROP COLUMN IF EXISTS blocking_open_transaction_count,
     DROP COLUMN IF EXISTS blocking_tran_log_bytes_used;
 CREATE OR REPLACE VIEW collect.v_dmv_blocking_snapshots AS SELECT * FROM collect.dmv_blocking_snapshots;"),
+
+        // /// V200 (#6098): the excluded-volumes list on the singleton alert settings row. The column is the probe's newest sentinel. The
+        // rewind drops it, so a re-run of V200 adds it again (the row keeps every other knob). Safe on a store that never had it.
+        new(200, "hasExcludedVolumes",
+            @"
+ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS excluded_volumes;"),
     ];
 
     /// <summary>

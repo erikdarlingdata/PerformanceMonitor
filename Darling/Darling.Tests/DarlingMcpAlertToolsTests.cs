@@ -1101,6 +1101,25 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         }
     }
 
+    /// <summary>#6098 (V200): <c>excluded_volumes</c> is reported at the top level beside <c>excluded_databases</c>, the write
+    /// targets that column, and anything that is not an array of strings is refused. (The canonical form it stores is
+    /// <c>VolumeExclusionsTests</c>'s.)</summary>
+    [Fact]
+    public void ExcludedVolumes_IsReported_AndWrittenInTheCanonicalForm()
+    {
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Equal(new[] { "S:\\", "/mnt/scratch" }, payload["excluded_volumes"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
+
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"excluded_volumes\":[\" S:\\\\ \",\"s:\",\"\",\"/mnt/scratch/\"]}")!);
+        Assert.Null(error);
+        var target = Assert.Single(targets);
+        Assert.Equal((DarlingMcpAlertTools.AlertSettingsTable, "excluded_volumes"), target);
+
+        var (_, notArray) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"excluded_volumes\":\"S:\\\\\"}")!);
+        Assert.NotNull(notArray);
+    }
+
     /// <summary>#5640 (V179): the Client Timeouts switch and its two per-minute bars are reported under <c>client_timeouts</c>
     /// through the engine's own clamp, written under the engine's own floor, and a Critical below Warning is refused when both
     /// are sent. (A lone bar against the stored other is checked inside the write transaction, like Runnable Queue's.)</summary>
@@ -1236,7 +1255,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         RunnableQueueEnabled: false, RunnableQueueWarningPerScheduler: 5, RunnableQueueCriticalPerScheduler: 11,
         /* #5640 (V179): deliberately NOT the shipped false / 10 / 60 -- enabled TRUE against the shipped OFF, and a pair of 4 and 25 -- for
            the same reason: a payload that dropped the columns and fell back to the engine defaults would not match. */
-        ClientTimeoutsEnabled: true, ClientTimeoutsWarningPerMinute: 4, ClientTimeoutsCriticalPerMinute: 25);
+        ClientTimeoutsEnabled: true, ClientTimeoutsWarningPerMinute: 4, ClientTimeoutsCriticalPerMinute: 25,
+        ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" });
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

@@ -470,7 +470,10 @@ LIMIT 1";
            bars through AttentionEvaluator.ClampBars, the way the engine reads them. */
         bool ClientTimeoutsEnabled,
         int ClientTimeoutsWarningPerMinute,
-        int ClientTimeoutsCriticalPerMinute);
+        int ClientTimeoutsCriticalPerMinute,
+        /* #6098 (V200): the Volume Free Space alert's fleet-wide excluded mount points (text[] NOT NULL, the excluded_databases
+           shape). APPENDED, same reason. */
+        IReadOnlyList<string> ExcludedVolumes);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -506,7 +509,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
        analysis_uncorroborated_route,
        runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
-       client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute
+       client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
+       excluded_volumes
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -569,7 +573,9 @@ WHERE id = 1";
             /* #5641 (V177): the Runnable Queue switch and bars at 70-72. */
             reader.GetBoolean(70), reader.GetInt32(71), reader.GetInt32(72),
             /* #5640 (V179): the Client Timeouts switch and bars at 73-75. */
-            reader.GetBoolean(73), reader.GetInt32(74), reader.GetInt32(75));
+            reader.GetBoolean(73), reader.GetInt32(74), reader.GetInt32(75),
+            /* #6098 (V200): the excluded mount points at 76. */
+            reader.IsDBNull(76) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(76));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

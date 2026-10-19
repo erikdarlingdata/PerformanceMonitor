@@ -104,6 +104,7 @@ public sealed class DarlingSelfAlertTests
         public int CooldownMinutes { get; set; } = 5;
         public List<string> ExcludedDatabasesList { get; } = new();
         public IReadOnlyList<string> ExcludedDatabases => ExcludedDatabasesList;
+        public IReadOnlyList<string> ExcludedVolumes { get; } = new List<string>();
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 

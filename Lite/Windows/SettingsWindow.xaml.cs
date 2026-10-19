@@ -854,6 +854,7 @@ public partial class SettingsWindow : Window
         AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedProgramNamePrefixes);
         AlertLrqExcludedLoginsBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedLogins);
         AlertExcludedDatabasesBox.Text = string.Join(", ", App.AlertExcludedDatabases);
+        AlertExcludedVolumesBox.Text = string.Join(", ", App.AlertExcludedVolumes);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
         AlertLowDiskCheckBox.IsChecked = App.AlertLowDiskEnabled;
@@ -1009,7 +1010,8 @@ public partial class SettingsWindow : Window
             .Select(s => s.Trim())
             .Where(s => s.Length > 0)
             .ToList();
-        App.AlertTempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true;
+        App.AlertExcludedVolumes = VolumeExclusions.Normalize(AlertExcludedVolumesBox.Text.Split(',')).ToList();
+        App.AlertTempDbSpaceEnabled =AlertTempDbSpaceCheckBox.IsChecked == true;
         if (int.TryParse(AlertTempDbSpaceThresholdBox.Text, out var tempDb) && tempDb > 0 && tempDb <= 100)
             App.AlertTempDbSpaceThresholdPercent = tempDb;
         App.AlertLowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true;
@@ -1119,6 +1121,9 @@ public partial class SettingsWindow : Window
         var dbArray = new System.Text.Json.Nodes.JsonArray();
         foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
         root["alert_excluded_databases"] = dbArray;
+        var volumeArray = new System.Text.Json.Nodes.JsonArray();
+        foreach (var volume in App.AlertExcludedVolumes) volumeArray.Add(volume);
+        root["alert_excluded_volumes"] = volumeArray;
         var lrqProgramArray = new System.Text.Json.Nodes.JsonArray();
         foreach (var name in App.AlertLongRunningQueryExcludedProgramNamePrefixes) lrqProgramArray.Add(name);
         root["alert_long_running_query_excluded_program_name_prefixes"] = lrqProgramArray;
@@ -1196,6 +1201,7 @@ public partial class SettingsWindow : Window
         AnalysisNotifyCooldownBox.Text = "360";
         AnalysisUncorroboratedDigestCheckBox.IsChecked = true;
         AlertExcludedDatabasesBox.Text = "";
+        AlertExcludedVolumesBox.Text = "";
         /* #3653 (A5, Q5): "defaults" for the opt-out knob are the SEEDS, not empty boxes. */
         AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultProgramNamePrefixes);
         AlertLrqExcludedLoginsBox.Text = string.Join(", ", LongRunningQueryExclusions.DefaultLogins);

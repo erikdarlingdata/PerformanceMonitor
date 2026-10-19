@@ -2308,6 +2308,7 @@ SELECT
         public int FailedJobLookbackMinutes { get; set; } = 60;
         public int CooldownMinutes { get; set; } = 5;
         public IReadOnlyList<string> ExcludedDatabases { get; } = new List<string>();
+        public IReadOnlyList<string> ExcludedVolumes { get; } = new List<string>();
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 }

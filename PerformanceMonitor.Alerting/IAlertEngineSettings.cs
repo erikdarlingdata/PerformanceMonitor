@@ -356,6 +356,13 @@ public interface IAlertEngineSettings
     /// </summary>
     IReadOnlyList<string> ExcludedDatabases { get; }
 
+    /// <summary>
+    /// Mount points the Volume Free Space alert ignores (#6098), fleet-wide. Matched by
+    /// <see cref="VolumeExclusions"/>: the whole mount point, case-insensitive, a trailing <c>\</c> or <c>/</c>
+    /// on either side ignored. Excluded volumes are dropped before the breach test. Empty by default.
+    /// </summary>
+    IReadOnlyList<string> ExcludedVolumes { get; }
+
     /// <summary>Which CPU value the engine compares against <see cref="CpuThresholdPercent"/>.</summary>
     CpuAlertMode CpuAlertMode { get; }
 }

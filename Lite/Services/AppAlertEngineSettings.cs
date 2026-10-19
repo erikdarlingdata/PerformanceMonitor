@@ -120,6 +120,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int CooldownMinutes => App.AlertCooldownMinutes;
 
     public IReadOnlyList<string> ExcludedDatabases => App.AlertExcludedDatabases;
+    public IReadOnlyList<string> ExcludedVolumes => App.AlertExcludedVolumes;
 
     public EngineCpuAlertMode CpuAlertMode =>
         App.AlertCpuMode == PerformanceMonitorLite.CpuAlertMode.Total

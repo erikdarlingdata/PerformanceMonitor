@@ -1048,6 +1048,13 @@ public sealed class AlertsConfig
     [JsonPropertyName("excludedDatabases")]
     public List<string> ExcludedDatabases { get; set; } = new();
 
+    /// <summary>Mount points the Volume Free Space alert ignores on every server (#6098), stored in
+    /// <c>config_alert_settings.excluded_volumes</c> (V200) beside <c>excluded_databases</c>, and the store row wins
+    /// over this file after the first seed. Matched by <see cref="PerformanceMonitor.Alerting.VolumeExclusions"/>:
+    /// the whole mount point, case-insensitive, a trailing <c>\</c> or <c>/</c> on either side ignored.</summary>
+    [JsonPropertyName("excludedVolumes")]
+    public List<string> ExcludedVolumes { get; set; } = new();
+
     /// <summary>
     /// How deadlock/blocking alerts are delivered (#1141): <see cref="AlertNotificationMode.Summary"/>
     /// (one batched card per cycle — the default, matching Lite) or <see cref="AlertNotificationMode.PerEvent"/>

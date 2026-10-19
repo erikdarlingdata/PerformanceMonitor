@@ -1274,6 +1274,10 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertExcludedDatabases = new List<string> { "tempdb", "model" };
         Assert.Equal(new[] { "tempdb", "model" }, settings.ExcludedDatabases);
 
+        /* #6098: the Volume Free Space alert's fleet-wide excluded mount points. */
+        App.AlertExcludedVolumes = new List<string> { "S:\\", "/mnt/scratch" };
+        Assert.Equal(new[] { "S:\\", "/mnt/scratch" }, settings.ExcludedVolumes);
+
         /* #3653 (A5, Q5): the Long-Running Query opt-out knob's two lists, forwarded raw (the engine normalises). */
         App.AlertLongRunningQueryExcludedProgramNamePrefixes = new List<string> { "SQLAgent - TSQL JobStep", "HammerDB" };
         Assert.Equal(new[] { "SQLAgent - TSQL JobStep", "HammerDB" }, settings.LongRunningQueryExcludedProgramNamePrefixes);

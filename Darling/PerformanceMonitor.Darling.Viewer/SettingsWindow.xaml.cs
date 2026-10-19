@@ -874,6 +874,7 @@ public partial class SettingsWindow : Window
         AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", r.LongRunningQueryExcludedProgramNamePrefixes);
         AlertLrqExcludedLoginsBox.Text = string.Join(", ", r.LongRunningQueryExcludedLogins);
         AlertExcludedDatabasesBox.Text = string.Join(", ", r.ExcludedDatabases);
+        AlertExcludedVolumesBox.Text = string.Join(", ", r.ExcludedVolumes);
         AlertTempDbSpaceCheckBox.IsChecked = r.TempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = r.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
@@ -987,6 +988,7 @@ public partial class SettingsWindow : Window
                 .Select(s => s.Trim())
                 .Where(s => s.Length > 0)
                 .ToList(),
+            ExcludedVolumes = VolumeExclusions.Normalize(AlertExcludedVolumesBox.Text.Split(',')).ToList(),
         };
 
         if (int.TryParse(AlertCpuThresholdBox.Text, out var cpu) && cpu is > 0 and <= 100)
@@ -1257,6 +1259,7 @@ public partial class SettingsWindow : Window
         FleetSweepEnabledCheckBox.IsChecked = true;
         FleetSweepIntervalBox.Text = FleetSweepCadence.DefaultIntervalMinutes.ToString(CultureInfo.InvariantCulture);
         AlertExcludedDatabasesBox.Text = "";
+        AlertExcludedVolumesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
     }

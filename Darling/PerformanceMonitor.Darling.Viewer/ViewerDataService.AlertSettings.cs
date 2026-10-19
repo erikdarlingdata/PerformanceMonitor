@@ -88,7 +88,10 @@ public sealed partial class ViewerDataService
         /* #5640 (V179): the Client Timeouts alert's switch and two bars, APPENDED for the same reason. The viewer refuses a
            store below StorageVersion.SchemaVersion (RequiredStoreSchemaVersion, checked at connect in MainWindow), so
            the columns always exist where this runs and the SELECT and upsert need no per-version gate (#5641 had none either). */
-        "client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute";
+        "client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute, " +
+        /* #6098 (V200): the Volume Free Space alert's excluded mount points (text[], the excluded_databases shape), APPENDED for
+           the same reason and under the same connect-time store gate. */
+        "excluded_volumes";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -105,7 +108,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -184,6 +187,7 @@ ON CONFLICT (id) DO UPDATE SET
     client_timeouts_enabled = EXCLUDED.client_timeouts_enabled,
     client_timeouts_warning_per_minute = EXCLUDED.client_timeouts_warning_per_minute,
     client_timeouts_critical_per_minute = EXCLUDED.client_timeouts_critical_per_minute,
+    excluded_volumes = EXCLUDED.excluded_volumes,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -307,6 +311,9 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.ClientTimeoutsEnabled });         // $74 (#5640, V179)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctWarning });                        // $75 (#5640, V179)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctCritical });                       // $76 (#5640, V179)
+        /* #6098 (V200): the excluded mount points, normalised on the way in (trim, blanks dropped, a trailing separator ignored
+           when de-duplicating) so the store holds the list the engine applies and get_alert_settings reports back. */
+        AddTextArray(command, VolumeExclusions.Normalize(r.ExcludedVolumes));                               // $77
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -405,6 +412,8 @@ ON CONFLICT (id) DO UPDATE SET
         ClientTimeoutsEnabled = reader.GetBoolean(73),
         ClientTimeoutsWarningPerMinute = reader.GetInt32(74),
         ClientTimeoutsCriticalPerMinute = reader.GetInt32(75),
+        /* #6098 (V200) excluded mount points appended at ordinal 76 (text[] NOT NULL, DEFAULT empty). */
+        ExcludedVolumes = reader.IsDBNull(76) ? new List<string>() : reader.GetFieldValue<string[]>(76).ToList(),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -564,6 +573,12 @@ public sealed class AlertSettingsRow
     public int CooldownMinutes { get; set; } = 5;
     public List<string> ExcludedDatabases { get; set; } = new();
 
+    /// <summary>#6098 (V200): mount points the Volume Free Space alert ignores on every server (the rule is
+    /// <c>VolumeExclusions</c> in the Alerting library: the whole mount point, case-insensitive, a trailing separator
+    /// ignored). Stored as <c>excluded_volumes</c> (<c>text[]</c>), edited as comma-separated text on the Settings
+    /// window like <see cref="ExcludedDatabases"/>. Empty by default.</summary>
+    public List<string> ExcludedVolumes { get; set; } = new();
+
     /// <summary>#3653 (A5, Q5): the Long-Running Query opt-out knob's <c>program_name</c> PREFIXES — sessions whose
     /// program name starts with one are NOT EVALUATED by the alert (case-insensitive, no wildcard grammar; the rule
     /// is <c>LongRunningQueryExclusions</c> in the Alerting library, applied in the read ahead of its row cap).
@@ -679,6 +694,7 @@ public sealed class AlertSettingsRow
             && FailedJobLookbackMinutes == other.FailedJobLookbackMinutes
             && CooldownMinutes == other.CooldownMinutes
             && (ExcludedDatabases ?? new List<string>()).SequenceEqual(other.ExcludedDatabases ?? new List<string>())
+            && (ExcludedVolumes ?? new List<string>()).SequenceEqual(other.ExcludedVolumes ?? new List<string>())
             && AnalysisEnabled == other.AnalysisEnabled
             && AnalysisIntervalMinutes == other.AnalysisIntervalMinutes
             && AnalysisNotificationsEnabled == other.AnalysisNotificationsEnabled

@@ -170,7 +170,7 @@ export const SETTING_SECTIONS = [
       "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"] },
   },
   { title: "Health bands", groups: ["health_bands"], top: [] },
-  { title: "Global alert filters", groups: [], top: ["excluded_databases"] },
+  { title: "Global alert filters", groups: [], top: ["excluded_databases", "excluded_volumes"] },
   { title: "Automated analysis", groups: ["analysis"], top: [] },
   { title: "Fleet sweep reports", groups: ["fleet_sweep"], top: [] },
 ];

@@ -102,6 +102,8 @@ public sealed class AlertEngineTests
         public int CooldownMinutes { get; set; } = 5;
         public List<string> ExcludedDatabasesList { get; } = new();
         public IReadOnlyList<string> ExcludedDatabases => ExcludedDatabasesList;
+        public List<string> ExcludedVolumesList { get; } = new();
+        public IReadOnlyList<string> ExcludedVolumes => ExcludedVolumesList;
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 

@@ -40,7 +40,7 @@ public sealed class BlockingHeadEvidenceRungTests
     {
         var rung = PgMigrations.Scripts.Single(m => m.Version == 199);
         Assert.Equal("blocking-head-evidence", rung.Name);
-        Assert.Equal(199, StorageVersion.SchemaVersion);
+        Assert.True(StorageVersion.SchemaVersion >= 199); /* not the top any more: V200 (#6098) sits above this rung */
         foreach (var column in EvidenceColumns)
         {
             Assert.Contains("ADD COLUMN IF NOT EXISTS " + column + " ", rung.Sql, StringComparison.Ordinal);

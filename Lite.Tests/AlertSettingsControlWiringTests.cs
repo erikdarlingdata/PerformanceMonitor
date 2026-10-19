@@ -39,7 +39,7 @@ public sealed class AlertSettingsControlWiringTests
     /// </summary>
     private static readonly string[] s_deliveryScopedBoxes =
     {
-        "AlertCooldownBox", "AlertDeliveryModeBox", "AlertPerEventMaxBox", "AlertExcludedDatabasesBox"
+        "AlertCooldownBox", "AlertDeliveryModeBox", "AlertPerEventMaxBox", "AlertExcludedDatabasesBox", "AlertExcludedVolumesBox"
     };
 
     public static TheoryData<string, string, string> Windows() => new()
@@ -122,7 +122,7 @@ public sealed class AlertSettingsControlWiringTests
            AlertCooldownMinutes (#5881) reaches the document from a local the same method sets the static from, so no
            thread can change what is written; SettingsWindowTabsLiteTests checks the value in the root. */
         var unpersisted = assigned.Except(persisted)
-            .Except(new[] { "AlertExcludedDatabases", "AlertLongRunningQueryExcludedProgramNamePrefixes", "AlertLongRunningQueryExcludedLogins", "AlertCooldownMinutes" })
+            .Except(new[] { "AlertExcludedDatabases", "AlertExcludedVolumes", "AlertLongRunningQueryExcludedProgramNamePrefixes", "AlertLongRunningQueryExcludedLogins", "AlertCooldownMinutes" })
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 

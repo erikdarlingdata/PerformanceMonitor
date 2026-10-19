@@ -1837,6 +1837,29 @@ ALTER TABLE collect.dmv_blocking_snapshots ADD COLUMN IF NOT EXISTS blocking_tra
 CREATE OR REPLACE VIEW v_dmv_blocking_snapshots AS SELECT * FROM dmv_blocking_snapshots;";
 
     /// <summary>
+    /// V200 (#6098): the Volume Free Space alert's fleet-wide EXCLUDED-VOLUMES list on the singleton
+    /// <c>config_alert_settings</c> row: a <c>text[]</c> of mount points the alert ignores, <c>excluded_databases</c>'s
+    /// shape (V17), <c>text[] NOT NULL DEFAULT '{}'</c>. The default is EMPTY, so a pre-rung row reads as "no volume
+    /// excluded" and the alert behaves exactly as it did.
+    ///
+    /// <para><b>The match rule</b> (whole mount point, case-insensitive, a trailing <c>\</c> or <c>/</c> on either side
+    /// ignored, never a prefix) is spelled once in <c>PerformanceMonitor.Alerting.VolumeExclusions</c> and applied by the
+    /// shared engine to the volumes it reads, BEFORE the breach test. The store holds the normalised list (trimmed,
+    /// blanks dropped, de-duplicated by the comparison form).</para>
+    ///
+    /// <para><b>Readers and writers.</b> <c>StoreConfigProvider</c> seeds it from <c>alerts.excludedVolumes</c> in
+    /// darling.json on first run and reads it back; the Viewer's <c>ViewerDataService.AlertSettings</c> binds it from the
+    /// Settings window; <c>DarlingAlertReader.AlertSettingsSelectSql</c> reads it for <c>get_alert_settings</c>;
+    /// <c>update_alert_settings</c> writes <c>excluded_volumes</c>; the web admin page edits it. No reload beacon of its
+    /// own: V17's statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any
+    /// write here. No ACL or provisioning change: <c>config_alert_settings</c> carries table-level grants (no column
+    /// carve), the same fact every knob rung on this row has relied on. An older build ignores the column.</para>
+    /// </summary>
+    private const string V200Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS excluded_volumes text[] NOT NULL DEFAULT '{}'::text[];";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2210,6 +2233,7 @@ $rung$;";
         new Migration(197, "plan-force-checks", V197Sql),
         new Migration(198, "pseudonym-key", V198Sql),
         new Migration(199, "blocking-head-evidence", V199Sql),
+        new Migration(200, "excluded-volumes", V200Sql),
     };
 
     /// <summary>

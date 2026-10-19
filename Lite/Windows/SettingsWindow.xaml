@@ -367,6 +367,12 @@
                                 <TextBlock Text="e.g. DBAtools, msdb, tempdb — applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                                <TextBlock Text="Exclude volumes from the Volume Free Space alert (comma-separated):"
+                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,10,0,4" FontSize="12"/>
+                                <TextBox x:Name="AlertExcludedVolumesBox" Margin="20,0,0,4"/>
+                                <TextBlock Text="e.g. S:\, T:\, /mnt/scratch — the whole mount point, any case, a trailing \ or / is ignored; applies to every server"
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>
