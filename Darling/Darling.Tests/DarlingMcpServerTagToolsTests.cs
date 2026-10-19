@@ -42,8 +42,18 @@ internal sealed class InMemoryServerTagStore : IServerTagStore
         return id;
     }
 
-    public Task<ServerTagSnapshot> ReadSnapshotAsync(CancellationToken ct = default) =>
-        Task.FromResult(new ServerTagSnapshot(Tags.ToList(), Assignments.ToList(), Rules.ToList()));
+    /// <summary>Runs once, right after the next snapshot read captured its rows and before that read returns: a
+    /// second operator's write landing between the caller's check and its own write.</summary>
+    public Action? AfterSnapshotRead { get; set; }
+
+    public Task<ServerTagSnapshot> ReadSnapshotAsync(CancellationToken ct = default)
+    {
+        var snapshot = new ServerTagSnapshot(Tags.ToList(), Assignments.ToList(), Rules.ToList());
+        var hook = AfterSnapshotRead;
+        AfterSnapshotRead = null;
+        hook?.Invoke();
+        return Task.FromResult(snapshot);
+    }
 
     public Task<IReadOnlySet<int>> FindRegisteredServerIdsAsync(IReadOnlyCollection<int> serverIds, CancellationToken ct = default) =>
         Task.FromResult<IReadOnlySet<int>>(serverIds.Where(Servers.Contains).ToHashSet());
@@ -112,7 +122,7 @@ internal sealed class InMemoryServerTagStore : IServerTagStore
             Landed();
         }
 
-        return Task.FromResult<ServerTagWriteResult>(new ServerTagWriteResult.Ok(Tags.Single(t => t.Id == tagId)));
+        return Task.FromResult<ServerTagWriteResult>(new ServerTagWriteResult.Ok(Tags.Single(t => t.Id == tagId), Written: moves.Count > 0));
     }
 
     public Task<ServerTagWriteResult> DeleteAsync(int tagId, bool confirm, CancellationToken ct = default)
@@ -276,6 +286,25 @@ public sealed class DarlingMcpServerTagToolsTests
         Assert.Equal("unchanged", (string?)top["status"]);
         Assert.Equal("unchanged", (string?)bottom["status"]);
         Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task Update_Move_WhenAnotherOperatorMovesFirst_AnswersUnchanged_NotUpdated()
+    {
+        var store = Store();
+        var a = store.Seed("A");
+        var b = store.Seed("B");
+
+        // B looks movable up in the snapshot; before this move reaches the store another operator moves B up
+        // already, so the store's re-read finds B first and writes nothing.
+        store.AfterSnapshotRead = () => store.MoveAsync(b, TagMoveDirection.Up).GetAwaiter().GetResult();
+
+        var result = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, b, "{\"move\":\"up\"}"));
+
+        Assert.Equal("unchanged", (string?)result["status"]);
+        Assert.Null(result["updated_fields"]);
+        Assert.Equal(new[] { b, a }, Order(result));
+        Assert.Equal(1, store.Writes);
     }
 
     [Theory]

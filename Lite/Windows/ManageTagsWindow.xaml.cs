@@ -289,14 +289,20 @@ public partial class ManageTagsWindow : Window
         try
         {
             var movedId = _selectedNode.Tag.Id;
+            var wrote = false;
             if (!await WriteWhileWaitingAsync(
                     "moving the tag", "Move tag",
-                    () => Task.Run(() => _dataService.MoveServerTagAsync(movedId, direction))))
+                    async () => wrote = await Task.Run(() => _dataService.MoveServerTagAsync(movedId, direction))))
             {
                 return;
             }
 
-            ChangedAny = true;
+            if (wrote)
+            {
+                ChangedAny = true;
+            }
+
+            // Reload either way: a move that wrote nothing means the tree this window shows was already stale.
             await ReloadTagsAsync();
         }
         catch (Exception ex)

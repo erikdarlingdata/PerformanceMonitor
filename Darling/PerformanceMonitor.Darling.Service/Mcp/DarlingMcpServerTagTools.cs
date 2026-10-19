@@ -244,17 +244,11 @@ public sealed class DarlingMcpServerTagTools
         var siblings = ServerTagRules.SiblingsOf(before.Tags, tagId);
         if (!TagSiblingOrder.CanMove(siblings, tagId, direction))
         {
-            return Serialize(new JsonObject
-            {
-                ["status"] = "unchanged",
-                ["tag"] = TagNode(before, before.Tags.First(t => t.Id == tagId)),
-                ["order"] = OrderNode(before.Tags, tagId),
-                ["affected_rules"] = new JsonArray(),
-            });
+            return MoveUnchanged(before, tagId);
         }
 
         var written = await store.MoveAsync(tagId, direction, ct);
-        if (written is not ServerTagWriteResult.Ok)
+        if (written is not ServerTagWriteResult.Ok ok)
         {
             return FromWriteResult(written, null)!;
         }
@@ -266,6 +260,13 @@ public sealed class DarlingMcpServerTagTools
             return ConcurrentlyGone(tagId);
         }
 
+        // Another operator's move can land between the check above and the store's re-read under the tree lock,
+        // leaving the tag at the edge: the store then wrote nothing, so this answers unchanged, not updated.
+        if (!ok.Written)
+        {
+            return MoveUnchanged(after, tagId);
+        }
+
         return Serialize(new JsonObject
         {
             ["status"] = "updated",
@@ -275,6 +276,15 @@ public sealed class DarlingMcpServerTagTools
             ["affected_rules"] = new JsonArray(),
         });
     }
+
+    private static string MoveUnchanged(ServerTagSnapshot snapshot, int tagId) =>
+        Serialize(new JsonObject
+        {
+            ["status"] = "unchanged",
+            ["tag"] = TagNode(snapshot, snapshot.Tags.First(t => t.Id == tagId)),
+            ["order"] = OrderNode(snapshot.Tags, tagId),
+            ["affected_rules"] = new JsonArray(),
+        });
 
     private static JsonArray OrderNode(IReadOnlyList<ServerTagRow> tags, int tagId) =>
         new(TagSiblingOrder.InDisplayOrder(ServerTagRules.SiblingsOf(tags, tagId))

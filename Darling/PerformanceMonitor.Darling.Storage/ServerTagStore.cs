@@ -49,11 +49,14 @@ public abstract record ServerTagWriteResult
     }
 
     /// <summary>The write committed. <c>Tag</c> is the row re-read after a create or update (null after a
-    /// delete); <c>RemovedAssignments</c> and <c>RemovedTagIds</c> describe a delete's cascade.</summary>
+    /// delete); <c>RemovedAssignments</c> and <c>RemovedTagIds</c> describe a delete's cascade. <c>Written</c> is
+    /// false only for a move that found the tag already at the edge when it re-read under the tree lock: the
+    /// transaction committed with no statement run, so callers answer "unchanged", not "moved" (#6094).</summary>
     public sealed record Ok(
         ServerTagRow? Tag,
         int RemovedAssignments = 0,
-        IReadOnlyList<int>? RemovedTagIds = null) : ServerTagWriteResult;
+        IReadOnlyList<int>? RemovedTagIds = null,
+        bool Written = true) : ServerTagWriteResult;
 
     /// <summary>The tag (or, with <c>Code</c> <c>unknown_parent</c>, the requested parent) does not exist.</summary>
     public sealed record NotFound(string Message, string? Code = null) : ServerTagWriteResult;
@@ -102,7 +105,7 @@ public interface IServerTagStore
     /// <summary>Moves a tag one place among its siblings (the tags under the same parent), renumbering every
     /// sibling densely in one transaction (#6094). The siblings are re-read under the tree lock, so two operators
     /// reordering at once never renumber from a stale snapshot. A tag already at that edge is an
-    /// <see cref="ServerTagWriteResult.Ok"/> that writes nothing.</summary>
+    /// <see cref="ServerTagWriteResult.Ok"/> with <c>Written</c> false: nothing was written.</summary>
     Task<ServerTagWriteResult> MoveAsync(int tagId, TagMoveDirection direction, CancellationToken ct = default);
 
     /// <summary>Deletes a tag and its whole subtree and their assignments. Without <paramref name="confirm"/>, a
@@ -172,8 +175,9 @@ public sealed class ServerTagStore : IServerTagStore
         "UPDATE server_tags SET parent_id = $2 WHERE id = $1";
 
     /// <summary>Writes the new sort order for a tag's siblings in ONE statement (#6094). $1 tag ids, $2 their sort
-    /// orders, parallel arrays. Rows already holding their value are skipped, so an untouched sibling does not
-    /// bump the change trigger.</summary>
+    /// orders, parallel arrays. Rows already holding their value are skipped. The change trigger is per statement,
+    /// so it fires once when this statement runs and does not run at all when no statement runs (an edge move
+    /// sends none).</summary>
     public const string SetSortOrdersSql =
         "UPDATE server_tags AS t SET sort_order = v.sort_order FROM unnest($1, $2) AS v(id, sort_order) WHERE t.id = v.id AND t.sort_order IS DISTINCT FROM v.sort_order";
 
@@ -398,7 +402,8 @@ WHERE server_id = ANY($1)";
         }
 
         var moves = TagSiblingOrder.Move(ServerTagRules.SiblingsOf(tags, tagId), tagId, direction);
-        if (moves.Count > 0)
+        var written = moves.Count > 0;
+        if (written)
         {
             await using var write = Command(SetSortOrdersSql, connection, transaction);
             write.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = moves.Select(m => m.TagId).ToArray() });
@@ -408,7 +413,7 @@ WHERE server_id = ANY($1)";
 
         var row = await GetCoreAsync(connection, transaction, tagId, ct);
         await transaction.CommitAsync(ct);
-        return new ServerTagWriteResult.Ok(row);
+        return new ServerTagWriteResult.Ok(row, Written: written);
     }
 
     /// <inheritdoc />

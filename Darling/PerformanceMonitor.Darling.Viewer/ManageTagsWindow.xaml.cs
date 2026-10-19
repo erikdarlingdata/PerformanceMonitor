@@ -295,8 +295,12 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            await _dataService.MoveServerTagAsync(_selectedNode.Tag.Id, direction);
-            ChangedAny = true;
+            if (await _dataService.MoveServerTagAsync(_selectedNode.Tag.Id, direction))
+            {
+                ChangedAny = true;
+            }
+
+            // Reload either way: a move that wrote nothing means the tree this window shows was already stale.
             await ReloadTagsAsync();
         }
         catch (Exception ex)

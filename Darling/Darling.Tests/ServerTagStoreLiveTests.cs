@@ -89,14 +89,15 @@ public sealed class ServerTagStoreLiveTests
         var child = ((ServerTagWriteResult.Ok)await store.CreateAsync("Child", a, null, ct)).Tag!.Id;
 
         /* The all-zero start: moving C up must still change every sibling's sort order, densely. */
-        Assert.IsType<ServerTagWriteResult.Ok>(await store.MoveAsync(c, TagMoveDirection.Up, ct));
+        Assert.True(Assert.IsType<ServerTagWriteResult.Ok>(await store.MoveAsync(c, TagMoveDirection.Up, ct)).Written);
         var tags = (await store.ReadSnapshotAsync(ct)).Tags;
         Assert.Equal(new[] { a, c, b }, tags.Where(t => t.ParentId is null).OrderBy(t => t.SortOrder).Select(t => t.Id));
         Assert.Equal(new[] { 0, 1, 2 }, tags.Where(t => t.ParentId is null).Select(t => t.SortOrder).OrderBy(i => i));
         Assert.Equal(0, tags.Single(t => t.Id == child).SortOrder);
 
-        /* An edge move is an Ok that writes nothing. */
-        Assert.IsType<ServerTagWriteResult.Ok>(await store.MoveAsync(a, TagMoveDirection.Up, ct));
+        /* An edge move is an Ok that says it wrote nothing: the same result a move whose tag another operator
+           already moved to the edge gets from the re-read under the tree lock (#6094). */
+        Assert.False(Assert.IsType<ServerTagWriteResult.Ok>(await store.MoveAsync(a, TagMoveDirection.Up, ct)).Written);
         Assert.Equal(new[] { a, c, b }, (await store.ReadSnapshotAsync(ct)).Tags.Where(t => t.ParentId is null).OrderBy(t => t.SortOrder).Select(t => t.Id));
 
         /* Two operators moving different tags at once: each renumbers from a fresh read under the tree lock, so
