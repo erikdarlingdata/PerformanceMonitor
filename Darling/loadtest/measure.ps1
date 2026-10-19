@@ -33,7 +33,6 @@
 param(
     [Parameter(Mandatory)] [string] $Psql,
     [Parameter(Mandatory)] [string] $Store,
-    [ValidateSet('Reads', 'ReadLatency', 'Jobs', 'Writes', 'Compression')]
     [string[]] $Steps = @('Jobs', 'Compression'),
     [string] $ServerName,
     [string] $McpUrl = 'http://localhost:5152/',
@@ -50,6 +49,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+
+# -Steps takes a list. Under `pwsh -File`, `-Steps Jobs,Compression` arrives as the one string 'Jobs,Compression' (a
+# ValidateSet refused it), so each item is split on commas, trimmed and checked here, before anything else runs.
+$validSteps = @('Reads', 'ReadLatency', 'Jobs', 'Writes', 'Compression')
+$requestedSteps = @($Steps | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($requestedSteps.Count -eq 0) { throw "No step named in -Steps. The valid steps are: $($validSteps -join ', ')." }
+$Steps = @($requestedSteps | ForEach-Object {
+    $name = $_
+    $known = @($validSteps | Where-Object { $_ -ieq $name })
+    if ($known.Count -eq 0) { throw "Unknown step '$name' in -Steps. The valid steps are: $($validSteps -join ', ')." }
+    $known[0]
+})
 
 # Runs one of the step files and turns psql's unaligned output (header line, then rows, '|' between columns) into a
 # Markdown table. Each step file returns exactly one result set.

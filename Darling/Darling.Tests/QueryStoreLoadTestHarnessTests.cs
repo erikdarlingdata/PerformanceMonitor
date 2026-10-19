@@ -148,6 +148,69 @@ public sealed partial class QueryStoreLoadTestHarnessTests
         }
     }
 
+    /* #5794: under `pwsh -File`, `-Steps Jobs,Compression` reaches the script as the one string "Jobs,Compression", which the
+       old ValidateSet refused. The script now splits and checks the list itself, before it does anything else. This runs the
+       real script with a -Psql path that does not exist, so a run that gets past step parsing prints the first step's
+       header and then stops at the missing program, and a bad step name stops before any header. */
+    [Fact]
+    public void MeasureScript_Steps_TakesACommaListUnderFile_AndRefusesAnUnknownStep()
+    {
+        var accepted = RunMeasureScript("Jobs,Compression");
+        if (accepted is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+
+        Assert.DoesNotContain("ValidateSet", accepted.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown step", accepted.Output, StringComparison.Ordinal);
+        Assert.Contains("## Jobs", accepted.Output, StringComparison.Ordinal);
+        Assert.NotEqual(0, accepted.ExitCode);
+
+        var refused = RunMeasureScript("Jobs,Bogus");
+        Assert.NotNull(refused);
+        Assert.NotEqual(0, refused!.ExitCode);
+        Assert.Contains("Unknown step 'Bogus'", refused.Output, StringComparison.Ordinal);
+        foreach (var name in new[] { "Reads", "ReadLatency", "Jobs", "Writes", "Compression" })
+        {
+            Assert.Contains(name, refused.Output, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("## Jobs", refused.Output, StringComparison.Ordinal);
+    }
+
+    private sealed record ScriptRun(int ExitCode, string Output);
+
+    /* Runs measure.ps1 under pwsh with -Steps as one argument and a -Psql that does not exist. Null when pwsh is missing. */
+    private static ScriptRun? RunMeasureScript(string steps)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo("pwsh")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in new[]
+        {
+            "-NoProfile", "-File", Path.Combine(RepoRoot(), "Darling/loadtest/measure.ps1"),
+            "-Psql", Path.Combine(Path.GetTempPath(), "darling-5794-no-such-psql-" + Guid.NewGuid().ToString("N")),
+            "-Store", "host=127.0.0.1 dbname=none",
+            "-Steps", steps,
+        })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        System.Diagnostics.Process? process;
+        try { process = System.Diagnostics.Process.Start(startInfo); }
+        catch (System.ComponentModel.Win32Exception) { return null; }
+        Assert.NotNull(process);
+        using (process)
+        {
+            var stderr = process!.StandardError.ReadToEndAsync();
+            var stdout = process.StandardOutput.ReadToEnd();
+            Assert.True(process.WaitForExit(120_000), "measure.ps1 did not stop.");
+            return new ScriptRun(process.ExitCode, stdout + stderr.GetAwaiter().GetResult());
+        }
+    }
+
     /* #5809: measure.ps1's purge-edge warning once held its own AddDays(-9) while the service's horizon moved to 10,
        so it warned on whole windows and told the operator to restore a newer copy. The script now reads the
        constant from source: this runs the script's own pattern against that file, and holds no day literal there. */
