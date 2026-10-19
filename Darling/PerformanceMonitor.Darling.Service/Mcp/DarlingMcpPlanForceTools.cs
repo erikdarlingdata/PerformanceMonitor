@@ -488,6 +488,12 @@ public sealed class DarlingMcpPlanForceTools
         }
     }
 
+    private static readonly string[] LoginTimeFormats =
+    {
+        "yyyy-MM-ddTHH:mm:ssK",
+        "yyyy-MM-ddTHH:mm:ss.FFFFFFFK",
+    };
+
     /// <summary>
     /// The login time as the agent passes it: the ISO 8601 UTC text <c>get_blocking</c> returns (naive, so no zone means UTC). Fractions are kept
     /// (the engine's <c>datetime</c> has 3.33 ms steps), and nothing is truncated to seconds.
@@ -497,7 +503,9 @@ public sealed class DarlingMcpPlanForceTools
         utc = default;
         if (string.IsNullOrWhiteSpace(text))
             return false;
-        if (!DateTime.TryParse(text.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+        /* Exact formats, not the general parser: 01/02/2026 must not read as two different days on two hosts. These are the shapes get_blocking writes
+           ("o" on a naive UTC time, so no zone) and the same with Z or an offset. */
+        if (!DateTime.TryParseExact(text.Trim(), LoginTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
             return false;
         utc = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
         return true;

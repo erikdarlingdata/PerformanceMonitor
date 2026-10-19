@@ -112,6 +112,8 @@ public sealed class KillSessionTests
     [InlineData("")]
     [InlineData("   ")]
     [InlineData("yesterday")]
+    [InlineData("10/19/2026 12:00")]
+    [InlineData("2026-10-19")]
     [InlineData("2026-13-45T00:00:00Z")]
     public void ALoginTimeThatIsNotATime_IsNotRead(string? text)
     {
