@@ -1291,6 +1291,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpForcedPlanTools>()
             /* #6073: get_query_store_aborts, the queries ranked by aborted and failed Query Store runs. */
             .WithGeminiCompatibleTools<DarlingMcpQueryStoreAbortsTools>()
+            /* #6072: get_cpu_by_database, get_load_by_caller and get_query_pileups, who drove the load. */
+            .WithGeminiCompatibleTools<DarlingMcpWhoDroveItTools>()
             /* #6074: find_database, which monitored server holds a database. */
             .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
             /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */

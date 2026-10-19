@@ -137,6 +137,7 @@ public static class CollectorEngineCapability
             ["perfmon_stats"] = "the sys.dm_os_performance_counters values",
             ["query_stats"] = "the sys.dm_exec_query_stats plan-cache history",
             ["query_snapshots"] = "the sys.dm_exec_requests active-query snapshots",
+            ["dmv_blocking_snapshot"] = "the DMV blocking snapshot of blocked and blocking sessions",
             ["procedure_stats"] = "the sys.dm_exec_procedure_stats history",
             ["query_store"] = "the Query Store runtime statistics",
             ["query_store_health"] = "the per-database Query Store configuration and health",
