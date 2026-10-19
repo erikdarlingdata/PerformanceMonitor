@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgDeadlockTools
                    non-fatal skip, and quoting that sentence here is what turns "no deadlocks" into
                    not-collected WITH THE REASON. get_pg_plans already asks #2546's question for
                    pg_plan_capture; the deadlock read reads the same file the same way and had never asked. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_deadlocks", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_deadlocks", cancellationToken)
@@ -125,7 +125,7 @@ public sealed class DarlingMcpPgDeadlockTools
                         NoDeadlocksText(resolved.DisplayName, hours_back),
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "pg_deadlocks", resolved.ServerName, windowStart, windowEnd, cancellationToken),
-                            null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
+                            null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
             }
 
             /* #4966: the notice is always COVERAGE, whether or not the cap cut the page (the cap is reported by truncated). A sparse event
@@ -192,11 +192,13 @@ public sealed class DarlingMcpPgDeadlockTools
             if (rows.Count == 0)
             {
                 return string.IsNullOrWhiteSpace(deadlock_hash)
-                    ? await DarlingEngineCapability.NotCollectedStatusAsync(
-                          postgres, resolved.ServerId, resolved.DisplayName, "pg_deadlocks", cancellationToken)
-                      ?? McpHelpers.Status(
-                          "empty",
-                          NoDeadlockGraphText(resolved.DisplayName))
+                    ? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow,
+                          await DarlingEngineCapability.NotCollectedStatusAsync(
+                              postgres, resolved.ServerId, resolved.DisplayName, "pg_deadlocks", cancellationToken)
+                          ?? McpHelpers.Status(
+                              "empty",
+                              NoDeadlockGraphText(resolved.DisplayName)),
+                          cancellationToken)
                     : McpHelpers.Status(
                           "empty",
                           $"No deadlock with hash '{deadlock_hash}' is stored for {resolved.DisplayName}. A "

@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgXminTools
                 /* #4966: the all-clear is an empty answer, and carries the window floor under hints. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_xmin_horizon", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
@@ -132,7 +132,7 @@ public sealed class DarlingMcpPgXminTools
                             + "reclaim dead rows, so bloat growth has a different cause — look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "
                             + "counts) rather than at whether it is being blocked."),
-                }, McpHelpers.JsonOptions), emptyNotice);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
             }
 
             var holders = rows.Select(r => new

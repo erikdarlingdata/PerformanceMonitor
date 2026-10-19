@@ -93,7 +93,7 @@ public sealed class DarlingMcpPgOfflineAndStatusWordLiveTests
         await WindowFloorLiveHarness.RunAsync(ConnectionString, ["pg_blocking"], [Name], Tables, async (c, ds, now) =>
         {
             await WindowFloorLiveHarness.SeedServerAsync(
-                c, Name, now.AddDays(-40), "pg_blocking", now.AddHours(-3), 30, now.AddMinutes(-5), Tables, TestContext.Current.CancellationToken);
+                c, Name, now.AddDays(-40), "pg_blocking", now.AddHours(-3), 1, DateTime.UtcNow.AddMinutes(-1), Tables, TestContext.Current.CancellationToken);
             await SetDisplayNameAsync(c, Name, "Orders PG");
 
             var root = WindowFloorLiveHarness.Parse(await DarlingMcpPgBlockingTools.GetPgBlocking(ds, Name, 6));

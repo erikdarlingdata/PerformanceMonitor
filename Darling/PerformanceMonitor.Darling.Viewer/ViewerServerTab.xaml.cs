@@ -386,6 +386,12 @@ public partial class ViewerServerTab : UserControl
         var timer = new ViewerLoadTimer();
         try
         {
+            /* #6155: a PostgreSQL panel's healthy sentence needs to know whether the server is offline before it is written. */
+            if (_server.IsPostgres)
+            {
+                await RefreshPgOfflineAsync();
+            }
+
             switch (tabIndex)
             {
                 case WaitStatsInnerTabIndex:

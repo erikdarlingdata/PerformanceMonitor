@@ -77,7 +77,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 /* #4966: the empty answer carries the window floor under hints. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_replication_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
@@ -88,7 +88,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                                 + "replica is SUPPOSED to be attached, check get_pg_replication_slots — a slot "
                                 + "that persists with nothing connected to it retains WAL indefinitely, which is "
                                 + "the case worth acting on."),
-                        emptyNotice.AsHints()), emptyNotice);
+                        emptyNotice.AsHints()), emptyNotice), cancellationToken);
             }
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
