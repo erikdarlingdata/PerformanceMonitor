@@ -49,6 +49,7 @@ public sealed class PseudonymKeySource : IPseudonymKeySource, IDisposable
     {
         _owner = owner ?? throw new ArgumentNullException(nameof(owner));
         _logger = logger;
+        if (logger is not null) PseudonymKeyNotice.Sink = message => logger.LogWarning("{Message}", message);
     }
 
     /// <inheritdoc />

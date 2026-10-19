@@ -244,7 +244,7 @@ public sealed class PseudonymKeyLiveTests
 
         Assert.Null(await source.GetAsync(ct));
         Assert.Null(await source.GetAsync(ct));
-        Assert.Equal(1, logger.Lines.Count);
+        Assert.Single(logger.Lines);
         Assert.DoesNotContain("PseudonymKey", logger.Lines[0], StringComparison.Ordinal);
 
         /* With no key, a metadataOnly answer still shows no name. */
