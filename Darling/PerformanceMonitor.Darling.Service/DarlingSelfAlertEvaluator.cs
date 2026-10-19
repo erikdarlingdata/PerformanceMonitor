@@ -6969,7 +6969,8 @@ WHERE c.is_enabled";
                             "the policy by hand: the history it holds exists nowhere else, so arming drops the only " +
                             "copy, which is precisely what the gate prevents - and the hourly pass re-holds a " +
                             "hand-armed policy whose coverage is still short. Check the service log for the " +
-                            "'HELD PAUSED' line at startup naming which consumer is short, and for the hourly " +
+                            "'HELD PAUSED' line at startup naming every short consumer and the remedy for each " +
+                            "(the service fills a small floor gap itself on the hourly pass, #6081; a larger one needs the verb), and for the hourly " +
                             "'Retention re-evaluation:' line, whose 'armed this pass' count is the confirmation.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",

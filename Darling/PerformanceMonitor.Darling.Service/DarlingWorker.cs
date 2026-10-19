@@ -10667,7 +10667,8 @@ LIMIT $3";
             }
 
             await TimescaleSupport.EnsureRetentionPoliciesAsync(
-                connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);
+                connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic,
+                otherRepairRunning: () => _materializationHoleRepairRunning, budget.Token);
 
             /* #4299: the service's own raw-purge trigger — ONLY reached from this Periodic pass, never
                from the start path. TriggerRawPurgeAsync re-reads the sweep's own verdict (config->>'darling_armed',
