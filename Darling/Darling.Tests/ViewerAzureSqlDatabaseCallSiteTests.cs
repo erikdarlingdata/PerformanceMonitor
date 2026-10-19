@@ -27,7 +27,7 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
     private static readonly string[] SystemHealthChartsFile =
         ["Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.SystemHealthCharts.cs"];
 
-    private const string GapNoteArguments = "(_server.ServerName, _server.EngineEdition, _server.EngineKind)";
+    private const string GapNoteArguments = "(_server.DisplayName, _server.EngineEdition, _server.EngineKind)";
 
     /// <summary>The eight grids the system_health session feeds, by the prefix of their loader and message block.</summary>
     public static TheoryData<string> SystemHealthGrids => new()

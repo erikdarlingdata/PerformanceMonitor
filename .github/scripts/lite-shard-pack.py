@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Duration-aware shard assignment for the Lite test matrix, with a proof that it loses no class (#5208).
 
-  lite-shard-pack.py pack      --classes FILE --shards N --out DIR [--timings DIR ...] [--tests-dir DIR]
-  lite-shard-pack.py reconcile --classes FILE --shards N --out DIR
+  lite-shard-pack.py pack      --classes FILE --shards N --out DIR [--timings DIR ...] [--tests-dir DIR] [--classes-source TEXT]
+  lite-shard-pack.py reconcile --classes FILE --shards N --out DIR [--classes-source TEXT]
   lite-shard-pack.py backtest  --runs DIR [DIR ...] [--tests-dir DIR]
   lite-shard-pack.py --self-test
 
@@ -30,11 +30,14 @@ total seconds so the unit drops out. `pack` ignores cpu-ms: wall weights still c
 
 `reconcile` is the guard: it fails (exit 1) unless the shard files hold every discovered class exactly once
 and nothing else, and prints both differences. `pack` runs it before it exits, so a bad packer cannot
-produce a green run, and the workflow runs it again on the files each shard actually reads.
+produce a green run, and the workflow runs it again on the files each shard actually reads. Its error lines name where
+each side came from (--classes-source says which class listing the file holds, #6117).
 """
 import collections
+import contextlib
 import glob
 import hashlib
+import io
 import math
 import os
 import re
@@ -349,10 +352,16 @@ def read_shards(out, shards):
     return result
 
 
-def run_reconcile(classes, assignment):
+def run_reconcile(classes, assignment, classes_src=None, shards_src=None, annotate=True):
+    """Prints and returns 1 on any problem. classes_src and shards_src say where each side came from (#6117), so a
+    disagreement names both. annotate=False prints plain lines: the self-test's deliberate failure must not raise
+    a `##[error]` annotation that a reader of the job summary takes for the real failure (#6117)."""
     problems = reconcile(classes, assignment)
+    seen = {c for shard in assignment for c in shard}
+    where = (f" [class list: {classes_src or 'unnamed'}, {len(set(classes))} classes; "
+             f"shard files: {shards_src or 'unnamed'}, {len(seen)} classes in {len(assignment)} shards]")
     for p in problems:
-        print("::error title=Lite shard reconciliation failed::" + p)
+        print(("::error title=Lite shard reconciliation failed::" if annotate else "expected problem: ") + p + where)
     if problems:
         print("RECONCILIATION FAILED: the shard lists are not exactly the discovered class set.")
         return 1
@@ -411,8 +420,10 @@ def main(argv):
     classes = read_classes(arg(rest, "--classes"))
     shards = int(arg(rest, "--shards"))
     out = arg(rest, "--out")
+    classes_src = arg(rest, "--classes-source") or arg(rest, "--classes")
+    shards_src = os.path.join(out, "shard-*.txt")
     if cmd == "reconcile":
-        return run_reconcile(classes, read_shards(out, shards))
+        return run_reconcile(classes, read_shards(out, shards), classes_src, shards_src)
     timings = arg(rest, "--timings", many=True)
     weights, stale = drop_missing_classes(load_weights(timings), declared_class_names(), "the timing run")
     for line in stale:
@@ -435,7 +446,7 @@ def main(argv):
           f"timed seconds per shard {[round(x) for x in load]}; "
           f"{len(serial)} serial classes, per shard {[sum(1 for c in s if c in serial) for s in assignment]}; "
           f"predicted wall seconds per shard {[round(x) for x in walls]}")
-    return run_reconcile(classes, read_shards(out, shards))
+    return run_reconcile(classes, read_shards(out, shards), classes_src, shards_src)
 
 
 def self_test():
@@ -607,9 +618,20 @@ def self_test():
         f.write("\n".join(names) + "\n")
         f.flush()
         write_shards(d, withheld)
-        print("--- expected failure below (a class was deliberately withheld) ---")
-        ok(run_reconcile(read_classes(f.name), read_shards(d, 4)) == 1, "reconcile exits 1 when a class is withheld")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = run_reconcile(read_classes(f.name), read_shards(d, 4), "listing 2 (re-listed)", "the cut's shard files", annotate=False)
+        shown = buf.getvalue()
+        ok(rc == 1, "reconcile exits 1 when a class is withheld")
+        ok("##[error]" not in shown and "::error" not in shown, "the self-test's deliberate failure raises no error annotation")
+        ok("listing 2 (re-listed)" in shown and "the cut's shard files" in shown and gone in shown, "a disagreement names both sides and the class")
+        print("--- the expected failure, printed plain (a class was deliberately withheld) ---")
+        print(shown.rstrip())
         print("--- end expected failure ---")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_reconcile(read_classes(f.name), read_shards(d, 4))
+        ok("::error title=Lite shard reconciliation failed::" in buf.getvalue(), "the real run still raises the error annotation")
         write_shards(d, a)
         ok(run_reconcile(read_classes(f.name), read_shards(d, 4)) == 0, "reconcile passes on the real pack")
     dup = [list(s) for s in a]

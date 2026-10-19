@@ -45,7 +45,7 @@ public sealed class DarlingMcpPgIoTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -68,7 +68,7 @@ public sealed class DarlingMcpPgIoTools
                    activity" is a statement about a PostgreSQL instance; said about a SQL Server target it
                    is not a weak answer but a false one, and it is the one an agent asking by name gets. */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats", cancellationToken);
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -79,9 +79,9 @@ public sealed class DarlingMcpPgIoTools
                     postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
                 return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
-                    server = resolved.ServerName,
+                    server = resolved.DisplayName,
                     hours_back,
-                    status = "no_io_activity",
+                    status = "empty",
                     hints = emptyNotice.AsHints(),
                     finding = "No (backend_type, object, context) combination recorded read, write, extend or "
                             + "hit activity in this window. On a busy server that more likely means the "
@@ -99,7 +99,7 @@ public sealed class DarlingMcpPgIoTools
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
-            return BuildIoJson(resolved.ServerName, hours_back, page, limit, timingSetting, notice);
+            return BuildIoJson(resolved.DisplayName, hours_back, page, limit, timingSetting, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

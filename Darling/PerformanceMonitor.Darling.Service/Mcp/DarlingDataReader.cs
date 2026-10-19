@@ -2519,6 +2519,44 @@ internal static class DarlingDataReader
         CancellationToken cancellationToken = default) =>
         RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
+    /// <summary>What an empty top-queries ranking over raw <c>query_stats</c> left unsaid (#6127): how many snapshots the window
+    /// stored, and where the newest one that carries a measured delta sits.</summary>
+    public sealed record QueryStatsSnapshotProbe(long SnapshotsInWindow, DateTime? NewestMeasuredDeltaAt);
+
+    /// <summary>
+    /// #6127: the ranking above reads only rows that carry a measured delta (an honest interval and an execution or elapsed
+    /// delta), and answered "no query stats" when the window held only snapshots that do not: a plan sighted once, or sighted
+    /// again with unmoved counters, stores zero deltas. This counts the window's snapshots regardless of delta, and finds the
+    /// newest snapshot at or before the window's end that DOES carry one (the same predicate as <see cref="TopQueriesSql"/>'s
+    /// interval filter and HAVING, so the answer names a window the ranking would serve). Same database filter as the
+    /// ranking, so a database the caller chose is not diluted by another's snapshots.
+    /// </summary>
+    public static async Task<QueryStatsSnapshotProbe> GetQueryStatsSnapshotProbeAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
+    {
+        var sql = $"""
+            SELECT
+                (SELECT COUNT(*) FROM query_stats
+                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+                 AND   ($4::text[] IS NULL OR database_name = ANY($4))) AS snapshots,
+                (SELECT MAX(collection_time) FROM query_stats
+                 WHERE server_id = $1 AND collection_time <= $3
+                 AND   ($4::text[] IS NULL OR database_name = ANY($4))
+                 AND   {TimescaleSupport.IntervalHonestSourceFilter}
+                 AND   (delta_execution_count > 0 OR delta_elapsed_time > 0)) AS newest_measured
+            """;
+        await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddWindow(command, serverId, startUtc, endUtc);
+        AddDatabases(command, databases);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new QueryStatsSnapshotProbe(
+            reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
+            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+    }
+
     /// <summary>
     /// #4231's <c>procedure_stats</c> arm of the same probe, for <c>get_top_procedures_by_cpu</c>.
     /// </summary>

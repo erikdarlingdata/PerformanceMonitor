@@ -87,8 +87,21 @@ public sealed class QueryStoreRegressionsBudgetTests : IClassFixture<SharedDuckD
 
         var defaultJson = await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName);
         var defaultRoot = Root(defaultJson);
-        Assert.Equal(30, defaultRoot.GetProperty("regression_count").GetInt32());
+        /* #6128: regression_count is every regression that passed the gate, not the page; returned_count is the page. */
+        Assert.Equal(RegressedQueryCount, defaultRoot.GetProperty("regression_count").GetInt32());
+        Assert.Equal(30, defaultRoot.GetProperty("returned_count").GetInt32());
         Assert.True(defaultRoot.GetProperty("truncated").GetBoolean());
+
+        var smallRoot = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, limit: 3));
+        Assert.Equal(RegressedQueryCount, smallRoot.GetProperty("regression_count").GetInt32());
+        Assert.Equal(3, smallRoot.GetProperty("returned_count").GetInt32());
+        Assert.Equal(3, smallRoot.GetProperty("regressions").GetArrayLength());
+        Assert.True(smallRoot.GetProperty("truncated").GetBoolean());
+
+        var wideRoot = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, limit: 50));
+        Assert.Equal(RegressedQueryCount, wideRoot.GetProperty("regression_count").GetInt32());
+        Assert.Equal(RegressedQueryCount, wideRoot.GetProperty("returned_count").GetInt32());
+        Assert.False(wideRoot.GetProperty("truncated").GetBoolean());
 
         var defaultBytes = Encoding.UTF8.GetByteCount(defaultJson);
         Assert.True(defaultBytes < McpResponseBudget.DefaultBytes,
