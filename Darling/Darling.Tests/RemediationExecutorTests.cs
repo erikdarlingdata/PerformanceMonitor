@@ -312,8 +312,12 @@ public sealed class RemediationOfflineTests
             .Where(m => m.ReturnType == typeof(Task<RemediationResult>)).ToList();
         Assert.Equal(4, writes.Count);
         Assert.All(writes, m => Assert.Equal(typeof(ServerActionPermit), m.GetParameters()[0].ParameterType));
-        /* No other public way to reach the server: the executor exposes nothing but those four methods and its constructor. */
-        Assert.Equal(4, typeof(SqlServerRemediationExecutor).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly).Length);
+        /* No other public way to reach the server: the executor exposes nothing but those four methods, the one read-only state read the force
+           tools journal their before and after image from (#5632, step 7, which takes the permit first too), and its constructor. */
+        var publicMethods = typeof(SqlServerRemediationExecutor).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly);
+        Assert.Equal(5, publicMethods.Length);
+        var read = Assert.Single(publicMethods, m => m.ReturnType == typeof(Task<PlanStateRead>));
+        Assert.Equal(typeof(ServerActionPermit), read.GetParameters()[0].ParameterType);
 
         Assert.DoesNotContain(typeof(ServerActionPermit).GetConstructors(BindingFlags.Instance | BindingFlags.Public), _ => true);
         Assert.DoesNotContain(typeof(ServerActionPermit).GetProperties(), p => p.SetMethod?.IsPublic == true);

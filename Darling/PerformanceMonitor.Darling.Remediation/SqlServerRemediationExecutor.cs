@@ -87,19 +87,6 @@ SELECT killed = @killed;";
     internal const string SessionMatchesSql =
         "SELECT matches = COUNT_BIG(*) FROM sys.dm_exec_sessions AS s WHERE s.session_id = @session_id AND s.login_time = @login_time OPTION(RECOMPILE);";
 
-    /// <summary>
-    /// The exact statement a force or an unforce runs, for a dry run to show: the database named the way <c>QUOTENAME</c> names it (a closing
-    /// bracket doubled), the ids as plain numbers. The write itself calls the procedure by its parameters on a connection to that database.
-    /// </summary>
-    public static string StatementFor(string database, long queryId, long planId, bool force)
-    {
-        ArgumentNullException.ThrowIfNull(database);
-        var procedure = force ? ForceSql : UnforceSql;
-        var quoted = "[" + database.Replace("]", "]]", StringComparison.Ordinal) + "]";
-        return string.Create(CultureInfo.InvariantCulture,
-            $"EXEC {quoted}.{procedure} @query_id = {queryId}, @plan_id = {planId};");
-    }
-
     /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
     internal const string PlanFactsSql =
         "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc " +
@@ -209,7 +196,7 @@ SELECT killed = @killed;";
             if (dryRun)
                 return RemediationResult.Done(name, dryRun, wrote: false,
                     $"Dry run: plan {planId} exists for query {queryId} and could be {(force ? "forced" : "unforced")}. Nothing was written.")
-                    with { Statement = StatementFor(database, queryId, planId, force) };
+                    with { Statement = PlanForceStatement.For(database, queryId, planId, force) };
 
             await using var write = Command(connection, force ? ForceSql : UnforceSql);
             write.CommandType = CommandType.StoredProcedure;
@@ -217,7 +204,7 @@ SELECT killed = @killed;";
             write.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
             await write.ExecuteNonQueryAsync(ct);
             return RemediationResult.Done(name, dryRun, wrote: true, $"Plan {planId} was {(force ? "forced" : "unforced")} for query {queryId} in {database}.")
-                with { Statement = StatementFor(database, queryId, planId, force) };
+                with { Statement = PlanForceStatement.For(database, queryId, planId, force) };
         }, ct);
     }
 
@@ -427,4 +414,21 @@ public sealed record PlanStateRead(RemediationOutcome Outcome, string? Reason, s
 {
     internal static PlanStateRead From(RemediationResult result, PlanForceState? state) =>
         new(result.Outcome, result.Reason, result.Message, result.Outcome == RemediationOutcome.Done ? state : null);
+}
+
+/// <summary>The exact statement a force or an unforce runs, for a dry run to show (#5632, step 7).</summary>
+public static class PlanForceStatement
+{
+    /// <summary>
+    /// The database named the way <c>QUOTENAME</c> names it (a closing bracket doubled), the ids as plain numbers. The write itself calls the
+    /// procedure by its parameters on a connection to that database.
+    /// </summary>
+    public static string For(string database, long queryId, long planId, bool force)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        var procedure = force ? SqlServerRemediationExecutor.ForceSql : SqlServerRemediationExecutor.UnforceSql;
+        var quoted = "[" + database.Replace("]", "]]", StringComparison.Ordinal) + "]";
+        return string.Create(CultureInfo.InvariantCulture,
+            $"EXEC {quoted}.{procedure} @query_id = {queryId}, @plan_id = {planId};");
+    }
 }

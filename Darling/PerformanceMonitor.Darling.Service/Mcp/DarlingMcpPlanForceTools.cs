@@ -163,7 +163,7 @@ public sealed class DarlingMcpPlanForceTools
                 return Answer("refused", block.Reason, block.Message, new { dry_run, before = beforeState });
             }
 
-            var statement = SqlServerRemediationExecutor.StatementFor(beforeState.Database, query_id, plan_id, force);
+            var statement = PlanForceStatement.For(beforeState.Database, query_id, plan_id, force);
 
             /* 5: a dry run runs the executor's own checks and journals nothing. */
             if (dry_run)
