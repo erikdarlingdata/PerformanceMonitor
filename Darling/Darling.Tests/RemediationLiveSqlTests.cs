@@ -137,7 +137,7 @@ public sealed class RemediationLiveSqlTests
         await using var command = new SqlCommand(
             "SELECT TOP (1) q.query_id, p.plan_id FROM sys.query_store_query AS q JOIN sys.query_store_query_text AS t ON t.query_text_id = q.query_text_id "
             + "JOIN sys.query_store_plan AS p ON p.query_id = q.query_id WHERE t.query_sql_text LIKE @like AND t.query_sql_text NOT LIKE N'%query_store_query%' ORDER BY p.plan_id;", admin);
-        command.Parameters.Add(new SqlParameter("@like", SqlDbType.NVarChar, 200) { Value = "%marker = '" + marker + "'%" });
+        command.Parameters.Add(new SqlParameter("@like", SqlDbType.NVarChar, 200) { Value = "%'" + marker + "'%" });
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct), "Query Store captured no plan for the test query.");
         return (reader.GetInt64(0), reader.GetInt64(1));
@@ -248,7 +248,7 @@ public sealed class RemediationLiveSqlTests
         await using var command = new SqlCommand(
             "SELECT TOP (1) plan_handle = CONVERT(varchar(130), c.plan_handle, 1) FROM sys.dm_exec_cached_plans AS c CROSS APPLY sys.dm_exec_sql_text(c.plan_handle) AS t "
             + "WHERE t.text LIKE @like AND t.text NOT LIKE N'%dm_exec_cached_plans%';", admin);
-        command.Parameters.Add(new SqlParameter("@like", SqlDbType.NVarChar, 200) { Value = "%marker = '" + marker + "'%" });
+        command.Parameters.Add(new SqlParameter("@like", SqlDbType.NVarChar, 200) { Value = "%'" + marker + "'%" });
         return await command.ExecuteScalarAsync(ct) as string;
     }
 
@@ -371,6 +371,9 @@ public sealed class RemediationLiveSqlTests
 
             var killed = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
             Assert.True(killed is { Outcome: RemediationOutcome.Done, Wrote: true }, killed.Message);
+            /* The server removes a killed session a moment after the KILL returns. */
+            for (var i = 0; i < 50 && await SessionExistsAsync(sessionId, ct); i++)
+                await Task.Delay(100, ct);
             Assert.False(await SessionExistsAsync(sessionId, ct));
             await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync(victim, "SELECT 1;", ct));
 

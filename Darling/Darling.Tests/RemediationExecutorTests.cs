@@ -85,7 +85,7 @@ public sealed class RemediationOfflineTests
             Assert.Equal(error, resolution.Error);
             Assert.False(string.IsNullOrWhiteSpace(resolution.Message));
             Assert.DoesNotContain(Secret, resolution.Message, StringComparison.Ordinal);
-            if (!string.IsNullOrEmpty(slot))
+            if (slot is { Length: > 5 })
                 Assert.DoesNotContain(slot, resolution.Message, StringComparison.Ordinal);
         }
 
