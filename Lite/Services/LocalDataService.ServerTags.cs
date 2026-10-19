@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 
@@ -153,6 +154,51 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
         command.Parameters.Add(new DuckDBParameter { Value = tagId });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)newParentId ?? DBNull.Value });
         await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Moves a tag one place up or down among its siblings (the tags under the same parent) and renumbers every
+    /// sibling 0 to n-1 with the shared <see cref="TagSiblingOrder"/> rule (#6094). The siblings are read on the
+    /// write connection, under the exclusive write lock, so a second writer is never renumbered from a stale
+    /// snapshot, and the new orders go in ONE statement. Returns false (and writes nothing) when the tag is
+    /// already first (up) or last (down), or no longer exists.
+    /// </summary>
+    public async Task<bool> MoveServerTagAsync(int tagId, TagMoveDirection direction)
+    {
+        using var connection = await OpenUserWriteConnectionAsync();
+        ThrowIfTagRestorePending();
+
+        var tags = new List<(int Id, string Name, int? ParentId, int SortOrder)>();
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = "SELECT id, name, parent_id, sort_order FROM server_tags";
+            using var reader = await read.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                tags.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2), reader.GetInt32(3)));
+            }
+        }
+
+        var tag = tags.FirstOrDefault(t => t.Id == tagId);
+        if (tag.Id != tagId)
+        {
+            return false;
+        }
+
+        var siblings = tags.Where(t => t.ParentId == tag.ParentId).Select(t => new TagSibling(t.Id, t.Name, t.SortOrder));
+        var moves = TagSiblingOrder.Move(siblings, tagId, direction);
+        if (moves.Count == 0)
+        {
+            return false;
+        }
+
+        /* ids and orders are ints, so inlining them is injection-safe and keeps the write one statement. */
+        var cases = string.Concat(moves.Select(m => string.Create(System.Globalization.CultureInfo.InvariantCulture, $" WHEN {m.TagId} THEN {m.SortOrder}")));
+        var inList = string.Join(",", moves.Select(m => m.TagId));
+        using var write = connection.CreateCommand();
+        write.CommandText = $"UPDATE server_tags SET sort_order = CASE id{cases} END WHERE id IN ({inList})";
+        await write.ExecuteNonQueryAsync();
+        return true;
     }
 
     /// <summary>

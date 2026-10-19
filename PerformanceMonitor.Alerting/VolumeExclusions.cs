@@ -57,8 +57,8 @@ public static class VolumeExclusions
         return trimmed.All(c => c == '/') ? "/" : null;
     }
 
-    /// <summary>True when one entry is acceptable input: no comma (the Settings windows join and split the list on
-    /// commas, so an entry holding one would turn into two on the next save), no control character (NUL included)
+    /// <summary>True when one entry is acceptable input: no comma (the Settings windows split the volumes box on
+    /// line breaks and commas, so an entry holding one would turn into two on the next save), no control character (NUL included)
     /// and at most <see cref="MaxEntryLength"/> characters once trimmed. A blank entry passes here: it is dropped,
     /// not refused.</summary>
     public static bool IsAcceptableEntry(string? entry)

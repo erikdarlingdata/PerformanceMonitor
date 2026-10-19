@@ -294,7 +294,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             {
                 secondBuild = QueryStoreComposeStamp.BuildHourAsync(second, hour, DateTime.UtcNow, ct);
                 secondWaited = await SomeoneWaitsOnALockAsync(connection, ct);
-                ungrantedAdvisoryLocks = await CountAsync(connection, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted", ct);
+                ungrantedAdvisoryLocks = await CountAsync(connection, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())", ct);
                 secondFinishedEarly = secondBuild.IsCompleted;
             });
             var secondResult = await secondBuild!.WaitAsync(TimeSpan.FromSeconds(60), ct);

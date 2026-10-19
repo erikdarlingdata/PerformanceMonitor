@@ -731,7 +731,7 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         while (waiting == 0 && DateTime.UtcNow < waitUntil)
         {
             await Task.Delay(50, ct);
-            waiting = await CountAsync(other, "SELECT count(*) FROM pg_locks WHERE NOT granted", ct);
+            waiting = await CountAsync(other, "SELECT count(*) FROM pg_locks WHERE NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())", ct);
         }
 
         Assert.True(waiting > 0, "the product's DROP never queued behind the first one");

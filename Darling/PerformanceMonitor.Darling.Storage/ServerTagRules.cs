@@ -131,6 +131,20 @@ public static class ServerTagRules
     public static ServerTagWriteResult? CheckDelete(IReadOnlyList<ServerTagRow> tags, int tagId) =>
         ToResult(TagTreeRules.CheckDelete(Nodes(tags), tagId));
 
+    /// <summary>The check for a reorder: the tag must exist (an edge move is not a refusal; it is a no-op).</summary>
+    public static ServerTagWriteResult? CheckMove(IReadOnlyList<ServerTagRow> tags, int tagId) =>
+        ToResult(TagTreeRules.CheckDelete(Nodes(tags), tagId));
+
+    /// <summary>The tags that share <paramref name="tagId"/>'s parent, itself included, as the shared reorder rule
+    /// reads them. Empty when the tag does not exist.</summary>
+    public static List<TagSibling> SiblingsOf(IReadOnlyList<ServerTagRow> tags, int tagId)
+    {
+        var tag = tags.FirstOrDefault(t => t.Id == tagId);
+        return tag is null
+            ? new List<TagSibling>()
+            : tags.Where(t => t.ParentId == tag.ParentId).Select(t => new TagSibling(t.Id, t.Name, t.SortOrder)).ToList();
+    }
+
     private static List<TagTreeNode> Nodes(IReadOnlyList<ServerTagRow> tags) =>
         tags.Select(t => new TagTreeNode(t.Id, t.Name, t.ParentId)).ToList();
 

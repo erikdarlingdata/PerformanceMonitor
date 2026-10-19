@@ -8,6 +8,7 @@
 
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -78,6 +79,40 @@ public sealed class LiteServerTagsStoreTests : IClassFixture<SharedDuckDbFixture
         await _service.SetServerTagColorAsync(id, null);   // back to neutral
         var afterClear = (await _service.GetServerTagsAsync()).Single(t => t.Id == id);
         Assert.Null(afterClear.Colour);
+    }
+
+    [Fact]
+    public async Task Move_SwapsWithTheNeighbour_RenumbersTheSiblingsDensely_AndLeavesOtherParentsAlone()
+    {
+        var a = await _service.CreateServerTagAsync("A", parentId: null);
+        var b = await _service.CreateServerTagAsync("B", parentId: null);
+        var c = await _service.CreateServerTagAsync("C", parentId: null);
+        var child = await _service.CreateServerTagAsync("Child", parentId: a);
+
+        /* Every tag starts at sort order 0, so the move must renumber, not just swap two zeros. */
+        Assert.True(await _service.MoveServerTagAsync(c, TagMoveDirection.Up));
+
+        var tags = await _service.GetServerTagsAsync();
+        var roots = tags.Where(t => t.ParentId is null).OrderBy(t => t.SortOrder).ToList();
+        Assert.Equal(new[] { a, c, b }, roots.Select(t => t.Id));
+        Assert.Equal(new[] { 0, 1, 2 }, roots.Select(t => t.SortOrder));
+        Assert.Equal(0, tags.Single(t => t.Id == child).SortOrder);
+
+        Assert.True(await _service.MoveServerTagAsync(a, TagMoveDirection.Down));
+        var after = (await _service.GetServerTagsAsync()).Where(t => t.ParentId is null).OrderBy(t => t.SortOrder).Select(t => t.Id);
+        Assert.Equal(new[] { c, a, b }, after);
+    }
+
+    [Fact]
+    public async Task Move_PastAnEdge_OrOfAMissingTag_WritesNothing()
+    {
+        var a = await _service.CreateServerTagAsync("A", parentId: null);
+        var b = await _service.CreateServerTagAsync("B", parentId: null);
+
+        Assert.False(await _service.MoveServerTagAsync(a, TagMoveDirection.Up));
+        Assert.False(await _service.MoveServerTagAsync(b, TagMoveDirection.Down));
+        Assert.False(await _service.MoveServerTagAsync(999, TagMoveDirection.Up));
+        Assert.All(await _service.GetServerTagsAsync(), t => Assert.Equal(0, t.SortOrder));
     }
 
     [Fact]

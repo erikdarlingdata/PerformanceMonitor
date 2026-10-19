@@ -29,7 +29,7 @@
             <DockPanel Grid.Column="0">
                 <TextBlock DockPanel.Dock="Top" Text="Tags" FontWeight="Bold" Margin="0,0,0,6"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <!-- WrapPanel (not a single row): the fifth button pushes the toolbar past the 300px column,
+                <!-- WrapPanel (not a single row): the fifth and later buttons push the toolbar past the 300px column,
                      so let them flow to a second row rather than clip. -->
                 <WrapPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
                     <Button x:Name="NewRootButton" Content="_New Tag" Width="78" Margin="0,0,6,6" Click="NewRoot_Click"/>
@@ -37,6 +37,10 @@
                     <Button x:Name="RenameButton" Content="_Rename" Width="72" Margin="0,0,6,6" Click="Rename_Click"/>
                     <Button x:Name="ColourButton" Content="_Colour…" Width="72" Margin="0,0,6,6" Click="Colour_Click"/>
                     <Button x:Name="DeleteButton" Content="_Delete" Width="66" Margin="0,0,6,6" Click="Delete_Click"/>
+                    <Button x:Name="MoveUpButton" Content="Move U_p" Width="78" Margin="0,0,6,6" Click="MoveUp_Click"
+                            ToolTip="Move the selected tag one place earlier among its siblings"/>
+                    <Button x:Name="MoveDownButton" Content="Move Do_wn" Width="78" Margin="0,0,6,6" Click="MoveDown_Click"
+                            ToolTip="Move the selected tag one place later among its siblings"/>
                 </WrapPanel>
                 <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
                     <TreeView x:Name="TagTree"
@@ -57,6 +61,7 @@
                         <TreeView.ItemContainerStyle>
                             <Style TargetType="TreeViewItem">
                                 <Setter Property="IsExpanded" Value="True"/>
+                                <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}"/>
                                 <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
                             </Style>
                         </TreeView.ItemContainerStyle>
