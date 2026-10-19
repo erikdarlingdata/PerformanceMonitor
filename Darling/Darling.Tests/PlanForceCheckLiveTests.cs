@@ -228,10 +228,10 @@ VALUES ($1,$2,$3,'srv-7',$4,$5,$6,$7,$8,$9,$10)";
         {
             var force = await ForceAsync(at(T), connection, T, ct);
             await PassAsync(connection, T.AddMinutes(5), ct);
+            Assert.Equal(1, (await at(T.AddMinutes(6)).SweepAsync(ct)).FollowUps);
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported' WHERE force_check_of = {force.CalledId}", ct);
             await PassAsync(connection, T.AddMinutes(10), ct);
             Assert.Equal(1, (await at(T.AddMinutes(11)).SweepAsync(ct)).FollowUps);
-            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported' WHERE force_check_of = {force.CalledId}", ct);
-            Assert.Equal(1, (await at(T.AddMinutes(12)).SweepAsync(ct)).FollowUps);
             await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported' WHERE force_check_of = {force.CalledId}", ct);
 
             /* At T + 1 h check 3 opens. */
@@ -329,7 +329,7 @@ VALUES ($1,$2,$3,'srv-7',$4,$5,$6,$7,$8,$9,$10)";
             Assert.Equal(1, (await at(T.AddMinutes(6)).SweepAsync(ct)).FollowUps);
             var check = Assert.Single(await ChecksAsync(connection, force.CalledId, ct)).Id;
 
-            Assert.Equal("1|7|3|True", await ScalarAsync(connection, $@"SELECT c.route_id || '|' || c.server_id || '|' || c.autonomy_level || '|' || (c.family = r.family)
+            Assert.Equal("1|7|3|true", await ScalarAsync(connection, $@"SELECT c.route_id || '|' || c.server_id || '|' || c.autonomy_level || '|' || (c.family = r.family)
 FROM config.investigation_requests AS c JOIN config.investigation_requests AS r ON r.request_id = '{force.Request}' WHERE c.request_id = '{check}'", ct));
             Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_requests WHERE follow_up_of IS NOT NULL", ct));
             Assert.Equal("1", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_request_alerts WHERE request_id = '{check}'", ct));
@@ -481,7 +481,6 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
             /* A replay of the open: the unique pair refuses a second request, and the once key a second event. */
             await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'expired' WHERE request_id = '{check}'", ct);
             await ExecAsync(connection, $"DELETE FROM config.investigation_requests WHERE request_id = '{check}'", ct);
-            await PassAsync(connection, T.AddMinutes(7), ct);
             Assert.Equal(1, (await at(T.AddMinutes(8)).SweepAsync(ct)).FollowUps);
             Assert.Equal("1", await ScalarAsync(connection,
                 $"SELECT count(*) FROM config.investigation_journal WHERE event = 'follow_up' AND once_key LIKE 'force_check:{force.CalledId}:%'", ct));
