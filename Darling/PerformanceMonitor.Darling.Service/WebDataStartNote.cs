@@ -69,7 +69,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// cut) and the read did not hit a row cap that cuts by time (or hit it, and its oldest row is at or before the
 /// window's start), nothing in scope holds a row or logged a run in it, the
 /// answer is an envelope other than the read's own "looked and found nothing" word (<see cref="NothingFoundStatusByRead"/>:
-/// <c>empty</c>, <c>no_changes</c> for the PostgreSQL changes, <c>no_blocking_sampled</c> for blocking and <c>no_io_activity</c> for the I/O summary, which are probed like rows; unavailable (the memory grant reads' no-snapshot word and top queries' no-statistics word), not_collected, not_sampled (blocking's "the collector never ran"), precondition (Captured Plans' "capture is not configured") and
+/// <c>empty</c>, which is probed like rows (#6130: every PostgreSQL read's nothing-found word is <c>empty</c>, one of the five words the MCP instructions define); unavailable (the memory grant reads' no-snapshot word, top queries' no-statistics word and blocking's "the collector never ran"), not_collected, precondition (Captured Plans' "capture is not configured") and
 /// invalid are not) or an error rather than rows, the read cannot be resolved, the
 /// window is no longer than the 90-minute slack (a window that short can never be cut by the store's coverage, so the
 /// probe is not asked), or the probe fails. A failed probe costs the grid its notice, never its rows.</para>
@@ -345,7 +345,7 @@ internal static class WebDataStartNote
     /// none: it says something other than "nothing happened".
     ///
     /// <para>The change histories and the collection log answer <c>empty</c> (the PostgreSQL changes read says
-    /// <c>no_changes</c>), as do waiting tasks, plan corrections, wait sampling, kernel stats, lock stats and predicate stats: each ran its
+    /// <c>empty</c> too, since #6130), as do waiting tasks, plan corrections, wait sampling, kernel stats, lock stats and predicate stats: each ran its
     /// query and found no rows in the window. The collection log's <c>empty</c> covers a quiet window and a filter that matched
     /// nothing, and the coverage fact holds for both; its <c>unavailable</c> (never collected) stays as it is. Latch stats,
     /// spinlock stats, wait stats, PostgreSQL wait events and PostgreSQL top queries are left out: their no-rows answer is <c>unavailable</c>. A test
@@ -353,9 +353,9 @@ internal static class WebDataStartNote
     ///
     /// <para>The PostgreSQL window reads (#4966): database stats, session states, replication stats, the four trends and Captured Plans
     /// answer <c>empty</c>; a server with no row and no logged run in the window gets no note, whatever the word. (For the database
-    /// and wait trends <c>empty</c>, and for the I/O summary <c>no_io_activity</c>, a history too short to difference may also
-    /// answer it; the coverage fact holds for that case too.) Blocking answers <c>no_blocking_sampled</c> (captures exist and none held
-    /// a chain) and the I/O summary <c>no_io_activity</c>. Never admitted: <c>not_sampled</c> (blocking found no capture at all),
+    /// and wait trends and the I/O summary, a history too short to difference may also
+    /// answer it; the coverage fact holds for that case too.) Blocking answers <c>empty</c> (captures exist and none held
+    /// a chain). Never admitted: <c>unavailable</c> (blocking found no capture at all),
     /// <c>precondition</c> (Captured Plans, capture is not configured) and <c>unavailable</c>.</para>
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, string> NothingFoundStatusByRead = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -368,18 +368,18 @@ internal static class WebDataStartNote
         ["get_server_config_changes"] = "empty",
         ["get_database_config_changes"] = "empty",
         ["get_trace_flag_changes"] = "empty",
-        ["get_pg_server_config_changes"] = "no_changes",
+        ["get_pg_server_config_changes"] = "empty",
         ["get_collection_log"] = "empty",
         ["get_plan_corrections"] = "empty",
 
         /* The PostgreSQL window reads (#4966). Blocking and the I/O summary name their own nothing-found word; the rest say empty.
            Top queries has none: its empty answer is unavailable (no extension or no snapshot), which says nothing was captured.
-           Not admitted anywhere: unavailable, not_collected, not_sampled (blocking's "the collector never ran") and precondition
+           Not admitted anywhere: unavailable, not_collected, unavailable (blocking's "the collector never ran") and precondition
            (Captured Plans' "capture is not configured"). */
-        ["get_pg_blocking"] = "no_blocking_sampled",
+        ["get_pg_blocking"] = "empty",
         ["get_pg_database_stats"] = "empty",
         ["get_pg_session_states"] = "empty",
-        ["get_pg_io_stats"] = "no_io_activity",
+        ["get_pg_io_stats"] = "empty",
         ["get_pg_replication_stats"] = "empty",
         ["get_pg_database_trend"] = "empty",
         ["get_pg_query_duration_trend"] = "empty",
@@ -407,17 +407,17 @@ internal static class WebDataStartNote
         ["get_health_parser_significant_waits"] = "empty",
 
         /* The PostgreSQL event logs, Blocking and Deadlocks (#4966): the window held no event. */
-        ["get_pg_deadlocks"] = "no_deadlocks",
-        ["get_pg_log_events"] = "no_events",
+        ["get_pg_deadlocks"] = "empty",
+        ["get_pg_log_events"] = "empty",
         ["get_blocking"] = "empty",
         ["get_deadlocks"] = "empty",
         ["get_deadlock_detail"] = "empty",
 
-        /* The horizon read answers no_holder only when the collector captured in the window and recorded none (it answers
+        /* The horizon read answers empty only when the collector captured in the window and recorded none (it answers
            unavailable when no capture is logged), so it is the one of the vacuum, horizon, slot and write reads that says "looked
-           and found nothing". Wraparound answers unavailable, autovacuum no_pending_maintenance and slots no_slots without asking the log
+           and found nothing". Wraparound answers unavailable, autovacuum and slots empty without asking the log
            whether the collector ran, and write stats empty for a window too short to difference: none of them is admitted. */
-        ["get_pg_xmin_horizon"] = "no_holder",
+        ["get_pg_xmin_horizon"] = "empty",
 
         /* Index usage (#4966): empty means collection ran and every index is under the size floor, a looked-and-found-nothing answer.
            Its unavailable (one snapshot, or none in the window) says nothing was read, and is not admitted. */

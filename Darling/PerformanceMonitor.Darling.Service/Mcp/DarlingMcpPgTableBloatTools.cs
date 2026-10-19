@@ -238,7 +238,7 @@ public sealed class DarlingMcpPgTableBloatTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -260,7 +260,7 @@ public sealed class DarlingMcpPgTableBloatTools
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, start, end, cancellationToken);
             }
 
             var suppressedCount = rows.Count(r => EstimateSuppressionReason(r) != null);
@@ -371,7 +371,7 @@ public sealed class DarlingMcpPgTableBloatTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 status = "table_bloat",
                 /* The page's count under the page's name (#3594). */
@@ -455,8 +455,8 @@ public sealed class DarlingMcpPgTableBloatTools
                 hints);
         }
 
-        return McpHelpers.Status(
-            "unavailable",
+        return await DarlingServerOfflineNote.UnavailableAsync(
+            postgres, serverId, serverName,
             probe.RowsEver > 0
                 ? $"No bloat snapshots were collected for {serverName} in the last {hoursBack} hour(s), so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
@@ -465,6 +465,6 @@ public sealed class DarlingMcpPgTableBloatTools
                 + "read and this is NOT an all-clear. Check that collection is running and enabled for this "
                 + "server - and note this collector is gated OFF on read replicas, because the statistics "
                 + "it needs to judge its own accuracy read as zero there.",
-            hints);
+            hints, cancellationToken);
     }
 }

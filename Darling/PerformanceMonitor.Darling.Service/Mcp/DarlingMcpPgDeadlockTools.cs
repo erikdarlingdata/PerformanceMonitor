@@ -41,7 +41,7 @@ public sealed class DarlingMcpPgDeadlockTools
         + "position waits and a restart reads that part again; a window whose write did not "
         + "land is offered again too.";
 
-    /// <summary>The "no_deadlocks" status text: why an empty window is not proof of a quiet server.</summary>
+    /// <summary>The empty-status text (was "no_deadlocks", #6130): why an empty window is not proof of a quiet server.</summary>
     internal static string NoDeadlocksText(string serverName, int hoursBack) =>
         $"No deadlock was reported on {serverName} in the last {hoursBack} "
         + "hour(s). FOUR different things produce that and they are worth telling apart: "
@@ -85,7 +85,7 @@ public sealed class DarlingMcpPgDeadlockTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -116,13 +116,13 @@ public sealed class DarlingMcpPgDeadlockTools
                    not-collected WITH THE REASON. get_pg_plans already asks #2546's question for
                    pg_plan_capture; the deadlock read reads the same file the same way and had never asked. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_deadlocks", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_deadlocks", cancellationToken)
                     /* #4966: not_collected and the precondition stay bare; a quiet answer carries the window keys under hints. */
                     ?? McpHelpers.Status(
-                        "no_deadlocks",
-                        NoDeadlocksText(resolved.ServerName, hours_back),
+                        "empty",
+                        NoDeadlocksText(resolved.DisplayName, hours_back),
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "pg_deadlocks", resolved.ServerName, windowStart, windowEnd, cancellationToken),
                             null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
@@ -137,7 +137,7 @@ public sealed class DarlingMcpPgDeadlockTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -178,7 +178,7 @@ public sealed class DarlingMcpPgDeadlockTools
         [Description("Maximum graphs to return when no hash is given. Default 5.")] int limit = 5,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var limitError = McpHelpers.ValidateTop(limit);
@@ -193,13 +193,13 @@ public sealed class DarlingMcpPgDeadlockTools
             {
                 return string.IsNullOrWhiteSpace(deadlock_hash)
                     ? await DarlingEngineCapability.NotCollectedStatusAsync(
-                          postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
+                          postgres, resolved.ServerId, resolved.DisplayName, "pg_deadlocks", cancellationToken)
                       ?? McpHelpers.Status(
                           "empty",
-                          NoDeadlockGraphText(resolved.ServerName))
+                          NoDeadlockGraphText(resolved.DisplayName))
                     : McpHelpers.Status(
                           "empty",
-                          $"No deadlock with hash '{deadlock_hash}' is stored for {resolved.ServerName}. A "
+                          $"No deadlock with hash '{deadlock_hash}' is stored for {resolved.DisplayName}. A "
                           + "hash identifies one report on ONE server, so one from a different server will "
                           + "not resolve here - and a report can age out of retention while a hash you are "
                           + "holding does not.");
@@ -207,7 +207,7 @@ public sealed class DarlingMcpPgDeadlockTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 status = "deadlock_detail",
                 graph_count = rows.Count,
                 note = "graph is PostgreSQL's own DETAIL block, as written apart from stripped tab indenting and "

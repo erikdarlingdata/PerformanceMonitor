@@ -240,7 +240,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         });
     }
 
-    /// <summary>No capture at all in the window is not an all-clear and carries no notice: blocking's not_sampled, session states' and xmin's unavailable.</summary>
+    /// <summary>No capture at all in the window is not an all-clear and carries no notice: blocking's, session states' and xmin's unavailable.</summary>
     [Theory]
     [InlineData("get_pg_blocking")]
     [InlineData("get_pg_session_states")]

@@ -673,7 +673,7 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
 
             /* Captures only, no holder: the healthy answer, and it names the denominator it rests on. */
             var clear = JsonDocument.Parse(await DarlingMcpPgXminTools.GetPgXminHorizon(postgres, ServerName, hours_back: 4)).RootElement;
-            Assert.Equal("no_holder", clear.GetProperty("status").GetString());
+            Assert.Equal("empty", clear.GetProperty("status").GetString());
             Assert.Equal(6, clear.GetProperty("captures_in_window").GetInt32());
             Assert.Contains("captured 6 time(s)", clear.GetProperty("finding").GetString()!, StringComparison.Ordinal);
 
