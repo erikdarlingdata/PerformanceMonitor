@@ -201,7 +201,7 @@ The service is cross-platform .NET; only the **bundled zero-admin store** and DP
 Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums.
 
 - **Docker Compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz`. Extract it, then `cd` into the folder it makes.
-- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It holds the same files in its `Darling/compose/` folder.
+- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder.
 - **systemd:** download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`.
 
 **Compose (the whole stack as one deployment).** The files are in the compose archive, or in [`Darling/compose/`](compose/) of a source checkout:
