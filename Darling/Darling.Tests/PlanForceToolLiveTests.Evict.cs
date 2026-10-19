@@ -349,7 +349,7 @@ VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
             /* The probe the PR body reports: did plan_handle change after the new compile. */
             var changed = !string.Equals(before.PlanHandle, after.PlanHandle, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(changed, (bool)statement["plan_handle_changed"]!);
-            Assert.Fail($"PROBE plan_handle_changed_after_recompile={changed} same_plan_shape={before.QueryPlanHash == after.QueryPlanHash} generation_before={before.Generation} generation_after={after.Generation}");  // TEMP-PROBE
+            /* Recorded in the PR body, not decided on: a live run saw the handle change on the new compile, but the read never relies on it. */
 
             /* A journal id that is not a done eviction is refused. */
             var notEvict = Parse(await DarlingMcpCompilesAfterEvictTools.RunAsync(c.Source, journalId + 1000, c.Ct));

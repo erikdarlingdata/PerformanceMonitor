@@ -46,3 +46,9 @@ Everything above stays true until a person turns it on, server by server: Darlin
 - Darling opens a check request for you about 5 and 10 minutes after a force, then every hour for 24 hours. It never removes a force on its own: at each check you keep it or remove it.
 - At each check, ask another agent or a person to argue against your conclusion from the same numbers before you keep or remove the force, and write what they said in your report.
 - After a write, call `get_forced_plans` to check that the force works. Nothing in Darling unforces for you: if it goes wrong, `unforce_query_store_plan` is the way back.
+
+`evict_cached_plan` is a third plan tool, behind its own per-server switch. It evicts the plan for one `plan_handle` (the `0x` text `get_top_queries_by_cpu` returns), so the next run compiles a new plan. These are suggestions, not rules Darling enforces. It blocks only a call that cannot do anything: the handle is not valid, the server is an Azure SQL Database, the login lacks the right to evict a plan, or the plan is not cached now.
+
+- An eviction has no undo, and it evicts every statement of the batch the handle covers. Evict only when the evidence shows a stale plan is the problem, and say why in `agent_action`.
+- Run the tool with its default `dry_run` first. It returns the exact statement, what Darling collected for that handle, and a warning when the handle covers several statements or Darling never collected it.
+- After a write, wait for the next `query_stats` collection (about a minute), then call `get_compiles_after_evict` with the `journal_id` the answer returned. It says, per statement, whether the next compile used the same plan shape, with executions and per-run cost before and after. A statement that has not run since is `not_collected_yet`; the collector keeps only the costliest statements, so a cheap one may never appear.
