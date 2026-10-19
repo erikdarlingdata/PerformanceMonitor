@@ -99,6 +99,16 @@ public class AuroraOnlySqlIsGatedTests
             "never the target; the dependency itself is PgWaitStatsCollector's GATED entry, and the detector " +
             "that emits the fact baselines pg_wait_stats, which is empty off Aurora.",
 
+        ["CollectorContext.cs"] =
+            "PROSE (#6143). AuroraFunctionNames lists the functions so the host can look up the schema each one " +
+            "lives in. It calls none of them; the collectors that do are the entries above.",
+
+        ["AuroraFunctionSchemaFallback.cs"] =
+            "GATED (#6143). Runs for a collector that reads Aurora functions only on a target already found to be " +
+            "Aurora, and once per connection for the aurora_version() probe that decides whether it is. It plans " +
+            "the call with EXPLAIN to find its schema and runs nothing; off Aurora that probe fails with 42883 as " +
+            "it always did.",
+
         ["PgTargetFactCollector.Queries.cs"] =
             "PROSE. PgTargetTopStatementsSql selects MAX(max_exec_peakmem_bytes), a STORED column in " +
             "collect.pg_statement_stats, never an Aurora function. PgStatementStatsCollector's vanilla path " +

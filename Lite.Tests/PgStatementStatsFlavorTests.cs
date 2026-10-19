@@ -79,14 +79,14 @@ public class PgStatementStatsFlavorTests
     {
         var sql = Sql(isAurora: true);
 
-        Assert.Contains("FROM aurora_stat_statements(false)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_catalog.aurora_stat_statements(false)", sql, StringComparison.Ordinal);
         /* The VIEW is what Aurora must not read - its rows come from the extended function. The extension's
            one-row pg_stat_statements_info (#3653 A5, the statements epoch) sits beside the view on Aurora
            too and is read on both flavors; the word boundary is what tells the two apart, since `_` is a
            word character and the info view's name continues past it. Since #3818 the epoch read also names
            the extension itself - as a pg_extension.extname LITERAL, to find the schema it was created in -
            so the pin is on a FROM of the view, which is the read Aurora must not make. */
-        Assert.DoesNotMatch(new Regex(@"FROM\s+(?:public\.)?pg_stat_statements\b"), sql);
+        Assert.DoesNotMatch(new Regex(@"FROM\s+(?:\S+\.)?pg_stat_statements\b"), sql);
         Assert.Contains("pg_stat_statements_info", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE e.extname = 'pg_stat_statements'", sql, StringComparison.Ordinal);
     }
@@ -96,7 +96,7 @@ public class PgStatementStatsFlavorTests
     {
         var sql = Sql(isAurora: false);
 
-        Assert.Contains("FROM public.pg_stat_statements", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_catalog.pg_stat_statements", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("aurora_stat_statements", sql, StringComparison.Ordinal);
     }
 

@@ -140,7 +140,7 @@ public class PgWaitStatsCollectorDefinitionTests
     {
         var sql = PgWaitStatsCollector.Instance.BuildQuery(MakeContext()).Text;
 
-        var selectList = sql[..sql.IndexOf("FROM aurora_stat_system_waits()", StringComparison.Ordinal)];
+        var selectList = sql[..sql.IndexOf("FROM pg_catalog.aurora_stat_system_waits()", StringComparison.Ordinal)];
         var items = selectList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
         Assert.Equal(7, items.Length);
         Assert.EndsWith("(SELECT pg_postmaster_start_time()) AS postmaster_start_time", items[6], StringComparison.Ordinal);
