@@ -396,7 +396,16 @@ public sealed class RemediationLiveSqlTests
 
             /* The session is gone: the same kill is refused rather than failing. */
             var gone = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
-            Assert.Equal(RemediationResult.Reasons.SessionGone, gone.Reason);
+            /* The server hands a freed id to the next sign-in, and the executor's own connection can be that sign-in: then the id is its own
+               session. Either way the kill is refused and wrote nothing. */
+            Assert.Contains(gone.Reason, new[] { RemediationResult.Reasons.SessionGone, RemediationResult.Reasons.OwnSession, RemediationResult.Reasons.SessionReused });
+            Assert.False(gone.Wrote);
+            /* An id no session holds is session_gone for certain. */
+            await using var admin = await OpenAsync(Admin(), ct);
+            var free = Convert.ToInt32(await ScalarAsync(admin, "SELECT MAX(session_id) + 1000 FROM sys.dm_exec_sessions;", ct), CultureInfo.InvariantCulture);
+            var absent = await executor.KillSessionAsync(Permit(ServerActionNames.KillSession, free.ToString(CultureInfo.InvariantCulture), null), free, loginTime, dryRun: false, ct);
+            Assert.Equal(RemediationResult.Reasons.SessionGone, absent.Reason);
+
 
             AssertNoSecret(scratch, logger, dry, wrong, wrongDry, killed, gone);
         }
@@ -405,6 +414,28 @@ public sealed class RemediationLiveSqlTests
             victim?.Dispose();
             await scratch.DropAsync();
         }
+    }
+
+    /// <summary>The kill batch run on a connection that names its OWN session: it refuses before anything else, and the connection survives. Run as the administrator, so no grant is in the way.</summary>
+    [Fact]
+    public async Task TheKillBatch_RefusesItsOwnSession_BeforeAnythingElse_AndDoesNotKillIt()
+    {
+        NeedServer();
+        var ct = TestContext.Current.CancellationToken;
+        await using var own = await OpenAsync(Admin(), ct);
+        var spid = Convert.ToInt32(await ScalarAsync(own, "SELECT @@SPID;", ct), CultureInfo.InvariantCulture);
+        foreach (var dry in new[] { true, false })
+        {
+            await using var command = new SqlCommand(SqlServerRemediationExecutor.KillSql, own) { CommandTimeout = 30 };
+            command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = spid });
+            command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = new DateTime(2000, 1, 1) });
+            command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dry });
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("own_session", reader.GetString(0));
+        }
+
+        Assert.Equal(spid, Convert.ToInt32(await ScalarAsync(own, "SELECT @@SPID;", ct), CultureInfo.InvariantCulture));
     }
 
     [Fact]

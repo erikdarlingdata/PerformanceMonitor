@@ -173,7 +173,8 @@ public sealed partial class PlanForceToolLiveTests
             Assert.True(await SessionAliveAsync(c, victim));
             Assert.Equal(1, await ScalarAsync(victim.Connection, "SELECT 1;", c.Ct) is int one ? one : 0);
             Assert.Equal(0, await JournalActionRowsAsync(c));
-            Assert.Equal("2", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'session_reused'", c.Ct));
+            /* A refusal is journaled once per request, tool, code and hour, so two refused calls leave one row. */
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'session_reused'", c.Ct));
         });
     }
 
@@ -188,7 +189,11 @@ public sealed partial class PlanForceToolLiveTests
             victim.Connection.Dispose();
             for (var i = 0; i < 50 && await SessionAliveAsync(c, victim); i++)
                 await Task.Delay(100, c.Ct);
-            var json = Parse(await KillAsync(c, victim.SessionId, login, dryRun: false));
+            /* The server hands a freed id to the next sign-in, which can be the remediation connection itself (that is own_session, tested by the
+               executor). So the gone session is one whose id no session holds now. */
+            await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
+            var free = Convert.ToInt32(await ScalarAsync(admin, "SELECT MAX(session_id) + 1000 FROM sys.dm_exec_sessions;", c.Ct), CultureInfo.InvariantCulture);
+            var json = Parse(await KillAsync(c, free, login, dryRun: false));
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("session_gone", (string?)json["reason"]);
         });
@@ -249,7 +254,7 @@ public sealed partial class PlanForceToolLiveTests
 
             Assert.True(await SessionAliveAsync(c, victim));
             Assert.Equal(0, await JournalActionRowsAsync(c));
-            Assert.Equal("2", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'postgres_target'", c.Ct));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'postgres_target'", c.Ct));
         });
     }
 
