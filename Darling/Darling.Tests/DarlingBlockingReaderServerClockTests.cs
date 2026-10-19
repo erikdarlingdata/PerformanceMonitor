@@ -28,12 +28,13 @@ public sealed class DarlingBlockingReaderServerClockTests
     /* The XE select is 37 columns wide: event_time first, the six server-local stamps at 25..30, and the row's store key last (collection_time, blocked_report_id at 35, 36; #5236). */
     private static readonly int[] XeStamps = [25, 26, 27, 28, 29, 30];
 
-    /* The DMV select is 20 columns wide: event_time first, the two server-local stamps last. */
-    private static readonly int[] DmvStamps = [18, 19];
+    /* The DMV select is 24 columns wide: event_time first, the two transaction stamps at 18 and 19, then (#5632) the head blocker's sign-in
+       time and last request end time at 20 and 21 (both server-local), its open transaction count at 22 and its log bytes at 23. */
+    private static readonly int[] DmvStamps = [18, 19, 20, 21];
 
     private static DataTable XeTable() => Table(37, [0, .. XeStamps]);
 
-    private static DataTable DmvTable() => Table(20, [0, .. DmvStamps]);
+    private static DataTable DmvTable() => Table(24, [0, .. DmvStamps]);
 
     private static DarlingBlockingReader.BlockedProcessReadRow ReadXe(DataTable table, ServerClock clock)
     {
@@ -98,6 +99,40 @@ public sealed class DarlingBlockingReaderServerClockTests
 
         Assert.Equal(Naive(year, month, day, expectedUtcHour, 1), row.BlockedLastTranStartedUtc);
         Assert.Equal(Naive(year, month, day, expectedUtcHour, 11), row.BlockingLastTranStartedUtc);
+    }
+
+    /// <summary>
+    /// #5632: the head blocker's four evidence values map from ordinals 20 to 23. The two stamps are the server's local clock and
+    /// leave as UTC through the server's clock (a New York winter value is five hours behind UTC); the count and the exact byte
+    /// total pass through untouched, and a NULL stays NULL (a session with no transaction row is not a transaction that wrote 0).
+    /// </summary>
+    [Fact]
+    public void ADmvBlockingSnapshot_MapsTheHeadBlockersEvidence_StampsToUtc_CountAndBytesAsStored()
+    {
+        var table = DmvTable();
+        table.Columns[22].DataType = typeof(int);
+        table.Columns[23].DataType = typeof(long);
+        AddRow(table,
+            (0, Naive(2026, 11, 2, 15)),
+            (20, Naive(2026, 11, 2, 8, 0)), (21, Naive(2026, 11, 2, 9, 30)),
+            (22, 2), (23, 123456789012L));
+
+        var row = ReadDmv(table, Eastern(snapshotOffsetMinutes: -240));
+
+        Assert.Equal(Naive(2026, 11, 2, 13, 0), row.BlockingLoginTimeUtc);
+        Assert.Equal(Naive(2026, 11, 2, 14, 30), row.BlockingLastRequestEndTimeUtc);
+        Assert.Equal(2, row.BlockingOpenTransactionCount);
+        Assert.Equal(123456789012L, row.BlockingTranLogBytesUsed);
+
+        var empty = DmvTable();
+        empty.Columns[22].DataType = typeof(int);
+        empty.Columns[23].DataType = typeof(long);
+        AddRow(empty, (0, Naive(2026, 11, 2, 15)));
+        var none = ReadDmv(empty, Eastern());
+        Assert.Null(none.BlockingLoginTimeUtc);
+        Assert.Null(none.BlockingLastRequestEndTimeUtc);
+        Assert.Null(none.BlockingOpenTransactionCount);
+        Assert.Null(none.BlockingTranLogBytesUsed);
     }
 
     /// <summary>
@@ -294,5 +329,6 @@ public sealed class DarlingBlockingReaderServerClockTests
         "blocked_last_batch_completed", "blocking_last_batch_completed",
     ];
 
-    private static readonly string[] DmvStampNames = ["blocked_last_tran_started", "blocking_last_tran_started"];
+    private static readonly string[] DmvStampNames =
+        ["blocked_last_tran_started", "blocking_last_tran_started", "blocking_login_time", "blocking_last_request_end_time"];
 }
