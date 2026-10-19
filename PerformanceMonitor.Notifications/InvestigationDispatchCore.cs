@@ -49,19 +49,23 @@ public sealed class InvestigationDispatchCore
     private readonly ILogger _logger;
     private readonly Action<int>? _opened;
     private readonly Func<string, string, CancellationToken, Task<bool>>? _agentGate;
+    private readonly IPseudonymKeySource? _keys;
 
     /// <param name="openOrJoin">The store's open-or-join (<see cref="IInvestigationRequestStore.OpenOrJoinAsync"/>).</param>
     /// <param name="settings">The live alert settings: the route list and the PagerDuty auto-resolve flag are read per call.</param>
     /// <param name="logger">Where a failure is logged.</param>
-    /// <param name="opened">Called with the route id when a request opens (#5822); null calls nothing.</param>
+    /// <param name="opened">Called with the route id when a request opens (#6066 aside: #5822); null calls nothing.</param>
+    /// <param name="keys">#6066: the store's pseudonym key, read when a webhook token's brief is masked at <c>metadataOnly</c>; null numbers per answer.</param>
     public InvestigationDispatchCore(
         Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>> openOrJoin,
         IAlertSettings settings,
         ILogger logger,
         Action<int>? opened = null,
-        Func<string, string, CancellationToken, Task<bool>>? agentGate = null)
+        Func<string, string, CancellationToken, Task<bool>>? agentGate = null,
+        IPseudonymKeySource? keys = null)
     {
         _agentGate = agentGate;
+        _keys = keys;
         _openOrJoin = openOrJoin ?? throw new ArgumentNullException(nameof(openOrJoin));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -265,7 +269,8 @@ public sealed class InvestigationDispatchCore
                 }
             }
 
-            return InvestigationWebhookToken.Render(requestId, opened, read?.Row, read?.Brief, dataDetail);
+            var key = await PseudonymKeySources.KeyForAsync(_keys, dataDetail, cancellationToken);
+            return InvestigationWebhookToken.Render(requestId, opened, read?.Row, read?.Brief, dataDetail, key);
         }
         catch (Exception ex)
         {

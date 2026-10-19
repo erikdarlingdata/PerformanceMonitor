@@ -47,6 +47,11 @@ internal static class DarlingProcessServices
     /* #5632 step 7: the worker's store owner data source, published for the one MCP tool that reads a remediation slot. */
     services.AddSingleton<StoreOwnerSource>();
 
+    /* #6066: the store's pseudonym key, read once over the owner connection the worker publishes above and kept in memory. Taken by the MCP
+       host (its data-detail filter and the brief composer) and the worker (the webhook dispatcher); no MCP tool method takes it. */
+    services.AddSingleton<PseudonymKeySource>(provider => new PseudonymKeySource(
+        provider.GetRequiredService<StoreOwnerSource>(), provider.GetRequiredService<ILogger<PseudonymKeySource>>()));
+
     /* #2953: the collector's startup verdict — the worker publishes it, the web host's /api/ping reads it, and
        neither touches the store to do so. A singleton for the same reason the three above are: the publisher and
        the reader are separate hosted services in one process, and the answer has to survive being asked at any

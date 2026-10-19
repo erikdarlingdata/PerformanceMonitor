@@ -335,6 +335,12 @@ END $do$;"),
 DROP INDEX IF EXISTS config.uq_investigation_requests_force_check;
 ALTER TABLE IF EXISTS config.investigation_requests DROP CONSTRAINT IF EXISTS ck_investigation_requests_force_check;
 ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS force_check_of, DROP COLUMN IF EXISTS force_check_no;"),
+
+        // /// V198 (#6066): the one-row pseudonym key table. The table is the probe's newest sentinel. The rewind drops it (its triggers go with
+        // it), so a re-run of V198 makes a fresh one and seeds a new key. Safe on a store that never had it.
+        new(198, "hasPseudonymKey",
+            @"
+DROP TABLE IF EXISTS config.pseudonym_key;"),
     ];
 
     /// <summary>

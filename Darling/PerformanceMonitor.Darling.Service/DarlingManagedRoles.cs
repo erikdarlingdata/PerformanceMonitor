@@ -1867,6 +1867,8 @@ GRANT UPDATE (undone_at, undone_by) ON {config}.investigation_signature_merges T
 REVOKE ALL ON {config}.password_key, {config}.password_key_service,
    {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
 REVOKE ALL ON {config}.legacy_secret_pin_candidate FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+-- V198 (#6066): the pseudonym key table; no role but the store owner reads it, so nothing is granted back.
+REVOKE ALL ON {config}.pseudonym_key FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
 GRANT SELECT ON {config}.password_key, {config}.password_key_service TO {admin};
 DO $do$
 DECLARE
@@ -1876,8 +1878,8 @@ BEGIN
       SELECT t.tgname, t.tgrelid::pg_catalog.regclass::pg_catalog.text AS tablename
       FROM pg_catalog.pg_trigger AS t
       WHERE NOT t.tgisinternal
-        AND t.tgrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
-        AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate', 'trg_legacy_secret_pin_candidate_owner_only_row', 'trg_legacy_secret_pin_candidate_owner_only_truncate')
+        AND t.tgrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'), pg_catalog.to_regclass('{config}.pseudonym_key'))
+        AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate', 'trg_legacy_secret_pin_candidate_owner_only_row', 'trg_legacy_secret_pin_candidate_owner_only_truncate', 'trg_pseudonym_key_owner_only_row', 'trg_pseudonym_key_owner_only_truncate')
    LOOP
       RAISE WARNING 'Dropped trigger % from % because only the store owner may write the password key tables.', stray.tgname, stray.tablename;
       EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.tablename);
@@ -1887,7 +1889,7 @@ BEGIN
       SELECT k.conname, k.conrelid::pg_catalog.regclass::pg_catalog.text AS tablename
       FROM pg_catalog.pg_constraint AS k
       WHERE k.contype = 'f'
-        AND k.confrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
+        AND k.confrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'), pg_catalog.to_regclass('{config}.pseudonym_key'))
    LOOP
       RAISE WARNING 'Dropped foreign key % on % because it references a password key table.', stray.conname, stray.tablename;
       EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', stray.tablename, stray.conname);
@@ -1898,7 +1900,7 @@ BEGIN
       FROM pg_catalog.pg_class AS c
       CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
       LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
-      WHERE c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
+      WHERE c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'), pg_catalog.to_regclass('{config}.pseudonym_key'))
         AND (a.grantee = 0 OR r.rolname IN ('{admin}', '{viewer}', '{mcp}'))
         AND NOT (COALESCE(r.rolname = '{admin}', false) AND a.privilege_type = 'SELECT'
                  AND c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service')))

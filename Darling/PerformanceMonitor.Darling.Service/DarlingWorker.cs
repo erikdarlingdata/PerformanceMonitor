@@ -1440,6 +1440,8 @@ LIMIT 1";
 
     /* #5632 step 7: where the worker publishes its store owner data source for the force and unforce tools. Null in a test-built worker. */
     private readonly StoreOwnerSource? _ownerSource;
+    /* #6066: the store's pseudonym key, read over the owner connection the first time a metadataOnly webhook token needs it. */
+    private readonly PseudonymKeySource? _pseudonymKeys;
 
     /// <summary>
     /// True when another registration in the published registry carries this one's display name (ordinal), so
@@ -1493,9 +1495,10 @@ LIMIT 1";
        and at each hourly flush); its own reads never go through admission. */
     private readonly ReadAdmission? _readAdmission;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
     {
         _ownerSource = ownerSource;
+        _pseudonymKeys = pseudonymKeys;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _mcpTlsCertState = mcpTlsCertState;
@@ -3433,7 +3436,8 @@ LIMIT 1";
                 : McpDataDetail.MetadataOnly,
             /* #5822: the long-poll's wake-up, fired when a request opens. */
             openSignal: PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared,
-            agentGate: deadlockRollup.AllowsAgentRequestAsync);
+            agentGate: deadlockRollup.AllowsAgentRequestAsync,
+            keys: _pseudonymKeys);
 
         /* The shared record-and-send deliverer — hoisted so BOTH the shared alert engine and the Stage 4
            service self-alerts (DarlingSelfAlertEvaluator) fire through the SAME instance: identical

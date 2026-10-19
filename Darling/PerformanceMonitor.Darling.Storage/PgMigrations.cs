@@ -1754,6 +1754,62 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_requests_force_check
     WHERE force_check_of IS NOT NULL;";
 
     /// <summary>
+    /// V198 (#6066): the store's pseudonym key. <c>config.pseudonym_key</c> is a one-row table (<c>id = 1</c>, a CHECK) holding 32 bytes
+    /// that turn a login or host name into the same <c>login#3fa9c2d1</c> text in every <c>metadataOnly</c> MCP answer, brief and webhook
+    /// from this store (<c>PerformanceMonitor.Common.PseudonymKey</c>). The row is seeded here, once, with <c>sha256</c> of two
+    /// <c>gen_random_uuid()</c> values (PostgreSQL's own strong random source, no extension), so every store has its key from the upgrade
+    /// on and no two services race to make one; <c>ON CONFLICT DO NOTHING</c> keeps a second run, and a restored or copied store, on the
+    /// key it has. A fresh install runs this rung too (the generated schema is V1 only), so a fresh and an upgraded store each end with
+    /// exactly one row. The key is never rotated.
+    ///
+    /// <para><b>Only the store owner reads it.</b> The table is revoked from <c>PUBLIC</c> here and from <c>admin</c>, <c>viewer</c> and <c>mcp</c>
+    /// (the roles that exist) in the same transaction, so no default grant outlives the migration; provisioning (<c>provision-roles.sql</c> step
+    /// 2d and 3g, managed section 10a) revokes it again and grants SELECT to nobody. It carries the password key tables' owner-only write
+    /// triggers (<c>config.password_key_owner_only()</c>, V165), <c>ENABLE ALWAYS</c>.</para>
+    /// </summary>
+    private const string V198Sql = @"
+CREATE TABLE IF NOT EXISTS config.pseudonym_key
+(
+    id smallint NOT NULL,
+    key bytea NOT NULL,
+    created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    CONSTRAINT pk_pseudonym_key PRIMARY KEY (id),
+    CONSTRAINT ck_pseudonym_key_single_row CHECK (id = 1),
+    CONSTRAINT ck_pseudonym_key_length CHECK (octet_length(key) = 32)
+);
+
+REVOKE ALL ON config.pseudonym_key FROM PUBLIC;
+
+DO $do$
+DECLARE
+    holder text;
+BEGIN
+    FOREACH holder IN ARRAY ARRAY['admin', 'viewer', 'mcp']
+    LOOP
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = holder) THEN
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.pseudonym_key FROM %I', holder);
+        END IF;
+    END LOOP;
+END
+$do$;
+
+DROP TRIGGER IF EXISTS trg_pseudonym_key_owner_only_row ON config.pseudonym_key;
+CREATE TRIGGER trg_pseudonym_key_owner_only_row
+    BEFORE INSERT OR UPDATE OR DELETE ON config.pseudonym_key
+    FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();
+DROP TRIGGER IF EXISTS trg_pseudonym_key_owner_only_truncate ON config.pseudonym_key;
+CREATE TRIGGER trg_pseudonym_key_owner_only_truncate
+    BEFORE TRUNCATE ON config.pseudonym_key
+    FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();
+ALTER TABLE config.pseudonym_key ENABLE ALWAYS TRIGGER trg_pseudonym_key_owner_only_row;
+ALTER TABLE config.pseudonym_key ENABLE ALWAYS TRIGGER trg_pseudonym_key_owner_only_truncate;
+
+INSERT INTO config.pseudonym_key (id, key)
+VALUES (1, pg_catalog.sha256(pg_catalog.decode(
+    pg_catalog.replace(pg_catalog.gen_random_uuid()::text || pg_catalog.gen_random_uuid()::text, '-', ''), 'hex')))
+ON CONFLICT (id) DO NOTHING;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2125,6 +2181,7 @@ $rung$;";
         new Migration(195, "query-store-forced-plans", V195Sql),
         new Migration(196, "level-3-server-action-switches", V196Sql),
         new Migration(197, "plan-force-checks", V197Sql),
+        new Migration(198, "pseudonym-key", V198Sql),
     };
 
     /// <summary>

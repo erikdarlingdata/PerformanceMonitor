@@ -189,7 +189,7 @@ ON CONFLICT (id) DO UPDATE SET smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLU
 
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
             Assert.Equal(3L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_candidate", ct));
-            Assert.Equal(10L, await ScalarAsync(connection,
+            Assert.Equal(12L, await ScalarAsync(connection,
                 "SELECT count(*) FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid WHERE NOT t.tgisinternal AND p.proname = 'password_key_owner_only'", ct));
 
             /* The hash is the SHA-256 of the stored text, as C# takes it; the text is not in the table. */

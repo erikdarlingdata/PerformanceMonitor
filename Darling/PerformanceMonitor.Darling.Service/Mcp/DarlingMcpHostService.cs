@@ -107,6 +107,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
     /* #5632 step 7: the worker-published store owner data source the force and unforce tools read a remediation slot through. */
     private readonly StoreOwnerSource _ownerSource;
+    private readonly PseudonymKeySource? _pseudonymKeys;
 
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
@@ -154,9 +155,10 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// releases it; released by <see cref="ReleaseServerCertificate"/>.</summary>
     private DarlingWebTls.LoadedCertificate? _serverCertificate;
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, McpTlsCertificateState? mcpTlsCertState = null, StoreOwnerSource? ownerSource = null)
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, McpTlsCertificateState? mcpTlsCertState = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
     {
         _ownerSource = ownerSource ?? new StoreOwnerSource();
+        _pseudonymKeys = pseudonymKeys;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _logger = logger;
@@ -748,7 +750,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource);
+            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys);
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -1104,8 +1106,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         PerformanceMonitor.Analysis.IPlanFetcher? planFetcher,
         ILogger logger,
         BaselineCache baselineCache,
-        StoreOwnerSource? ownerSource = null)
+        StoreOwnerSource? ownerSource = null,
+        IPseudonymKeySource? pseudonymKeys = null)
     {
+        /* #6066: the store's pseudonym key, for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
+        if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
         /* #5632 step 7: force_query_store_plan and unforce_query_store_plan take this as a service parameter. Empty until the worker publishes. */
         services.AddSingleton<StoreOwnerSource>(ownerSource ?? new StoreOwnerSource());
         /* Register services that MCP tools need via dependency injection. */
@@ -1202,7 +1207,9 @@ public sealed class DarlingMcpHostService : BackgroundService
         services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
-            DarlingInvestigationBriefTools.Tools));
+            DarlingInvestigationBriefTools.Tools,
+            utcNow: null,
+            keys: sp.GetService<IPseudonymKeySource>()));
 
         /* #5918: get_investigation_reports hides the case a live practice request replays under the investigations arm. The arm is
            the policy the host started with, so the tool takes it as a service parameter. */

@@ -469,18 +469,18 @@ public sealed class DarlingMcpInvestigationTools
         "after a later evidence_ready. sections (optional) names the sections to return; omit it for all. A request that " +
         "another agent holds a live claim on is refused (already_claimed) unless you pass its claim_id; an unclaimed or " +
         "finished request is served to any caller.")]
-    public static Task<string> GetInvestigationEvidence(
+    public static async Task<string> GetInvestigationEvidence(
         NpgsqlDataSource postgres,
         InvestigationBriefComposer composer,
         [Description("From list_investigation_requests.")] string request_id,
         [Description("Section names to return. Omit for all.")] string[]? sections = null,
         [Description("Your claim_id, when you hold the claim.")] string? claim_id = null,
         CancellationToken cancellationToken = default) =>
-        EvidenceAsync(Store(postgres), composer.Mode, request_id, sections, claim_id, cancellationToken);
+        await EvidenceAsync(Store(postgres), composer.Mode, request_id, sections, claim_id, cancellationToken, await composer.KeyAsync(cancellationToken));
 
     /// <summary>The evidence read over a given store at <paramref name="mode"/> (#6033).</summary>
     internal static async Task<string> EvidenceAsync(InvestigationRequestStore store, McpDataDetail mode, string request_id,
-        string[]? sections, string? claim_id, CancellationToken cancellationToken)
+        string[]? sections, string? claim_id, CancellationToken cancellationToken, PseudonymKey? key = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
@@ -502,7 +502,7 @@ public sealed class DarlingMcpInvestigationTools
             var rows = (await store.ReadEvidenceAsync(requestId, cancellationToken))
                 .Where(r => wanted is null || wanted.Contains(r.Section))
                 .Select(r => InvestigationBriefComposer.EvidenceSection(
-                    new InvestigationBriefEvidence(r.Section, r.State, r.CapturedAtUtc, r.ContentJson), mode))
+                    new InvestigationBriefEvidence(r.Section, r.State, r.CapturedAtUtc, r.ContentJson), mode, key))
                 .ToList();
 
             return JsonSerializer.Serialize(new
@@ -700,7 +700,7 @@ public sealed class DarlingMcpInvestigationTools
         "While a practice request (practice_of on its row) is open or claimed, the case it replays is read without its report, " +
         "feedback and journal, so the practice is not answered from them. " +
         "hours_back 1-168, default 24.")]
-    public static Task<string> GetInvestigationReports(
+    public static async Task<string> GetInvestigationReports(
         NpgsqlDataSource postgres,
         InvestigationBriefComposer composer,
         InvestigationReadPolicy readPolicy,
@@ -708,12 +708,14 @@ public sealed class DarlingMcpInvestigationTools
         [Description("One request, with its brief. Omit for the window.")] string? request_id = null,
         [Description("1-168. Default 24. Ignored with request_id.")] int hours_back = 24,
         CancellationToken cancellationToken = default) =>
-        ReportsAsync(postgres, composer.Mode, server_name, request_id, hours_back, cancellationToken, readPolicy.HideLivePracticeAnswers);
+        await ReportsAsync(postgres, composer.Mode, server_name, request_id, hours_back, cancellationToken, readPolicy.HideLivePracticeAnswers,
+            await composer.KeyAsync(cancellationToken));
 
     /// <summary>The report read at <paramref name="mode"/>. The web panel passes <see cref="McpDataDetail.Full"/>: its role
     /// can SELECT these tables itself, so the setting guards the MCP side (#5632 review round 2, M1).</summary>
     internal static async Task<string> ReportsAsync(NpgsqlDataSource postgres, McpDataDetail mode, string? server_name,
-        string? request_id, int hours_back, CancellationToken cancellationToken, bool hideLivePracticeAnswers = false)
+        string? request_id, int hours_back, CancellationToken cancellationToken, bool hideLivePracticeAnswers = false,
+        PseudonymKey? key = null)
     {
         Guid? requestId = null;
         if (!string.IsNullOrWhiteSpace(request_id))
@@ -759,7 +761,7 @@ public sealed class DarlingMcpInvestigationTools
                     : InvestigationToolCore.Status("empty", $"No investigation request opened in the last {hours_back} hours.");
             }
 
-            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode);
+            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
