@@ -1120,6 +1120,67 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.NotNull(notArray);
     }
 
+    /// <summary>#6098 input checks: an excluded_volumes entry holding a comma or a control character, an entry over 260
+    /// characters, and a list of more than 256 entries are refused with the tool's invalid answer and nothing is written
+    /// (not truncated or dropped silently). A separator-only entry is not refused: the normaliser drops it.</summary>
+    [Theory]
+    [InlineData("{\"excluded_volumes\":[\"/mnt/a,b\"]}")]
+    [InlineData("{\"excluded_volumes\":[\"/mnt/a\\u0000b\"]}")]
+    [InlineData("{\"excluded_volumes\":[\"/mnt/a\\nb\"]}")]
+    public void ExcludedVolumes_RefusesACommaOrControlCharacterEntry_AndWritesNothing(string body)
+    {
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(body)!);
+
+        Assert.NotNull(error);
+        Assert.Contains("excluded_volumes", error);
+        Assert.Empty(targets);
+    }
+
+    private static string ArrayBody(string field, IEnumerable<string> items) =>
+        new JsonObject { [field] = new JsonArray(items.Select(i => (JsonNode?)JsonValue.Create(i)).ToArray()) }.ToJsonString();
+
+    [Fact]
+    public void ExcludedVolumes_RefusesOverLongAndOverCountInput_ButAcceptsTheLimits()
+    {
+        var (_, tooLong) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(ArrayBody("excluded_volumes", new[] { "/" + new string('a', 260) }))!);
+        var (_, tooMany) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(ArrayBody("excluded_volumes", Enumerable.Range(0, 257).Select(i => "/v" + i)))!);
+        Assert.NotNull(tooLong);
+        Assert.NotNull(tooMany);
+
+        var (okTargets, okError) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            ArrayBody("excluded_volumes", Enumerable.Range(0, 255).Select(i => "/v" + i).Append("/" + new string('a', 259))))!);
+        Assert.Null(okError);
+        Assert.Single(okTargets);
+
+        var (sepTargets, sepError) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"excluded_volumes\":[\"\\\\\",\"/\"]}")!);
+        Assert.Null(sepError);
+        Assert.Single(sepTargets);
+    }
+
+    /// <summary>#6098 input checks, alert-side excluded_databases: at most 256 names of at most 128 characters and no control
+    /// character; a comma stays allowed because SQL Server database names may hold one.</summary>
+    [Fact]
+    public void ExcludedDatabases_RefusesOverLongOverCountAndControlCharacterNames_ButAllowsAComma()
+    {
+        var (okTargets, okError) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            ArrayBody("excluded_databases", new[] { "Sales,2024", new string('d', 128) }))!);
+        Assert.Null(okError);
+        Assert.Single(okTargets);
+
+        foreach (var bad in new[]
+        {
+            ArrayBody("excluded_databases", new[] { new string('d', 129) }),
+            ArrayBody("excluded_databases", new[] { "a\0b" }),
+            ArrayBody("excluded_databases", Enumerable.Range(0, 257).Select(i => "db" + i)),
+        })
+        {
+            var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(bad)!);
+            Assert.NotNull(error);
+            Assert.Contains("excluded_databases", error);
+            Assert.Empty(targets);
+        }
+    }
+
     /// <summary>#5640 (V179): the Client Timeouts switch and its two per-minute bars are reported under <c>client_timeouts</c>
     /// through the engine's own clamp, written under the engine's own floor, and a Critical below Warning is refused when both
     /// are sent. (A lone bar against the stored other is checked inside the write transaction, like Runnable Queue's.)</summary>

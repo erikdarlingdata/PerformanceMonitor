@@ -1088,7 +1088,7 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(a.FailedJobEnabled);
         command.Parameters.AddWithValue(a.FailedJobLookbackMinutes);
         command.Parameters.AddWithValue(a.CooldownMinutes);
-        AddTextArray(command, a.ExcludedDatabases);
+        AddTextArray(command, ExcludedDatabaseNames.Normalize(a.ExcludedDatabases));
         command.Parameters.AddWithValue(an.Enabled);
         command.Parameters.AddWithValue(an.IntervalMinutes);
         command.Parameters.AddWithValue(an.NotificationsEnabled);

@@ -30,8 +30,16 @@ namespace PerformanceMonitor.Alerting;
 /// </summary>
 public static class VolumeExclusions
 {
+    /// <summary>Most entries the list keeps (#6098 input checks).</summary>
+    public const int MaxEntries = 256;
+
+    /// <summary>Longest entry, in characters, after trimming (#6098 input checks).</summary>
+    public const int MaxEntryLength = 260;
+
     /// <summary>The comparison form of a mount point: trimmed, trailing separators dropped, a bare root kept
-    /// as <c>/</c>. Null for a blank entry, which matches nothing.</summary>
+    /// as <c>/</c>. Null for a blank entry, which matches nothing, and for an entry made only of separators that
+    /// is not a run of <c>/</c> (<c>\</c>, <c>\\</c>, <c>\/</c>): a stray backslash must not stand for the Linux root
+    /// volume, so only slashes alone name the root.</summary>
     public static string? Key(string? mountPoint)
     {
         var trimmed = mountPoint?.Trim() ?? "";
@@ -41,12 +49,57 @@ public static class VolumeExclusions
         }
 
         var stripped = trimmed.TrimEnd('\\', '/');
-        return stripped.Length == 0 ? "/" : stripped;
+        if (stripped.Length > 0)
+        {
+            return stripped;
+        }
+
+        return trimmed.All(c => c == '/') ? "/" : null;
+    }
+
+    /// <summary>True when one entry is acceptable input: no comma (the Settings windows join and split the list on
+    /// commas, so an entry holding one would turn into two on the next save), no control character (NUL included)
+    /// and at most <see cref="MaxEntryLength"/> characters once trimmed. A blank entry passes here: it is dropped,
+    /// not refused.</summary>
+    public static bool IsAcceptableEntry(string? entry)
+    {
+        var trimmed = entry?.Trim() ?? "";
+        return trimmed.Length <= MaxEntryLength
+            && trimmed.IndexOf(',') < 0
+            && !trimmed.Any(char.IsControl);
+    }
+
+    /// <summary>The refusal text for a write that arrives as a whole (the MCP write), or null when the list is
+    /// acceptable: more than <see cref="MaxEntries"/> entries, or an entry <see cref="IsAcceptableEntry"/> rejects.
+    /// The caller learns instead of the list being truncated or an entry silently lost.</summary>
+    public static string? Refusal(IEnumerable<string>? raw, string field)
+    {
+        if (raw is null)
+        {
+            return null;
+        }
+
+        var count = 0;
+        foreach (var entry in raw)
+        {
+            if (++count > MaxEntries)
+            {
+                return $"'{field}' holds more than {MaxEntries} entries.";
+            }
+
+            if (!IsAcceptableEntry(entry))
+            {
+                return $"'{field}' entries must not contain a comma or a control character, and must be at most {MaxEntryLength} characters.";
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Trims, drops blanks and de-duplicates by <see cref="Key"/> (so <c>S:</c> and <c>S:\</c> keep
     /// the first one typed), keeping first-seen order. Applied on the way into a store or a settings file so
-    /// text typed in a Settings window and a JSON array arriving through MCP mean the same thing.</summary>
+    /// text typed in a Settings window and a JSON array arriving through MCP mean the same thing. Also drops an
+    /// entry <see cref="IsAcceptableEntry"/> rejects and stops at <see cref="MaxEntries"/> entries.</summary>
     public static IReadOnlyList<string> Normalize(IEnumerable<string>? raw)
     {
         if (raw is null)
@@ -58,6 +111,16 @@ public static class VolumeExclusions
         var result = new List<string>();
         foreach (var entry in raw)
         {
+            if (result.Count >= MaxEntries)
+            {
+                break;
+            }
+
+            if (!IsAcceptableEntry(entry))
+            {
+                continue;
+            }
+
             var key = Key(entry);
             if (key is not null && seen.Add(key))
             {

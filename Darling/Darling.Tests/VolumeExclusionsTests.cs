@@ -74,6 +74,89 @@ public sealed class VolumeExclusionsTests
         Assert.Empty(VolumeExclusions.Normalize(null));
     }
 
+    /// <summary>The Settings windows join the list with ", " and split on "," when saving, so an entry holding a comma
+    /// would turn into two entries (and could silence a different volume) on an unrelated save. It is dropped.</summary>
+    [Fact]
+    public void Normalize_DropsAnEntryHoldingAComma()
+    {
+        Assert.Equal(new[] { "S:\\" }, VolumeExclusions.Normalize(new[] { "/mnt/a,b", "S:\\", "x, y" }));
+    }
+
+    /// <summary>Only an entry made entirely of "/" is the root; a stray backslash must not exclude the Linux root volume.</summary>
+    [Theory]
+    [InlineData("\\")]
+    [InlineData("\\\\")]
+    [InlineData("\\/")]
+    [InlineData("/\\")]
+    [InlineData(" \\ ")]
+    public void SeparatorOnlyEntry_ThatIsNotAllSlashes_IsDropped_AndMatchesNoMountPoint(string entry)
+    {
+        Assert.Empty(VolumeExclusions.Normalize(new[] { entry }));
+        Assert.Null(VolumeExclusions.Key(entry));
+        Assert.False(VolumeExclusions.IsExcluded("/", new[] { entry }));
+    }
+
+    [Theory]
+    [InlineData("/")]
+    [InlineData("//")]
+    [InlineData(" / ")]
+    public void AnEntryOfSlashesAlone_StaysTheRootVolume(string entry)
+    {
+        Assert.Equal(new[] { entry.Trim() }, VolumeExclusions.Normalize(new[] { entry }));
+        Assert.True(VolumeExclusions.IsExcluded("/", new[] { entry }));
+        Assert.False(VolumeExclusions.IsExcluded("/var", new[] { entry }));
+    }
+
+    [Fact]
+    public void Normalize_DropsControlCharacterAndOverLongEntries_AndKeepsTheLimitExactly()
+    {
+        var atLimit = "/" + new string('a', VolumeExclusions.MaxEntryLength - 1);
+        var overLimit = atLimit + "a";
+        var normalized = VolumeExclusions.Normalize(new[] { "/bad\0nul", "/bad\ttab", "/bad\nline", overLimit, atLimit, "/ok" });
+
+        Assert.Equal(new[] { atLimit, "/ok" }, normalized);
+    }
+
+    [Fact]
+    public void Normalize_CapsTheListAtTheEntryLimit()
+    {
+        var many = Enumerable.Range(0, VolumeExclusions.MaxEntries + 40).Select(i => "/mnt/v" + i).ToList();
+
+        var normalized = VolumeExclusions.Normalize(many);
+
+        Assert.Equal(VolumeExclusions.MaxEntries, normalized.Count);
+        Assert.Equal("/mnt/v0", normalized[0]);
+    }
+
+    [Fact]
+    public void Refusal_NamesTheFirstProblem_AndPassesAnAcceptableList()
+    {
+        Assert.Null(VolumeExclusions.Refusal(new[] { "S:\\", "/mnt/scratch/", "", "\\" }, "excluded_volumes"));
+        Assert.Null(VolumeExclusions.Refusal(null, "excluded_volumes"));
+        Assert.Contains("excluded_volumes", VolumeExclusions.Refusal(new[] { "/mnt/a,b" }, "excluded_volumes"));
+        Assert.NotNull(VolumeExclusions.Refusal(new[] { "/a\0b" }, "excluded_volumes"));
+        Assert.NotNull(VolumeExclusions.Refusal(new[] { "/" + new string('a', VolumeExclusions.MaxEntryLength) }, "excluded_volumes"));
+        Assert.NotNull(VolumeExclusions.Refusal(Enumerable.Repeat("/x", VolumeExclusions.MaxEntries + 1), "excluded_volumes"));
+        Assert.Null(VolumeExclusions.Refusal(Enumerable.Repeat("/x", VolumeExclusions.MaxEntries), "excluded_volumes"));
+    }
+
+    /// <summary>The alert-side excluded-databases bounds: 128 characters, no control character, 256 names, commas allowed.</summary>
+    [Fact]
+    public void ExcludedDatabaseNames_BoundsLengthCountAndControlCharacters_ButAllowsCommas()
+    {
+        var atLimit = new string('d', ExcludedDatabaseNames.MaxNameLength);
+        var normalized = ExcludedDatabaseNames.Normalize(new[] { "Sales,2024", atLimit, atLimit + "d", "bad\0name", "bad\nname", "tempdb" });
+
+        Assert.Equal(new[] { "Sales,2024", atLimit, "tempdb" }, normalized);
+        Assert.Equal(ExcludedDatabaseNames.MaxEntries,
+            ExcludedDatabaseNames.Normalize(Enumerable.Range(0, ExcludedDatabaseNames.MaxEntries + 5).Select(i => "db" + i)).Count);
+
+        Assert.Null(ExcludedDatabaseNames.Refusal(new[] { "Sales,2024", atLimit }, "excluded_databases"));
+        Assert.NotNull(ExcludedDatabaseNames.Refusal(new[] { atLimit + "d" }, "excluded_databases"));
+        Assert.NotNull(ExcludedDatabaseNames.Refusal(new[] { "a\0b" }, "excluded_databases"));
+        Assert.NotNull(ExcludedDatabaseNames.Refusal(Enumerable.Repeat("db", ExcludedDatabaseNames.MaxEntries + 1), "excluded_databases"));
+    }
+
     [Fact]
     public void Filter_ReturnsTheInputWhenNothingIsExcluded_AndDropsOnlyTheNamedVolumes()
     {

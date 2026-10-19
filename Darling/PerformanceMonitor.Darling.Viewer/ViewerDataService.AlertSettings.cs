@@ -241,7 +241,7 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.FailedJobEnabled });                 // $20
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FailedJobLookbackMinutes });          // $21
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.CooldownMinutes });                   // $22
-        AddTextArray(command, r.ExcludedDatabases);                                                             // $23
+        AddTextArray(command, ExcludedDatabaseNames.Normalize(r.ExcludedDatabases));                                                             // $23
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.AnalysisEnabled });                  // $24
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.AnalysisIntervalMinutes });           // $25
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.AnalysisNotificationsEnabled });     // $26

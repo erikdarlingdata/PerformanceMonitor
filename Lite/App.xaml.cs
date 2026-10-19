@@ -1406,6 +1406,10 @@ public partial class App : Application
                     var db = elem.ValueKind == JsonValueKind.String ? elem.GetString() : null;
                     if (!string.IsNullOrWhiteSpace(db)) AlertExcludedDatabases.Add(db);
                 }
+
+                /* #6098 input checks: the same name bounds the MCP write enforces (a name over 128 characters or with a
+                   control character is dropped, at most 256 kept), so a hand-edited file and the tools agree. */
+                AlertExcludedDatabases = ExcludedDatabaseNames.Normalize(AlertExcludedDatabases).ToList();
             }
             /* #3653 (A5, Q5): the two opt-out lists, read with the same element-kind filter as the database list
                above and normalised through the shared rule so a hand-edited file and the Settings window agree.
