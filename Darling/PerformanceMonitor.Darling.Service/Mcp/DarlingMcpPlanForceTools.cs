@@ -526,7 +526,9 @@ public sealed class DarlingMcpPlanForceTools
                     return OutcomeUnknownAnswer(unknown, before, result);
                 return WithWarnings(Answer("done", null,
                     $"Session {sessionId} was killed. There is no undo."
-                    + (killed?.Rollback is { InProgress: true } ? " A rollback is running: the session keeps its locks until it ends. Do not kill it again; read get_blocking to see it clear." : ""),
+                    + (killed?.Rollback is { InProgress: true } ? " A rollback is running: the session keeps its locks until it ends. Do not kill it again; read get_blocking to see it clear." : "")
+                    /* The read after the KILL failed inside the batch (#5632): the kill stands, and whether it rolls back was not read. */
+                    + (killed is { Rollback: null } ? " Whether a rollback is running was not read. Do not kill it again; read get_blocking to see its locks clear." : ""),
                     new
                     {
                         dry_run = false,

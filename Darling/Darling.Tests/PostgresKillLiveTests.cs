@@ -512,6 +512,80 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
     }
 
     [Fact]
+    public async Task AKillWhoseReplyIsLost_AndWhoseStoreRollbackFails_StillAnswersUnknown_AndJournalsOnlyTheCall()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            /* The real statement runs and ends the backend; the same fault then ends the store's open transaction too, so its rollback
+               fails, and the reply is lost. */
+            PostgresRemediationExecutor.KillStatementSeam.Value = async (command, token) =>
+            {
+                await command.ExecuteScalarAsync(token);
+                const string open = "FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND state = 'idle in transaction'";
+                await ExecAsync(c.Store, "SELECT pg_terminate_backend(pid) " + open, token);
+                for (var i = 0; i < 100; i++)
+                {
+                    await using var left = new NpgsqlCommand("SELECT count(*) " + open, c.Store);
+                    if (await left.ExecuteScalarAsync(token) is 0L)
+                        break;
+                    await Task.Delay(50, token);
+                }
+
+                throw new NpgsqlException("Exception while reading from stream", new System.IO.IOException("The connection was reset."));
+            };
+            string answer;
+            try
+            {
+                answer = await c.Kill(id, dryRun: false);
+            }
+            finally
+            {
+                PostgresRemediationExecutor.KillStatementSeam.Value = null;
+            }
+
+            Assert.Equal("outcome_unknown", (string?)Parse(answer)["status"]);
+            Assert.False(await c.AliveAsync(pid));
+            Assert.Equal(1, await c.JournalAsync("action_called"));
+            Assert.Equal(0, await c.JournalAsync("action_failed"));
+            Assert.Equal(0, await c.JournalAsync("action_done"));
+        });
+    }
+
+    [Fact]
+    public async Task ACancelDuringTheReadAfterAConfirmedKill_StillJournalsDone_AndTheCancelGoesOn()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(c.Ct);
+            /* pg_terminate_backend answers true; the caller cancels before the read that follows it. */
+            PostgresRemediationExecutor.KillStatementSeam.Value = async (command, token) =>
+            {
+                var answer = await command.ExecuteScalarAsync(token);
+                Assert.Equal(true, answer);
+                await cts.CancelAsync();
+                return answer;
+            };
+            try
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => (c with { Ct = cts.Token }).Kill(id, dryRun: false));
+            }
+            finally
+            {
+                PostgresRemediationExecutor.KillStatementSeam.Value = null;
+            }
+
+            Assert.False(await c.AliveAsync(pid));
+            Assert.Equal(1, await c.JournalAsync("action_called"));
+            Assert.Equal(1, await c.JournalAsync("action_done"));
+            Assert.Equal(0, await c.JournalAsync("action_failed"));
+        });
+    }
+
+    [Fact]
     public async Task AServerErrorOnTheKillStatement_IsAFailure_NotUnknown_AndTheBackendLives()
     {
         await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
@@ -596,12 +670,22 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
     }
 
     [Theory]
-    [InlineData("57014", true)]
-    [InlineData("57P01", true)]
-    [InlineData("42501", false)]
-    [InlineData("22012", false)]
-    public void AServerErrorResponse_IsAFailure_ExceptACancelOrTheConnectionEnding(string sqlState, bool unknown) =>
-        Assert.Equal(unknown, PostgresRemediationExecutor.IsOutcomeUnknown(new PostgresException("m", "ERROR", "ERROR", sqlState)));
+    [InlineData("57014", "ERROR", true)]
+    [InlineData("57P01", "FATAL", true)]
+    [InlineData("57P01", "ERROR", true)]
+    [InlineData("57P02", "FATAL", true)]
+    [InlineData("57P03", "FATAL", true)]
+    [InlineData("57P04", "FATAL", true)]
+    [InlineData("40001", "ERROR", true)]
+    [InlineData("XX000", "FATAL", true)]
+    [InlineData("XX000", "PANIC", true)]
+    [InlineData("53200", "FATAL", true)]
+    [InlineData("42501", "ERROR", false)]
+    [InlineData("22012", "ERROR", false)]
+    [InlineData("XX000", "ERROR", false)]
+    [InlineData("53200", "ERROR", false)]
+    public void AServerErrorResponse_IsAFailure_ExceptOneThatCanEndTheStatementAfterTheKillRan(string sqlState, string severity, bool unknown) =>
+        Assert.Equal(unknown, PostgresRemediationExecutor.IsOutcomeUnknown(new PostgresException("m", severity, severity, sqlState)));
 
     [Fact]
     public void ALostConnectionOrATimeout_IsUnknown_AndACancelByTheCallerIsNeither()

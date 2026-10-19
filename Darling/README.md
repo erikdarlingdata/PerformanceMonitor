@@ -599,7 +599,7 @@ Darling also refuses a session that belongs to a superuser. PostgreSQL lets only
 
 Darling ends client sessions only. A background process or a replication sender is refused as `not_user_session`, and Darling's own connection is refused as `own_session`. Ending a session rolls back its open transaction. A session that is waiting for a synchronous standby has already committed on the server, so its commit stays. There is no undo.
 
-`pg_terminate_backend` only sends the signal. After a kill Darling reads the session once more and says in `still_there` whether it was still there. If the reply to the kill is lost, for example because the connection drops, the answer is `outcome_unknown`: the session may have ended. The agent changes list then shows the kill as "result unknown", not failed. The SQL Server kill answers the same way. A kill also needs that server's `kill_session` switch, which is off after an upgrade.
+`pg_terminate_backend` only sends the signal. After a kill Darling reads the session once more and says in `still_there` whether it was still there. When that read fails, or the caller cancels during it, `still_there` is null and the kill still counts as done. On SQL Server the same holds for `rollback`. If the reply to the kill is lost, for example because the connection drops or the server ends the kill's own connection, the answer is `outcome_unknown`: the session may have ended. The agent changes list then shows the kill as "result unknown", not failed. The SQL Server kill answers the same way. A kill also needs that server's `kill_session` switch, which is off after an upgrade.
 
 #### How the remediation login signs in to PostgreSQL
 

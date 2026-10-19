@@ -249,18 +249,25 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
     /// <summary>
     /// True for an error that came after the kill statement was sent and is not the server refusing the statement: a lost or closed connection,
-    /// a timeout, the statement cancelled (57014), or its connection ended by the server (57P01 to 57P03). The server may have run it. Any other
-    /// server error response, such as 42501, means the statement did not run.
+    /// a timeout, the statement cancelled (57014), its connection ended by the server (57P01 to 57P03, 57P04 database dropped), a serialization
+    /// failure (40001), or any error the server sends at FATAL or PANIC severity, which ends the session whatever its code. Each can end our
+    /// statement after pg_terminate_backend ran, so the server may have run it. Any other server error response at ERROR severity, such as 42501,
+    /// means the statement did not run.
     /// </summary>
     internal static bool IsOutcomeUnknown(Exception ex) => ex switch
     {
         OperationCanceledException => false,
-        PostgresException pg => pg.SqlState is PostgresErrorCodes.QueryCanceled or PostgresErrorCodes.AdminShutdown
-            or PostgresErrorCodes.CrashShutdown or PostgresErrorCodes.CannotConnectNow,
+        PostgresException pg => pg.InvariantSeverity is "FATAL" or "PANIC"
+            || pg.SqlState is PostgresErrorCodes.QueryCanceled or PostgresErrorCodes.AdminShutdown or PostgresErrorCodes.CrashShutdown
+                or PostgresErrorCodes.CannotConnectNow or PostgresErrorCodes.DatabaseDropped or PostgresErrorCodes.SerializationFailure,
         _ => true,
     };
 
-    /// <summary>The one read after a kill that signalled: true when the same backend is still there. Null when the read failed; it never turns a kill into an error.</summary>
+    /// <summary>
+    /// The one read after a kill that signalled: true when the same backend is still there. Null when the read failed or the caller cancelled
+    /// during it; it never turns a kill into an error. A cancel here must not escape: the kill is confirmed, and only a kill the executor returns
+    /// as done is journaled as done (#5632). The caller's cancel still ends the call when the store next uses the token.
+    /// </summary>
     private static async Task<bool?> StillThereAsync(NpgsqlConnection connection, int pid, long startEpoch, CancellationToken ct)
     {
         try
@@ -271,7 +278,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             await using var reader = await command.ExecuteReaderAsync(ct);
             return await reader.ReadAsync(ct) && !reader.IsDBNull(0) && reader.GetInt64(0) == startEpoch;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception)
         {
             return null;
         }

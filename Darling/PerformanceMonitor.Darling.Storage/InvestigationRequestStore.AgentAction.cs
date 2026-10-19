@@ -267,8 +267,18 @@ RETURNING journal_id";
             if (signal?.OutcomeUnknown == true && !signal.Changed)
             {
                 /* The write was sent and its reply was lost (#5632): no result row, so the called row reads "result unknown". The
-                   transaction holds only the re-check's reads, so rolling it back undoes nothing on the server. */
-                await transaction.RollbackAsync(cancellationToken);
+                   transaction holds only the re-check's reads, so rolling it back undoes nothing on the server. The same network fault
+                   that lost the reply can fail this rollback, or the caller can cancel; neither may turn the answer into an error or
+                   journal action_failed, so the rollback takes no token and its failure is dropped (the connection's close ends the
+                   transaction anyway). */
+                try
+                {
+                    await transaction.RollbackAsync(CancellationToken.None);
+                }
+                catch (Exception)
+                {
+                }
+
                 return new AgentActionResult(null, calledId, null) { OutcomeUnknown = true };
             }
 
@@ -290,9 +300,10 @@ RETURNING journal_id";
                 throw;
             return new AgentActionResult(null, calledId, after) { RecordedLate = late, JournalMissing = !late };
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException && signal?.OutcomeUnknown != true)
         {
-            /* Only a store-only write, or a failure before the server accepted anything, gets here: the change rolled back with
+            /* Only a store-only write, or a failure before the server accepted anything, gets here (a write whose outcome is unknown never
+               does: its called row stays with no result, which reads as "result unknown"): the change rolled back with
                its transaction (a store change) or never happened (a refused write), so journal the failure on its own. A
                failure to write this row leaves the called row with neither result, which reads as "result unknown". */
             await using var connection = await _dataSource.OpenConnectionAsync(CancellationToken.None);

@@ -94,8 +94,9 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     /// not a user session (<c>not_user_session</c>), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
     /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
-    /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. No statement text and no input
-    /// buffer are read.
+    /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
+    /// nothing after the <c>KILL</c> can raise an error that would read as a failed kill: a read that fails answers <c>rollback_read = 0</c>, and the
+    /// kill is still <c>killed</c> with its rollback not read. No statement text and no input buffer are read.
     /// </summary>
     internal const string KillSql = @"
 DECLARE @edition bigint = CONVERT(bigint, SERVERPROPERTY('EngineEdition'));
@@ -112,6 +113,7 @@ DECLARE @last_end datetime = NULL;
 DECLARE @log_bytes bigint = NULL;
 DECLARE @command nvarchar(32) = NULL;
 DECLARE @percent real = NULL;
+DECLARE @rollback_read bit = 1;
 IF @edition = 5
     SET @outcome = 'kill_not_built_on_platform';
 ELSE
@@ -155,15 +157,22 @@ BEGIN
         DECLARE @kill nvarchar(40) = N'KILL ' + CONVERT(nvarchar(11), @session_id) + N';';
         EXEC (@kill);
         SET @outcome = 'killed';
-        SELECT @command = r.command, @percent = r.percent_complete
-        FROM sys.dm_exec_requests AS r
-        WHERE r.session_id = @session_id
-        OPTION(RECOMPILE);
+        BEGIN TRY
+            SELECT @command = r.command, @percent = r.percent_complete
+            FROM sys.dm_exec_requests AS r
+            WHERE r.session_id = @session_id
+            OPTION(RECOMPILE);
+        END TRY
+        BEGIN CATCH
+            SET @command = NULL;
+            SET @percent = NULL;
+            SET @rollback_read = 0;
+        END CATCH;
     END;
 END;
 SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
        program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
-       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent;";
+       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read;";
 
     /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
     internal const string PlanFactsSql =
@@ -429,15 +438,18 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
 
             var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
             double? percent = reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
-            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent);
+            var rollbackRead = reader.IsDBNull(12) || Convert.ToInt64(reader.GetValue(12), CultureInfo.InvariantCulture) == 1;
+            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent, rollbackRead);
         }
     }
 
     /// <summary>
     /// Turns the kill batch's outcome into the executor's answer. Pure, so a test needs no server. An outcome the batch does not name is a failure,
-    /// never a kill: only <c>killed</c> says <see cref="RemediationResult.Wrote"/>.
+    /// never a kill: only <c>killed</c> says <see cref="RemediationResult.Wrote"/>. A kill whose rollback read failed (<paramref name="rollbackRead"/>
+    /// false) is still a kill, with no <see cref="RemediationResult.Rollback"/>, as PostgreSQL's kill answers a still-there read that failed.
     /// </summary>
-    internal static RemediationResult KillAnswer(string name, bool dryRun, int sessionId, string? outcome, KillSessionFacts? facts, string? rollbackCommand, double? percent)
+    internal static RemediationResult KillAnswer(string name, bool dryRun, int sessionId, string? outcome, KillSessionFacts? facts, string? rollbackCommand, double? percent,
+        bool rollbackRead = true)
     {
         var result = outcome switch
         {
@@ -461,7 +473,11 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
 
         /* A reused id answers nothing about the session that has it now (#5632). */
         result = result with { Session = outcome == KillOutcomes.SessionReused ? null : facts };
-        if (outcome == KillOutcomes.Killed)
+        if (outcome == KillOutcomes.Killed && !rollbackRead)
+        {
+            result = result with { Message = $"Session {sessionId} was killed. Whether a rollback is running was not read; read get_blocking to see its locks clear." };
+        }
+        else if (outcome == KillOutcomes.Killed)
         {
             var inProgress = rollbackCommand is not null && rollbackCommand.StartsWith("KILLED/ROLLBACK", StringComparison.OrdinalIgnoreCase);
             result = result with { Rollback = new KillRollback(inProgress, inProgress ? percent : null) };

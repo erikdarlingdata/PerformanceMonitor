@@ -226,6 +226,45 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     [Fact]
+    public async Task AKillWhoseRollbackReadFails_IsStillDone_JournalsDone_AndSaysTheRollbackWasNotRead()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            /* The real batch, with an error raised by the read after the KILL: the KILL ran, so this is a kill, not a failure. */
+            PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.KillBatchSeam.Value = (command, token) =>
+            {
+                const string read = "SELECT @command = r.command";
+                Assert.Contains(read, command.CommandText, StringComparison.Ordinal);
+                command.CommandText = command.CommandText.Replace(read, "RAISERROR(N'the read after the kill failed', 16, 1); " + read, StringComparison.Ordinal);
+                return command.ExecuteReaderAsync(token);
+            };
+            string answer;
+            try
+            {
+                answer = await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: false);
+            }
+            finally
+            {
+                PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.KillBatchSeam.Value = null;
+            }
+
+            var json = Parse(answer);
+            Assert.Equal("done", (string?)json["status"]);
+            Assert.Null(json["rollback"]);
+            Assert.Contains("was not read", (string?)json["message"], StringComparison.Ordinal);
+            for (var i = 0; i < 50 && await SessionAliveAsync(c, victim); i++)
+                await Task.Delay(100, c.Ct);
+            Assert.False(await SessionAliveAsync(c, victim));
+            Assert.Single(await RowsAsync(c, "action_called"));
+            Assert.Single(await RowsAsync(c, "action_done"));
+            Assert.Empty(await RowsAsync(c, "action_failed"));
+        });
+    }
+
+    [Fact]
     public async Task ASessionThatIsGone_IsRefusedSessionGone_NotSessionReused()
     {
         await RunAsync(Without.Nothing, async c =>
