@@ -156,10 +156,25 @@ public sealed class CollectorContext
             : "pg_catalog";
 
     /// <summary>
+    /// The one Aurora function the pg_stat_statements extension itself ships (#6143), and the argument types the
+    /// collector calls it with. It is the only one that can live outside <c>pg_catalog</c>: in the schema the extension
+    /// was created in, as a member of the extension. Every other Aurora built-in is in <c>pg_catalog</c> or nowhere.
+    /// </summary>
+    public const string StatementsExtensionAuroraFunction = "aurora_stat_statements";
+
+    /// <summary>
+    /// <see cref="StatementsExtensionAuroraFunction"/>'s argument types as <c>pg_catalog.oidvectortypes</c> prints
+    /// them: the collector calls <c>aurora_stat_statements(false)</c>.
+    /// </summary>
+    public const string StatementsExtensionAuroraFunctionArguments = "boolean";
+
+    /// <summary>
     /// Picks the schema for each function from the (function, schema) rows <c>pg_catalog.pg_proc</c> returned
-    /// (#6143). Only <c>pg_catalog</c> and <paramref name="statementsExtensionSchema"/> (the schema
-    /// pg_stat_statements was created in, null when it is not created) are accepted, and <c>pg_catalog</c> wins
-    /// when a function is in both. A row in any other schema is ignored, whatever the query that produced it said.
+    /// (#6143). <c>pg_catalog</c> is accepted for every function, and wins when a function is in both.
+    /// <paramref name="statementsExtensionSchema"/> (the schema pg_stat_statements was created in, null when it is not
+    /// created) is accepted only for <see cref="StatementsExtensionAuroraFunction"/>; the host's query returns that row
+    /// only when the function is a member of the extension. A row in any other schema, or for any other function in
+    /// the extension's schema, is ignored, whatever the query that produced it said.
     /// </summary>
     public static IReadOnlyDictionary<string, string> ChoosePgFunctionSchemas(
         IEnumerable<(string Function, string Schema)> rows, string? statementsExtensionSchema)
@@ -173,6 +188,7 @@ public sealed class CollectorContext
                 chosen[function] = schema;
             }
             else if (statementsExtensionSchema is not null
+                     && string.Equals(function, StatementsExtensionAuroraFunction, StringComparison.Ordinal)
                      && string.Equals(schema, statementsExtensionSchema, StringComparison.Ordinal)
                      && !chosen.ContainsKey(function))
             {

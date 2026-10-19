@@ -1794,10 +1794,13 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// #6143: every extension in the connected database and the schema it was created in, then each Aurora built-in
-    /// function (<see cref="CollectorContext.AuroraFunctionNames"/>) found in pg_catalog or in the schema
-    /// pg_stat_statements was created in. No other schema is read, and <see cref="CollectorContext.ChoosePgFunctionSchemas"/>
-    /// checks the same rule again. Run on the monitoring connection, whose search_path is pinned to pg_catalog; every
-    /// relation and operator is named by schema all the same.
+    /// function (<see cref="CollectorContext.AuroraFunctionNames"/>) found in pg_catalog. The one function the
+    /// pg_stat_statements extension ships (<see cref="CollectorContext.StatementsExtensionAuroraFunction"/>) is also
+    /// returned from the schema the extension was created in, but only when <c>pg_depend</c> shows it is a member of
+    /// that extension and its argument types are the ones the collector calls it with: anyone with CREATE on that schema
+    /// can make a function of the same name there. No other schema is read, and
+    /// <see cref="CollectorContext.ChoosePgFunctionSchemas"/> checks the same rule again. Run on the monitoring
+    /// connection, whose search_path is pinned to pg_catalog; every relation and operator is named by schema all the same.
     /// </summary>
     internal const string PgExtensionSchemasSql = @"SELECT 'extension'::text, e.extname::text, n.nspname::text
 FROM pg_catalog.pg_extension AS e
@@ -1807,10 +1810,23 @@ SELECT 'function'::text, p.proname::text, n.nspname::text
 FROM pg_catalog.pg_proc AS p
 JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
 WHERE p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
-AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
-     OR n.oid OPERATOR(pg_catalog.=) ANY (
-         SELECT x.extnamespace FROM pg_catalog.pg_extension AS x
-         WHERE x.extname OPERATOR(pg_catalog.=) 'pg_stat_statements'))";
+AND n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
+UNION ALL
+SELECT 'function'::text, p.proname::text, n.nspname::text
+FROM pg_catalog.pg_extension AS x
+JOIN pg_catalog.pg_depend AS d
+  ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+ AND d.refobjid OPERATOR(pg_catalog.=) x.oid
+ AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass
+ AND d.deptype OPERATOR(pg_catalog.=) 'e'
+JOIN pg_catalog.pg_proc AS p
+  ON p.oid OPERATOR(pg_catalog.=) d.objid
+ AND p.pronamespace OPERATOR(pg_catalog.=) x.extnamespace
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE x.extname OPERATOR(pg_catalog.=) 'pg_stat_statements'
+AND p.proname::text OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunction + @"'
+AND p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
+AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunctionArguments + "'";
 
     /// <summary>#6143: a catalog read of a handful of rows; the other connection-time reads beside it use 5 s too.</summary>
     internal const int PgExtensionSchemasTimeoutSeconds = 5;
@@ -1882,8 +1898,8 @@ AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
         if (readsFunctions)
         {
             var statementsSchema = schemas.TryGetValue("pg_stat_statements", out var found) ? found : null;
-            /* #6143: a function pg_proc did not show is called in pg_catalog, or in the extension's schema when only
-               that one resolves (AuroraFunctionSchemaFallback); remembered per target. */
+            /* #6143: a function pg_proc did not show is called in pg_catalog, or, for the one the extension ships, in
+               the extension's schema when it is a member there (AuroraFunctionSchemaFallback); remembered per target. */
             context.PgFunctionSchemas = await AuroraFunctionSchemaFallback.FillAsync(
                 targetConnection,
                 CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema),

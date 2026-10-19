@@ -337,9 +337,9 @@ SELECT
     /// <c>42883 undefined_function</c> be caught and read as "not Aurora" instead of failing the whole
     /// probe — the wrapping the old column comment claimed but a catalog subquery never actually needed.</para>
     /// </summary>
-    /// <para>#6143: <c>{0}</c> is the schema, quoted: pg_catalog, or the schema pg_stat_statements was created in when
-    /// <c>pg_proc</c> shows the function there and not in pg_catalog (<see cref="CollectorContext.ChoosePgFunctionSchemas"/>).
-    /// The catalog only picks between those two; whether the target is Aurora is still decided by the call.</para>
+    /// <para>#6143: <c>{0}</c> is the schema, quoted, from <see cref="ResolveAuroraFunctionSchemaAsync"/>. For
+    /// <c>aurora_version</c> that is always pg_catalog: the pg_stat_statements extension does not ship it, so a function
+    /// of that name in any other schema is never called. Whether the target is Aurora is still decided by the call.</para>
     public const string PostgresAuroraProbeQueryText = @"SELECT {0}.aurora_version()";
 
     /// <summary>
@@ -357,7 +357,7 @@ SELECT
     /// reading as stock PostgreSQL" is answerable from the service log instead of requiring a live psql
     /// session against the target, which is what diagnosing #2340 actually took.</para>
     /// </summary>
-    private static async Task<bool> ProbeAuroraAsync(
+    internal static async Task<bool> ProbeAuroraAsync(
         NpgsqlConnection connection, CancellationToken cancellationToken, ILogger? logger = null)
     {
         try
@@ -377,8 +377,9 @@ SELECT
 
     /// <summary>
     /// #6143: the quoted schema to call an Aurora built-in by, from <see cref="DarlingCollectorRunner.PgExtensionSchemasSql"/>
-    /// and <see cref="CollectorContext.ChoosePgFunctionSchemas"/>: pg_catalog, or the schema pg_stat_statements was
-    /// created in, never any other. pg_catalog when the catalog shows neither.
+    /// and <see cref="CollectorContext.ChoosePgFunctionSchemas"/>: pg_catalog, or, only for the function the
+    /// pg_stat_statements extension ships and only as a member of it, the schema the extension was created in; never
+    /// any other. pg_catalog when the catalog shows neither.
     /// </summary>
     internal static async Task<string> ResolveAuroraFunctionSchemaAsync(
         NpgsqlConnection connection, string functionName, CancellationToken cancellationToken)
@@ -404,7 +405,8 @@ SELECT
         }
 
         /* #6143: when pg_proc shows nothing (measured on Aurora for a pg_monitor login, #2340), the call is tested in
-           pg_catalog and then in the extension's schema. Once per connection, so nothing is remembered. */
+           pg_catalog only: aurora_version is not shipped by pg_stat_statements, so it is never looked for in the
+           extension's schema. Once per connection, so nothing is remembered. */
         var chosen = await AuroraFunctionSchemaFallback.FillAsync(
             connection,
             CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema),

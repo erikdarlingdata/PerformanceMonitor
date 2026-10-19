@@ -106,8 +106,8 @@ public class AuroraOnlySqlIsGatedTests
         ["AuroraFunctionSchemaFallback.cs"] =
             "GATED (#6143). Runs for a collector that reads Aurora functions only on a target already found to be " +
             "Aurora, and once per connection for the aurora_version() probe that decides whether it is. It plans " +
-            "the call with EXPLAIN to find its schema and runs nothing; off Aurora that probe fails with 42883 as " +
-            "it always did.",
+            "the call with EXPLAIN in pg_catalog only, and otherwise reads pg_depend for aurora_stat_statements' " +
+            "membership in pg_stat_statements; off Aurora the pg_catalog probe fails with 42883 as it always did.",
 
         ["PgTargetFactCollector.Queries.cs"] =
             "PROSE. PgTargetTopStatementsSql selects MAX(max_exec_peakmem_bytes), a STORED column in " +

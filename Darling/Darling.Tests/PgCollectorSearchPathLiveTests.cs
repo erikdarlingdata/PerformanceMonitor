@@ -365,11 +365,12 @@ public sealed class PgCollectorSearchPathLiveTests
             Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
                 context, PgWaitStatsCollector.Instance, connection, null, ct));
 
-            /* Only in other: not found, so pg_catalog. In other and the extension's schema: the extension's schema.
-               In all three: pg_catalog. */
+            /* Only in other: not found, so pg_catalog. In other and the extension's schema: the extension does not ship
+               it and it is not a member there, so pg_catalog too. In all three: pg_catalog. */
             var sql = PgWaitStatsCollector.Instance.BuildQuery(context).Text;
             Assert.Contains("FROM pg_catalog.aurora_stat_system_waits()", sql, StringComparison.Ordinal);
-            Assert.Contains($"JOIN {ExtSchema}.aurora_stat_wait_type()", sql, StringComparison.Ordinal);
+            Assert.Contains("JOIN pg_catalog.aurora_stat_wait_type()", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain(ExtSchema + ".", sql, StringComparison.Ordinal);
             Assert.Contains("JOIN \"pg_catalog\".aurora_stat_wait_event()", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("other.", sql, StringComparison.Ordinal);
 
@@ -386,9 +387,10 @@ public sealed class PgCollectorSearchPathLiveTests
     }
 
     /// <summary>
-    /// When pg_proc shows no Aurora function (measured on Aurora, #2340), the call that fails in pg_catalog with 42883 is
-    /// tried once in the pg_stat_statements extension's schema, the statement collector reads through it, and the
-    /// schema is remembered for the target. A same-named copy in public is never called.
+    /// When pg_proc shows no Aurora function (measured on Aurora, #2340), aurora_stat_statements, whose call fails in
+    /// pg_catalog with 42883, is found in the pg_stat_statements extension's schema as a member of the extension, the
+    /// statement collector reads through it, and the schema is remembered for the target. A same-named copy in public
+    /// is never called.
     /// </summary>
     [Fact]
     public async Task AuroraFunction_PgProcShowsNothing_FallsBackToTheStatementsExtensionSchema_AndRemembersIt()
@@ -421,6 +423,7 @@ public sealed class PgCollectorSearchPathLiveTests
                 CREATE FUNCTION {ExtSchema}.aurora_stat_statements(boolean) RETURNS SETOF {ExtSchema}.aurora_shape
                 LANGUAGE plpgsql AS $$
                 BEGIN INSERT INTO public.calls VALUES ('extension schema'); RETURN QUERY SELECT * FROM {ExtSchema}.aurora_shape; END $$;
+                ALTER EXTENSION pg_stat_statements ADD FUNCTION {ExtSchema}.aurora_stat_statements(boolean);
                 CREATE FUNCTION public.aurora_stat_statements(boolean) RETURNS SETOF {ExtSchema}.aurora_shape
                 LANGUAGE plpgsql AS $$
                 BEGIN INSERT INTO public.calls VALUES ('public'); RETURN QUERY SELECT * FROM {ExtSchema}.aurora_shape; END $$;
@@ -461,7 +464,10 @@ public sealed class PgCollectorSearchPathLiveTests
 
             /* Remembered: with the function gone, the target's answer is reused without testing again. A caller that
                remembers nothing tests again, finds neither schema, and calls pg_catalog. Public is never chosen. */
-            await ExecAsync(auroraAdmin.ConnectionString, $"DROP FUNCTION {ExtSchema}.aurora_stat_statements(boolean)", ct);
+            await ExecAsync(auroraAdmin.ConnectionString, $"""
+                ALTER EXTENSION pg_stat_statements DROP FUNCTION {ExtSchema}.aurora_stat_statements(boolean);
+                DROP FUNCTION {ExtSchema}.aurora_stat_statements(boolean);
+                """, ct);
             Assert.Equal(Unquoted, (await AuroraFunctionSchemaFallback.FillAsync(
                 connection, empty, new[] { "aurora_stat_statements" }, Unquoted, targetKey, null, ct))["aurora_stat_statements"]);
             var retested = await AuroraFunctionSchemaFallback.FillAsync(
@@ -481,6 +487,115 @@ public sealed class PgCollectorSearchPathLiveTests
                 await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
         }
     }
+
+    /// <summary>
+    /// A stock PostgreSQL target where pg_stat_statements is created in public and someone with CREATE there made
+    /// IMMUTABLE public.aurora_version() and public.aurora_stat_statements(boolean). PostgreSQL evaluates an IMMUTABLE
+    /// call with constant arguments while it plans, so planning such a call (EXPLAIN) runs it. Neither the connect-time
+    /// Aurora probe nor a collector cycle ever runs them, and the target is not Aurora. Once
+    /// aurora_stat_statements(boolean) is a member of the extension it is found there without being run, while
+    /// aurora_version, which the extension does not ship, still resolves in pg_catalog or nowhere.
+    /// </summary>
+    [Fact]
+    public async Task AuroraNamedFunctionsInTheExtensionSchema_ThatAreNotMembers_AreNeverPlannedOrRun()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var auroraAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = AuroraDatabase };
+        var targetKey = "pm6143-stock-" + Guid.NewGuid().ToString("N");
+
+        var bodySucceeded = false;
+        try
+        {
+            await ResetAsync(admin.ConnectionString, ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {AuroraDatabase}", ct);
+            /* A sequence counts each call: nextval is allowed in an IMMUTABLE function and is not undone by a rollback. */
+            await ExecAsync(auroraAdmin.ConnectionString, """
+                CREATE EXTENSION pg_stat_statements SCHEMA public;
+                CREATE SEQUENCE public.version_calls;
+                CREATE SEQUENCE public.statements_calls;
+                CREATE FUNCTION public.aurora_version() RETURNS text IMMUTABLE LANGUAGE plpgsql AS $$
+                BEGIN PERFORM pg_catalog.nextval('public.version_calls'); RETURN 'x'; END $$;
+                CREATE FUNCTION public.aurora_stat_statements(boolean) RETURNS text IMMUTABLE LANGUAGE plpgsql AS $$
+                BEGIN PERFORM pg_catalog.nextval('public.statements_calls'); RETURN 'x'; END $$;
+                ALTER DATABASE pm6143_aurora SET search_path = public, pg_catalog;
+                """, ct);
+
+            /* The premise: planning the call runs it. */
+            await ExecAsync(auroraAdmin.ConnectionString, "EXPLAIN (COSTS OFF) SELECT * FROM public.aurora_version()", ct);
+            Assert.Equal(1, await CountAsync(auroraAdmin.ConnectionString, "public.version_calls", ct));
+            await ExecAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.setval('public.version_calls', 1, false)", ct);
+
+            var runtime = await RuntimeAsync(admin, AuroraDatabase, admin.Username!, ct);
+            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
+            await connection.OpenAsync(ct);
+
+            /* The connect-time probe: not Aurora. */
+            Assert.False(await DarlingServerConnector.ProbeAuroraAsync(connection, ct));
+            Assert.Equal("pg_catalog", await DarlingServerConnector.ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", ct));
+
+            /* A collector cycle that reads Aurora functions (the host gates it on IsAurora; forced here so the lookup
+               runs): nothing outside pg_catalog is chosen, and pg_catalog is remembered for the target. */
+            var aurora = NewContext(new CollectorTargetInfo
+            {
+                Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = connection.PostgreSqlVersion.Major, IsAurora = true,
+            });
+            Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+                aurora, PgStatementStatsCollector.Instance, connection, null, ct, targetKey));
+            Assert.Empty(aurora.PgFunctionSchemas!);
+            Assert.Equal("pg_catalog", AuroraFunctionSchemaFallback.Remembered(targetKey, "aurora_stat_statements", "public"));
+            Assert.Contains("FROM pg_catalog.aurora_stat_statements(false)", PgStatementStatsCollector.Instance.BuildQuery(aurora).Text, StringComparison.Ordinal);
+            Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+                aurora, PgWaitStatsCollector.Instance, connection, null, ct, targetKey));
+            Assert.Empty(aurora.PgFunctionSchemas!);
+
+            /* The cycle a stock target really gets: the statement collector reads pg_stat_statements. */
+            var stock = NewContext(new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = connection.PostgreSqlVersion.Major });
+            Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+                stock, PgStatementStatsCollector.Instance, connection, null, ct, targetKey));
+            await using (var command = new NpgsqlCommand(PgStatementStatsCollector.Instance.BuildQuery(stock).Text, connection))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                await PgStatementStatsCollector.Instance.ReadAsync(reader, stock, ct);
+            }
+
+            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.version_calls", ct));
+            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.statements_calls", ct));
+
+            /* Members of the extension: aurora_stat_statements(boolean) is found in the extension's schema by the catalog
+               read and by the fallback, without being planned or run; aurora_version still is not. */
+            await ExecAsync(auroraAdmin.ConnectionString, """
+                ALTER EXTENSION pg_stat_statements ADD FUNCTION public.aurora_stat_statements(boolean);
+                ALTER EXTENSION pg_stat_statements ADD FUNCTION public.aurora_version();
+                """, ct);
+            Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+                aurora, PgStatementStatsCollector.Instance, connection, null, ct, targetKey + "-member"));
+            Assert.Equal("public", aurora.PgFunctionSchemas!["aurora_stat_statements"]);
+            Assert.False(aurora.PgFunctionSchemas.ContainsKey("aurora_version"));
+            var filled = await AuroraFunctionSchemaFallback.FillAsync(
+                connection, new Dictionary<string, string>(StringComparer.Ordinal), CollectorContext.AuroraFunctionNames, "public", null, null, ct);
+            Assert.Equal("public", Assert.Single(filled).Value);
+            Assert.Equal("aurora_stat_statements", Assert.Single(filled).Key);
+            Assert.False(await DarlingServerConnector.ProbeAuroraAsync(connection, ct));
+
+            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.version_calls", ct));
+            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.statements_calls", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task<long> CountAsync(string connectionString, string sequence, CancellationToken ct) =>
+        await ScalarLongAsync(connectionString, $"SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {sequence}", ct);
 
     /// <summary>
     /// PgBouncer refuses the startup 'options' parameter with 08P01 "unsupported startup parameter: options". That
@@ -578,14 +693,12 @@ public sealed class PgCollectorSearchPathLiveTests
             ["pg_buffercache"] = "Ext \"q\"", ["pg_stat_kcache"] = "Ext \"q\"", ["pg_qualstats"] = "Ext \"q\"",
             ["pg_wait_sampling"] = "Ext \"q\"", ["pg_stat_statements"] = "Ext \"q\"",
         };
-        var functions = CollectorContext.ChoosePgFunctionSchemas(
-            new[]
-            {
-                ("aurora_stat_statements", "Ext \"q\""), ("aurora_stat_system_waits", "Ext \"q\""),
-                ("aurora_stat_wait_type", "Ext \"q\""), ("aurora_stat_wait_event", "Ext \"q\""),
-                ("aurora_stat_wait_event", "other"),
-            },
-            "Ext \"q\"");
+        /* Every function mapped to a schema that needs quoting, so each query shows where its schema goes. */
+        var functions = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["aurora_stat_statements"] = "Ext \"q\"", ["aurora_stat_system_waits"] = "Ext \"q\"",
+            ["aurora_stat_wait_type"] = "Ext \"q\"", ["aurora_stat_wait_event"] = "Ext \"q\"",
+        };
 
         foreach (var (definition, target, name) in objects)
         {
@@ -605,6 +718,17 @@ public sealed class PgCollectorSearchPathLiveTests
         Assert.Empty(CollectorContext.ChoosePgFunctionSchemas(new[] { ("aurora_version", "other") }, null));
         Assert.Equal("pg_catalog", CollectorContext.ChoosePgFunctionSchemas(
             new[] { ("aurora_version", "Ext \"q\""), ("aurora_version", "pg_catalog") }, "Ext \"q\"")["aurora_version"]);
+
+        /* The extension's schema is accepted only for the function the extension ships. */
+        var chosen = CollectorContext.ChoosePgFunctionSchemas(
+            new[]
+            {
+                ("aurora_stat_statements", "Ext \"q\""), ("aurora_version", "Ext \"q\""),
+                ("aurora_stat_system_waits", "Ext \"q\""), ("aurora_stat_wait_event", "other"),
+            },
+            "Ext \"q\"");
+        Assert.Equal("Ext \"q\"", Assert.Single(chosen).Value);
+        Assert.Equal("aurora_stat_statements", Assert.Single(chosen).Key);
     }
 
     [Fact]
