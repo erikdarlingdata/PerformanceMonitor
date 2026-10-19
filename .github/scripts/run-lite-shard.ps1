@@ -107,7 +107,7 @@ else {
         if ($expected.Count -eq 0 -or ($expected -join ',') -ne ($got -join ',')) { throw "downloaded timing artifacts [$($got -join ', ')] are not the [$($expected -join ', ')] the gate pinned from run $TimingRun - failing this shard rather than cutting from different inputs than the other shards" }
 
         # #6117: --classes-source names the listing the class file holds, so a reconcile mismatch says where each side came from.
-        $packOutput = @(python .github/scripts/lite-shard-pack.py pack --classes $classesFile --shards $shards --out $planDir --timings $timingDir --classes-source 'the dotnet run -list of this leg')
+        $packOutput = @(python .github/scripts/lite-shard-pack.py pack --classes $classesFile --shards $shards --out $planDir --timings $timingDir --classes-source 'the class listing of this leg')
         $packExit = $LASTEXITCODE
         $packOutput | ForEach-Object { Write-Host $_ }
         if ($packExit -ne 0) { throw 'the shard packer failed or could not prove its cut total - failing this shard rather than guessing' }
@@ -116,7 +116,7 @@ else {
         # the notice below.
         $method = if (($packOutput -join ' ') -match 'shards by (\w+);') { $Matches[1] } else { 'an unreported method' }
         # The guard again, on the very files this shard reads.
-        python .github/scripts/lite-shard-pack.py reconcile --classes $classesFile --shards $shards --out $planDir --classes-source 'the dotnet run -list of this leg'
+        python .github/scripts/lite-shard-pack.py reconcile --classes $classesFile --shards $shards --out $planDir --classes-source 'the class listing of this leg'
         if ($LASTEXITCODE -ne 0) { throw 'the shard files are not exactly the discovered classes - failing this shard' }
 
         $mine = @(Get-Content -Path (Join-Path $planDir "shard-$Shard.txt") | Where-Object { $_.Trim() })
