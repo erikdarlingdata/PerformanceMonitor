@@ -344,10 +344,14 @@ public sealed class RemediationLiveSqlTests
         return (victim, sessionId, loginTime);
     }
 
-    private static async Task<bool> SessionExistsAsync(int sessionId, CancellationToken ct)
+    /// <summary>Is that very session still there? A session id is reused, so the login time is part of the question.</summary>
+    private static async Task<bool> SessionExistsAsync(int sessionId, DateTime loginTime, CancellationToken ct)
     {
         await using var admin = await OpenAsync(Admin(), ct);
-        return Convert.ToInt64(await ScalarAsync(admin, $"SELECT COUNT_BIG(*) FROM sys.dm_exec_sessions WHERE session_id = {sessionId};", ct), CultureInfo.InvariantCulture) > 0;
+        await using var command = new SqlCommand("SELECT COUNT_BIG(*) FROM sys.dm_exec_sessions WHERE session_id = @id AND login_time = @login_time;", admin);
+        command.Parameters.Add(new SqlParameter("@id", SqlDbType.Int) { Value = sessionId });
+        command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = loginTime });
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) > 0;
     }
 
     [Fact]
@@ -369,7 +373,7 @@ public sealed class RemediationLiveSqlTests
 
             var dry = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: true, ct);
             Assert.True(dry is { Outcome: RemediationOutcome.Done, Wrote: false }, dry.Message);
-            Assert.True(await SessionExistsAsync(sessionId, ct));
+            Assert.True(await SessionExistsAsync(sessionId, loginTime, ct));
 
             var wrong = await executor.KillSessionAsync(permit, sessionId, loginTime.AddSeconds(1), dryRun: false, ct);
             Assert.Equal(RemediationOutcome.Refused, wrong.Outcome);
@@ -377,7 +381,7 @@ public sealed class RemediationLiveSqlTests
             Assert.False(wrong.Wrote);
             var wrongDry = await executor.KillSessionAsync(permit, sessionId, loginTime.AddSeconds(1), dryRun: true, ct);
             Assert.Equal(RemediationResult.Reasons.SessionChanged, wrongDry.Reason);
-            Assert.True(await SessionExistsAsync(sessionId, ct));
+            Assert.True(await SessionExistsAsync(sessionId, loginTime, ct));
             Assert.Equal(1, Convert.ToInt32(await ScalarAsync(victim, "SELECT 1;", ct), CultureInfo.InvariantCulture));
 
             var killed = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
@@ -385,9 +389,9 @@ public sealed class RemediationLiveSqlTests
             /* The victim can no longer use its connection. An idle killed session leaves sys.dm_exec_sessions when its client next
                touches the connection, so that touch comes first and the catalog is read after it. */
             await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync(victim, "SELECT 1;", ct));
-            for (var i = 0; i < 50 && await SessionExistsAsync(sessionId, ct); i++)
+            for (var i = 0; i < 50 && await SessionExistsAsync(sessionId, loginTime, ct); i++)
                 await Task.Delay(100, ct);
-            Assert.False(await SessionExistsAsync(sessionId, ct));
+            Assert.False(await SessionExistsAsync(sessionId, loginTime, ct));
 
             /* The session is gone: the same kill is refused rather than failing. */
             var gone = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
