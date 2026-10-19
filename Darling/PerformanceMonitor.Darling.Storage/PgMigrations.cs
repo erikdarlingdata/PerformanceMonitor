@@ -1860,6 +1860,26 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS excluded_volumes text[] NOT NULL DEFAULT '{}'::text[];";
 
     /// <summary>
+    /// V201 (#6160): what the forced-plan collector learned about a force beyond Query Store's own columns, on
+    /// <c>collect.query_store_forced_plans</c> (V195). <c>variant_plan_ids</c> is <c>text</c>: the plan ids of the same query, newer
+    /// than the forced plan, whose stored plan XML carries <c>UsePlan="1"</c> and no <c>PlanGuideName</c> (SQL Server recompiled the
+    /// force under a new plan id), as a comma-separated list in ascending order with no spaces (<c>12,15</c>). The collector writer has no
+    /// array type, so the list is text; NULL when there is none. <c>plan_guide_name</c>, <c>plan_guide_enabled</c> (<c>boolean</c>) and
+    /// <c>plan_guide_scope</c> (OBJECT, SQL or TEMPLATE) describe a plan guide that covers the forced query, all NULL when none was found.
+    ///
+    /// <para><b>Appended LAST</b>, after <c>last_compile_start_time</c>: the writer is a positional binary COPY, so a fresh store (the
+    /// generated V1 table carries the columns from the collector's payload, and these ALTERs no-op there) and an upgraded store share one
+    /// physical column order. All four are nullable with no default, so each <c>ADD COLUMN</c> is catalog-only, and a row stored before
+    /// the rung reads NULL (no variant, no guide). The table stays a plain table (<c>StaysPlainTable</c>); no grant (the <c>collect</c>
+    /// schema carries blanket SELECT). An older build ignores the columns. Every statement is idempotent.</para>
+    /// </summary>
+    private const string V201Sql = @"
+ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS variant_plan_ids text;
+ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide_name text;
+ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide_enabled boolean;
+ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide_scope text;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2234,6 +2254,7 @@ $rung$;";
         new Migration(198, "pseudonym-key", V198Sql),
         new Migration(199, "blocking-head-evidence", V199Sql),
         new Migration(200, "excluded-volumes", V200Sql),
+        new Migration(201, "forced-plan-variants-and-guides", V201Sql),
     };
 
     /// <summary>

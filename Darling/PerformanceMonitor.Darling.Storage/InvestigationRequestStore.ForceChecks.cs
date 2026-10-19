@@ -296,7 +296,15 @@ RETURNING route_id, server_id, server_name";
         {
             forcedSince = PlanNumbers(fact.PlanId, fact.ForcedRun ?? new DarlingForcedPlanStateReader.Ran(0, null));
             sincePlans.Add(forcedSince.DeepClone());
-            foreach (var other in fact.OtherPlans.Take(ForceCheckPlansShown - 1))
+            /* #6160: a variant is the force running under a new plan id, listed after the forced plan and marked, never counted as another plan. */
+            foreach (var variant in fact.VariantPlans.Take(ForceCheckPlansShown - 1))
+            {
+                var numbers = PlanNumbers(variant.PlanId, variant.Run ?? new DarlingForcedPlanStateReader.Ran(variant.Executions, variant.LastExecution));
+                numbers["variant_of_forced"] = true;
+                sincePlans.Add(numbers);
+            }
+
+            foreach (var other in fact.OtherPlans.Take(Math.Max(0, ForceCheckPlansShown - 1 - Math.Min(fact.VariantPlans.Count, ForceCheckPlansShown - 1))))
                 sincePlans.Add(PlanNumbers(other.PlanId, other.Run ?? new DarlingForcedPlanStateReader.Ran(other.Executions, other.LastExecution)));
         }
         else
@@ -342,7 +350,8 @@ RETURNING route_id, server_id, server_name";
                 ["to"] = Iso(now),
                 ["forced_plan"] = forcedSince?.DeepClone(),
                 ["plans"] = sincePlans,
-                ["other_plans_ran"] = sincePlans.Any(p => p is JsonObject o && o["plan_id"] is JsonValue v && v.TryGetValue(out long id) && id != force.PlanId),
+                ["other_plans_ran"] = sincePlans.Any(p => p is JsonObject o && o["plan_id"] is JsonValue v && v.TryGetValue(out long id) && id != force.PlanId && o["variant_of_forced"] is null),
+                ["variant_plans_ran"] = sincePlans.Any(p => p is JsonObject o && o["variant_of_forced"] is not null),
                 ["stats_complete"] = read.StatsComplete,
             },
             ["before_force"] = new JsonObject
@@ -365,6 +374,9 @@ RETURNING route_id, server_id, server_name";
                 ["force_failure_count"] = fact?.FailureCount,
                 ["last_force_failure_reason"] = fact?.FailureReason,
             },
+            ["plan_guide"] = fact?.PlanGuide is { } guide
+                ? new JsonObject { ["name"] = guide.Name, ["enabled"] = guide.Enabled, ["scope"] = guide.Scope }
+                : null,
             ["interval_caveat"] = ForceCheckIntervalCaveat,
         };
     }
