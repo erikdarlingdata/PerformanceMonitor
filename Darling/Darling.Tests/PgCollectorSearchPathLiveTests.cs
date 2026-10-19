@@ -100,7 +100,8 @@ public sealed class PgCollectorSearchPathLiveTests
         var ct = TestContext.Current.CancellationToken;
         var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
         var ownedAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = Database };
-        var ownedMonitor = new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Monitor };
+        /* No type loading: its catalog query compares oids, and on this unpinned connection each comparison runs the copy. */
+        var ownedMonitor = new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Monitor, ServerCompatibilityMode = ServerCompatibilityMode.NoTypeLoading };
 
         var bodySucceeded = false;
         try
@@ -356,7 +357,7 @@ public sealed class PgCollectorSearchPathLiveTests
             {
                 ServerId = ServerId,
                 ServerName = "pm6143-target",
-                CollectionTime = DateTime.UtcNow,
+                CollectionTime = LiveClock.Now(),
                 Deltas = new CollectorDeltaCalculator(),
                 Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 17, IsAurora = true },
             };
@@ -527,7 +528,7 @@ public sealed class PgCollectorSearchPathLiveTests
     {
         ServerId = ServerId,
         ServerName = "pm6143-target",
-        CollectionTime = DateTime.UtcNow,
+        CollectionTime = LiveClock.Now(),
         Deltas = new CollectorDeltaCalculator(),
         Target = target,
     };
