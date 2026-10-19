@@ -126,6 +126,11 @@ public partial class MainWindow : Window
     /* #5820: the mcp_data_detail level of the running MCP host, for the webhook token's brief; the setting's default (full)
        while no host runs. Set when the host starts and reset when it stops. */
     private McpDataDetail _mcpDataDetail = McpDataDetail.Full;
+    /* #6066: Lite's pseudonym key (Windows Credential Manager, PerformanceMonitorLite_PseudonymKey), read the first time a metadataOnly answer or webhook needs it.
+       One source for the MCP host and the webhook token, so both show one login as one pseudonym. */
+    private readonly Services.LitePseudonymKeySource _pseudonymKeys = new(
+        new Services.CredentialManagerPseudonymKeyVault(new Services.CredentialService(new AppLoggerAdapter<Services.CredentialService>())),
+        message => AppLogger.Warn("MCP", message));
     /* #5820: the investigation expiry sweep's loop, started with the background service and ended by the same token. */
     private Task? _investigationSweepLoop;
     private EmailAlertService _emailAlertService;
@@ -169,7 +174,7 @@ public partial class MainWindow : Window
             _webhookAlertService,
             new AppLoggerAdapter<EmailAlertService>(),
             new InvestigationDispatchCore(
-                investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null),
+                investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys),
             (requestId, token) => investigationStore.ReadRequestAsync(requestId, token),
             () => _mcpDataDetail);
         _muteRuleService = new MuteRuleService(
@@ -731,7 +736,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
             _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }

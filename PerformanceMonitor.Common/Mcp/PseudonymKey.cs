@@ -123,6 +123,9 @@ public static class PseudonymKeyNotice
     /// <summary>Where the warning goes (an app's logger); null drops it, and the once-flag is then not spent.</summary>
     public static Action<string>? Sink { get; set; }
 
+    /// <summary>A source that has already warned with its own reason spends the once-flag, so the process warns once, not twice.</summary>
+    internal static void Spent() => Interlocked.Exchange(ref s_warned, 1);
+
     /// <summary>Clears the once-flag (tests).</summary>
     internal static void Reset() => Interlocked.Exchange(ref s_warned, 0);
 

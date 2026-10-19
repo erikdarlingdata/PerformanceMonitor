@@ -360,7 +360,7 @@ public sealed class McpInvestigationTools
         "window held more (the reports and journal are those of the returned requests only; narrow hours_back or pass " +
         "server_name or request_id), and journal_truncated says their journal held more than 200 rows. " +
         "hours_back 1-168, default 24.")]
-    public static Task<string> GetInvestigationReports(
+    public static async Task<string> GetInvestigationReports(
         ServerManager serverManager,
         IInvestigationRequestStore store,
         InvestigationBriefComposer composer,
@@ -368,11 +368,11 @@ public sealed class McpInvestigationTools
         [Description("One request, with its brief. Omit for the window.")] string? request_id = null,
         [Description("1-168. Default 24. Ignored with request_id.")] int hours_back = 24,
         CancellationToken cancellationToken = default) =>
-        ReportsAsync(serverManager, store, composer.Mode, server_name, request_id, hours_back, cancellationToken);
+        await ReportsAsync(serverManager, store, composer.Mode, server_name, request_id, hours_back, cancellationToken, await composer.KeyAsync(cancellationToken));
 
     /// <summary>The report read at <paramref name="mode"/>.</summary>
     internal static async Task<string> ReportsAsync(ServerManager serverManager, IInvestigationRequestStore store,
-        McpDataDetail mode, string? server_name, string? request_id, int hours_back, CancellationToken cancellationToken)
+        McpDataDetail mode, string? server_name, string? request_id, int hours_back, CancellationToken cancellationToken, PseudonymKey? key = null)
     {
         Guid? requestId = null;
         if (!string.IsNullOrWhiteSpace(request_id))
@@ -411,7 +411,7 @@ public sealed class McpInvestigationTools
                     : InvestigationToolCore.Status("empty", $"No investigation request opened in the last {hours_back} hours.");
             }
 
-            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode);
+            return InvestigationToolCore.ReportsAnswer(read, requestId is null ? hours_back : null, mode, key);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

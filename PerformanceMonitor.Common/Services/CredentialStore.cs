@@ -235,6 +235,56 @@ public class CredentialStore
     }
 
     /// <summary>
+    /// Reads one entry and says why it could not be read (#6066): <see cref="CredentialReadOutcome.NotFound"/> (Windows says there is
+    /// no such entry) is told apart from <see cref="CredentialReadOutcome.Unreadable"/> (any other failure), which
+    /// <see cref="GetCredential"/> folds into one null. A caller that must never replace an entry it merely failed to read (the Lite
+    /// pseudonym key) needs the difference. The failure text names the Windows error only; it never holds the secret.
+    /// </summary>
+    public CredentialReadOutcome TryReadCredential(string serverId, out (string Username, string Password)? credential, out string? failure)
+    {
+        credential = null;
+        failure = null;
+        if (string.IsNullOrWhiteSpace(serverId))
+        {
+            throw new ArgumentException("Server ID cannot be null or empty", nameof(serverId));
+        }
+
+        try
+        {
+            if (!NativeMethods.CredRead(GetCredentialTarget(serverId), CredTypeGeneric, 0, out var ptr))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error == ErrorNotFound)
+                {
+                    return CredentialReadOutcome.NotFound;
+                }
+
+                failure = $"Windows returned error {error}";
+                return CredentialReadOutcome.Unreadable;
+            }
+
+            try
+            {
+                var native = Marshal.PtrToStructure<NativeCredential>(ptr);
+                var password = native.CredentialBlobSize > 0
+                    ? Marshal.PtrToStringUni(native.CredentialBlob, native.CredentialBlobSize / 2)
+                    : string.Empty;
+                credential = (native.UserName ?? string.Empty, password);
+                return CredentialReadOutcome.Found;
+            }
+            finally
+            {
+                NativeMethods.CredFree(ptr);
+            }
+        }
+        catch (Exception ex)
+        {
+            failure = ex.GetType().Name;
+            return CredentialReadOutcome.Unreadable;
+        }
+    }
+
+    /// <summary>
     /// Deletes SQL Server credentials from Windows Credential Manager.
     /// Should be called when a server is removed.
     /// </summary>
@@ -453,6 +503,19 @@ public class CredentialStore
         [DllImport("advapi32.dll", SetLastError = true)]
         internal static extern void CredFree(IntPtr buffer);
     }
+}
+
+/// <summary>What <see cref="CredentialStore.TryReadCredential"/> found.</summary>
+public enum CredentialReadOutcome
+{
+    /// <summary>The entry was read.</summary>
+    Found,
+
+    /// <summary>Windows says there is no such entry.</summary>
+    NotFound,
+
+    /// <summary>The read failed for any other reason; the entry may well exist.</summary>
+    Unreadable,
 }
 
 /// <summary>

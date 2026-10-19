@@ -108,6 +108,7 @@ public sealed class PseudonymKeySource : IPseudonymKeySource, IDisposable
         Interlocked.Exchange(ref _nextAttemptAtTick, Environment.TickCount64 + RetryAfterMilliseconds);
         if (Interlocked.Exchange(ref _warned, 1) == 0)
         {
+            PseudonymKeyNotice.Spent();
             _logger?.LogWarning(
                 "The pseudonym key could not be read from the store ({Reason}). Under mcp.dataDetail metadataOnly, logins and hosts are numbered per answer until it can; every name stays hidden. It is tried again on a later answer.",
                 reason);

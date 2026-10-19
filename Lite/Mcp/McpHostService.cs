@@ -29,6 +29,7 @@ public sealed class McpHostService : BackgroundService
     private readonly bool _allowWrites;
     private readonly bool _allowInvestigations;
     private readonly McpDataDetail _dataDetail;
+    private readonly IPseudonymKeySource? _pseudonymKeys;
     private readonly IInvestigationRequestStore _investigationStore;
     private WebApplication? _app;
 
@@ -47,8 +48,10 @@ public sealed class McpHostService : BackgroundService
     /// <c>mcp_allow_writes</c> setting). Default off: a write tool is then absent from the served set and a call
     /// to it fails as an unknown tool. See <see cref="McpWritePolicy"/>.</param>
     public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore, ScheduleManager? scheduleManager = null, bool allowWrites = false,
-        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full)
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full,
+        IPseudonymKeySource? pseudonymKeys = null)
     {
+        _pseudonymKeys = pseudonymKeys;
         _dataService = dataService;
         _serverManager = serverManager;
         _muteRuleService = muteRuleService;
@@ -134,8 +137,10 @@ public sealed class McpHostService : BackgroundService
     /// host register the SAME tools and the SAME policy production does, not a hand-built set.
     /// </summary>
     internal static void RegisterMcpServer(IServiceCollection services, bool allowWrites,
-        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full)
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IPseudonymKeySource? pseudonymKeys = null)
     {
+        /* #6066: Lite's pseudonym key (Credential Manager), for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
+        if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
         /* #5820: the four investigation tools are served only with mcp_allow_investigations on AND the writes off
            (McpInvestigationPolicy). Registered BEFORE the write policy so its instructions census (built there) counts
            only the tools this start offers. */
@@ -264,7 +269,7 @@ public sealed class McpHostService : BackgroundService
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
-            RegisterMcpServer(builder.Services, _allowWrites, _allowInvestigations, _dataDetail);
+            RegisterMcpServer(builder.Services, _allowWrites, _allowInvestigations, _dataDetail, _pseudonymKeys);
 
             _app = builder.Build();
 

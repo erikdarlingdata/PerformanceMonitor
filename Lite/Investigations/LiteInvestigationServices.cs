@@ -37,6 +37,8 @@ internal static class LiteInvestigationServices
         services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
-            LiteInvestigationBriefTools.Tools));
+            LiteInvestigationBriefTools.Tools,
+            utcNow: null,
+            keys: sp.GetService<IPseudonymKeySource>()));
     }
 }

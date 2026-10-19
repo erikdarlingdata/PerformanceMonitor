@@ -70,6 +70,10 @@ public class CredentialService
     public (string Username, string Password)? GetCredential(string serverId)
         => _store.GetCredential(serverId);
 
+    /// <summary>One entry's read with its reason when it fails (#6066): not found apart from unreadable.</summary>
+    public CredentialReadOutcome TryReadCredential(string serverId, out (string Username, string Password)? credential, out string? failure)
+        => _store.TryReadCredential(serverId, out credential, out failure);
+
     /// <summary>
     /// Deletes SQL Server credentials from Windows Credential Manager.
     /// Should be called when a server is removed.
