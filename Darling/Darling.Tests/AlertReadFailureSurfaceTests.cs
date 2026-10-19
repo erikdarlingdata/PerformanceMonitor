@@ -2486,7 +2486,7 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Equal(2, panelUses);
 
         Assert.Contains("subtitle: \"since this service started", js, StringComparison.Ordinal);
-        Assert.Contains("NOT the trailing 7 days", js, StringComparison.Ordinal);
+        Assert.Contains("not the trailing 7 days", js, StringComparison.Ordinal);
 
         /* DERIVED from the tool's own payload, not listed. A hardcoded key list here was blind to the
            field this pin exists to protect: #3099 added last_failure_elapsed_ms to the tool and to the
