@@ -2706,8 +2706,17 @@ jobs:
             echo "::error::The packed compose file does not name the darling image at :${version}."
             exit 1
           fi
+          # #6140: setup.sh is the quickstart's first step, so it must open with its execute bit. The checkout holds it as
+          # mode 755 already, and chmod makes that certain. The tar listing below must show it executable and the
+          # script must parse under a POSIX shell, so a bad pack fails this job and not the user's first command.
+          chmod 755 "${compose_stage}/${compose_dir}/setup.sh"
+          sh -n "${compose_stage}/${compose_dir}/setup.sh"
           tar -C "${compose_stage}" -czf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" "${compose_dir}"
           tar -tzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
+          if ! tar -tvzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" | grep -Eq '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$'; then
+            echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
+            exit 1
+          fi
           (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
 
       # #5804: the tarball and its checksums leave this job as a same-run artifact rather than as release

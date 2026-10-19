@@ -201,7 +201,7 @@ The service is cross-platform .NET; only the **bundled zero-admin store** and DP
 Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums.
 
 - **Docker Compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz`. Extract it, then `cd` into the folder it makes.
-- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder.
+- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder. Those releases have no `setup.sh`, so make the secret files by hand from the list in [`compose/secrets/README.md`](compose/secrets/README.md).
 - **systemd:** download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`.
 
 **Compose (the whole stack as one deployment).** The files are in the compose archive, or in [`Darling/compose/`](compose/) of a source checkout:
@@ -209,10 +209,16 @@ Each shape needs a different file from the [release page](https://github.com/eri
 ```bash
 tar -xzf PerformanceMonitorDarling-compose-<version>.tar.gz
 cd PerformanceMonitorDarling-compose-<version>   # from a source checkout or a "Source code" archive: cd Darling/compose
-cp darling.sample.json darling.json        # edit: servers, alerting, tokens
-#   one secret per file — see secrets/README.md for the exact list
+./setup.sh                                 # makes secrets/ and darling.json
+#   edit darling.json: servers, alerting
 docker compose up -d
 ```
+
+`setup.sh` makes the secret files that a default install needs, and it never changes a file that exists. It writes a random store password and the matching store connection string, the web token, and the MCP token. It copies `darling.sample.json` to `darling.json`. It asks for the monitoring login's SQL password with hidden input. To skip the question, set `DARLING_SQL_PASSWORD` and add `--no-prompt`. With `--no-prompt` and no variable, it tells you to make `secrets/sql_password.txt` yourself. It never prints a secret.
+
+The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
+
+MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](compose/secrets/README.md).
 
 The compose file in the compose archive names the image tag of its own release, for example `performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `performancemonitor-darling:3.10.0`. The `:nightly` tag is the newest dev build. Use it only to test unreleased changes.
 
