@@ -29,7 +29,7 @@ public sealed class ViewerServerListEnterKeyTests
     {
         var xaml = Read("MainWindow.xaml");
 
-        Assert.Matches(@"<ListBox[^>]*x:Name=""ServerList""[^>]*KeyDown=""ServerList_KeyDown""", xaml);
+        Assert.Matches(@"<ui:InvokableListBox[^>]*x:Name=""ServerList""[^>]*KeyDown=""ServerList_KeyDown""", xaml);
         Assert.Contains("MouseDoubleClick=\"ServerList_MouseDoubleClick\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"Double-click or press Enter to open a server tab\"", xaml, StringComparison.Ordinal);
     }

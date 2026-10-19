@@ -172,16 +172,21 @@ public sealed class ViewerDisabledListBoxThemeTests
         return (ResourceDictionary)XamlReader.Load(stream);
     }
 
-    /// <summary>The real <c>ServerList</c> element, minus what only the window can supply: the three handler
-    /// attributes (SelectionChanged, MouseDoubleClick, KeyDown), and the row templates in <c>ListBox.Resources</c> / <c>ListBox.ItemTemplateSelector</c>
+    private static readonly XNamespace Ui = "clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui";
+
+    /// <summary>The real <c>ServerList</c> element (the Ui project's InvokableListBox, #6138), minus what only the window can supply: the four handler
+    /// attributes (ItemInvoked, SelectionChanged, MouseDoubleClick, KeyDown), and the row templates in <c>ListBox.Resources</c> / <c>ListBox.ItemTemplateSelector</c>
     /// (they name code-behind handlers and Window-level resources). Everything else, the Background /
     /// BorderBrush / BorderThickness attributes included, is parsed as shipped.</summary>
     private static ListBox ParseServerList()
     {
         var element = new XElement(XDocument
             .Load(PathTo("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"))
-            .Descendants(Wpf + "ListBox")
+            .Descendants(Ui + "InvokableListBox")
             .Single(e => (string?)e.Attribute(X + "Name") == "ServerList"));
+        /* Parsed as the stock ListBox it derives from: the theme's template, the Style attribute and the brushes are what this test is about. */
+        element.Name = Wpf + "ListBox";
+        element.Attribute("ItemInvoked")?.Remove();
         element.Attribute("SelectionChanged")?.Remove();
         element.Attribute("MouseDoubleClick")?.Remove();
         element.Attribute("KeyDown")?.Remove();

@@ -436,7 +436,9 @@
                            TextWrapping="Wrap"
                            Margin="2,8,2,0"
                            Visibility="Collapsed"/>
-                <ListBox x:Name="ServerList" AutomationProperties.AutomationId="ServerPicker"
+                <ui:InvokableListBox x:Name="ServerList" AutomationProperties.AutomationId="ServerPicker"
+                         Style="{DynamicResource {x:Type ListBox}}"
+                         ItemInvoked="ServerList_ItemInvoked"
                          Background="{DynamicResource BackgroundDarkBrush}"
                          BorderBrush="{DynamicResource BorderBrush}"
                          BorderThickness="1"
@@ -648,6 +650,7 @@
                                         </Border.Style>
                                         <!-- #3609: the ink on a status fill is a theme key. White was 1.41:1 on Dark's amber. -->
                                         <TextBlock Text="{Binding Server.AttentionText}"
+                                                   AutomationProperties.Name="{Binding Server.AttentionAutomationName}"
                                                    Foreground="{DynamicResource StatusForegroundBrush}" FontSize="9" FontWeight="Bold"
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </Border>
@@ -749,7 +752,7 @@
                     <ListBox.ItemTemplateSelector>
                         <StaticResource ResourceKey="FleetRowSelector"/>
                     </ListBox.ItemTemplateSelector>
-                </ListBox>
+                </ui:InvokableListBox>
             </DockPanel>
 
             <!-- Right: the top tab strip. Fixed aggregate tabs (Overview, Recommendations, Alerts) plus
@@ -1011,7 +1014,7 @@
                         </Border>
 
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <ItemsControl x:Name="OverviewItemsControl">
+                        <ui:InvokableItemsControl x:Name="OverviewItemsControl" ItemInvoked="OverviewItemsControl_ItemInvoked">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                     <WrapPanel/>
@@ -1151,7 +1154,7 @@
                                     </Border>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                        </ui:InvokableItemsControl>
                         </ScrollViewer>
                     </DockPanel>
                 </TabItem>

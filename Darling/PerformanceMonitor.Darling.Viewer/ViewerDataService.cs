@@ -331,6 +331,9 @@ public sealed class DarlingServer : INotifyPropertyChanged
         ? "99+"
         : _attentionCount.ToString(CultureInfo.InvariantCulture);
 
+    /// <summary>The badge's screen-reader name ("1 unread alert", "3 unread alerts"); the painted count alone is a bare number.</summary>
+    public string AttentionAutomationName => PerformanceMonitor.Ui.UnreadAlertsName.For(_attentionCount);
+
     /// <summary>
     /// Badge severity vocabulary — "Critical" / "Warning" / "None" — so the sidebar row's DataTriggers colour
     /// the badge (ErrorBrush / WarningBrush) the same way Lite maps deadlock→red, else→orange-red.
@@ -362,6 +365,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
         OnPropertyChanged(nameof(AttentionCount));
         OnPropertyChanged(nameof(HasAttention));
         OnPropertyChanged(nameof(AttentionText));
+        OnPropertyChanged(nameof(AttentionAutomationName));
         OnPropertyChanged(nameof(AttentionSeverity));
         OnPropertyChanged(nameof(AttentionTooltip));
     }
