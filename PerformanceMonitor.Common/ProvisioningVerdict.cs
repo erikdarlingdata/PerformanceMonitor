@@ -68,6 +68,35 @@ public static class ProvisioningVerdict
     /// matter how quiet its CPU looks. Fleet max is 18.8%.</summary>
     public const decimal IdleGrantUtilizationPercent = 50m;
 
+    /// <summary>The fewest CPU samples a window must hold before it gets any verdict (#6139). Twelve is an hour of the
+    /// collector's five-minute cadence: a server that came back from a long gap with six samples is not called anything yet.
+    /// The one place the number lives; every verdict site passes its sample count to <see cref="Evaluate"/>.</summary>
+    public const long MinSamples = 12;
+
+    /// <summary>Stolen memory (total server memory not in the buffer pool) at or above this share is memory pressure, not spare
+    /// memory (#6139): a buffer pool that is a small share of physical RAM because the rest is stolen has nothing to give back.
+    /// The one place the number lives. It is also where the Stolen Mem % figure starts to read amber.</summary>
+    public const decimal HighStolenMemoryPercent = 60m;
+
+    /// <summary>Too few CPU samples in the window to say (<see cref="MinSamples"/>).</summary>
+    public const string NotEnoughData = "NOT_ENOUGH_DATA";
+
+    /// <summary>What the verdict badge shows for <see cref="NotEnoughData"/>: "not enough data yet (6 samples)".</summary>
+    public static string NotEnoughDataLabel(long samples) =>
+        string.Create(System.Globalization.CultureInfo.CurrentCulture, $"not enough data yet ({samples:N0} {(samples == 1 ? "sample" : "samples")})");
+
+    /// <summary>The sentence shown beside <see cref="NotEnoughData"/>.</summary>
+    public static string NotEnoughDataExplanation(long samples) =>
+        string.Create(System.Globalization.CultureInfo.CurrentCulture,
+            $"The last 24 hours hold {samples:N0} CPU {(samples == 1 ? "sample" : "samples")}; a verdict needs at least {MinSamples:N0}.");
+
+    /// <summary>The tooltip for a Stolen Mem % figure that reads amber or red, so a coloured figure says why; empty when it is not.</summary>
+    public static string StolenMemoryNote(double stolenPercent) =>
+        stolenPercent < (double)HighStolenMemoryPercent
+            ? ""
+            : string.Create(System.Globalization.CultureInfo.CurrentCulture,
+                $"{stolenPercent:N0}% of the memory SQL Server holds is outside the buffer pool (plans, grants, other caches). Amber from {HighStolenMemoryPercent:N0}%, red from 85%.");
+
     /// <summary>Over-provisioned: a downsizing candidate.</summary>
     public const string OverProvisioned = "OVER_PROVISIONED";
 
@@ -115,11 +144,20 @@ public static class ProvisioningVerdict
         int maxWorkers,
         int? currentWorkers,
         int? engineEdition = null,
-        string? edition = null)
+        string? edition = null,
+        long? cpuSamples = null,
+        decimal? stolenMemoryPercent = null)
     {
         if (ServerHardwareScope.IsLogicalServerMaster(engineEdition, edition))
         {
             return NotApplicable;
+        }
+
+        /* #6139: a window with too few samples says nothing. Null is a caller that does not count samples (a unit test of the
+           other rules); every production site passes its count. */
+        if (cpuSamples is long counted && counted < MinSamples)
+        {
+            return NotEnoughData;
         }
 
         /* Any of these three is a query that asked for workspace memory and did not simply get it. They are
@@ -134,7 +172,7 @@ public static class ProvisioningVerdict
             && currentWorkers is int inUse
             && inUse / (double)maxWorkers > HighWorkerRatio;
 
-        if (p95CpuPercent > HighCpuP95Percent || memoryPressure || workerPressure)
+        if (p95CpuPercent > HighCpuP95Percent || memoryPressure || workerPressure || StolenMemoryIsHigh(stolenMemoryPercent, engineEdition))
         {
             return UnderProvisioned;
         }
@@ -148,6 +186,11 @@ public static class ProvisioningVerdict
 
         return RightSized;
     }
+
+    /// <summary>Stolen memory is at or above <see cref="HighStolenMemoryPercent"/> (#6139). Not on an Azure SQL Database, whose memory
+    /// figures describe the database's own limit and not a host's RAM.</summary>
+    public static bool StolenMemoryIsHigh(decimal? stolenMemoryPercent, int? engineEdition) =>
+        stolenMemoryPercent is decimal stolen && stolen >= HighStolenMemoryPercent && !ServerHardwareScope.HardwareIsTheHosts(engineEdition);
 
     /// <summary>
     /// Why <see cref="Evaluate"/> returned <see cref="UnderProvisioned"/>, in the operator's words.
@@ -167,7 +210,9 @@ public static class ProvisioningVerdict
         long grantTimeouts,
         long forcedGrants,
         int maxWorkers,
-        int? currentWorkers)
+        int? currentWorkers,
+        decimal? stolenMemoryPercent = null,
+        int? engineEdition = null)
     {
         if (p95CpuPercent > HighCpuP95Percent)
         {
@@ -186,6 +231,12 @@ public static class ProvisioningVerdict
         {
             return $"Worker threads are near the limit: {inUse} of {maxWorkers} in use "
                 + $"(threshold: {HighWorkerRatio:P0}). This server may need more CPU capacity.";
+        }
+
+        if (StolenMemoryIsHigh(stolenMemoryPercent, engineEdition))
+        {
+            return $"Memory is under pressure: stolen memory is {stolenMemoryPercent:N0}% of total server memory (threshold: {HighStolenMemoryPercent:N0}%), "
+                + "so the buffer pool's small share of RAM is not spare memory. This server may need more memory.";
         }
 
         /* Reachable only if a caller asks for a reason on inputs that are not under-provisioned. Say so
