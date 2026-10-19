@@ -37,6 +37,12 @@ public sealed record AgentActionContext(AgentActionCall Call, int RequestServerI
 public sealed class AgentActionHooks
 {
     /// <summary>
+    /// Set by a tool whose <see cref="Write"/> changes something the store's transaction cannot undo (a monitored SQL Server:
+    /// #5632, step 13). Null for a store-only write (mute, signature merge, threshold override), whose rollback really does undo it.
+    /// </summary>
+    public ServerChangeSignal? ServerChange { get; init; }
+
+    /// <summary>
     /// Reads the live routes once, inside the gate's own transaction (check 5), and answers the resolver every metric of the
     /// request is read against: the level the routes send <c>metric</c> on server <c>serverId</c> at, null when none does. Called
     /// at most once per gate pass, so a request with several metrics does not read the route table (and its scope inputs) again
@@ -54,11 +60,35 @@ public sealed class AgentActionHooks
     public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<string?>> Write { get; init; }
 }
 
+/// <summary>
+/// The moment a tool's <see cref="AgentActionHooks.Write"/> knows the monitored server accepted the change (#5632, step 13). The tool
+/// calls <see cref="MarkServerChanged"/> right after its executor says it wrote, before any later read. From then on the change happened
+/// whatever the store does, so the gate never journals <c>action_failed</c> for the call. One signal per call.
+/// </summary>
+public sealed class ServerChangeSignal
+{
+    private volatile bool _changed;
+
+    /// <summary>True once <see cref="MarkServerChanged"/> was called.</summary>
+    public bool Changed => _changed;
+
+    /// <summary>The server accepted the change.</summary>
+    public void MarkServerChanged() => _changed = true;
+}
+
 /// <summary>What the gate did (#5912): a refusal, or the change with the <c>action_called</c> row's id and the after image.</summary>
 public sealed record AgentActionResult(AgentActionRefusal? Refusal, long? CalledId, string? AfterJson)
 {
     /// <summary>True when the change was made and journaled <c>action_done</c>.</summary>
     public bool Done => Refusal is null && CalledId is not null;
+
+    /// <summary>True when the server accepted the change but the store's own transaction failed, so <c>action_done</c> was written
+    /// afterwards on a fresh connection with <c>recorded_late</c> (#5632, step 13).</summary>
+    public bool RecordedLate { get; init; }
+
+    /// <summary>True when the server accepted the change and the store could not record it at all. The call has <c>action_called</c>
+    /// and no result row, so the agent changes list reads "result unknown" (#5632, step 13).</summary>
+    public bool JournalMissing { get; init; }
 }
 
 public sealed partial class InvestigationRequestStore
@@ -86,6 +116,19 @@ WHERE request_id = $1";
 INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, detail)
 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
 RETURNING journal_id";
+
+    /// <summary>The late <c>action_done</c> of a change the server accepted (#5632, step 13). Written only when the call has no
+    /// <c>action_done</c> yet, so a commit that succeeded before its connection failed is not recorded twice.</summary>
+    internal const string AgentActionLateDoneSql = @"
+INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, detail)
+SELECT $1, $2, $3, 'action_done', $4, NULL, $5::jsonb
+WHERE NOT EXISTS (
+    SELECT 1 FROM config.investigation_journal AS x
+    WHERE x.request_id = $2 AND x.event = 'action_done' AND x.detail->>'called_id' = $6)
+RETURNING journal_id";
+
+    /// <summary>How many times the late <c>action_done</c> is tried (#5632, step 13).</summary>
+    internal const int AgentActionLateAttempts = 2;
 
     /// <summary>The journal rows a change takes: <c>action_called</c> and <c>action_done</c> or <c>action_failed</c>.</summary>
     internal const int AgentActionJournalRows = 2;
@@ -184,11 +227,14 @@ RETURNING journal_id";
             await transaction.CommitAsync(cancellationToken);
         }
 
+        var signal = hooks.ServerChange;
+        string? after = null;
+        var writeNow = Now();
+        var requestServerId = call.Target.ServerId;
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            var writeNow = Now();
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
             var recheck = await LiveChecksAsync(connection, transaction, request, call, hooks, writeNow, cancellationToken, practice: false);
             if (recheck is not null)
@@ -200,17 +246,30 @@ RETURNING journal_id";
                 return new AgentActionResult(recheck, calledId, null);
             }
 
-            var after = await hooks.Write(connection, transaction, cancellationToken);
-            await JournalReturningAsync(connection, transaction, writeNow, action.RequestId, request!.ServerId, "action_done",
+            requestServerId = request!.ServerId;
+            after = await hooks.Write(connection, transaction, cancellationToken);
+            await JournalReturningAsync(connection, transaction, writeNow, action.RequestId, request.ServerId, "action_done",
                 actor, null,
                 new JsonObject { ["called_id"] = calledId, ["after"] = after is null ? null : JsonNode.Parse(after) }.ToJsonString(),
                 cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return new AgentActionResult(null, calledId, after);
         }
+        catch (Exception ex) when (signal?.Changed == true)
+        {
+            /* The monitored server accepted the change, and that does not roll back with the store's transaction (#5632, step 13). So
+               the journal never says action_failed for this call: record action_done on a fresh connection, then let a cancellation
+               go on (the change happened whatever the caller does). When the store cannot be written at all the called row stands
+               with no result, which reads as "result unknown". */
+            var late = await RecordLateDoneAsync(action.RequestId, requestServerId, actor, calledId, after, ex.Message, writeNow);
+            if (ex is OperationCanceledException)
+                throw;
+            return new AgentActionResult(null, calledId, after) { RecordedLate = late, JournalMissing = !late };
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* The change rolled back with its transaction; the called row stands, so journal the failure on its own. A
+            /* Only a store-only write, or a failure before the server accepted anything, gets here: the change rolled back with
+               its transaction (a store change) or never happened (a refused write), so journal the failure on its own. A
                failure to write this row leaves the called row with neither result, which reads as "result unknown". */
             await using var connection = await _dataSource.OpenConnectionAsync(CancellationToken.None);
             await using var transaction = await connection.BeginTransactionAsync(CancellationToken.None);
@@ -220,6 +279,43 @@ RETURNING journal_id";
             await transaction.CommitAsync(CancellationToken.None);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Records <c>action_done</c> with <c>recorded_late</c> for a change the server accepted, on a fresh connection with no
+    /// cancellation, at most <see cref="AgentActionLateAttempts"/> times (#5632, step 13). True when the call has its
+    /// <c>action_done</c> afterwards; false when both attempts failed and the call is left with no result row.
+    /// </summary>
+    private async Task<bool> RecordLateDoneAsync(Guid requestId, int serverId, string actor, long calledId, string? after,
+        string storeError, DateTime at)
+    {
+        var detail = new JsonObject
+        {
+            ["called_id"] = calledId,
+            ["after"] = after is null ? null : JsonNode.Parse(after),
+            ["recorded_late"] = true,
+            ["error"] = storeError,
+        }.ToJsonString();
+        for (var attempt = 0; attempt < AgentActionLateAttempts; attempt++)
+        {
+            try
+            {
+                await using var connection = await _dataSource.OpenConnectionAsync(CancellationToken.None);
+                await using var command = Command(connection, null, AgentActionLateDoneSql,
+                    P(at), P(requestId), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
+                    P(actor), P(detail), P(calledId.ToString(CultureInfo.InvariantCulture)));
+                /* No row back means the call already had its action_done (the commit went through and the failure came after it),
+                   so there is nothing to add and the call is recorded either way. */
+                await command.ExecuteScalarAsync(CancellationToken.None);
+                return true;
+            }
+            catch (Exception)
+            {
+                /* Try once more; the second failure leaves the call with no result row, which reads as "result unknown". */
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
