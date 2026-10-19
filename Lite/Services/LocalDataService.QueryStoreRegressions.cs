@@ -45,6 +45,8 @@ public sealed class QueryStoreRegressionRow
     public string Severity { get; set; } = "";
     public string QueryTextSample { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
+    /// <summary>#6128: every regression that passed the gate, before the row cap. The same value on every row of one read.</summary>
+    public long TotalCount { get; set; }
 }
 
 /*
@@ -207,7 +209,9 @@ SELECT
     END AS severity,
     w.collection_id AS text_collection_id,
     r.last_execution_time,
-    w.collection_time AS text_collection_time
+    w.collection_time AS text_collection_time,
+    /* #6128: the rows that passed the gate, before LIMIT, in the same statement. */
+    COUNT(*) OVER () AS total_count
 FROM recent_performance AS r
 JOIN baseline_performance AS b
   ON  b.database_name = r.database_name
@@ -255,6 +259,7 @@ LIMIT $" + limitIndex;
                 Severity = reader.IsDBNull(16) ? "" : reader.GetString(16),
                 QueryTextSample = "",
                 LastExecutionTime = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
+                TotalCount = reader.IsDBNull(20) ? 0 : Convert.ToInt64(reader.GetValue(20)),
             });
         }
         }
