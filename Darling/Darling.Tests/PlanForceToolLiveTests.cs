@@ -37,7 +37,7 @@ namespace Darling.Tests;
 /// the tool as an <c>env:</c> reference set in this process, and drops both in its own <c>finally</c>. The server row's host is the test SQL Server.
 /// </summary>
 [Collection("remediation-live-sql")]
-public sealed class PlanForceToolLiveTests
+public sealed partial class PlanForceToolLiveTests
 {
     private static string? StoreConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
     private static string? SqlHost => Environment.GetEnvironmentVariable("DARLING_TEST_SQL");
@@ -275,7 +275,7 @@ public sealed class PlanForceToolLiveTests
             var change = Assert.Single(list.Changes);
             Assert.Equal(ForceKind, change.Kind);
             Assert.Equal(AgentChangeResult.Done, change.Result);
-            Assert.False(change.CanTryUndo(DateTime.UtcNow), "plan_force has no undo until step 9");
+            Assert.True(change.CanTryUndo(DateTime.UtcNow), "a done plan_force can be undone from the list (step 9)");
             AssertNoSecret(c, answer, await JournalTextAsync(c));
         });
     }

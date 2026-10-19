@@ -51,10 +51,18 @@ public sealed class AgentChangesWebLiveTests
             Assert.Equal(200, list.Status);
             Assert.False((bool)list.Body!["can_decide"]!);
             Assert.True((bool)list.Body["enabled"]!);
-            Assert.Equal(2, list.Body["changes"]!.AsArray().Count);
+            Assert.Equal(3, list.Body["changes"]!.AsArray().Count);
             var results = string.Join(",", list.Body["changes"]!.AsArray().Select(c => (string)c!["result"]!));
             Assert.Contains("unknown", results, StringComparison.Ordinal);
             Assert.Contains("done", results, StringComparison.Ordinal);
+
+            var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
+            var planRow = list.Body["changes"]!.AsArray().Single(c => (string?)c!["kind"] == "plan_force")!;
+            Assert.True((bool)planRow["can_undo"]!);
+            var planUndo = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", "{\"confirm\":true}");
+            Assert.Equal(403, planUndo.Status);
+            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage, (string)planUndo.Body!["error"]!);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE actor LIKE 'person:%'", ct));
 
             var undone = await Send("PUT", "/api/agent-changes/" + await CalledIdAsync(owner, "m-web", ct) + "/undo", "application/json");
             Assert.Equal(403, undone.Status);
@@ -70,6 +78,32 @@ public sealed class AgentChangesWebLiveTests
             Assert.Equal("agent says", await ScalarAsync(owner, "SELECT reason FROM config.config_mute_rules WHERE id = 'm-web'", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_service WHERE NOT agent_actions_enabled", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event IN ('action_undone', 'agent_actions_switched')", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AsTheManagedAdminRole_APlanUndo_IsRefusedWith409WhenTheServersSwitchIsOff_JournaledWithThePerson_AndNeverWritesWithoutTheSwitch()
+    {
+        await WithWebRoutesAsync("admin", async (owner, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/agent-changes", null);
+            var planRow = list.Body!["changes"]!.AsArray().Single(c => (string?)c!["kind"] == "plan_force")!;
+            Assert.True((bool)planRow["can_undo"]!);
+            Assert.Equal("unknown", (string)planRow["result"]!);
+
+            var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
+            foreach (var payload in new[] { "{}", "{\"confirm\":true}" })
+            {
+                var refused = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", payload);
+                Assert.Equal(409, refused.Status);
+                Assert.Equal("server_action_off", (string)refused.Body!["code"]!);
+                Assert.Contains("config_server_actions", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            }
+
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor LIKE 'person:%' AND reason = 'server_action_off'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'", ct));
+            Assert.Equal(400, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", "[1]")).Status);
+            Assert.Equal(415, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "text/plain", "{}")).Status);
         });
     }
 
@@ -134,6 +168,9 @@ VALUES ('{request}', 7, 'action_called', 'agent:a', '{{""tool"":""t"",""kind"":"
 VALUES ('{request}', 7, 'action_done', 'agent:a', '{{""called_id"":{called},""after"":{{""status"":""updated"",""mute_rule"":{{""reason"":""agent says"",""enabled"":true}}}}}}')", ct);
             await ExecAsync(owner, $@"INSERT INTO config.investigation_journal (request_id, server_id, event, actor, detail)
 VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""t"",""kind"":""mute"",""target"":{{""id"":""lost"",""server_id"":7,""database"":null}},""before"":null}}')", ct);
+            /* A plan force whose call has no result row (#5632, step 9): a plan row is offered an undo whatever its result. */
+            await ExecAsync(owner, $@"INSERT INTO config.investigation_journal (request_id, server_id, event, actor, detail)
+VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""force_query_store_plan"",""kind"":""plan_force"",""target"":{{""id"":""20"",""server_id"":7,""database"":""d""}},""before"":{{""database"":""d"",""query_id"":10,""plan_id"":20,""forced_plan"":null}}}}')", ct);
 
             await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
             foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, managedRole))
@@ -159,7 +196,9 @@ VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""t"",""k
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
+            var ownerSeam = new PerformanceMonitor.Darling.Service.Mcp.StoreOwnerSource();
+            ownerSeam.Publish(owner);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 

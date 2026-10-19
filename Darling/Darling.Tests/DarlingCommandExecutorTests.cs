@@ -432,6 +432,23 @@ public sealed class DarlingCommandExecutorTests
         Assert.Equal(CommandKind.FetchActiveQueries, plan.Kind);
     }
 
+    /// <summary>#5632 step 9: the Viewer's command constant resolves to the undo, the pure validation refuses a missing called_id and a bad requested_by,
+    /// and the constant is the executor's case label.</summary>
+    [Fact]
+    public void UndoPlanChange_ConstantMatchesExecutorCase_AndItsArgumentsAndLoginAreValidatedBeforeAnythingRuns()
+    {
+        var type = PerformanceMonitor.Darling.Viewer.ViewerDataService.CommandUndoPlanChange;
+        Assert.Equal("undo_plan_change", type);
+        var ok = DarlingCommandExecutor.ResolvePlan(Command(type, args: "{\"called_id\": 12, \"confirm\": false}"));
+        Assert.Equal(CommandKind.UndoPlanChange, ok.Kind);
+        Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(Command(type)).Kind);
+        Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(Command(type, args: "{\"called_id\": 0}")).Kind);
+        Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(Command(type, args: "{\"confirm\": true}")).Kind);
+        Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", null)).Kind);
+        Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", "bad login!")).Kind);
+        Assert.Equal(CommandKind.UndoPlanChange, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", "CORP\\alice")).Kind);
+    }
+
     [Theory]
     [InlineData("bogus")]
     [InlineData("")]

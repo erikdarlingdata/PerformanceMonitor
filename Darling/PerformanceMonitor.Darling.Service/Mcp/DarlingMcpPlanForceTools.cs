@@ -52,7 +52,7 @@ public sealed class DarlingMcpPlanForceTools
         "<<GUIDE>>" +
         "Call get_plan_force_precheck first and weigh its warnings; it only warns. This tool blocks only a call that cannot do anything: plan_not_found (the plan is not among that query's Query Store rows) or plan_already_forced. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_force) with the plan that was forced before and how (forcing_type MANUAL or AUTO on SQL Server 2022 and later, else unknown), so the way back is known. " +
-        "After a write, check with get_forced_plans. Nothing in Darling unforces on its own: unforce_query_store_plan is the way back. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id.")]
+        "After a write, check with get_forced_plans. Nothing in Darling unforces on its own: unforce_query_store_plan is the way back, and a person can undo a force from the Agent changes list. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id.")]
     public static Task<string> ForceQueryStorePlan(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
@@ -69,7 +69,7 @@ public sealed class DarlingMcpPlanForceTools
     [McpServerTool(Name = "unforce_query_store_plan"), Description(
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
-        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again. " +
+        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id.")]
     public static Task<string> UnforceQueryStorePlan(
         NpgsqlDataSource postgres,
@@ -215,6 +215,138 @@ public sealed class DarlingMcpPlanForceTools
         }
     }
 
+    /// <summary>
+    /// A person's undo of an agent's plan force or unforce (#5632, step 9), for the web route and the Viewer's <c>undo_plan_change</c> command: one
+    /// method, so both run the same code. Its signature names only Storage, Common and Npgsql types, so the callers never name the remediation assembly.
+    /// <para><b>The server state decides.</b> It reads the query's state on the remediation connection first and decides from that, not from the
+    /// journal's result: an undo of a force of plan N puts plan M (the plan forced before) back when N is still forced, or unforces N when none was
+    /// forced before; an undo of an unforce of N forces N again when no plan of the query is forced. Anything else is refused,
+    /// <c>changed_since</c> when another change was made since, <c>nothing_to_undo</c> when the server shows the change never took effect.</para>
+    /// <para><b>Show, then confirm.</b> Without <paramref name="confirm"/> it returns the exact statement and the state it read, and writes and
+    /// journals nothing. With it, and with <paramref name="shownStatement"/> equal to the statement it would run now, it writes and journals
+    /// <c>action_undone</c> under the same advisory lock the store kinds' undo takes. A confirm without the shown statement writes nothing and
+    /// answers the confirm step again, so no caller can write a statement a person was not shown.</para>
+    /// <para><b>Gate.</b> The two server-side conditions only (that server's <c>force_plan</c> switch and an <c>env:</c> or <c>file:</c> remediation login),
+    /// through <see cref="AgentChangeUndo.PlanUndoSession.AuthorizeAsync"/>; the agent-only conditions are not asked of a person. A refusal is journaled
+    /// with the person as the actor.</para>
+    /// </summary>
+    internal static async Task<PlanUndoAnswer> UndoPlanChangeAsync(AgentChangeUndo changes, NpgsqlDataSource? owner, ILogger? logger, long calledId, string login,
+        bool confirm, string? shownStatement, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+        logger ??= NullLogger.Instance;
+        PlanUndoBegin begin;
+        try
+        {
+            begin = await changes.BeginPlanUndoAsync(calledId, login, ct);
+        }
+        catch (ArgumentException)
+        {
+            return PlanUndoAnswer.Refused("bad_login", "The signed-in name cannot be recorded as the person who undid this change.");
+        }
+
+        if (begin.Session is not { } session)
+        {
+            var refusal = begin.Refusal!;
+            return PlanUndoAnswer.Refused(refusal.Code ?? "not_undoable", refusal.Words);
+        }
+
+        await using (session)
+        {
+            try
+            {
+                var answer = await DecideAndRunAsync(session, owner, logger, confirm, shownStatement, ct);
+                await session.CommitAsync(ct);
+                return answer;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning("Undo of plan change {CalledId} failed: {Message}", calledId, ex.Message);
+                throw;
+            }
+        }
+    }
+
+    private static async Task<PlanUndoAnswer> DecideAndRunAsync(AgentChangeUndo.PlanUndoSession session, NpgsqlDataSource? owner, ILogger logger,
+        bool confirm, string? shownStatement, CancellationToken ct)
+    {
+        var facts = session.Facts;
+        if (owner is null)
+            return PlanUndoAnswer.Refused(NoOwnerSource, "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly.");
+
+        /* The permit for the plan the change named: it reads the state, and it is the plan an unforce or a no-prior-force undo writes on. */
+        var decision = await session.AuthorizeAsync(facts.PlanId, owner, ct);
+        if (decision.Refusal is { } gateRefusal)
+            return PlanUndoAnswer.Refused(gateRefusal.Reason, gateRefusal.Message);
+        var permit = decision.Permit!;
+
+        var row = await ReadServerRowAsync(owner, facts.ServerId, ct);
+        if (row is null)
+            return PlanUndoAnswer.Refused("server_row_missing", $"{facts.ServerName} has no row in the monitored-server settings.");
+        var executor = new SqlServerRemediationExecutor(facts.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+
+        var read = await executor.ReadPlanStateAsync(permit, facts.QueryId, facts.PlanId, ct);
+        if (read.State is not { } state)
+        {
+            if (read.Outcome == RemediationOutcome.Refused && read.Reason is not null)
+                await session.RecordRefusalAsync(read.Reason, ct);
+            return new PlanUndoAnswer(read.Outcome == RemediationOutcome.Refused ? PlanUndoAnswer.RefusedStatus : PlanUndoAnswer.Failed, read.Reason, read.Message);
+        }
+
+        var stateNode = JsonSerializer.SerializeToNode(state);
+        var plan = PlanUndoDecision.Decide(facts, state);
+        if (plan.Refusal is { } refused)
+        {
+            await session.RecordRefusalAsync(refused.Reason, ct);
+            return new PlanUndoAnswer(PlanUndoAnswer.RefusedStatus, refused.Reason, refused.Message, null, stateNode);
+        }
+
+        var step = plan.Step!;
+        var statement = PlanForceStatement.For(state.Database, facts.QueryId, step.PlanId, step.Force);
+        var stepPermit = step.PlanId == facts.PlanId ? permit : null;
+        if (stepPermit is null)
+        {
+            var other = await session.AuthorizeAsync(step.PlanId, owner, ct);
+            if (other.Refusal is { } otherRefusal)
+                return PlanUndoAnswer.Refused(otherRefusal.Reason, otherRefusal.Message);
+            stepPermit = other.Permit!;
+        }
+
+        /* The executor's own dry run, for the confirm step and before a write: it checks the plan is there and in the state the statement needs. */
+        var dry = step.Force
+            ? await executor.ForcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: true, ct)
+            : await executor.UnforcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: true, ct);
+        if (dry.Outcome != RemediationOutcome.Done)
+        {
+            if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
+                await session.RecordRefusalAsync(dry.Reason, ct);
+            return new PlanUndoAnswer(dry.Outcome == RemediationOutcome.Refused ? PlanUndoAnswer.RefusedStatus : PlanUndoAnswer.Failed, dry.Reason, dry.Message, statement, stateNode);
+        }
+
+        statement = dry.Statement ?? statement;
+        if (!confirm || shownStatement is null || !string.Equals(shownStatement, statement, StringComparison.Ordinal))
+        {
+            var lead = !confirm ? ""
+                : shownStatement is null ? "A confirm must carry the statement that was shown, so nothing was written. Review this statement and confirm it. "
+                : "The server's state changed since the statement was shown, so nothing was written. Review the new statement and confirm again. ";
+            return new PlanUndoAnswer(PlanUndoAnswer.Confirm, null, lead + step.Words, statement, stateNode, null, step.RestoredAs);
+        }
+
+        var written = step.Force
+            ? await executor.ForcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: false, ct)
+            : await executor.UnforcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: false, ct);
+        if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
+        {
+            await session.RecordRefusalAsync(written.Reason ?? "write_failed", ct);
+            return new PlanUndoAnswer(written.Outcome == RemediationOutcome.Refused ? PlanUndoAnswer.RefusedStatus : PlanUndoAnswer.Failed, written.Reason, written.Message, statement, stateNode);
+        }
+
+        var after = await executor.ReadPlanStateAsync(stepPermit, facts.QueryId, step.PlanId, ct);
+        var afterNode = after.State is null ? null : JsonSerializer.SerializeToNode(after.State);
+        await session.JournalUndoneAsync(statement, stateNode, afterNode, step.RestoredAs, ct);
+        return new PlanUndoAnswer(PlanUndoAnswer.Undone, null, step.DoneWords, statement, stateNode, afterNode, step.RestoredAs, facts.CalledId, session.Actor);
+    }
+
     /// <summary>The only two blocks, as Erik ruled: the call cannot do anything. Everything else is the pre-check's warning.</summary>
     internal static AgentActionRefusal? BlockReason(PlanForceState state, bool force)
     {
@@ -259,6 +391,67 @@ WHERE server_id = $1";
             new RemediationServer(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.GetBoolean(3), reader.GetBoolean(4)),
             reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6));
+    }
+
+    /// <summary>One statement an undo would run, and the words around it.</summary>
+    internal sealed record UndoStep(bool Force, long PlanId, string? RestoredAs, string Words, string DoneWords);
+
+    /// <summary>What <see cref="PlanUndoDecision.Decide"/> decided: a step to run, or a refusal.</summary>
+    internal sealed record UndoPlan(UndoStep? Step, AgentActionRefusal? Refusal);
+
+    /// <summary>The decision from the state the server reported (rule 3), pure so the table can be tested without a server.</summary>
+    internal static class PlanUndoDecision
+    {
+        internal const string ChangedSince = "changed_since";
+        internal const string NothingToUndo = "nothing_to_undo";
+
+        internal static UndoPlan Decide(PlanChangeFacts facts, PlanForceState state)
+        {
+            var forcedNow = state.ForcedPlan?.PlanId;
+            var done = facts.Result == AgentChangeResult.Done;
+            var where = $"query {facts.QueryId} in {state.Database}";
+            var now = forcedNow is long k ? $"plan {k} is forced now" : "no plan is forced now";
+            var neverHappened = done ? "" : " The server shows the change never took effect, so there is nothing to undo.";
+            if (facts.IsForce)
+            {
+                if (forcedNow == facts.PlanId)
+                {
+                    if (facts.BeforeForcedPlanId is long m && m != facts.PlanId)
+                    {
+                        var auto = string.Equals(facts.BeforeForcingType, "AUTO", StringComparison.OrdinalIgnoreCase);
+                        return new UndoPlan(new UndoStep(true, m, auto ? "manual" : null,
+                            $"Undo would force plan {m} again for {where} (it replaces plan {facts.PlanId}, which is forced now)." + (auto ? AutoWords(m) : ""),
+                            $"Plan {m} is forced again for {where}; plan {facts.PlanId} is no longer forced." + (auto ? AutoWords(m) : "")), null);
+                    }
+
+                    return new UndoPlan(new UndoStep(false, facts.PlanId, null,
+                        $"Undo would unforce plan {facts.PlanId} for {where}; no plan was forced before the agent's change.",
+                        $"Plan {facts.PlanId} is unforced for {where}."), null);
+                }
+
+                if (!done && forcedNow == facts.BeforeForcedPlanId)
+                    return Refuse(NothingToUndo, $"Nothing to undo: plan {facts.PlanId} was not forced for {where} ({now}).{neverHappened}");
+                return Refuse(ChangedSince, $"Not undone: the plan state changed since the agent's force of plan {facts.PlanId} ({now}), so it was left as it is. Review it and change it by hand if you still want it back.");
+            }
+
+            /* An unforce of plan N: the way back is to force N again, only when no plan of the query is forced. */
+            if (forcedNow is null)
+            {
+                var auto = string.Equals(facts.BeforeForcingType, "AUTO", StringComparison.OrdinalIgnoreCase);
+                return new UndoPlan(new UndoStep(true, facts.PlanId, auto ? "manual" : null,
+                    $"Undo would force plan {facts.PlanId} again for {where}; no plan is forced now." + (auto ? AutoWords(facts.PlanId) : ""),
+                    $"Plan {facts.PlanId} is forced again for {where}." + (auto ? AutoWords(facts.PlanId) : "")), null);
+            }
+
+            if (!done && forcedNow == facts.PlanId)
+                return Refuse(NothingToUndo, $"Nothing to undo: plan {facts.PlanId} is still forced for {where}.{neverHappened}");
+            return Refuse(ChangedSince, $"Not undone: {now} for {where}, so the agent's unforce of plan {facts.PlanId} was left as it is. Review it and change it by hand if you still want plan {facts.PlanId} back.");
+        }
+
+        private static string AutoWords(long planId) =>
+            $" Automatic plan correction placed plan {planId}'s force; Query Store cannot restore that type, so it comes back as a manual force.";
+
+        private static UndoPlan Refuse(string code, string message) => new(null, new AgentActionRefusal(code, message));
     }
 
     /// <summary>A failure inside the write hook: the gate journals <c>action_failed</c> with <see cref="Exception.Message"/> (the server's own words, already scrubbed of the secret) and the tool answers <see cref="Answer"/>.</summary>

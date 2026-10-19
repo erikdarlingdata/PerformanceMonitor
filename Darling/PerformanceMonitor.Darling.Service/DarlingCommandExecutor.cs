@@ -347,6 +347,23 @@ WHERE status = 'in_progress'
                    runs the shared Active Queries collector's query on demand and returns the rows in result_json. */
                 return await _host.FetchActiveQueriesLiveAsync(command.TargetServerId!.Value, cancellationToken);
 
+            case CommandKind.UndoPlanChange:
+            {
+                /* #5632 step 9: a person's undo of an agent's plan force or unforce, from the Viewer. It runs the same code as the web route
+                   (DarlingMcpPlanForceTools.UndoPlanChangeAsync), as the person named in requested_by. The service's own store source is the
+                   owner source here: the remediation slot is read through it, and the secret never leaves the service. */
+                if (!UndoPlanChangeArgs.TryParse(command.ArgsJson, out var undoArgs))
+                {
+                    return new CommandOutcome(false, "invalid args_json", ErrorJson("undo_plan_change args_json did not carry a called_id"));
+                }
+
+                var answer = await Mcp.DarlingMcpPlanForceTools.UndoPlanChangeAsync(
+                    new AgentChangeUndo(_postgres, McpCommandDeadlines.ReadSeconds), _postgres, _logger, undoArgs.CalledId,
+                    command.RequestedBy ?? string.Empty, undoArgs.Confirm, undoArgs.Statement, cancellationToken);
+                _logger?.LogInformation("Command {Id} (undo_plan_change {CalledId}) => {Status} {Code}", command.CommandId, undoArgs.CalledId, answer.Status, answer.Code);
+                return new CommandOutcome(answer.Succeeded, answer.Code ?? answer.Status, answer.ToJson().ToJsonString());
+            }
+
             default:
                 return new CommandOutcome(false, "unknown command_type", ErrorJson("unknown command_type"));
         }
@@ -468,6 +485,19 @@ WHERE status = 'in_progress'
                     ? new CommandPlan(CommandKind.TestHypotheticalIndex, null, null, "hypothetical index tested", null)
                     : Fail("test_hypothetical_index requires args_json with queryid, schemaName, tableName and a "
                            + "non-empty columns array of plain identifiers");
+
+            case "undo_plan_change":
+                /* #5632 step 9: a person's undo of a plan force or unforce, run in the service because only the service can read the remediation
+                   credential. requested_by is the person (the web route's login): a name PersonActor refuses is refused here, before anything runs.
+                   args_json {called_id, confirm, statement}: without confirm the answer is the statement and the state, and nothing is written. */
+                if (!UndoPlanChangeArgs.TryParse(command.ArgsJson, out _))
+                {
+                    return Fail("undo_plan_change requires args_json with a called_id");
+                }
+
+                return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
+                    ? new CommandPlan(CommandKind.UndoPlanChange, null, null, "plan change undone", null)
+                    : Fail("undo_plan_change requires requested_by to be the person's login (1 to 64 letters, digits or . _ : - @ \\)");
 
             case "fetch_active_queries":
                 /* Worker-delegated like fetch_plan (needs the target's LIVE runtime connection to read what is
@@ -873,6 +903,10 @@ public enum CommandKind
     /// capture its ACTUAL plan with runtime stats (via the host). The one command that writes to a target.</summary>
     ExecuteActualPlan,
 
+    /// <summary><c>undo_plan_change</c> (#5632, step 9): a person's undo of an agent's plan force or unforce. The service reads the server first, shows the
+    /// statement without a confirm, and writes only with one. The Viewer cannot write to a monitored server, so it asks the service.</summary>
+    UndoPlanChange,
+
     /// <summary><c>fetch_active_queries</c>: read the LIVE running-request DMV snapshot from a server on demand (via
     /// the host, running the shared Active Queries collector's query) and return the rows in result_json. Read-only.</summary>
     FetchActiveQueries,
@@ -884,6 +918,58 @@ public enum CommandKind
 
     /// <summary>Bad arguments or an unknown command_type — report failed without touching the store.</summary>
     Fail,
+}
+
+/// <summary>The arguments of <c>undo_plan_change</c> (#5632, step 9): <c>{called_id, confirm, statement}</c>. <c>statement</c> is the text the person was
+/// shown; a write runs only when the statement it would run now is that text.</summary>
+internal sealed record UndoPlanChangeArgs(long CalledId, bool Confirm, string? Statement)
+{
+    internal static bool TryParse(string? json, out UndoPlanChangeArgs args)
+    {
+        args = new UndoPlanChangeArgs(0, false, null);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("called_id", out var id) || id.ValueKind != JsonValueKind.Number || !id.TryGetInt64(out var calledId) || calledId <= 0)
+            {
+                return false;
+            }
+
+            var confirm = root.TryGetProperty("confirm", out var flag) && flag.ValueKind == JsonValueKind.True;
+            var statement = root.TryGetProperty("statement", out var text) && text.ValueKind == JsonValueKind.String ? text.GetString() : null;
+            args = new UndoPlanChangeArgs(calledId, confirm, statement);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The same rule the journal's person actor holds a login to.</summary>
+    internal static bool LoginIsValid(string? login)
+    {
+        if (login is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            _ = AgentChangeUndo.PersonActor(login);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
 }
 
 /// <summary>The resolved (pure) plan for one command — see <see cref="DarlingCommandExecutor.ResolvePlan"/>.</summary>
