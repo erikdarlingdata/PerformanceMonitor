@@ -268,7 +268,13 @@ END;";
         try
         {
             rig = await StartAsync(name, database, ct);
-            await body(rig, Connect(sqlHost, user, password, database), ct);
+            var target = Connect(sqlHost, user, password, database);
+
+            /* StartAsync seeds the modules, then migrates the store, which takes seconds. A busy target can evict a module's
+               plan from its cache in that time (its row then vanishes from sys.dm_exec_procedure_stats), so the modules run
+               again right before the body's first cycle. */
+            await RunModulesAgainAsync(target, ct);
+            await body(rig, target, ct);
             ok = true;
         }
         finally
@@ -286,6 +292,16 @@ END;";
         }
     }
 
+    /// <summary>
+    /// Runs the four scratch modules again, unchanged (same branch, same data, so the same plan and fingerprint), so their
+    /// counters move between two cycles. The collector's idle skip drops a module whose counters did not move over a measured
+    /// interval (a whole second or more between two cycles of one runner); without this a follow-up cycle that starts a
+    /// second after the first sees no rows, and a test that expects the unchanged modules' rows passes or fails on timing alone.
+    /// Running them right before a cycle also keeps their plans young in the target's plan cache, which a busy target can evict.
+    /// </summary>
+    private static Task RunModulesAgainAsync(string targetConnectionString, CancellationToken ct) =>
+        ExecOnTargetAsync(targetConnectionString, ct, "", "pm_a", "pm_b", "pm_s", "pm_d 0");
+
     private static async Task ExecOnTargetAsync(string targetConnectionString, CancellationToken ct, string sql, params string[] calls)
     {
         await using var target = new SqlConnection(targetConnectionString);
@@ -302,7 +318,7 @@ END;";
     }
 
     [Fact]
-    public Task On_CycleTwoRendersNothing_AndTheRowsCarryTheDigest() => WithRigAsync("pm5158p-two", async (rig, _, ct) =>
+    public Task On_CycleTwoRendersNothing_AndTheRowsCarryTheDigest() => WithRigAsync("pm5158p-two", async (rig, target, ct) =>
     {
         var runner = NewRunner(rig.Store, "on");
 
@@ -310,6 +326,7 @@ END;";
         Assert.True(first.Rows >= 4, "four scratch procedures, one row each");
         Assert.True(Measured(first, "plans_rendered") >= 4, "a cold cache renders every module plan");
 
+        await RunModulesAgainAsync(target, ct);
         var second = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
         Assert.True(second.Rows >= 4);
         Assert.Equal(0, Measured(second, "plans_rendered"));
@@ -331,12 +348,17 @@ END;";
     });
 
     [Fact]
-    public Task On_TheCadenceGateStillDecidesWhenMissesRender_AndHitsCarryTheirDigestOnEveryCycle() => WithRigAsync("pm5158p-gate", async (rig, _, ct) =>
+    public Task On_TheCadenceGateStillDecidesWhenMissesRender_AndHitsCarryTheirDigestOnEveryCycle() => WithRigAsync("pm5158p-gate", async (rig, target, ct) =>
     {
         var runner = NewRunner(rig.Store, "on", planCycleInterval: 2);
         var runs = new List<CollectorRunResult>();
         for (var i = 0; i < 6; i++)
         {
+            if (i > 0)
+            {
+                await RunModulesAgainAsync(target, ct);
+            }
+
             runs.Add(await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct));
         }
 
@@ -368,7 +390,9 @@ END;";
     {
         var runner = NewRunner(rig.Store, "on");
         await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        await RunModulesAgainAsync(target, ct);
         var warm = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        Assert.True(warm.Rows >= 4, "the unchanged modules ran again, so they are rows");
         Assert.Equal(0, Measured(warm, "plans_rendered"));
 
         /* pm_d's second branch compiles the first time it is taken: same plan handle, same cached_time, one more statement
@@ -385,7 +409,9 @@ END;";
     {
         var runner = NewRunner(rig.Store, "on");
         await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        await RunModulesAgainAsync(target, ct);
         var warm = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        Assert.True(warm.Rows >= 4, "the unchanged modules ran again, so they are rows");
         Assert.Equal(0, Measured(warm, "plans_rendered"));
 
         /* New statistics make the next execution recompile pm_s's one statement inside the cached module plan. */
@@ -399,7 +425,7 @@ END;";
     });
 
     [Fact]
-    public Task Shadow_OnAnUnchangedModule_CountsWouldHits_AndNoFalseHit_AndWritesWhatOffWrites() => WithRigAsync("pm5158p-shadow", async (rig, _, ct) =>
+    public Task Shadow_OnAnUnchangedModule_CountsWouldHits_AndNoFalseHit_AndWritesWhatOffWrites() => WithRigAsync("pm5158p-shadow", async (rig, target, ct) =>
     {
         var log = new CapturingTestLogger();
         var runner = NewRunner(rig.Store, "shadow", logger: log);
@@ -409,6 +435,7 @@ END;";
         Assert.True(Measured(first, "deferred_miss") >= 4);
         Assert.True(Measured(first, "plans_rendered") >= 4, "shadow renders inline, exactly as off");
 
+        await RunModulesAgainAsync(target, ct);
         var second = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
         Assert.True(Measured(second, "deferred_would_hit") >= 4);
         Assert.Equal(0, Measured(second, "deferred_false_hit"));
@@ -473,7 +500,7 @@ END;";
     });
 
     [Fact]
-    public Task Shadow_WhenAStaleEntryIsForcedIntoTheCache_CountsAFalseHit_AndWarnsWithTheKeyOnly() => WithRigAsync("pm5158p-false", async (rig, _, ct) =>
+    public Task Shadow_WhenAStaleEntryIsForcedIntoTheCache_CountsAFalseHit_AndWarnsWithTheKeyOnly() => WithRigAsync("pm5158p-false", async (rig, target, ct) =>
     {
         var log = new CapturingTestLogger();
         var runner = NewRunner(rig.Store, "shadow", logger: log);
@@ -496,6 +523,7 @@ END;";
 
         cache.ConfirmPending(keys, DateTime.UtcNow);
 
+        await RunModulesAgainAsync(target, ct);
         var second = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
         Assert.True(Measured(second, "deferred_false_hit") >= 4);
         Assert.Equal(Measured(second, "deferred_would_hit"), Measured(second, "deferred_false_hit"));
