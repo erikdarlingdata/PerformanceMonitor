@@ -362,20 +362,23 @@ public sealed class WhoDroveItLiveTests
         await SnapshotAsync(postgres, ct, t, 51, "0xHA", "sa", "APP01", "SSMS", 5000, 5500);
         await SnapshotAsync(postgres, ct, t, 60, "0xHB", "svc", "WEB01", "api", 3000, 5500);
         await SnapshotAsync(postgres, ct, t, 61, "0xHB", "svc", "WEB01", "api", 0, 5500);
-        await SnapshotAsync(postgres, ct, t, 70, "0xHD", "svc2", "WEB02", "api", 2000, 5500);
+        await SnapshotAsync(postgres, ct, t, 70, "0xHD", "svc2", "WEB02", "api", 1500, 5500);
+        await SnapshotAsync(postgres, ct, t, 71, "0xHE", "svc3", "WEB03", "api", 500, 5500);
+        /* top 2 on a window of four callers: the read fetches one extra group to learn whether it cut, so the page it holds is three callers, 9,500 ms. */
         using var doc = await LoadByCallerAsync(postgres, ct, top: 2);
         var root = doc.RootElement;
         Assert.True(root.GetProperty("truncated").GetBoolean());
         var callers = root.GetProperty("callers").EnumerateArray().ToArray();
         Assert.Equal(new[] { "APP01", "WEB01" }, callers.Select(c => c.GetProperty("host_name").GetString()));
-        /* The page holds 8,000 of the window's 10,000 ms. A share of the page would read 0.625 and 0.375. */
+        /* A share of the page would read 0.5263 and 0.3158, a share of the two listed callers 0.625 and 0.375. */
         Assert.Equal(10_000.0, root.GetProperty("total_cpu_ms").GetDouble(), 3);
         Assert.Equal(0.5, callers[0].GetProperty("cpu_share").GetDouble(), 4);
         Assert.Equal(0.3, callers[1].GetProperty("cpu_share").GetDouble(), 4);
-        Assert.Equal(4, root.GetProperty("total_samples").GetInt64());
-        Assert.Equal(0.25, callers[0].GetProperty("sample_share").GetDouble(), 4);
-        Assert.Equal(0.5, callers[1].GetProperty("sample_share").GetDouble(), 4);
-        Assert.Equal(0.25, callers[0].GetProperty("elapsed_share").GetDouble(), 4);
+        Assert.Equal(5, root.GetProperty("total_samples").GetInt64());
+        Assert.Equal(0.2, callers[0].GetProperty("sample_share").GetDouble(), 4);
+        Assert.Equal(0.4, callers[1].GetProperty("sample_share").GetDouble(), 4);
+        Assert.Equal(0.2, callers[0].GetProperty("elapsed_share").GetDouble(), 4);
+        Assert.Equal(0.4, callers[1].GetProperty("elapsed_share").GetDouble(), 4);
     });
 
     /* ───────────────────────── get_query_pileups ───────────────────────── */
