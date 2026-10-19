@@ -128,7 +128,7 @@ public sealed class WebDataStartNoteTests
     /// <summary>The vacuum, horizon, slot and write tiles are listed over the table their tool reads. The freeze headroom and the
     /// checkpoint and WAL tables get a row every collection, so they keep the table's own start; the horizon holders, the autovacuum
     /// backlog and the slots store a row only while one exists, so they are probed on the collector's runs (the slot collector is
-    /// named pg_replication_slots and writes pg_replication_slot_stats). The horizon read's nothing-found word is no_holder.</summary>
+    /// named pg_replication_slots and writes pg_replication_slot_stats). The horizon read's nothing-found word is empty.</summary>
     [Fact]
     public void TheVacuumHorizonSlotAndWriteReads_AreListedOverTheirTables_AndTheSparseOnesAreProbedOnTheirCollectorsRuns()
     {
@@ -159,7 +159,7 @@ public sealed class WebDataStartNoteTests
             }
         }
 
-        Assert.Equal("no_holder", WebDataStartNote.NothingFoundStatusByRead["get_pg_xmin_horizon"]);
+        Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead["get_pg_xmin_horizon"]);
         foreach (var read in new[] { "get_pg_wraparound_risk", "get_pg_autovacuum_health", "get_pg_replication_slots", "get_pg_write_stats" })
         {
             Assert.DoesNotContain(read, WebDataStartNote.NothingFoundStatusByRead.Keys);

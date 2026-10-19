@@ -237,7 +237,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -259,7 +259,7 @@ public sealed class DarlingMcpPgIndexUsageTools
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, logger, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, hours_back, start, end, logger, cancellationToken);
             }
 
             /* #4966: scans_in_window is a DIFFERENCE between the first and last sample, and this collector runs daily, so a short
@@ -341,7 +341,7 @@ public sealed class DarlingMcpPgIndexUsageTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -404,7 +404,7 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// windowed scan count is a difference and needs two.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
+        NpgsqlDataSource postgres, int serverId, string serverName, string displayName, int hoursBack, DateTime start, DateTime end,
         ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
@@ -424,7 +424,7 @@ public sealed class DarlingMcpPgIndexUsageTools
 
         var hints = new Dictionary<string, object?>
         {
-            ["server"] = serverName,
+            ["server"] = displayName,
             ["hours_back"] = hoursBack,
             ["rows_in_window"] = probe.RowsInWindow,
             ["snapshots_in_window"] = probe.SnapshotsInWindow,
@@ -446,7 +446,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
-                    factual: $"No indexes were recorded for {serverName} in the last {hoursBack} hour(s) even though "
+                    factual: $"No indexes were recorded for {displayName} in the last {hoursBack} hour(s) even though "
                         + "collection ran - at least two snapshots exist. Every index on every collected database is "
                         + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
                         + "all trivially small",
@@ -456,27 +456,27 @@ public sealed class DarlingMcpPgIndexUsageTools
 
         if (probe.SnapshotsInWindow == 1)
         {
-            return McpHelpers.Status(
-                "unavailable",
-                $"Only ONE index snapshot exists for {serverName} in the last {hoursBack} hour(s), so this "
+            return await DarlingServerOfflineNote.UnavailableAsync(
+                postgres, serverId, displayName,
+                $"Only ONE index snapshot exists for {displayName} in the last {hoursBack} hour(s), so this "
                 + "is NOT a report about index usage. A windowed scan count is a DIFFERENCE and needs two "
                 + "snapshots before it produces anything. This collector runs DAILY, so on a newly added "
                 + "server it clears itself within a day or two; widen hours_back in the meantime.",
-                hints);
+                hints, cancellationToken);
         }
 
-        return McpHelpers.Status(
-            "unavailable",
+        return await DarlingServerOfflineNote.UnavailableAsync(
+            postgres, serverId, displayName,
             probe.RowsEver > 0
-                ? $"No index snapshots were collected for {serverName} in the last {hoursBack} hour(s), so "
+                ? $"No index snapshots were collected for {displayName} in the last {hoursBack} hour(s), so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
                 + "window - this collector runs DAILY, so a window shorter than about 48 hours can "
                 + "legitimately contain fewer than two samples. Widen hours_back, or use "
                 + "get_collection_health to find where it stopped."
-                : $"No index snapshots have EVER been collected for {serverName}, so there is nothing to "
+                : $"No index snapshots have EVER been collected for {displayName}, so there is nothing to "
                 + "read. Check that collection is running and enabled for this server - and note this "
                 + "collector is gated OFF on read replicas, because a replica reports its own scan counts "
                 + "rather than the writer's, which would make every index on it look unused.",
-            hints);
+            hints, cancellationToken);
     }
 }

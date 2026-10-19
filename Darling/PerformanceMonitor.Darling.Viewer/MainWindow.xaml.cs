@@ -1903,6 +1903,9 @@ public partial class MainWindow : Window
             ? RecommendationsViewModel.FormatLastAnalyzed(
                 rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode, serverClock)
             : string.Empty;
+        /* #6135: an offline server's findings are the last it collected; say so beside the time they came from. */
+        RecommendationsStatusText.Text = RecommendationsViewModel.WithOfflineNote(
+            RecommendationsStatusText.Text, server.CardStatus == ServerCollectionStatus.Offline);
         StatusText.Text = $"{server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}";
     }
 

@@ -59,7 +59,7 @@ public partial class ViewerServerTab
         RenderCpuSchedulerChart(trendTask.Result);
         CpuSchedulerGrid.ItemsSource = CpuSchedulerGridRow.Build(snapshotTask.Result);
 
-        var gap = CpuSchedulerGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind);
+        var gap = CpuSchedulerGapNote(_server.DisplayName, _server.EngineEdition, _server.EngineKind);
         CpuSchedulerNoDataMessage.Text = gap ?? "";
         CpuSchedulerNoDataMessage.Visibility = gap is null ? Visibility.Collapsed : Visibility.Visible;
     }

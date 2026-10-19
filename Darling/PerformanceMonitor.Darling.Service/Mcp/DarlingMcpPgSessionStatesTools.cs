@@ -224,7 +224,7 @@ public sealed class DarlingMcpPgSessionStatesTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -250,7 +250,7 @@ public sealed class DarlingMcpPgSessionStatesTools
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, captures, start, end, logger, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, hours_back, captures, start, end, logger, cancellationToken);
             }
 
             /* #4966: decided after the empty branch, whose not-collected answer carries no notice. */
@@ -330,7 +330,7 @@ public sealed class DarlingMcpPgSessionStatesTools
 
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor, right after hours_back. */
                 effective_start = notice.EffectiveStart,
@@ -396,7 +396,7 @@ public sealed class DarlingMcpPgSessionStatesTools
     /// perfectly monitored server as uncollected (#2508).</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack,
+        NpgsqlDataSource postgres, int serverId, string serverName, string displayName, int hoursBack,
         DarlingPgSessionStatesReader.PgSessionStatesCaptureCounts captures,
         DateTime start, DateTime end, ILogger? logger, CancellationToken cancellationToken = default)
     {
@@ -409,7 +409,7 @@ public sealed class DarlingMcpPgSessionStatesTools
 
         var hints = new
         {
-            server = serverName,
+            server = displayName,
             hours_back = hoursBack,
             captures_in_window = captures.CapturesTotal,
             captures_with_sessions = captures.CapturesWithSessions,
@@ -426,7 +426,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No session held a transaction open past the collector's floor on {serverName} in the last "
+                    factual: $"No session held a transaction open past the collector's floor on {displayName} in the last "
                         + $"{hoursBack} hour(s), across {captures.CapturesTotal} capture(s)",
                     coveredClaim: ". This is the healthy "
                         + "state and a real all-clear rather than missing data - the collector stores nothing when "
@@ -448,11 +448,11 @@ public sealed class DarlingMcpPgSessionStatesTools
                 });
         }
 
-        return McpHelpers.Status(
-            "unavailable",
-            $"No captures at all for {serverName} in the last {hoursBack} hour(s), so the window says "
+        return await DarlingServerOfflineNote.UnavailableAsync(
+            postgres, serverId, displayName,
+            $"No captures at all for {displayName} in the last {hoursBack} hour(s), so the window says "
             + "nothing either way - this is NOT an all-clear. Check that collection is running and enabled "
             + "for this server with get_collection_health, or widen hours_back.",
-            hints);
+            hints, cancellationToken);
     }
 }

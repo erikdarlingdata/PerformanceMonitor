@@ -84,7 +84,7 @@ public sealed class DarlingMcpPgWraparoundTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -103,14 +103,14 @@ public sealed class DarlingMcpPgWraparoundTools
                    not collected yet, or a row whose engine_kind is NULL — naming "the server is SQL Server"
                    here would repeat a branch that can no longer reach this line. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wraparound_stats", cancellationToken)
-                    ?? McpHelpers.Status(
-                        "unavailable",
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wraparound_stats", cancellationToken)
+                    ?? await DarlingServerOfflineNote.UnavailableAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName,
                         /* W6 (release walk): said in plain words, offline first. An offline server collects nothing, so an
                            empty window is the likeliest reason; the store-internal engine wording is gone. */
                         "No PostgreSQL freeze-headroom data for this server and window. If the server is offline, "
                         + "nothing is being collected from it. Otherwise this collector has not run on it yet, or the "
-                        + "store has not yet learned that it is a PostgreSQL server. Check list_servers.");
+                        + "store has not yet learned that it is a PostgreSQL server. Check list_servers.", cancellationToken);
             }
 
             var databases = rows
@@ -148,7 +148,7 @@ public sealed class DarlingMcpPgWraparoundTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* Fleet-triage summary first: the worst database is the server's real state, since one
                    database hitting the wall stops writes for the whole instance. */
