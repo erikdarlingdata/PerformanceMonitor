@@ -185,6 +185,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpLongQueryTools>()
             /* #5992 get_resource_use_by_tag; twin of Darling's DarlingMcpQueryTagRollupTools. */
             .WithGeminiCompatibleTools<McpQueryTagUsageTools>()
+            /* #6114 get_cpu_by_database, get_load_by_caller and get_query_pileups; twins of Darling's DarlingMcpWhoDroveItTools (#6072). */
+            .WithGeminiCompatibleTools<McpWhoDroveItTools>()
             .WithGeminiCompatibleTools<McpClientTimeoutTools>()
             .WithGeminiCompatibleTools<McpQueryTools>()
             .WithGeminiCompatibleTools<McpCpuTools>()

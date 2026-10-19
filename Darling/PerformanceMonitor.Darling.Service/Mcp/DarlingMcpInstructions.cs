@@ -142,7 +142,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 217 tools. 108 are the same names Lite exposes. The remaining 109 are unique to Darling: " +
+        "This server exposes 217 tools. 111 are the same names Lite exposes. The remaining 106 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
@@ -179,6 +179,8 @@ internal static class DarlingMcpInstructions
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",
         "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_servers",
         "mute_analysis_finding", "set_notification_route_enabled", "submit_investigation_report", "unmute_analysis_finding",
+        /* #6114: Lite's twins of the #6072 reads, the same names as Darling's. */
+        "get_cpu_by_database", "get_load_by_caller", "get_query_pileups",
         /* #5991: Lite's query-tag tools, the same names as Darling's. */
         "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule",
         "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",

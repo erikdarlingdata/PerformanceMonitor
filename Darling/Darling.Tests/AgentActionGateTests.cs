@@ -487,6 +487,174 @@ public sealed class AgentActionGateLiveTests
         });
     }
 
+    /* #5632, step 13. The store's commit is broken by a DEFERRED constraint trigger: it raises at COMMIT for an action_done row
+       that is not marked recorded_late, so the insert inside the write's transaction succeeds and only the commit fails, which is
+       the window the step closes. The late row is written outside a transaction block, so it passes. The "late write fails too" case
+       uses an immediate trigger on every action_done row, so the normal insert and both late attempts are refused. */
+    private const string FailCommitSql = @"
+CREATE FUNCTION config.test_fail_done() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+    IF NEW.event = 'action_done' AND NEW.detail->>'recorded_late' IS NULL THEN
+        RAISE EXCEPTION 'commit refused by test';
+    END IF;
+    RETURN NULL;
+END $f$;
+CREATE CONSTRAINT TRIGGER test_fail_done AFTER INSERT ON config.investigation_journal
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION config.test_fail_done();";
+
+    private const string FailEveryDoneSql = @"
+CREATE FUNCTION config.test_fail_every_done() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+    RAISE EXCEPTION 'store refused by test';
+END $f$;
+CREATE TRIGGER test_fail_every_done BEFORE INSERT ON config.investigation_journal
+    FOR EACH ROW WHEN (NEW.event = 'action_done') EXECUTE FUNCTION config.test_fail_every_done();";
+
+    private AgentActionHooks WriteHooks(ServerChangeSignal? signal, bool mark, Func<CancellationToken, Task>? then = null) => new()
+    {
+        ServerChange = signal,
+        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 2),
+        ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"state\":\"old\"}"),
+        Write = async (_, _, token) =>
+        {
+            _writes++;
+            if (mark)
+                signal!.MarkServerChanged();
+            if (then is not null)
+                await then(token);
+            return "{\"state\":\"new\"}";
+        },
+    };
+
+    private static Task<string?> EventsAsync(NpgsqlConnection connection, Guid request, CancellationToken ct) => ScalarAsync(connection,
+        $"SELECT string_agg(event, '|' ORDER BY journal_id) FROM config.investigation_journal WHERE request_id = '{request}' AND event LIKE 'action_%'", ct);
+
+    private async Task<AgentChangeRow> ListedAsync(NpgsqlConnection connection, long calledId, CancellationToken ct)
+    {
+        await using var dataSource = NpgsqlDataSource.Create(connection.ConnectionString);
+        return (await new AgentChangeUndo(dataSource, 30, () => _now).ReadAsync(50, ct)).Changes.Single(c => c.CalledId == calledId);
+    }
+
+    [Fact]
+    public async Task AServerChange_WhoseCommitFails_IsJournaledDoneAndLate_NeverFailed()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            await ExecAsync(connection, FailCommitSql, ct);
+            var (request, claim) = await OpenAndClaimAsync(store);
+            var result = await store.RunAgentActionAsync(Call(request, claim), WriteHooks(new ServerChangeSignal(), mark: true), ct);
+
+            Assert.True(result.Done);
+            Assert.True(result.RecordedLate);
+            Assert.False(result.JournalMissing);
+            Assert.Equal("{\"state\":\"new\"}", result.AfterJson);
+            Assert.Equal(1, _writes);
+            Assert.Equal("action_called|action_done", await EventsAsync(connection, request, ct));
+            Assert.Equal("true", await ScalarAsync(connection,
+                $"SELECT detail->>'recorded_late' FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'action_done'", ct));
+            Assert.Equal(result.CalledId!.Value.ToString(CultureInfo.InvariantCulture), await ScalarAsync(connection,
+                $"SELECT detail->>'called_id' FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'action_done'", ct));
+            Assert.Equal("new", await ScalarAsync(connection,
+                $"SELECT detail->'after'->>'state' FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'action_done'", ct));
+            Assert.Contains("commit refused by test", await ScalarAsync(connection,
+                $"SELECT detail->>'error' FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'action_done'", ct), StringComparison.Ordinal);
+            Assert.Equal(AgentChangeResult.Done, (await ListedAsync(connection, result.CalledId.Value, ct)).Result);
+        });
+    }
+
+    [Fact]
+    public async Task AWriteThatFailsBeforeTheServerAccepted_IsStillJournaledFailed_AndThrows()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var (request, claim) = await OpenAndClaimAsync(store);
+            var signal = new ServerChangeSignal();
+            var hooks = WriteHooks(signal, mark: false, _ => throw new InvalidOperationException("executor said it did not write"));
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => store.RunAgentActionAsync(Call(request, claim), hooks, ct));
+            Assert.Contains("did not write", ex.Message, StringComparison.Ordinal);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task AnUnmarkedWrite_WhoseCommitFails_IsJournaledFailed_AsBefore()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            await ExecAsync(connection, FailCommitSql, ct);
+            var (request, claim) = await OpenAndClaimAsync(store);
+            await Assert.ThrowsAsync<PostgresException>(() => store.RunAgentActionAsync(Call(request, claim), WriteHooks(new ServerChangeSignal(), mark: false), ct));
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task AStoreOnlyHook_WhoseCommitFails_IsJournaledFailed_BecauseItsChangeRolledBack()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            await ExecAsync(connection, FailCommitSql, ct);
+            var (request, claim) = await OpenAndClaimAsync(store);
+            /* No signal at all: the mute, signature merge and threshold override hooks. */
+            await Assert.ThrowsAsync<PostgresException>(() => store.RunAgentActionAsync(Call(request, claim), WriteHooks(null, mark: false), ct));
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task AServerChange_ThenACancellation_IsRecordedDone_AndTheCancellationPropagates()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var (request, claim) = await OpenAndClaimAsync(store);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var hooks = WriteHooks(new ServerChangeSignal(), mark: true, token =>
+            {
+                cts.Cancel();
+                token.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            });
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.RunAgentActionAsync(Call(request, claim), hooks, cts.Token));
+            Assert.Equal("action_called|action_done", await EventsAsync(connection, request, ct));
+            Assert.Equal("true", await ScalarAsync(connection,
+                $"SELECT detail->>'recorded_late' FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'action_done'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ACancellationBeforeTheServerAccepted_IsNotRecordedAsDone()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var (request, claim) = await OpenAndClaimAsync(store);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var hooks = WriteHooks(new ServerChangeSignal(), mark: false, token =>
+            {
+                cts.Cancel();
+                token.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            });
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.RunAgentActionAsync(Call(request, claim), hooks, cts.Token));
+            Assert.Equal("action_called", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task AServerChange_WhoseStoreCannotBeWrittenAtAll_HasNoResultRow_AndTheListReadsUnknown()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            await ExecAsync(connection, FailEveryDoneSql, ct);
+            var (request, claim) = await OpenAndClaimAsync(store);
+            var result = await store.RunAgentActionAsync(Call(request, claim), WriteHooks(new ServerChangeSignal(), mark: true), ct);
+
+            Assert.True(result.JournalMissing);
+            Assert.False(result.RecordedLate);
+            Assert.Equal("action_called", await EventsAsync(connection, request, ct));
+            Assert.Equal(AgentChangeResult.Unknown, (await ListedAsync(connection, result.CalledId!.Value, ct)).Result);
+        });
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

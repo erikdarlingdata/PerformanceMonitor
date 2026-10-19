@@ -873,8 +873,8 @@ public partial class SettingsWindow : Window
         LrqExcludeCdcCheckBox.IsChecked = r.LongRunningQueryExcludeCdc;
         AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", r.LongRunningQueryExcludedProgramNamePrefixes);
         AlertLrqExcludedLoginsBox.Text = string.Join(", ", r.LongRunningQueryExcludedLogins);
-        AlertExcludedDatabasesBox.Text = string.Join(", ", r.ExcludedDatabases);
-        AlertExcludedVolumesBox.Text = string.Join(", ", r.ExcludedVolumes);
+        AlertExcludedDatabasesBox.Text = SettingsListText.Join(r.ExcludedDatabases);
+        AlertExcludedVolumesBox.Text = SettingsListText.Join(r.ExcludedVolumes);
         AlertTempDbSpaceCheckBox.IsChecked = r.TempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = r.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
@@ -983,12 +983,8 @@ public partial class SettingsWindow : Window
                the bind normalises the spelling. */
             AnalysisUncorroboratedRoute = SelectedAnalysisUncorroboratedRoute(),
             FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
-            ExcludedDatabases = AlertExcludedDatabasesBox.Text
-                .Split(',')
-                .Select(s => s.Trim())
-                .Where(s => s.Length > 0)
-                .ToList(),
-            ExcludedVolumes = VolumeExclusions.Normalize(AlertExcludedVolumesBox.Text.Split(',')).ToList(),
+            ExcludedDatabases = SettingsListText.SplitLines(AlertExcludedDatabasesBox.Text),
+            ExcludedVolumes = VolumeExclusions.Normalize(SettingsListText.SplitLinesAndCommas(AlertExcludedVolumesBox.Text)).ToList(),
         };
 
         if (int.TryParse(AlertCpuThresholdBox.Text, out var cpu) && cpu is > 0 and <= 100)

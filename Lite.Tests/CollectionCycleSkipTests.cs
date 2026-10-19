@@ -428,8 +428,10 @@ public sealed class CollectionCycleSkipTests : IDisposable
         var failures = AppLogger.DrainBufferedLines()
             .Where(l => l.Contains("[ERROR]", StringComparison.Ordinal)
                         && l.Contains("[Collector]", StringComparison.Ordinal)
-                        && l.Contains("COLLECTION LOGGING FAILED", StringComparison.Ordinal))
+                        && l.Contains("Failed to log collection for " + CollectionCycleSkip.CollectorName, StringComparison.Ordinal))
             .ToList();
+        /* #6113: counted on the line that names THIS collector. "COLLECTION LOGGING FAILED" is written for any collector whose log
+           row fails, so a collector run in another test class at the same moment added a line to the count. */
         Assert.Equal(2, failures.Count);
     }
 

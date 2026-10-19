@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
@@ -139,6 +140,27 @@ public sealed class DarlingMcpPlanForceTools
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
+    /// <summary>
+    /// Adds the <c>notice</c> a made change carries (not <c>warnings</c>: evict and kill already answer a list under that key) (#5632, step 13): the store recorded the change late, or could not record it,
+    /// and what a later read could not show. A change the server accepted is never answered as an error.
+    /// </summary>
+    internal static string WithWarnings(string answer, AgentActionResult result, params string?[] more)
+    {
+        var parts = new List<string>();
+        if (result.JournalMissing)
+            parts.Add("The change was made on the server, but the store could not record it. The agent changes list shows it as result unknown.");
+        else if (result.RecordedLate)
+            parts.Add("The change was made on the server. The store recorded it late.");
+        foreach (var extra in more)
+            if (extra is not null)
+                parts.Add(extra);
+        if (parts.Count == 0)
+            return answer;
+        var node = JsonNode.Parse(answer)!.AsObject();
+        node["notice"] = string.Join(" ", parts);
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
     /// <summary>The tool body, so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, bool force, string? server_name,
         string database_name, long query_id, long plan_id, string? agent_action, bool dry_run, CancellationToken ct)
@@ -221,10 +243,13 @@ public sealed class DarlingMcpPlanForceTools
 
             /* 6: the write, journaled. */
             PlanForceState? after = null;
+            var afterNotRead = false;
+            var changed = new ServerChangeSignal();
             try
             {
                 var hooks = new AgentActionHooks
                 {
+                    ServerChange = changed,
                     LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(beforeState)),
                     Write = async (_, _, token) =>
@@ -232,20 +257,34 @@ public sealed class DarlingMcpPlanForceTools
                         var written = force
                             ? await executor.ForcePlanAsync(permit, query_id, plan_id, dryRun: false, token)
                             : await executor.UnforcePlanAsync(permit, query_id, plan_id, dryRun: false, token);
+                        /* The executor says the server accepted the write: from here the store's journal never says failed (#5632, step 13). */
+                        if (written.Wrote)
+                            changed.MarkServerChanged();
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
                             throw new PlanForceWriteException(written.Message, Answer(written.Outcome == RemediationOutcome.Refused ? "refused" : "failed",
                                 written.Reason, written.Message, new { dry_run = false, statement, before = beforeState }));
-                        var read = await executor.ReadPlanStateAsync(permit, query_id, plan_id, token);
-                        after = read.State;
+                        /* The read after the write is a warning when it fails, not an error for a change that was made (#5632, step 13). */
+                        try
+                        {
+                            var read = await executor.ReadPlanStateAsync(permit, query_id, plan_id, token);
+                            after = read.State;
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            logger.LogWarning("The state read after plan {PlanId} was {Verb} for query {QueryId} failed: {Message}", plan_id, force ? "forced" : "unforced", query_id, ex.Message);
+                        }
+
+                        afterNotRead = after is null;
                         return JsonSerializer.Serialize(new { statement, state = after, message = written.Message });
                     },
                 };
                 var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
-                return Answer("done", null,
+                return WithWarnings(Answer("done", null,
                     $"Plan {plan_id} was {(force ? "forced" : "unforced")} for query {query_id} in {beforeState.Database}. Check with get_forced_plans.",
-                    new { dry_run = false, statement, before = beforeState, after, journal_id = result.CalledId });
+                    new { dry_run = false, statement, before = beforeState, after, journal_id = result.CalledId }),
+                    result, afterNotRead ? "The state after the change was not read; check with get_forced_plans." : null);
             }
             catch (PlanForceWriteException ex)
             {
@@ -328,13 +367,17 @@ public sealed class DarlingMcpPlanForceTools
             /* 6: the write, journaled. action_called holds the store's before image; action_done holds the statement and the message. */
             try
             {
+                var changed = new ServerChangeSignal();
                 var hooks = new AgentActionHooks
                 {
+                    ServerChange = changed,
                     LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
                         var written = await executor.EvictPlanAsync(permit, handle, dryRun: false, token);
+                        if (written.Wrote)
+                            changed.MarkServerChanged();
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
                             throw new PlanForceWriteException(written.Message, Answer(written.Outcome == RemediationOutcome.Refused ? "refused" : "failed",
                                 written.Reason, written.Message, new { dry_run = false, statement, before, warnings }));
@@ -344,9 +387,9 @@ public sealed class DarlingMcpPlanForceTools
                 var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanEvict, action!, target), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
-                return Answer("done", null,
+                return WithWarnings(Answer("done", null,
                     "The plan was evicted from the plan cache. There is no undo; the next run compiles a new plan. Wait for the next query_stats collection (about a minute), then call get_compiles_after_evict with this journal_id.",
-                    new { dry_run = false, statement, before, warnings, journal_id = result.CalledId });
+                    new { dry_run = false, statement, before, warnings, journal_id = result.CalledId }), result);
             }
             catch (PlanForceWriteException ex)
             {
@@ -444,13 +487,17 @@ public sealed class DarlingMcpPlanForceTools
             /* 6: the kill, journaled. action_called holds the facts the dry batch read; action_done holds the facts the kill batch read and the rollback read. */
             try
             {
+                var changed = new ServerChangeSignal();
                 var hooks = new AgentActionHooks
                 {
+                    ServerChange = changed,
                     LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
                         var written = await executor.KillSessionAsync(permit, session_id, loginLocal, dryRun: false, token);
+                        if (written.Wrote)
+                            changed.MarkServerChanged();
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
                             throw new PlanForceWriteException(written.Message, KillNotDone(written, clock, dryRun: false));
                         killed = written;
@@ -465,7 +512,7 @@ public sealed class DarlingMcpPlanForceTools
                 var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.SessionKill, action!, target), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
-                return Answer("done", null,
+                return WithWarnings(Answer("done", null,
                     $"Session {session_id} was killed. There is no undo."
                     + (killed?.Rollback is { InProgress: true } ? " A rollback is running: the session keeps its locks until it ends. Do not kill it again; read get_blocking to see it clear." : ""),
                     new
@@ -475,7 +522,7 @@ public sealed class DarlingMcpPlanForceTools
                         warnings,
                         rollback = KillRollbackImage(killed?.Rollback),
                         journal_id = result.CalledId,
-                    });
+                    }), result);
             }
             catch (PlanForceWriteException ex)
             {
@@ -807,7 +854,7 @@ WHERE server_id = $1";
         private static UndoPlan Refuse(string code, string message) => new(null, new AgentActionRefusal(code, message));
     }
 
-    /// <summary>A failure inside the write hook: the gate journals <c>action_failed</c> with <see cref="Exception.Message"/> (the server's own words, already scrubbed of the secret) and the tool answers <see cref="Answer"/>.</summary>
+    /// <summary>A failure inside the write hook before the server accepted anything: the gate journals <c>action_failed</c> with <see cref="Exception.Message"/> (the server's own words, already scrubbed of the secret) and the tool answers <see cref="Answer"/>.</summary>
     private sealed class PlanForceWriteException(string message, string answer) : Exception(message)
     {
         internal string Answer { get; } = answer;
