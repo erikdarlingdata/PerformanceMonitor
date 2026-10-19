@@ -534,6 +534,14 @@ public sealed class PgCollectorSearchPathLiveTests
             await using var connection = new NpgsqlConnection(runtime.ConnectionString);
             await connection.OpenAsync(ct);
 
+            /* The fallback on its own, as when pg_proc shows nothing (#2340): nothing outside pg_catalog is chosen, and
+               nothing is planned there. */
+            var nothing = await AuroraFunctionSchemaFallback.FillAsync(
+                connection, new Dictionary<string, string>(StringComparer.Ordinal), CollectorContext.AuroraFunctionNames, "public", null, null, ct);
+            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.version_calls", ct));
+            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.statements_calls", ct));
+            Assert.Empty(nothing);
+
             /* The connect-time probe: not Aurora. */
             Assert.False(await DarlingServerConnector.ProbeAuroraAsync(connection, ct));
             Assert.Equal("pg_catalog", await DarlingServerConnector.ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", ct));
