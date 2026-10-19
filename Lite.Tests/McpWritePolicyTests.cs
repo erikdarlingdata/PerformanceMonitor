@@ -405,12 +405,12 @@ public sealed class McpWritePolicyTests
     public void Host_RegistersThePolicyWithTheSetting_AndTheMainWindowPassesTheSetting()
     {
         var host = ParitySource.ReadFile("Lite/Mcp/McpHostService.cs");
-        Assert.Contains("RegisterMcpServer(builder.Services, _allowWrites, _allowInvestigations, _dataDetail);", host, StringComparison.Ordinal);
+        Assert.Contains("RegisterMcpServer(builder.Services, _allowWrites, _allowInvestigations, _dataDetail, _pseudonymKeys);", host, StringComparison.Ordinal);
         Assert.Contains("_allowWrites = allowWrites;", host, StringComparison.Ordinal);
         Assert.Contains("bool allowWrites = false", host, StringComparison.Ordinal);
 
         var main = ParitySource.ReadFile("Lite/MainWindow.xaml.cs");
-        Assert.Contains("mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail)", main, StringComparison.Ordinal);
+        Assert.Contains("mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys)", main, StringComparison.Ordinal);
     }
 
     [Fact]
