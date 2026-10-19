@@ -1307,4 +1307,42 @@ public partial class ViewerServerTab
                  no way to see the difference from the grid itself. */
               + coverage.Message;
     }
+
+    /// <summary>
+    /// #6133: the Vacuum tab scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
+    /// mouse wheel handled even when it has nothing left to scroll, so over a grid the page would not move.
+    /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself.
+    /// </summary>
+    private void PgVacuumScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (sender is not ScrollViewer page || e.Handled)
+        {
+            return;
+        }
+
+        ScrollViewer? inner = null;
+        for (DependencyObject? d = e.OriginalSource as DependencyObject;
+             d != null && !ReferenceEquals(d, page);
+             d = System.Windows.Media.VisualTreeHelper.GetParent(d))
+        {
+            if (d is ScrollViewer sv)
+            {
+                inner = sv;
+                break;
+            }
+        }
+
+        if (inner != null && inner.ScrollableHeight > 0)
+        {
+            bool atTop = inner.VerticalOffset <= 0;
+            bool atBottom = inner.VerticalOffset >= inner.ScrollableHeight;
+            if ((e.Delta > 0 && !atTop) || (e.Delta < 0 && !atBottom))
+            {
+                return;
+            }
+        }
+
+        page.ScrollToVerticalOffset(page.VerticalOffset - e.Delta);
+        e.Handled = true;
+    }
 }

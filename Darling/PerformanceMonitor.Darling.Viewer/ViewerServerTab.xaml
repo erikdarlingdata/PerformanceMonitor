@@ -4579,25 +4579,30 @@
              idle-in-transaction session pins NOTHING, which is the correction the rest of the tab cannot
              make and the reason it has to be met before the vacuum backlog below it. -->
         <TabItem x:Name="PgVacuumTab" Header="Vacuum" Visibility="Collapsed">
+            <!-- #6133: five panels do not fit one screen, and star rows gave the four grids whatever the
+                 wrapped notes and the plan-capture grid left (a header strip). Every row is Auto now and
+                 each grid has a MinHeight (several rows) and a MaxHeight (inner scroll), so the tab scrolls. -->
+            <ScrollViewer x:Name="PgVacuumScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          PreviewMouseWheel="PgVacuumScroll_PreviewMouseWheel">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="2*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-</Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgVacuumNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
@@ -4611,6 +4616,7 @@
                                Background="#22FFAA00"/>
                 </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgSessionStatesGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="300"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -4682,6 +4688,7 @@
                                Background="#22FFAA00"/>
                 </StackPanel>
                 <DataGrid Grid.Row="6" x:Name="PgXminHorizonGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="240"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Cause" Binding="{Binding Source}" Width="200"/>
@@ -4711,6 +4718,7 @@
                                Background="#22FFAA00"/>
                 </StackPanel>
                 <DataGrid Grid.Row="9" x:Name="PgAutovacuumGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="360"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -4750,6 +4758,7 @@
                 <TextBlock Grid.Row="11" x:Name="PgWraparoundNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="12" x:Name="PgWraparoundGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="90" MaxHeight="200"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
@@ -4774,6 +4783,7 @@
                 <TextBlock Grid.Row="14" x:Name="PgPlanCaptureNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="15" x:Name="PgPlanCaptureGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="260"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True"
                           AutoGenerateColumns="False" IsReadOnly="True">
                     <DataGrid.Columns>
@@ -4787,6 +4797,7 @@
                 </DataGrid>
 
             </Grid>
+            </ScrollViewer>
         </TabItem>
 
         <TabItem x:Name="PgWaitsTab" Header="Waits" Visibility="Collapsed">
