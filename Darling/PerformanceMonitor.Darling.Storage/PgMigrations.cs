@@ -1781,15 +1781,16 @@ CREATE TABLE IF NOT EXISTS config.pseudonym_key
 REVOKE ALL ON config.pseudonym_key FROM PUBLIC;
 
 DO $do$
-DECLARE
-    holder text;
 BEGIN
-    FOREACH holder IN ARRAY ARRAY['admin', 'viewer', 'mcp']
-    LOOP
-        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = holder) THEN
-            EXECUTE pg_catalog.format('REVOKE ALL ON config.pseudonym_key FROM %I', holder);
-        END IF;
-    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE ALL ON config.pseudonym_key FROM admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE ALL ON config.pseudonym_key FROM viewer;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.pseudonym_key FROM mcp;
+    END IF;
 END
 $do$;
 

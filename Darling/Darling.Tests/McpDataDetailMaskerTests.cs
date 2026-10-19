@@ -247,7 +247,7 @@ public sealed class McpDataDetailMaskerTests
         Assert.DoesNotContain("canlogin", meta, StringComparison.Ordinal);
         Assert.DoesNotContain("CANHOST", meta, StringComparison.Ordinal);
         Assert.Contains("<inputbuf>" + Withheld + "</inputbuf>", meta, StringComparison.Ordinal);
-        Assert.Contains("loginname=\"" + PseudonymTestKey.Login("canlogin") + "\"", meta, StringComparison.Ordinal);
+        Assert.Contains("loginname=\"" + PseudonymTestKey.Login("CORP\\canlogin") + "\"", meta, StringComparison.Ordinal);
         Assert.Contains("hostname=\"" + PseudonymTestKey.Host("CANHOST") + "\"", meta, StringComparison.Ordinal);
         Assert.Contains("clientapp=\"App 1\"", meta, StringComparison.Ordinal);
         Assert.Contains("objectname=\"db.dbo.t\"", meta, StringComparison.Ordinal);

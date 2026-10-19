@@ -297,11 +297,6 @@ public sealed class MigrationDataMovingRungCensusPins
             + "are nullable with no default and rewrite nothing, and the CHECK is validated against rows that are all null in both "
             + "columns. It does not move the lock-wait floor."),
         new(
-            198,
-            SetsTheFloor: false,
-            "INSERT INTO config.pseudonym_key (#6066, created by this rung): one row, seeded with a hash of two gen_random_uuid() values, into a "
-            + "table this rung has just created empty. It reads no other table and moves no stored row. It does not move the lock-wait floor."),
-        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "
