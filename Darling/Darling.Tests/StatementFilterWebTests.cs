@@ -34,7 +34,6 @@ namespace Darling.Tests;
 /// then comes through.
 /// </summary>
 [Collection("timing")]
-[Trait("Stage", "Guard")]
 public sealed class StatementFilterWebTests
 {
     private static readonly string Canary = StatementScrubCanary.CanaryStatement;

@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// The reuse rule of the PLAN_REGRESSION candidate cache (#5812), pinned without a store: a current pass of the same
 /// shape reuses a read younger than the refresh period, and nothing else does.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PlanRegressionCandidateReuseRuleTests
 {
     private static readonly DateTime Now = new(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);

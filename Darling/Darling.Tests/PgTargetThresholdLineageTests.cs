@@ -43,7 +43,6 @@ namespace Darling.Tests;
 /// <para>Passes trivially on the plumbing lane's stubs (every partial returns <c>0.0</c> / <c>[]</c>), which is
 /// the point: the rule exists on the tree before the first number does.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetThresholdLineageTests
 {
     /// <summary>A line that grades: the shared formula, a comparison, or an amplifier boost. A comparison is a

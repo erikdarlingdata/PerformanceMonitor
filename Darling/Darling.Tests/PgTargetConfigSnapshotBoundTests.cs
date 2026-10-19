@@ -36,7 +36,6 @@ namespace Darling.Tests;
 /// config collector went dark still states its config, and a historical window still reads the snapshot that applied
 /// at its own end.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetConfigSnapshotBoundTests
 {
     /// <summary>The six statements: the const, the file that executes it, and the parameter its lower bound takes.</summary>

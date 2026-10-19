@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// fix removes. Its shape instead threads the anchor's <c>collection_time</c> through a LEFT JOIN so it rides
 /// on every call, even one with zero override rows; the retry loop keys on THAT column, never on row count.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgServerConfigToolBoundTests
 {
     private static string Strip(string sql) => Regex.Replace(sql, @"/\*.*?\*/", " ", RegexOptions.Singleline);

@@ -28,7 +28,6 @@ namespace Darling.Tests;
 /// alphanumeric-password safety guard. The live round-trip (roles actually created, admin writes /
 /// viewer denied, default-privileges proof) is in the gated <see cref="DarlingSecuritySplitLiveTests"/>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingManagedRolesTests
 {
     /// <summary>The EXECUTE grant of the edit function (#5240), as the managed batch and <c>Darling/tools/provision-roles.sql</c>

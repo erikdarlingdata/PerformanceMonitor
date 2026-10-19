@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// message. The colour-helper assertions are compile-only RED on dev (the member doesn't exist);
 /// the source-census assertion is a runtime RED on dev (the old ternaries are still there).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PlanViewerWarningColorAndFixTests
 {
     [Fact]

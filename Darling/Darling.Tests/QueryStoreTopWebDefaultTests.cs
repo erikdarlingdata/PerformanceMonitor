@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// <c>previewLength</c> overload (the same shape #3897's trend tools use for <c>TrendBudget.Chart</c>), not to
 /// <c>full_text: true</c>: full text would be MORE than the viewer ever rendered, which is still a change.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class QueryStoreTopWebDefaultTests
 {
     private const string WebEndpoints =

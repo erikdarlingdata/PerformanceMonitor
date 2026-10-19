@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// statements the store would have seen. The gated live test at the bottom closes the loop against a real
 /// store with three racing <c>GetFleetOverviewAsync</c> calls.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class FleetCollectionHealthMemoTests
 {
     private static readonly DateTime T0 = new(2026, 9, 19, 13, 36, 3, DateTimeKind.Utc);

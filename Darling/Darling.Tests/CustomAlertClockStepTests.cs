@@ -28,7 +28,6 @@ namespace Darling.Tests;
 /// decision is driven through <see cref="CustomAlertEvaluator.CadenceIsWaiting"/> and the retry through the
 /// evaluator's decision half (<see cref="CustomAlertEvaluator.ApplyValueAsync"/>), so no store is read or written.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class CustomAlertClockStepTests
 {
     private const int ServerId = 7;

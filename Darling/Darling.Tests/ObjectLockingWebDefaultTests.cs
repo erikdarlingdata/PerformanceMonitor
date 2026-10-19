@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// neighboring row already pins for the identical reason - independent of (and higher than) the MCP
 /// signature's own default.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ObjectLockingWebDefaultTests
 {
     private const string WebEndpoints =

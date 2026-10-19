@@ -136,7 +136,6 @@ internal sealed class InMemoryServerTagStore : IServerTagStore
 }
 
 /// <summary>The cores of the five server-tag write tools over <see cref="InMemoryServerTagStore"/> (#5085).</summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingMcpServerTagToolsTests
 {
     private static readonly string[] ExpectedSurface =

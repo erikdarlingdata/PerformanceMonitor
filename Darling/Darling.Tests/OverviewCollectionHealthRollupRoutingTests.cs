@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// COMPILES (the old reads still exist, for the Collection Health tab and for Lite's parity twin), so only
 /// reading the call sites catches a caller quietly routed back to raw.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class OverviewCollectionHealthRollupRoutingTests
 {
     [Fact]

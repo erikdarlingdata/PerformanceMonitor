@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// <c>--upgrade-takeover</c>, which startup must never read as the darling.json path, and the relaunch
 /// must carry the first launch's arguments forward.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerArgsTests
 {
     [Fact]

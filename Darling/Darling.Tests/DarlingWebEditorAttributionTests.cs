@@ -79,7 +79,6 @@ namespace Darling.Tests;
 /// contexts (below) plus the live store round-trip; the join between them is asserted from the source. Said
 /// plainly because "it's tested" unscoped is how #2213's wiring gap survived a green suite.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingWebEditorAttributionTests
 {
     private const string EndpointsPath = "Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs";

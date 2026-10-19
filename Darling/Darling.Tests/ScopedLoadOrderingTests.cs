@@ -61,7 +61,6 @@ namespace Darling.Tests;
 /// #5371 gave them the viewer's replay (<c>RefreshCoordinator</c>), with the event-suppression duty split off
 /// into <c>_suppressRangeRefresh</c>, which was a load-architecture change rather than a guard.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ScopedLoadOrderingTests
 {
     // ══ The mechanism ═════════════════════════════════════════════════════════════════════════

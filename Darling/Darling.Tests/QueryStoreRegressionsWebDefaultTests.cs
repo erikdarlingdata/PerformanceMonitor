@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// show. This pins the web row's <c>full_text</c> default at <c>true</c>, independent of (and opposite to)
 /// the MCP signature's own default.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class QueryStoreRegressionsWebDefaultTests
 {
     private const string WebEndpoints =

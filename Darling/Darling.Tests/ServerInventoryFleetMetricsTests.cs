@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// replacement to its shape: one statement for every server's metrics, and the idle check answered from the
 /// stitched rollup plus raw only for the two edges it cannot cover.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ServerInventoryFleetMetricsTests
 {
     // ── #4227: one statement, not one per server ──

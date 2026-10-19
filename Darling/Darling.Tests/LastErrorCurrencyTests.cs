@@ -38,7 +38,6 @@ namespace Darling.Tests;
 /// and which is now closed as not-a-defect. The falsifying query was always one <c>GROUP BY status</c>
 /// away; nothing in the surface suggested it was necessary.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class LastErrorCurrencyTests
 {
     /// <summary>

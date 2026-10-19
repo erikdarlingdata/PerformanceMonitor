@@ -31,7 +31,6 @@ namespace Darling.Tests;
 /// run (<see cref="DarlingWorker.RunOneBodyOverride"/>) that a test can hold open, so "the pass ends", "the
 /// run is still going" and "the 17th run waits" are observed directly, with no store and no monitored server.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DailyCollectorDetachTests
 {
     private const string Daily = "index_object_stats";

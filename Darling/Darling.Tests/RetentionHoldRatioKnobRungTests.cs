@@ -31,7 +31,6 @@ namespace Darling.Tests;
 /// own claims, stated against this rung's own NUMBER — read out of the ladder rather than taken from
 /// <see cref="StorageVersion.SchemaVersion"/>, which is no longer it.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RetentionHoldRatioKnobRungTests
 {
     /// <summary>This rung's number, DERIVED from the ladder entry that owns the name rather than written as

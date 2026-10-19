@@ -39,7 +39,6 @@ namespace Darling.Tests;
 /// structural claim — a deadline was SET — is what this file owns. The one constant this change
 /// introduced, <see cref="StorageCommandDeadlines.McpReadSeconds"/>, gets its band pinned below.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class StorageCommandTimeoutTests
 {
     /// <summary>

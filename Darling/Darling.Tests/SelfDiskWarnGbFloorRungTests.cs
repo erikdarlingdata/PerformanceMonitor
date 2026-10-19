@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// about being NEWEST — keeping a copy of those would assert this rung is still the top, which is how the
 /// NEXT rung's build goes red.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class SelfDiskWarnGbFloorRungTests
 {
     private const int RungVersion = 126;

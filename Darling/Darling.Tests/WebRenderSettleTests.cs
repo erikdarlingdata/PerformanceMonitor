@@ -19,7 +19,6 @@ namespace Darling.Tests;
 /// <see cref="WebAutoRefreshPolicyTests"/> skips it, when it is not installed, and the source-order pin at the
 /// bottom then still holds the fix in place.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class WebRenderSettleTests
 {
     private static readonly string s_wwwroot = Path.Combine(

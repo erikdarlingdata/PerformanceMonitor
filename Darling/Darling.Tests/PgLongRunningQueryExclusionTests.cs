@@ -48,7 +48,6 @@ namespace Darling.Tests;
 /// runner matched by login only, and a real long user query matched by neither — and a second capture where
 /// an excluded database holds every one of the longest sessions.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public class PgLongRunningQueryExclusionTests
 {
     /// <summary>The host's exact builder call (<c>DarlingWorker.EvaluatePgLongRunningQueryAsync</c>): the

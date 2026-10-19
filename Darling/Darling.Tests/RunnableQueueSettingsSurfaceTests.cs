@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// saves all three columns, and the Settings window and the mute dialog name the alert. The MCP and web halves are
 /// pinned in <c>DarlingMcpAlertToolsSurfaceAndSqlTests</c> and <c>AdminPageTests</c>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RunnableQueueSettingsSurfaceTests
 {
     [Fact]

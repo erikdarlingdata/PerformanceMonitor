@@ -49,7 +49,6 @@ namespace Darling.Tests;
 /// against a real store — is <c>StoreSelfMetricsTests.Sweep_EndToEnd_…</c>; the Lite-side lockstep for the two
 /// INFO arms is <c>Lite.Tests.AlertSeverityTests</c>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class StoreToastAndCheckpointerTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

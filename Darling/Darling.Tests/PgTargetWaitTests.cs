@@ -30,7 +30,6 @@ namespace Darling.Tests;
 /// and a restart collection contributes no sample. The SQL Server lock remedy does not transfer: the
 /// <c>Lock:relation</c> block names PostgreSQL's levers and never the isolation-level one.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetWaitTests
 {
     private static readonly string Lock = PgTargetFactKeys.WaitKey("Lock", null);

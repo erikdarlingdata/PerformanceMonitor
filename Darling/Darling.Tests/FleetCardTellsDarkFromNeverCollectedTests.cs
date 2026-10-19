@@ -30,7 +30,6 @@ namespace Darling.Tests;
 /// card and the reason it produces, and the read's shape; <see cref="FleetReadsAreBoundedLivePostgresTests"/>
 /// holds the seam against a store.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class FleetCardTellsDarkFromNeverCollectedTests
 {
     private static readonly DateTime Now = new(2026, 9, 23, 12, 0, 0, DateTimeKind.Utc);

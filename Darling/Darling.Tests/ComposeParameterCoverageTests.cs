@@ -73,7 +73,6 @@ namespace Darling.Tests;
 /// number typed here, which a new measure raises on its own. Same discipline as
 /// <c>ServerLocalReadFrameDisciplineTests</c> and <c>CreationTimeClockFrameDisciplineTests</c>.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ComposeParameterCoverageTests
 {
     /// <summary>A positional placeholder in composed SQL. Matched as a whole number, not a substring: a

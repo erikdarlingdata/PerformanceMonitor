@@ -33,7 +33,6 @@ namespace Darling.Tests;
 /* Serialized with the other classes that read or set the process-wide ViewerTimeHelper statics: the status-line
    tests below set ActiveServerClock and CurrentDisplayMode to prove the line ignores them. */
 [Collection("viewer-time-statics")]
-[Trait("Stage", "Guard")]
 public sealed class ViewerRecommendationServerClockTests
 {
     /* The dash between the two ends of the window in the prompt text. */

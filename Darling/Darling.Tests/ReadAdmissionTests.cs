@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// limit and the wait cap, and past that a read is refused. Light reads never wait, and a read nested in a flow that holds
 /// a slot takes no second one. Unit-level: the admission object alone, with a clock the test moves.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ReadAdmissionTests
 {
     private const string HeavyRoute = "heavy_probe";

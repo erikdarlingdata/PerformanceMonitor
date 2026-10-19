@@ -44,7 +44,6 @@ namespace Darling.Tests;
 /// itself (initialize / tools/list / tools/call) is spoken as plain JSON-RPC HTTP POSTs over
 /// <c>TestServer.CreateClient</c>, since the SDK's transport reads the body, not the connection.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingMcpHostGateLiveTests
 {
     private const string ListenIp = "192.168.1.205";

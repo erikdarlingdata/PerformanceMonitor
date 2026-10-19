@@ -36,7 +36,6 @@ namespace Darling.Tests;
 /// adds its own read with <see cref="DarlingWebEndpoints.TestOnlyExtraDispatchEntry"/>, classified heavy, so no store is
 /// needed: the handler stands in for the store read and counts its calls.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ReadCacheWebEndToEndTests
 {
     private sealed class NullLogger<T> : ILogger<T>

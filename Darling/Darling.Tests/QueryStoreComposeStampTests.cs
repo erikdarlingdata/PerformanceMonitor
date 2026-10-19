@@ -25,7 +25,6 @@ namespace Darling.Tests;
 /// builder works in, the 3-hour lag, the column map that the compiler and the builder share, and the rung's place in the
 /// ladder (the sentinel, the version map, the tick).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class QueryStoreComposeStampTests
 {
     /// <summary>The probe ordinal of this rung's sentinel in the viewer's version probe.</summary>

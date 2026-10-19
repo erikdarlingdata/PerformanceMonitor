@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// the live slicer and dedup tests in <c>ViewerQueriesLivePostgresTests</c>, so between them a
 /// logical/physical swap on either side of the seam goes red.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerSlicerMetricMapTests
 {
     private const string QueriesSource = "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Queries.cs";

@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// names <c>procedure_stats_interval_hourly</c> / <c>procedure_stats_hourly</c> directly in the hourly path
 /// instead of going through <see cref="PerformanceMonitor.Darling.Storage.RollupCoverage.StitchedRelationSql"/>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class TopProceduresHourlyRoutingTests
 {
     /// <summary>

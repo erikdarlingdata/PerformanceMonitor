@@ -33,7 +33,6 @@ namespace Darling.Tests;
 /// health is actually read from.
 /// </para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RdsLogUnavailableTests
 {
     /// <summary>

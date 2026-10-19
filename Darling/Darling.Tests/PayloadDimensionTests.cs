@@ -43,7 +43,6 @@ namespace Darling.Tests;
 /// the view, that the last_seen guard and the GC behave — is in <c>PayloadDimensionLiveTests</c>, gated on
 /// DARLING_TEST_PG.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PayloadDimensionTests
 {
     /// <summary>The ordinal a named payload column occupies in a collector definition, or -1.</summary>

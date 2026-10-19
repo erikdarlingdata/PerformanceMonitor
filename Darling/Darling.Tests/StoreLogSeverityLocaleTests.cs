@@ -47,7 +47,6 @@ namespace Darling.Tests;
 /// store only: a bring-your-own store, and every monitored PostgreSQL target, keeps whatever
 /// <c>lc_messages</c> its owner gave it.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public class StoreLogSeverityLocaleTests
 {
     /// <summary>

@@ -63,7 +63,6 @@ namespace Darling.Tests;
 /// arithmetic through each projection is <see cref="DarlingMcpPgPercentDenominatorTests"/>' subject; this
 /// file holds the census.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class McpPageContractTests
 {
     /* ───────────────────────── the census ───────────────────────── */

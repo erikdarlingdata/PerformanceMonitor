@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// <c>RunnableQueueIncidentReplayTests</c> pins the 10-09 timeline; these pin the rule on its own, the downstream
 /// legs (the shared cooldown and the repeat ceiling, the Darling viewer's tray cooldown) and the opt-in boundary.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RunnableQueueEscalationTests
 {
     private static readonly DateTime T0 = new(2026, 10, 9, 15, 40, 0, DateTimeKind.Utc);

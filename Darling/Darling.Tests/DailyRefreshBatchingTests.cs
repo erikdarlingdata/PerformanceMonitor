@@ -40,7 +40,6 @@ namespace Darling.Tests;
 /// cost of reaching it is sliced — is deferred on the issue and deliberately not pinned here: this file is
 /// about the transaction boundary, not the window.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DailyRefreshBatchingTests
 {
     /// <summary>

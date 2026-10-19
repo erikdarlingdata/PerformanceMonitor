@@ -50,7 +50,6 @@ namespace Darling.Tests;
 /// <c>Lite.Tests/McpLatestSnapshotStampTests</c> executes the Lite tools against a real DuckDB;
 /// <see cref="McpLatestSnapshotStampLivePostgresTests"/> executes the Darling ones against live Postgres.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class McpLatestSnapshotStampTests
 {
     /* ───────────────────────── the declaration ───────────────────────── */

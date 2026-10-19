@@ -34,7 +34,6 @@ namespace Darling.Tests;
 /// (<c>/api/ping</c>, the static JS the SPA ships) — this class asserts response SHAPE, not store content, so
 /// it stays ungated (no live Postgres needed, unlike <see cref="AvailabilityGroupCountReadTests"/>).</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingWebResponseCompressionTests
 {
     /// <summary>

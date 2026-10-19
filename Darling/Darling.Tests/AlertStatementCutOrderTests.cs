@@ -26,7 +26,6 @@ namespace Darling.Tests;
 /// <c>CREATE LOGIN ... PASSWORD</c> tail) lies past the cut, so every statement here carries a value in its first
 /// part and its naming text well past 300 characters. Each pin fails when the cut comes first.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class AlertStatementCutOrderTests
 {
     private const string Value = "Hunter2Secret5320";

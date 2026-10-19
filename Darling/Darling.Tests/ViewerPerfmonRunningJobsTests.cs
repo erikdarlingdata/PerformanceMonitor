@@ -309,7 +309,6 @@ public sealed class ViewerPerfmonPickerLogicTests
 /// keeps one of them (or drops one of the calls) fails here with the file named. The shaping itself is
 /// pinned value-by-value in <c>Lite.Tests/DeltaSeriesShapingTests</c>, which runs off Windows.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerPerfmonShapingParityTests
 {
     public static IEnumerable<object[]> Charts()

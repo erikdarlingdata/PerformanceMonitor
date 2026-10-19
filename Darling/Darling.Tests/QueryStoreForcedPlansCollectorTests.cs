@@ -19,7 +19,6 @@ namespace Darling.Tests;
 /// all-NULL marker row per captured database (how a later read tells REMOVED from not captured), carries a command deadline,
 /// and its V195 table is the generator's output for the catalog entry.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class QueryStoreForcedPlansCollectorTests
 {
     /* The collector reads the engine version from the enumeration probe (SERVERPROPERTY PRODUCTVERSION major), the way

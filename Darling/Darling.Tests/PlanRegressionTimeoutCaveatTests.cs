@@ -29,7 +29,6 @@ namespace Darling.Tests;
 /// the fact runs carries the 60 s deadline and the fact's catch reports, and a timeout recorded under the fact's method
 /// name describes and serializes as <c>plan_regression (timeout)</c> and maps to the stored reason <c>timeout</c>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PlanRegressionTimeoutCaveatTests
 {
     [Fact]

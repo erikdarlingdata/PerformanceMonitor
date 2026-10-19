@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// #4605's BRIN index ensure, without a store: the build-or-skip decision (PostgreSQL 16 floor, hypertable
 /// guard) and the source shape of the SQL and of the worker's scheduling.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class QueryStoreIntervalWideBrinIndexTests
 {
     [Theory]

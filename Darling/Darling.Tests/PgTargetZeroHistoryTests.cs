@@ -28,7 +28,6 @@ namespace Darling.Tests;
 /// wording through <see cref="PgTargetAdvice.Compose"/>, and the two wait-profile detectors' stamps are pinned in
 /// their source because their reads need a database.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetZeroHistoryTests
 {
     /// <summary>A FULL-tier bucket: 10 samples over 3 distinct days is where the tier's floors clear.</summary>

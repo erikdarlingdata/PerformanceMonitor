@@ -19,7 +19,6 @@ namespace Darling.Tests;
 /// "reduce from X to X" advice. The helper's edges are exercised directly; the Viewer's rules run over the Postgres
 /// store, so their text and equal-size guards are pinned on the rule source.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RightSizingWindowTests
 {
     [Theory]

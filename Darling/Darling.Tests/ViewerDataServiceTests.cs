@@ -431,7 +431,6 @@ public sealed class ViewerReadOnlyTests
 /// <c>information_schema</c> (the owner-only <c>darling_schema_version</c> table can't be read) and blocks a
 /// store behind the version this build needs, instead of letting a control-plane write throw a raw 42703.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerSchemaVersionGateTests
 {
     /// <summary>

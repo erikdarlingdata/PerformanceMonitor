@@ -34,7 +34,6 @@ namespace Darling.Tests;
 /// where #3635's grids and <c>get_alert_history</c> read it. The arms themselves need a live store; the
 /// graders and the deliverer do not.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingPgOperationalAlertTests
 {
     private static DarlingPgDeadlockReader.PgDeadlockRow DeadlockRow(

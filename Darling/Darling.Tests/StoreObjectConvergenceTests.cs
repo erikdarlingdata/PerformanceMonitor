@@ -41,7 +41,6 @@ namespace Darling.Tests;
 /// host — that a step which throws is retried on the next pass and counted — is driven, on the list's own
 /// step shape, in <see cref="StoreObjectConvergenceStepBehaviourTests"/>.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class StoreObjectConvergenceTests
 {
     private const string ListDeclaration = "private static readonly StoreObjectConvergenceStep[] s_storeObjectConvergence =";

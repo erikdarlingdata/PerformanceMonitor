@@ -51,7 +51,6 @@ namespace Darling.Tests;
 /// page rather than off either read. <c>Lite</c> has no index-bloat panel at all: the PostgreSQL collectors
 /// are Darling-only, so there is no cross-SKU parity question on this surface.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgIndexBloatGridReachTests
 {
     private const string ViewerPanel =

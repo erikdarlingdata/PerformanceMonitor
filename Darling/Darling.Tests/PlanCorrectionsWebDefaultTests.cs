@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// not what the viewer should show. This pins the web row's <c>full_text</c> default at <c>true</c>,
 /// independent of (and opposite to) the MCP signature's own default.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PlanCorrectionsWebDefaultTests
 {
     private const string WebEndpoints =

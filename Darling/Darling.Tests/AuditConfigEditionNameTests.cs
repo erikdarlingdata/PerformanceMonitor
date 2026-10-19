@@ -25,7 +25,6 @@ namespace Darling.Tests;
 /// <c>DARLING_TEST_PG</c>); what runs everywhere is the source pin that the tool's empty branch asks the same
 /// engine question <c>get_server_config</c> does, for the same collector.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class AuditConfigEditionNameTests
 {
     [Theory]

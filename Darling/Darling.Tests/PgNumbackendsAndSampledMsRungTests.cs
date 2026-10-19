@@ -40,7 +40,6 @@ namespace Darling.Tests;
 /// value-by-value in <c>Lite.Tests/PgDatabaseStatsCollectorDefinitionTests</c> and
 /// <c>Lite.Tests/PgWaitSamplerArmTests</c>, which run off Windows. What is here is the PostgreSQL side.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgNumbackendsAndSampledMsRungTests
 {
     private const int RungVersion = 133;

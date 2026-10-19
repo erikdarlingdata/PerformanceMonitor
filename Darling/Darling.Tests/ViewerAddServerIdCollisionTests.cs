@@ -28,7 +28,6 @@ namespace Darling.Tests;
 /// dialogs' wiring (an Add goes through <see cref="ViewerDataService.AddMonitoredServerAsync"/>, an edit keeps
 /// the upsert). The insert-then-read itself runs against a store in the PostgreSQL CI job.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerAddServerIdCollisionTests
 {
     /* Two hosts whose storage names hash to the SAME server_id (found by search). The first test asserts it, so

@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// lists it and <c>set_notification_route_enabled</c> returns it, so a scoped route carries its scope on both, and a <c>*</c> route
 /// reads <c>wildcard</c> with no family (it used to read an exact performance metric) the same way Lite's twin does.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingRoutePayloadTests
 {
     private static JsonElement Payload(PgNotificationRouteStore.RouteSummary summary) =>

@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// and 2.30.1 alike. It passed the guard, Npgsql could not convert it to a <see cref="DateTime"/>, and
 /// <c>get_fleet_overview</c> answered "Out of range of DateTime" while <c>/api/fleet</c> returned a bare 500.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class FreshStoreWatermarkTests
 {
     /// <summary>

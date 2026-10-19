@@ -37,7 +37,6 @@ namespace Darling.Tests;
 /// early-stop; #3597 reshaped it into one chunk-orderable <c>LIMIT 1</c> per collector, and
 /// <see cref="CaptureDownChunkOrderTests"/> pins that one.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class CollectionSignalsChunkOrderTests
 {
     private const string ChunkOrderedRecentN = "ORDER BY collection_time DESC, log_id DESC LIMIT $2";

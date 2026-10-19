@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// <para>The dialog is pinned textually, the way the other Add Server dialog tests are, because reproducing it
 /// behaviourally means standing up the WPF window with a live store.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerOperatorGroupTests
 {
     /// <summary>The Viewer cannot reference the service project, so it repeats the group name. A mismatch would send a

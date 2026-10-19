@@ -26,7 +26,6 @@ namespace Darling.Tests;
 /// cooldowns (seeded from the same history) through. The stores' own rules are pinned in
 /// <c>EscalationSeedHistoryStoreTests</c> (Lite) and <c>EscalationSeedLiveStoreTests</c> (Darling).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class EscalationRestartSeedTests
 {
     private static readonly DateTime T0 = new(2026, 10, 13, 10, 0, 0, DateTimeKind.Utc);

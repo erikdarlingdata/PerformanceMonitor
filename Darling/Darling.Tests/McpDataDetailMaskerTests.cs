@@ -26,7 +26,6 @@ namespace Darling.Tests;
 /// The keyed census that proves the table covers what the readers really return lives in the six statement-filter
 /// live classes.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class McpDataDetailMaskerTests
 {
     private const string Withheld = McpDataDetailMasker.WithheldText;

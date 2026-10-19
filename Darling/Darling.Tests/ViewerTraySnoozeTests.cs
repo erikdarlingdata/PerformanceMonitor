@@ -31,7 +31,6 @@ namespace Darling.Tests;
 /// viewer cannot reference. The WPF surfaces themselves (the balloon, the status bar) are not unit-testable;
 /// everything that decides what they say is.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerTraySnoozeTests
 {
     private static readonly DateTime T0 = new(2026, 9, 18, 7, 22, 53, DateTimeKind.Utc);

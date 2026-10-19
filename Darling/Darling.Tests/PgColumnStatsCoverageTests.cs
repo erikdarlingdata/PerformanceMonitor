@@ -65,7 +65,6 @@ namespace Darling.Tests;
 /// tables past the byte floor also clear the page floor, on all 49 targets that report, and the busiest
 /// holds 361 of them, which is the figure the collector's own comment cites.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgColumnStatsCoverageTests
 {
     /// <summary>

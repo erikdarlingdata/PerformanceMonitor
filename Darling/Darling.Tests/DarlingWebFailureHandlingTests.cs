@@ -37,7 +37,6 @@ namespace Darling.Tests;
 /// #4128 <c>TestServer</c> pattern <see cref="DarlingWebResponseCompressionTests"/> established) so the ordering
 /// and end-to-end behavior are proven against the real <c>ConfigurePipeline</c>, not a hand-copied second one.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingWebFailureHandlingTests
 {
     /* ═══════════════════════════ DarlingWebFailureLog: the shared classifier ═══════════════════════════ */

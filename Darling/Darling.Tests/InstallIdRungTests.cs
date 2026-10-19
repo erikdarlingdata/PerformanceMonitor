@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// <para>Every fact finds the rung by NAME, so a renumber (another rung landing first) is one edit to the
 /// registration, the <c>StorageVersion</c> constant and the viewer's <c>return</c>.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class InstallIdRungTests
 {
     /// <summary>The rung's registered name - how every test here (and the live reset helper) finds it.</summary>

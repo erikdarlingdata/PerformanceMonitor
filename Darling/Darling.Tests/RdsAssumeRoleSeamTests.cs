@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// under the same role, a role edit that reconnects, and the worker arm that records a role the service cannot use. Each
 /// test builds the real ingestor or log source over a fake STS and a recording RDS client, so no AWS call is made.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RdsAssumeRoleSeamTests
 {
     private const string Role = "arn:aws:iam::123456789012:role/darling-monitor";

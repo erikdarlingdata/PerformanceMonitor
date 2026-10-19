@@ -30,7 +30,6 @@ namespace Darling.Tests;
 /// <c>--backfill-rollups</c> did not. None of this needs a live store: the failure comes before any connection is
 /// opened.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingCliUnusableStoreConnectionTests
 {
     /// <summary>A string Npgsql cannot parse: it does not know this <c>sslmode</c>.</summary>

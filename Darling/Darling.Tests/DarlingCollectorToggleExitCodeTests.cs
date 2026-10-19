@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// None of these needs a live store: a closed port stands in for an unreachable one, and a small listener that
 /// answers the login with an error stands in for a store that says no.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DarlingCollectorToggleExitCodeTests
 {
     private const int UsageOrConfig = DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig;

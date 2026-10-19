@@ -21,7 +21,6 @@ namespace Darling.Tests;
 /// warn before the store's own disk fills, so a read from the drive letter would raise or hold the alert on
 /// the wrong disk.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class StoreDiskPressureVolumeTests
 {
     private const long OneGb = 1024L * 1024 * 1024;

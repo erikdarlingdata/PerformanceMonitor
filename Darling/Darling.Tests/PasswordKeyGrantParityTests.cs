@@ -19,7 +19,6 @@ namespace Darling.Tests;
 /// database) pins that the two say the same thing, and that each comes after the last schema-wide grant on the
 /// <c>config</c> schema in its own file, so no blanket grant can run after it.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PasswordKeyGrantParityTests
 {
     private static readonly string[] Placeholders = { "admin", "viewer", "mcp", "config" };

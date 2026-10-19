@@ -32,7 +32,6 @@ namespace Darling.Tests;
 /// value, including the warning for a run time that cannot apply. Every fact finds the rung by NAME, so a renumber is one
 /// edit to the registration, the constant and the viewer's <c>return</c>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class CollectorRunTimeRungTests
 {
     public const string RungName = "collector-run-time";

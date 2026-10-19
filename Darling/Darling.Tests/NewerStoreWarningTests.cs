@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// <see cref="PgMigrations.WarnIfStoreNewerThanBuild"/>, the seam the migration applier calls with the version it
 /// read, so no store is needed.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class NewerStoreWarningTests
 {
     private static int BuildTop => PgMigrations.Scripts[^1].Version;

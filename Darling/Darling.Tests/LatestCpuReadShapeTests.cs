@@ -44,7 +44,6 @@ namespace Darling.Tests;
 /// off. <see cref="LatestCpuReadShapeLivePostgresTests"/> demonstrates that against seeded data instead of
 /// arguing it from the shape.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class LatestCpuReadShapeSqlTests
 {
     /// <summary>The required ordering, as the substring common to the per-server reads

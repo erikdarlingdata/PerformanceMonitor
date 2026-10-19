@@ -49,7 +49,6 @@ namespace Darling.Tests;
 /// <see cref="EveryPgGridOnAPgTab_IsFilledBySomePgTabsLoadPath"/> is what goes red if that stops holding,
 /// naming the grid whose assignment the read could no longer see.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgPanelTabOwnershipTests
 {
     /// <summary>

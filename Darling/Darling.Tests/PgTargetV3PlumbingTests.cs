@@ -25,7 +25,6 @@ namespace Darling.Tests;
 /// root so no content lane edits the anomaly partial. When a lane fills its family it moves ITS lines here from the
 /// inert shape to the filled one (as <c>PgTargetBetweenWavesV2Tests</c> did for lane 17) and says so.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetV3PlumbingTests
 {
     [Fact]

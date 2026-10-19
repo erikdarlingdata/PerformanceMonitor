@@ -28,7 +28,6 @@ namespace Darling.Tests;
 /// <para>The expected numbers are written out against the true totals, so each one fails against the plain sum the
 /// window used before. Pure logic and source pins only: no live Postgres.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerQueryStoreHistoryTotalExecutionsTests
 {
     private static readonly DateTime T0 = new(2026, 3, 1, 10, 0, 0, DateTimeKind.Unspecified);

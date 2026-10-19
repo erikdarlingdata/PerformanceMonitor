@@ -23,7 +23,6 @@ namespace Darling.Tests;
 /// Static pins for the hourly rollup of <c>collect.pg_io_stats</c> (#5495, V170): the read's shape, the rung, the tick and the retention
 /// prune. The live facts are in <see cref="PgIoStatsHourlyLiveTests"/>. Lite has no PostgreSQL targets, so there is no twin to pin there.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgIoStatsHourlyTests
 {
     [Fact]

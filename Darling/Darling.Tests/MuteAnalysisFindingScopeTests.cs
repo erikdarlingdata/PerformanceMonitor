@@ -26,7 +26,6 @@ namespace Darling.Tests;
 /// refusals, and that the tool writes only through that decision. The read tools match with the same rule; that is
 /// pinned in <c>DarlingServerResolverSameHostTests</c>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class MuteAnalysisFindingScopeTests
 {
     private const string Hash = "0123456789abcdef";

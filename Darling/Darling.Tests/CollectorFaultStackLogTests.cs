@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// operation may not execute" could not say which collection or which line. The first failure of each kind from each
 /// collector now carries its full text; the repeats keep the one line.
 /// </summary>
-[Trait("Stage", "Guard")]
 public class CollectorFaultStackLogTests
 {
     private static Exception Thrown(Exception exception)

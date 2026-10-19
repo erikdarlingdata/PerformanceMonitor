@@ -25,7 +25,6 @@ namespace Darling.Tests;
 /// <c>--remove-alert-source</c> and <c>--list-alert-sources</c>. These are the parse, classification and text tests; the live
 /// proof against a store is <see cref="ExternalAlertSourceVerbLiveTests"/>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ExternalAlertSourceVerbTests
 {
     [Theory]

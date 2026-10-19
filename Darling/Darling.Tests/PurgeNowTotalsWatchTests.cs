@@ -28,7 +28,6 @@ namespace Darling.Tests;
 /// source, so there is no WPF, no Postgres and no real waiting. The service's half (the reply carrying
 /// <c>startedAtUtc</c>) is in <see cref="PurgeNowBackgroundTests"/>.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PurgeNowTotalsWatchTests
 {
     private static readonly DateTime Started = new(2026, 9, 29, 11, 59, 59, 500, DateTimeKind.Unspecified);

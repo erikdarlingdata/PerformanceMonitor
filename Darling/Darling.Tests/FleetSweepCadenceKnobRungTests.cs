@@ -37,7 +37,6 @@ namespace Darling.Tests;
 /// is how the NEXT rung's build goes red — the note every demoted file in this line leaves for its
 /// successor.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class FleetSweepCadenceKnobRungTests
 {
     private const int RungVersion = 124;

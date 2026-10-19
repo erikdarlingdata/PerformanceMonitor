@@ -2204,7 +2204,6 @@ internal sealed class SlowInsertMuteRuleStore : IMuteRuleStore
 /// is a repeat to the other. The identity is the seven scope and pattern fields plus the expiry, against rules that are
 /// enabled and unexpired.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RepeatedCreateMuteRuleTests
 {
     /* #5496: one clock reading for the whole class. Expiry(30) is called twice in one test and the two spellings must be

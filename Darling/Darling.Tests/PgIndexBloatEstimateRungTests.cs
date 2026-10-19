@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// refusing a store that is perfectly current, permanently, because no further upgrade changes the
 /// answer.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public class PgIndexBloatEstimateRungTests
 {
     internal const int RungVersion = 114;

@@ -14,7 +14,6 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>The store statement history's pure parts (#5097): the epoch decision and the SQL text's shape. No store.</summary>
-[Trait("Stage", "Guard")]
 public sealed class StoreStatementHistoryTests
 {
     private static readonly DateTime Previous = new(2026, 1, 1, 10, 0, 0, DateTimeKind.Unspecified);

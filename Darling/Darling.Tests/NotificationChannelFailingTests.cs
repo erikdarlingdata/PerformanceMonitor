@@ -28,7 +28,6 @@ namespace Darling.Tests;
 /// at 0. The text names the channel and the count and never an error, because a webhook error can carry the
 /// endpoint's URL and the URL is the credential.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class NotificationChannelFailingTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

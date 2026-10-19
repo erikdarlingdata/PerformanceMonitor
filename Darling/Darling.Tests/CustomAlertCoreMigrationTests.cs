@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// rung is strictly below the top either way, and its probe arm has to keep reporting 116 for a store
 /// migrated exactly this far.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class CustomAlertCoreMigrationTests
 {
     private const int RungVersion = 116;

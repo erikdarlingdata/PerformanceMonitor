@@ -44,7 +44,6 @@ namespace Darling.Tests;
 /// <para>Reads the LF-normalised source (<see cref="RepoFile.ReadRepoFileLf"/>) because a comment block spans
 /// lines and is collapsed to one string before its citation is matched.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetMeasuredLineageTests
 {
     private const string CalibrationDate = "2026-09-19";

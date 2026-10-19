@@ -20,7 +20,6 @@ namespace Darling.Tests;
 /// A bounded change whose table stays busy pass after pass escalates once to a Warning and says so when it
 /// finally converges (#4980).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class BoundedDdlBusyStreakTests
 {
     private static readonly DateTime T0 = new(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);

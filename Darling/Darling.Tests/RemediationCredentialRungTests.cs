@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// form the top-rung comment below predicted it would take. A rung that keeps claiming the title after
 /// losing it breaks every older rung's suite instead.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public class RemediationCredentialRungTests
 {
     internal const int RungVersion = 113;

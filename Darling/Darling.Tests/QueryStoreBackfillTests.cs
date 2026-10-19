@@ -22,7 +22,6 @@ namespace PerformanceMonitor.Darling.Tests;
 /// worker's collector_state rows off the query_store definition (whose "declares NO StateKeys"
 /// contract is pinned by CollectorStateContractTests and must survive this feature).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class QueryStoreBackfillTests
 {
     [Fact]

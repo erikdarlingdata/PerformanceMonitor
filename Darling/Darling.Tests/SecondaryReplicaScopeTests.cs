@@ -174,7 +174,6 @@ public sealed class PgSecondaryReplicaScopeTests
 /// secondary copy would quietly come back for that one pass. A pass that reads only node-local facts says so by setting the
 /// empty set on purpose. Scans Lite and Darling; test projects build contexts freely and are not scanned.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class AnalysisContextSecondaryScopeSourceScanTests
 {
     private static string RepoRoot([CallerFilePath] string thisFile = "")

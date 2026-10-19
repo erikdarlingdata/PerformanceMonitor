@@ -23,7 +23,6 @@ namespace Darling.Tests;
 /// keeps the stored ID unless a new one is typed or the clear box is ticked; and every read's column count agrees with the
 /// ordinals its reader uses, which a live test would only catch on a store with the V169 columns.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerAwsRoleFieldsTests
 {
     private static readonly Regex ExternalIdColumn = new(@"\baws_external_id\b", RegexOptions.CultureInvariant);

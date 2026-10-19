@@ -111,7 +111,6 @@ internal sealed class RdsFakeCollectorState
 /// RDS log positions across a restart, a rotation inside one cycle, and the measurements a rotation leaves (#4708).
 /// Each pin runs against all three ingestors, because each keeps its own copy of the read, store and commit sequence.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RdsResumePersistenceTests
 {
     private const string Host = "solo.abc123.us-east-1.rds.amazonaws.com";

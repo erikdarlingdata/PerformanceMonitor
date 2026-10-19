@@ -42,7 +42,6 @@ namespace Darling.Tests;
 /// The same twin then shows the two degradations: a snapshot after the window end is ignored, and a snapshot whose
 /// <c>TimeZone</c> is session-scoped yields UTC keying for that compute.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetClockTests
 {
     [Fact]

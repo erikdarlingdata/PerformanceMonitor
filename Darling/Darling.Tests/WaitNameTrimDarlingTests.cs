@@ -30,7 +30,6 @@ namespace Darling.Tests;
 /// the ignore set the service hands the collectors, its delta calculator's rule for the new trimmed key, and the
 /// system_health shred its viewer and MCP host share.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class WaitNameTrimDarlingTests
 {
     private const int ServerId = 7;

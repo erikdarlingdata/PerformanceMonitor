@@ -288,7 +288,6 @@ public sealed class DailyRunLimiterTests
 /// body, so 16 daily runs plus a sweep nine wide asked a pool of 24 for more connections than it has. The cap is
 /// the smaller of 16 and (pool - sweep width - 8 kept free for reads), never below 1.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DailyRunCapTests
 {
     private static readonly TimeSpan Patience = DailyRunKit.Patience;
@@ -476,7 +475,6 @@ public sealed class DailyRunCapTests
 /// naming the server and the collector. The three runs detached by name are watched the same way
 /// (<see cref="DetachedByNameWatchdogTests"/>).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DailyRunWatchdogTests
 {
     private static readonly TimeSpan Patience = DailyRunKit.Patience;
@@ -845,7 +843,6 @@ public sealed class DetachedByNameWatchdogTests
 /// untracked, so the shutdown drain that waits for the other detached runs did not wait for them. They are tracked the
 /// same way now, and a shutdown waits for one that is still going.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class DetachedByNameShutdownDrainTests
 {
     private static readonly TimeSpan Patience = DailyRunKit.Patience;

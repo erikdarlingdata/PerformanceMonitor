@@ -35,7 +35,6 @@ namespace Darling.Tests;
 /// <c>pg_statement_stats</c> for two statements with different shares and reads two distinct buckets;
 /// <c>PgStatementKeyedSetLiveTests</c> holds the set to the per-statement arms it replaced.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgBaselineProviderKeyedTests
 {
     private static string ProviderSource => RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs");

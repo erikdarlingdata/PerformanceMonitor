@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// first-non-option convention applies otherwise, with <c>--</c> flags never mistaken for file paths),
 /// and the exit-code rule (0 unless a layer FAILED — Skipped and NotReached are not failures).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class HeadlessSelfTestTests
 {
     [Theory]

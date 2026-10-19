@@ -94,7 +94,6 @@ internal sealed class StandInUnixModes : IUnixDirectoryModes
 /// stable for one key, different across stores), the pipeline's use of it (stamped by the classifier, refused without a
 /// key), and the key file (generated once, owner-only, never rotated: missing generates, unreadable or untrusted refuses).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgLogHashKeyTests
 {
     private const string FailedUpdate =

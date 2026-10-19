@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// posted before, to exactly where it posted it. The live half (the V131 table, its trigger, the reload)
 /// runs in <see cref="NotificationRoutesLivePostgresTests"/>.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class NotificationRoutingTests
 {
     /* ---- the family census --------------------------------------------------------------------------- */

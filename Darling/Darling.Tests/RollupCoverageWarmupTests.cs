@@ -16,7 +16,6 @@ namespace Darling.Tests;
 /// <c>RollupFloorCacheLiveTests</c>); these pin that the two processes that pay the cold sort inline actually start it —
 /// the service after its migrations, the Viewer once its store has answered — and that neither waits for it.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RollupCoverageWarmupTests
 {
     [Fact]

@@ -32,7 +32,6 @@ namespace Darling.Tests;
 /// (age, setting, keeping-up) through BOTH graders and asserts the verdicts agree, so the two walks cannot
 /// drift even if the constants stay shared.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetVacuumTests
 {
     /* ── D9: shared constants ── */

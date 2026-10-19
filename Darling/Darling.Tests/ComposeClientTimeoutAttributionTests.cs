@@ -24,7 +24,6 @@ namespace Darling.Tests;
 /// classified as a timeout with the same text 57014 gives, but only when it fired while the statement executed;
 /// a failure to open the store connection has the same exception shape and is answered as the server error it is.
 /// </summary>
-[Trait("Stage", "Guard")]
 public class ComposeClientTimeoutAttributionTests
 {
     [Fact]

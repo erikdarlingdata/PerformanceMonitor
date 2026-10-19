@@ -27,7 +27,6 @@ namespace Darling.Tests;
 /// proof. Lite's <c>AzureSiblingGrowthTests</c> run the twin query and the same predicate on a real DuckDB store, with
 /// the upgrade history seeded.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class AzureSiblingGrowthTests
 {
     private static string Squash(string sql) => Regex.Replace(sql, @"\s+", " ").Trim();

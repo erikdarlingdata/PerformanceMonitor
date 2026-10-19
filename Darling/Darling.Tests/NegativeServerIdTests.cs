@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// negative id must key a silence, a snooze, a self-alert context and an MCP update exactly as a positive one
 /// does, or the silence is lost on that half of the fleet.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class NegativeServerIdTests
 {
     private const int NegativeId = -616758012;

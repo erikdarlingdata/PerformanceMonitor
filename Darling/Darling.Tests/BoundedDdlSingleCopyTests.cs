@@ -16,7 +16,6 @@ namespace Darling.Tests;
 /// The bounded compression DDL has one copy: <c>TimescaleSupport.TryRunBoundedDdlAsync</c> is the only place that
 /// sets the hourly lock timeout, and every compression-enable ALTER goes through it (#4970).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class BoundedDdlSingleCopyTests
 {
     private static string Storage() =>

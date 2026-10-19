@@ -29,7 +29,6 @@ namespace Darling.Tests;
 /// multi-server scope returns the same rows by id as by name, a renamed server's whole history is included, and a scoped name that
 /// no registry row carries keeps matching what it matched before.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ComposeServerScopeByIdTests
 {
     private static readonly DateTime Start = new(2026, 7, 23, 0, 0, 0, DateTimeKind.Utc);

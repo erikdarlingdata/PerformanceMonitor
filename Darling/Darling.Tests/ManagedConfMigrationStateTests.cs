@@ -20,7 +20,6 @@ namespace Darling.Tests;
 /// once before the legacy appenders, over a real temp data directory so the include/marker/pending/stamp
 /// checks all run against files on disk exactly as the caller sees them.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ManagedConfMigrationStateTests : IDisposable
 {
     private readonly string _dataDir;

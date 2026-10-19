@@ -25,7 +25,6 @@ namespace Darling.Tests;
 /// The wiring itself — that DuckDB actually observes the token — is proven by Lite.Tests' Windows-only pins;
 /// this pin only proves the shape is present.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class LiteAnalysisServiceCancellationSourceTests
 {
     private const string AnalysisServicePath = "Lite/Analysis/AnalysisService.cs";

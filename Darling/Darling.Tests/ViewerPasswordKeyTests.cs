@@ -19,7 +19,6 @@ namespace Darling.Tests;
 /// The key the viewer seals server passwords with (#5366): when it may seal, the saved key per store, and what a
 /// sealed value is bound to. The decision is pure, so no store and no window is needed.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class ViewerPasswordKeyTests : IDisposable
 {
     private const string Store = "alpha-store:5432/pm";

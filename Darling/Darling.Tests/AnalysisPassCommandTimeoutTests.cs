@@ -60,7 +60,6 @@ namespace Darling.Tests;
 /// undocumented default - so the fix is what bounds them, not a nicety on top of a token that was
 /// already doing the work.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class AnalysisPassCommandTimeoutTests
 {
     /* Matched by SHAPE, not by variable name: the sites use cmd, command, peakCmd, rateCmd,

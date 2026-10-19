@@ -31,7 +31,6 @@ namespace Darling.Tests;
 /// role change that would keep the stored external ID unseen, and the typed external ID kept out of every answer and
 /// audit line. The role below is the example account's.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class AwsRoleEditTests
 {
     private const string RoleA = "arn:aws:iam::123456789012:role/darling-monitor";

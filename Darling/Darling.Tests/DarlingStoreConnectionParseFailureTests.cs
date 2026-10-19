@@ -87,7 +87,6 @@ internal static class StoreParseFailureFixtures
 /// test here is parse-only: no connection is opened and no store is needed.
 /// </summary>
 [Collection("darling-config-env")]
-[Trait("Stage", "Guard")]
 public sealed class DarlingStoreConnectionParseFailureTests
 {
     private const string FixedHintStart = "Npgsql rejected the string. A value that contains ';' or '=' must be quoted";

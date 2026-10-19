@@ -22,7 +22,6 @@ namespace Darling.Tests;
 /// Low-Impact replay (M1), the 30-minute stale-incident resolution (M1), the top requests read by CPU and the
 /// "at least N more" trailer (L1), and the Viewer's refusal of a bad bar pair whatever the checkbox says (L2).
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class RunnableQueueRound1Tests
 {
     private static readonly DateTime T0 = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);

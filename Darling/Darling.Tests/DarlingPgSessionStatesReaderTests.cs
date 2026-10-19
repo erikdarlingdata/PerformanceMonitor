@@ -23,7 +23,6 @@ namespace Darling.Tests;
 /// assertion this whole surface exists for — that the causal claim is gated on the horizon age and REFUSED
 /// where the age says the session pinned nothing.
 /// </summary>
-[Trait("Stage", "Guard")]
 public class DarlingPgSessionStatesReaderTests
 {
     private static string Sql => DarlingPgSessionStatesReader.PgSessionStatesSql;

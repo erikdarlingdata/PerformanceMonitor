@@ -29,7 +29,6 @@ namespace Darling.Tests;
 /// pass moved (<c>PgTargetIoTests</c>' hour-of-day collapse, <c>PgTargetWaitTests</c>' Single Lock edges,
 /// <c>PgTargetReplicationTests</c>' shift edge, the census counts) say so inline.
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class PgTargetBetweenWavesV2Tests
 {
     private const long MiB = 1024 * 1024;

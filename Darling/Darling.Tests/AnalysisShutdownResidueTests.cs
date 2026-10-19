@@ -31,7 +31,6 @@ namespace Darling.Tests;
 /// ERRORs — because a data source disposed while the service is meant to be running is a real bug whose
 /// only evidence is exactly this text.</para>
 /// </summary>
-[Trait("Stage", "Guard")]
 public sealed class AnalysisShutdownResidueTests
 {
     private static readonly CancellationToken s_fired = new(canceled: true);
