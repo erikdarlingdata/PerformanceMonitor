@@ -78,7 +78,7 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     private static Task<string> KillAsync(Ctx c, int session, string? loginTime, bool dryRun, string server = "srv-7") =>
-        DarlingMcpPlanForceTools.RunKillAsync(c.Source, c.Source, c.Log, server, session, loginTime, c.Arg, dryRun, c.Ct);
+        DarlingMcpPlanForceTools.RunKillAsync(c.Source, c.Source, c.Log, server, session, loginTime, null, c.Arg, dryRun, c.Ct);
 
     [Fact]
     public async Task ADryRunKill_ShowsTheSessionsFacts_KillsNothing_AndJournalsNothing_AndTheKillIsDryByDefault()

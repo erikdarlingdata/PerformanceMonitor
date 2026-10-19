@@ -109,24 +109,26 @@ public sealed class DarlingMcpPlanForceTools
         RunEvictAsync(postgres, ownerSource?.Read(), logger, server_name, plan_handle, agent_action, dry_run, cancellationToken);
 
     [McpServerTool(Name = "kill_session"), Description(
-        "SQL Server only. PostgreSQL kill is NOT built. Agent arm: kills ONE session on the monitored SQL Server, after checking in the same batch that it is still the session you named (the same session_id and the same login_time). Dry run by default: runs that check, returns what the server says about the session, and kills nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's kill_session switch and remediation login (with ALTER ANY CONNECTION, which can kill any session on that server); ships off. " +
+        "Agent arm: kills ONE session on the monitored SQL Server or PostgreSQL server, after checking in the same batch or statement that it is still the session you named. Dry run by default: runs that check, returns what the server says about the session, and kills nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's kill_session switch and remediation login (SQL Server: with ALTER ANY CONNECTION, which can kill any session on that server; PostgreSQL: with pg_signal_backend and pg_read_all_stats); ships off. Azure SQL Database kill is NOT built. " +
         "<<GUIDE>>" +
-        "Take session_id and login_time from get_blocking (blocking_session_id and blocking_login_time, UTC, pass it back unchanged). SQL Server reuses a session id after a disconnect, so a kill without the login_time check could hit a new, unrelated session. The check and the KILL run in one batch but are not atomic: a session can end and its id be reused between them. " +
+        "SQL Server: take session_id and login_time from get_blocking (blocking_session_id and blocking_login_time, UTC, pass it back unchanged). SQL Server reuses a session id after a disconnect, so a kill without the login_time check could hit a new, unrelated session. The check and the KILL run in one batch but are not atomic: a session can end and its id be reused between them. " +
+        "PostgreSQL: pass backend_id exactly as get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns it, a string of digits, and leave login_time out. backend_id is the session's start time in epoch seconds followed by its pid in seven digits. The pid and the start second are checked in the SAME statement that calls pg_terminate_backend, so a pid the operating system gave to a new session is never ended; a different session with the same pid and the same start second would need the operating system to wrap its whole pid space inside that second. session_id, if you pass it, must be that pid. A login that cannot signal the session (no pg_signal_backend, a superuser's session, or no pg_read_all_stats to see its start time) is refused before any kill is tried. Only client sessions are ended. " +
         "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
-        "The answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. There is no undo. " +
-        "Refusals: own_session, session_gone, session_reused (the id now belongs to another session; its login_time is returned), not_user_session, kill_permission_denied (the login lacks ALTER ANY CONNECTION), bad_session_id, bad_login_time, server_clock_unknown (no clock collected for the server yet), kill_not_built_on_platform (Azure SQL Database) and postgres_target. " +
+        "On SQL Server the answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back at once. There is no undo. " +
+        "Refusals: own_session, session_gone, session_reused (the id now belongs to another session; its login_time or backend_id is returned), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet) and kill_not_built_on_platform (Azure SQL Database). " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason) or failed, with session, warnings, rollback and journal_id.")]
     public static Task<string> KillSession(
         NpgsqlDataSource postgres,
-        [Description("The session id: blocking_session_id from get_blocking.")] int session_id,
-        [Description("The session's login time as get_blocking returns it (blocking_login_time, ISO 8601 UTC). It must be the value you read, not a later one.")] string login_time,
+        [Description("SQL Server: the session id, blocking_session_id from get_blocking (required there). PostgreSQL: leave it out, or pass the pid that backend_id holds.")] int? session_id = null,
+        [Description("SQL Server: the session's login time as get_blocking returns it (blocking_login_time, ISO 8601 UTC), required there. It must be the value you read, not a later one. PostgreSQL: leave it out.")] string? login_time = null,
+        [Description("PostgreSQL: the session's backend_id exactly as get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns it, a string of digits (required there). SQL Server: leave it out.")] string? backend_id = null,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Required: the agent_action object (request_id, claim_id, agent_id, reason, evidence); see the tool guide. The reason is recorded with the change.")] string? agent_action = null,
         [Description("Default true: run the check and kill nothing. Pass false to kill.")] bool dry_run = true,
         StoreOwnerSource? ownerSource = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        RunKillAsync(postgres, ownerSource?.Read(), logger, server_name, session_id, login_time, agent_action, dry_run, cancellationToken);
+        RunKillAsync(postgres, ownerSource?.Read(), logger, server_name, session_id, login_time, backend_id, agent_action, dry_run, cancellationToken);
 
     private static string Answer(string status, string? reason, string message, object? extra = null)
     {
@@ -404,7 +406,7 @@ public sealed class DarlingMcpPlanForceTools
 
     /// <summary>The kill tool body (#5632, step 12), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunKillAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name,
-        int session_id, string? login_time, string? agent_action, bool dry_run, CancellationToken ct)
+        int? session_id, string? login_time, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct)
     {
         const string tool = KillToolName;
         logger ??= NullLogger.Instance;
@@ -416,25 +418,23 @@ public sealed class DarlingMcpPlanForceTools
 
             var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
 
-            /* 1: a session id or a login time that cannot be read can do nothing. Refused before the gate, and journaled as a block is. */
-            if (session_id <= 0)
+            /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
+            var (_, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
+                return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct);
+
+            /* 2: a session id or a login time that cannot be read can do nothing. Refused before the gate, and journaled as a block is. */
+            if (session_id is not > 0)
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadSession,
                     "session_id is a positive whole number, the blocking_session_id get_blocking returns. Nothing was run.", ct);
             }
 
+            var sessionId = session_id.Value;
             if (!TryReadLoginTime(login_time, out var loginUtc))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, BadLoginTime,
                     "login_time is the blocking_login_time get_blocking returns (ISO 8601, UTC), passed back unchanged. Nothing was run.", ct);
-            }
-
-            /* 2: SQL Server only. PostgreSQL kill (pg_terminate_backend) is NOT built. */
-            var (_, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
-            if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
-            {
-                return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.ServerName} is a PostgreSQL target. Killing a session is SQL Server only. PostgreSQL kill (pg_terminate_backend) is NOT built, so nothing was run.", ct);
             }
 
             if (owner is null)
@@ -444,7 +444,7 @@ public sealed class DarlingMcpPlanForceTools
             }
 
             /* 3: the gate, for a dry run too. The permit's Id and the journal's target.id are the session id in decimal. */
-            var idText = session_id.ToString(CultureInfo.InvariantCulture);
+            var idText = sessionId.ToString(CultureInfo.InvariantCulture);
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, null);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
             if (decision.Refusal is { } gateRefusal)
@@ -469,7 +469,7 @@ public sealed class DarlingMcpPlanForceTools
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
             /* 5: one batch decides, for a dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
-            var dry = await executor.KillSessionAsync(permit, session_id, loginLocal, dryRun: true, ct);
+            var dry = await executor.KillSessionAsync(permit, sessionId, loginLocal, dryRun: true, ct);
             if (dry.Outcome != RemediationOutcome.Done)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
@@ -495,7 +495,7 @@ public sealed class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await executor.KillSessionAsync(permit, session_id, loginLocal, dryRun: false, token);
+                        var written = await executor.KillSessionAsync(permit, sessionId, loginLocal, dryRun: false, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
@@ -513,7 +513,7 @@ public sealed class DarlingMcpPlanForceTools
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 return WithWarnings(Answer("done", null,
-                    $"Session {session_id} was killed. There is no undo."
+                    $"Session {sessionId} was killed. There is no undo."
                     + (killed?.Rollback is { InProgress: true } ? " A rollback is running: the session keeps its locks until it ends. Do not kill it again; read get_blocking to see it clear." : ""),
                     new
                     {
@@ -534,6 +534,137 @@ public sealed class DarlingMcpPlanForceTools
             return McpHelpers.FormatError(tool, ex);
         }
     }
+
+    internal const string BadBackendId = "bad_backend_id";
+
+    /// <summary>
+    /// The PostgreSQL arm of the kill tool (#5632). The agent names the session by the <c>backend_id</c> the reads return; it is unpacked into the
+    /// pid and the start second, and the executor checks both in the SAME statement that calls <c>pg_terminate_backend</c> (the start second is
+    /// derived the way the collector derives it). Seconds are enough: for a different backend to carry the same pid and the same start second the
+    /// operating system would have to wrap its whole pid space inside that one second. Same gate, same journal kind (<c>session_kill</c>), no undo.
+    /// A login that may not signal the session is refused with <c>not_permitted</c> before any kill is tried.
+    /// </summary>
+    private static async Task<string> RunKillPostgresAsync(NpgsqlDataSource? owner, ILogger logger, InvestigationRequestStore store,
+        (int ServerId, string ServerName) resolved, int? session_id, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct)
+    {
+        const string tool = KillToolName;
+
+        /* 1: a backend id that cannot be read can do nothing. Refused before the gate, and journaled as a block is. */
+        if (!PostgresBackendId.TryUnpack(backend_id, out var pid, out var startEpoch))
+        {
+            return await RefuseBeforeGateAsync(store, agent_action, tool, BadBackendId,
+                "backend_id is the value get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns for the session, a string of digits, passed back unchanged. Nothing was run.", ct);
+        }
+
+        if (session_id is { } given && given != pid)
+        {
+            return await RefuseBeforeGateAsync(store, agent_action, tool, BadBackendId,
+                "session_id is not the pid inside backend_id. Pass backend_id alone, or the matching pid with it. Nothing was run.", ct);
+        }
+
+        if (owner is null)
+        {
+            return DarlingAgentActionGate.RefusalAnswer(new AgentActionRefusal(NoOwnerSource,
+                "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly."));
+        }
+
+        /* 2: the gate, for a dry run too. The permit's Id and the journal's target.id are the pid in decimal. */
+        var idText = pid.ToString(CultureInfo.InvariantCulture);
+        var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, null);
+        var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
+        if (decision.Refusal is { } gateRefusal)
+            return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
+        var permit = decision.Permit!;
+        _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
+
+        var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
+        if (row is null)
+            return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
+        var executor = new PostgresRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+
+        /* 3: the read decides, for a dry run and before a write: gone, own session, start time, reused, client session, and what the login may do. */
+        var dry = await executor.KillBackendAsync(permit, pid, startEpoch, dryRun: true, ct);
+        if (dry.Outcome != RemediationOutcome.Done)
+        {
+            if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+            return PgKillNotDone(dry, dry_run);
+        }
+
+        var before = PgKillSessionImage(dry.PgSession);
+        var warnings = PgKillWarnings(dry.PgSession);
+        if (dry_run)
+            return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
+
+        RemediationResult? killed = null;
+
+        /* 4: the kill, journaled. action_called holds the facts the dry read found; action_done holds the facts the kill read. */
+        try
+        {
+            var changed = new ServerChangeSignal();
+            var hooks = new AgentActionHooks
+            {
+                ServerChange = changed,
+                LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
+                Write = async (_, _, token) =>
+                {
+                    var written = await executor.KillBackendAsync(permit, pid, startEpoch, dryRun: false, token);
+                    /* The server took the signal: from here the store's journal never says failed (#5632, step 13). */
+                    if (written.Wrote)
+                        changed.MarkServerChanged();
+                    if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
+                        throw new PlanForceWriteException(written.Message, PgKillNotDone(written, dryRun: false));
+                    killed = written;
+                    return JsonSerializer.Serialize(new { message = written.Message, session = PgKillSessionImage(written.PgSession) }, McpHelpers.JsonOptions);
+                },
+            };
+            var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.SessionKill, action!, target), hooks, ct);
+            if (result.Refusal is { } refused)
+                return DarlingAgentActionGate.RefusalAnswer(refused);
+            return WithWarnings(Answer("done", null, $"Backend {pid} was ended. There is no undo.",
+                new { dry_run = false, session = PgKillSessionImage(killed?.PgSession ?? dry.PgSession), warnings, journal_id = result.CalledId }), result);
+        }
+        catch (PlanForceWriteException ex)
+        {
+            return ex.Answer;
+        }
+    }
+
+    /// <summary>A refusal or a failure of the PostgreSQL kill. A reused pid shows the session's actual backend id and nothing else about it.</summary>
+    private static string PgKillNotDone(RemediationResult result, bool dryRun)
+    {
+        var status = result.Outcome == RemediationOutcome.Refused ? "refused" : "failed";
+        if (result.Reason == RemediationResult.Reasons.SessionReused)
+            return Answer(status, result.Reason, result.Message, new { dry_run = dryRun, actual_backend_id = result.PgSession?.BackendId });
+        return Answer(status, result.Reason, result.Message, new { dry_run = dryRun, session = PgKillSessionImage(result.PgSession) });
+    }
+
+    private static string? PgUtcText(DateTime? utc) =>
+        utc is { } value ? DateTime.SpecifyKind(value, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture) : null;
+
+    /// <summary>The backend's facts as the answer and the journal show them. Times are UTC. No statement text is ever read.</summary>
+    internal static object? PgKillSessionImage(PgKillSessionFacts? facts) => facts is null ? null : new
+    {
+        session_id = facts.Pid,
+        backend_id = facts.BackendId,
+        backend_start = PgUtcText(facts.BackendStartUtc),
+        login_name = facts.UserName,
+        application_name = facts.ApplicationName,
+        client_addr = facts.ClientAddr,
+        database = facts.DatabaseName,
+        state = facts.State,
+        backend_type = facts.BackendType,
+        open_transaction = facts.XactStartUtc is not null,
+        xact_start = PgUtcText(facts.XactStartUtc),
+        state_change = PgUtcText(facts.StateChangeUtc),
+    };
+
+    /// <summary>What a PostgreSQL kill will cost, with no threshold: an open transaction is rolled back. A warning, never a refusal.</summary>
+    internal static string[] PgKillWarnings(PgKillSessionFacts? facts) =>
+        facts?.XactStartUtc is not null
+            ? [$"This session has an open transaction (started {PgUtcText(facts.XactStartUtc)}). Ending the session rolls that transaction back and its uncommitted work is lost."]
+            : [];
 
     private static readonly string[] LoginTimeFormats =
     {
@@ -774,7 +905,7 @@ public sealed class DarlingMcpPlanForceTools
     private sealed record ServerRow(RemediationServer Server, string? UserName, string? SecretSlot);
 
     internal const string ServerRowSql = @"
-SELECT host, database, encrypt_mode, trust_server_certificate, multi_subnet_failover, remediation_username, remediation_encrypted_password
+SELECT host, database, encrypt_mode, trust_server_certificate, multi_subnet_failover, remediation_username, remediation_encrypted_password, port
 FROM config.config_monitored_servers
 WHERE server_id = $1";
 
@@ -789,7 +920,7 @@ WHERE server_id = $1";
             return null;
         return new ServerRow(
             new RemediationServer(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2),
-                reader.GetBoolean(3), reader.GetBoolean(4)),
+                reader.GetBoolean(3), reader.GetBoolean(4), reader.IsDBNull(7) ? 0 : reader.GetInt32(7)),
             reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6));
     }
 

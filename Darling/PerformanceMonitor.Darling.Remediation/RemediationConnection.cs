@@ -7,6 +7,7 @@
  */
 
 using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace PerformanceMonitor.Darling.Remediation;
 
@@ -20,7 +21,8 @@ public sealed record RemediationServer(
     string? Database = null,
     string? EncryptMode = null,
     bool TrustServerCertificate = false,
-    bool MultiSubnetFailover = false);
+    bool MultiSubnetFailover = false,
+    int Port = 0);
 
 /// <summary>
 /// Builds the remediation connection (#5632, step 6): the posture of the service's <c>BuildRemediationConnectionString</c> (same host, TLS
@@ -58,6 +60,34 @@ public static class RemediationConnection
             "OPTIONAL" => SqlConnectionEncryptOption.Optional,
             _ => SqlConnectionEncryptOption.Mandatory,
         };
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// The remediation connection to a monitored PostgreSQL server (#5632): the posture of <see cref="BuildConnectionString"/> and of the
+    /// service's PostgreSQL monitoring connection (same host and port, the same TLS rule: an Optional mode prefers TLS, a trusted certificate
+    /// requires it, anything else verifies the certificate in full), the remediation login, a 15-second connect budget, a 30-second command
+    /// budget, no pooled connection, and the application name that says so in <c>pg_stat_activity.application_name</c>.
+    /// </summary>
+    internal static string BuildPostgresConnectionString(RemediationServer server, RemediationLogin login)
+    {
+        var builder = new NpgsqlConnectionStringBuilder
+        {
+            Host = server.Host,
+            /* pg_stat_activity and pg_terminate_backend are cluster-wide: the maintenance database every cluster has is enough. */
+            Database = string.IsNullOrWhiteSpace(server.Database) ? "postgres" : server.Database,
+            Username = login.UserName,
+            Password = login.Secret,
+            ApplicationName = ApplicationName,
+            Timeout = 15,
+            CommandTimeout = 30,
+            Pooling = false,
+            SslMode = server.EncryptMode?.Trim().ToUpperInvariant() == "OPTIONAL"
+                ? SslMode.Prefer
+                : server.TrustServerCertificate ? SslMode.Require : SslMode.VerifyFull,
+        };
+        if (server.Port > 0)
+            builder.Port = server.Port;
         return builder.ConnectionString;
     }
 }

@@ -33,7 +33,7 @@ namespace PerformanceMonitor.Darling.Remediation;
 /// action, another server, another database or another object, before it reads the secret or opens a connection.</para>
 /// <para><b>The sign-in</b> is the server's remediation login: its name, and the secret read from the <c>env:</c> or <c>file:</c> reference when
 /// the action runs. The secret reaches the connection string and nothing else: every message that leaves here has it removed first.</para>
-/// <para><b>PostgreSQL is not built:</b> this is SQL Server only, and there is no PostgreSQL kill (<c>pg_terminate_backend</c>).</para>
+/// <para>This class is SQL Server only. The PostgreSQL kill (<c>pg_terminate_backend</c>) is <see cref="PostgresRemediationExecutor"/>. Azure SQL Database kill is not built.</para>
 /// </summary>
 public sealed class SqlServerRemediationExecutor
 {
