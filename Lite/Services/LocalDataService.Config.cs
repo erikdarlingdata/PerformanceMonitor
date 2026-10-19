@@ -402,6 +402,9 @@ public class QueryStoreHealthRow
             : $"{ActualState} (wanted {DesiredState})";
 
     /// <summary>Percent of the storage cap in use; blank when the cap is 0 (unlimited/unknown).</summary>
+    public double? PercentOfCap => MaxStorageMb > 0 ? 100.0 * CurrentStorageMb / MaxStorageMb : null;
+
+    /// <summary>The same percent as text; the Percent of Cap column sorts on <see cref="PercentOfCap"/> (#6086), not on this.</summary>
     public string PercentOfCapDisplay =>
         MaxStorageMb > 0 ? $"{100.0 * CurrentStorageMb / MaxStorageMb:F0}%" : "";
 

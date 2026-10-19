@@ -71,7 +71,7 @@
                 <DataGridTextColumn Header="Frequency (min)" Binding="{Binding FrequencyMinutes, UpdateSourceTrigger=LostFocus}" Width="110"/>
                 <DataGridTextColumn Header="Retention (days)" Binding="{Binding RetentionDays, UpdateSourceTrigger=LostFocus}" Width="110"/>
                 <DataGridTextColumn Header="Run at (HH:MM)" Binding="{Binding RunAt, UpdateSourceTrigger=LostFocus}" Width="110"/>
-                <DataGridTextColumn Header="Schedule" Binding="{Binding FrequencyDisplay}" Width="140" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Schedule" Binding="{Binding FrequencyDisplay}" SortMemberPath="FrequencyMinutes" Width="140" IsReadOnly="True"/>
                 <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="*" IsReadOnly="True"/>
             </DataGrid.Columns>
         </DataGrid>

@@ -142,7 +142,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding CurrentValueDisplay}" Width="160">
+                    <DataGridTextColumn Binding="{Binding CurrentValueDisplay}" SortMemberPath="CurrentValue" Width="160">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentValueDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -150,7 +150,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding ThresholdValueDisplay}" Width="120">
+                    <DataGridTextColumn Binding="{Binding ThresholdValueDisplay}" SortMemberPath="ThresholdValue" Width="120">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ThresholdValueDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -173,7 +173,7 @@
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <!-- #5642: the age of the newest sample the alert judged, as it was when the alert fired (Lite's twin column). -->
-                    <DataGridTextColumn Binding="{Binding NewestSampleDisplay}" Width="270">
+                    <DataGridTextColumn Binding="{Binding NewestSampleDisplay}" SortMemberPath="NewestSample.Age" Width="270">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NewestSampleDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>

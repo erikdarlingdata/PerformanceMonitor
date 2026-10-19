@@ -48,6 +48,17 @@ public static class ViewerConfigDiagnostics
     public const string LogSource = "Config";
 
     /// <summary>
+    /// The one hint for a missing darling.json (#6097), shared by the window and the headless self-test. It names
+    /// the places the viewer looked, then the two supported ways to get the file: the sample on the service
+    /// machine, or --export-viewer-config on the service host for a viewer on another machine.
+    /// </summary>
+    public const string ConfigNotFoundMessage =
+        "darling.json was not found beside the viewer, one folder up, or at DARLING_CONFIG / --config. "
+        + "On the service machine, create it from darling.sample.json. "
+        + "On another machine, run PerformanceMonitor.Darling.Service.exe --export-viewer-config on the service host "
+        + "and copy the folder it writes beside the viewer.";
+
+    /// <summary>
     /// Which darling.json the viewer resolved, by which rule, and whether it is there. Emitted BEFORE the
     /// load attempt, so a file that does not exist or will not parse still tells the operator where the
     /// viewer looked.
