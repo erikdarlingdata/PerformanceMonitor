@@ -23,7 +23,7 @@ export const MCP_TOOL_NAMES = [
   "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_alert_history", "get_alert_settings",
   "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
   "get_blocking_stats", "get_blocking_trend", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collector_cost",
-  "get_collector_stall_probes", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
+  "get_collector_stall_probes", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
   "get_custom_alert_rule", "get_custom_view", "get_daily_summary", "get_daily_summary_range", "get_database_config",
   "get_database_config_changes", "get_database_scoped_config", "get_database_sizes", "get_deadlock_detail",
   "get_deadlock_plan_xml", "get_deadlock_trend", "get_deadlocks", "get_default_trace_events", "get_file_io_stats",
