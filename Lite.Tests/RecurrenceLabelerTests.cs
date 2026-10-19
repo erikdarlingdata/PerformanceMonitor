@@ -108,6 +108,55 @@ public class RecurrenceLabelerTests
         Assert.False(label.MaintenanceWindowMoved);
     }
 
+    /* #6132: a finding driven only by settings is the same at every hour, so it is never "recurring at this hour". */
+
+    private static Fact FactOf(string source, string key) => new() { Source = source, Key = key, Value = 1, BaseSeverity = 0.6, Severity = 0.6 };
+
+    [Theory]
+    [InlineData("config")]
+    [InlineData("database_config")]
+    [InlineData("pg_config")]
+    [InlineData("pg_posture")]
+    public void AStoryDrivenByASettingsFact_IsNotLabelledRecurring_EvenWhenItFiredInTheSlotForWeeks(string settingsSource)
+    {
+        var story = Story("SOME_SETTING", "h-config");
+        var facts = new List<Fact> { FactOf(settingsSource, "SOME_SETTING") };
+        var before = story.StoryText;
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-config", 1), InSlot("h-config", 2), InSlot("h-config", 3)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+        Assert.Null(story.RootFactMetadata);
+    }
+
+    [Fact]
+    public void AStoryDrivenByATimeSeriesFact_IsLabelledRecurring_AndASettingsStoryBesideItIsNot()
+    {
+        var waitStory = Story("SOS_SCHEDULER_YIELD", "h-wait");
+        var settingStory = Story("DB_CONFIG", "h-setting");
+        var facts = new List<Fact> { FactOf("waits", "SOS_SCHEDULER_YIELD"), FactOf("database_config", "DB_CONFIG") };
+
+        RecurrenceLabeler.Label(
+            [waitStory, settingStory],
+            facts,
+            Read(InSlot("h-wait", 1), InSlot("h-wait", 2), InSlot("h-setting", 1), InSlot("h-setting", 2)));
+
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(waitStory.StoryText)!.RecurrenceWeeks);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(settingStory.StoryText));
+    }
+
+    [Fact]
+    public void AChainWithAnyTimeSeriesFactOnItsPath_StaysEligible_EvenWhenItsRootIsASetting()
+    {
+        var story = Story("MAXDOP_CONFIG", "h-mixed", path: ["MAXDOP_CONFIG", "CXPACKET"]);
+        var facts = new List<Fact> { FactOf("config", "MAXDOP_CONFIG"), FactOf("waits", "CXPACKET") };
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-mixed", 1), InSlot("h-mixed", 2)));
+
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
     [Fact]
     public void TwoWeeks_IsACoincidence_NoLabel()
     {
