@@ -4,9 +4,9 @@
     "net10.0-windows7.0": {
       "Microsoft.AspNetCore.TestHost": {
         "type": "Direct",
-        "requested": "[10.0.12, )",
-        "resolved": "10.0.12",
-        "contentHash": "bTHgbcjSrLxlqSasYRDU9BcJ3hDGoqIjtDY0soLNrndOWi3kxtOyddwUMaNZgtoI2Uf6y7ZQs2EuVj0c20B7mA=="
+        "requested": "[10.0.13, )",
+        "resolved": "10.0.13",
+        "contentHash": "8xzbDfEOWg5GRp5byA42Axr4TbockbxCvdHTYk27ZIdst79DO0CLBp/Zw5sduK2goRii7of4EeuTjG/yPH4tsg=="
       },
       "Microsoft.CodeAnalysis.BannedApiAnalyzers": {
         "type": "Direct",
@@ -25,15 +25,15 @@
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.0.102.10",
-        "contentHash": "ngedi+19mHnszODbUrZLtpU6JeIXVbR/MxslGZPJIcC5YVZcJSZxasnde3+0iboQj9V9bKri7b8D+TXTrOW6Aw=="
+        "resolved": "4.0.102.11",
+        "contentHash": "K9PP9/qHQ7pqSB0lYwStJrpXQ8P1xc7Fbn3CyPg8EX78p4+yz8dhIiwiRc3aVbVrUZxmPAPRvmZm+ey1euIXGg=="
       },
       "AWSSDK.Extensions.CborProtocol": {
         "type": "Transitive",
-        "resolved": "4.0.100.17",
-        "contentHash": "taDKDuymY1Q7p3jjmsIzfzfzmTCzGHAIzZ2bIpTAzPuSW+1KiNuh4vGVbkbj3Hd1KwOUzDw+LIRz5P29oPnlFw==",
+        "resolved": "4.0.100.19",
+        "contentHash": "fFR80NxmBhnDe+f45pRSV0I65LePzChOeGYzCIBJuHM6gDqZAbzDlDMVZ93W6XiAtFAg6MGmUDnmWyem/Z3u6A==",
         "dependencies": {
-          "AWSSDK.Core": "4.0.102.10",
+          "AWSSDK.Core": "4.0.102.11",
           "System.Formats.Cbor": "9.0.5"
         }
       },
@@ -803,9 +803,9 @@
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.PI": "[4.0.101.1, )",
-          "AWSSDK.RDS": "[4.0.106.3, )",
-          "AWSSDK.SecurityToken": "[4.0.101.3, )",
+          "AWSSDK.PI": "[4.0.101.2, )",
+          "AWSSDK.RDS": "[4.0.106.4, )",
+          "AWSSDK.SecurityToken": "[4.0.101.4, )",
           "BlackwellSystems.Gcf": "[1.1.0, )",
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
@@ -875,30 +875,30 @@
       },
       "AWSSDK.PI": {
         "type": "CentralTransitive",
-        "requested": "[4.0.101.1, )",
-        "resolved": "4.0.101.1",
-        "contentHash": "r7dOPYUcQmPK3VMEpgbkeXby8+sWgPc5QeY+eSqdf6QbZz6jXE+fLbveoOHSEmkFtaxDsHbf8Aou0i/X5SDS1g==",
+        "requested": "[4.0.101.2, )",
+        "resolved": "4.0.101.2",
+        "contentHash": "kD2SMcNimr3NIMYaoJ+i4sal9Ij16Sy/cl2A8wuQoBgXWzBzJ62brx03K1Fq0tFuoKmtk5HtaHFbVJHXAXTf9A==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.10, 5.0.0)",
-          "AWSSDK.Extensions.CborProtocol": "[4.0.100.17, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.11, 5.0.0)",
+          "AWSSDK.Extensions.CborProtocol": "[4.0.100.19, 5.0.0)"
         }
       },
       "AWSSDK.RDS": {
         "type": "CentralTransitive",
-        "requested": "[4.0.106.3, )",
-        "resolved": "4.0.106.3",
-        "contentHash": "rwSWO/zJ+It+0QRye4j6F6xG+PUjYGrheaECV+dMj/Ml3aLJgE8eaFuwAsO1PHfJThhibi7E+xrcVQxW9tn0cw==",
+        "requested": "[4.0.106.4, )",
+        "resolved": "4.0.106.4",
+        "contentHash": "3ZwcZEfQaqQnpChZvNXv/1n8wBL1v367HUX4LCSg6jB1EbAZwXdLRYdMXkwonpEHAyAZSlkgRzqbY0YzXV8Z8Q==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.10, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.11, 5.0.0)"
         }
       },
       "AWSSDK.SecurityToken": {
         "type": "CentralTransitive",
-        "requested": "[4.0.101.3, )",
-        "resolved": "4.0.101.3",
-        "contentHash": "m/cVTo5zzbwxMNaRyYaLnos73vgSNFW9kaZlXHBsp7wmQKK25zgQyYXNiKdlVPC4bg9Tl0P00Q1ViynS0NhzGA==",
+        "requested": "[4.0.101.4, )",
+        "resolved": "4.0.101.4",
+        "contentHash": "vjha/QlWaemVuL4A81mwxqGRR52meo+naCp1ELk/UTxrUiSn4fltXMCLlooZKURzwfdHd6dDDQHUL8cjT8xW3w==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.10, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.11, 5.0.0)"
         }
       },
       "BlackwellSystems.Gcf": {
