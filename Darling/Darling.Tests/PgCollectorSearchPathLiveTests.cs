@@ -514,7 +514,7 @@ public sealed class PgCollectorSearchPathLiveTests
             await ResetAsync(admin.ConnectionString, ct);
             await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {AuroraDatabase}", ct);
             /* A sequence counts each call: nextval is allowed in an IMMUTABLE function and is not undone by a rollback. */
-            await ExecAsync(auroraAdmin.ConnectionString, """
+            await ExecAsync(auroraAdmin.ConnectionString, $"""
                 CREATE EXTENSION pg_stat_statements SCHEMA public;
                 CREATE SEQUENCE public.version_calls;
                 CREATE SEQUENCE public.statements_calls;
@@ -522,7 +522,7 @@ public sealed class PgCollectorSearchPathLiveTests
                 BEGIN PERFORM pg_catalog.nextval('public.version_calls'); RETURN 'x'; END $$;
                 CREATE FUNCTION public.aurora_stat_statements(boolean) RETURNS text IMMUTABLE LANGUAGE plpgsql AS $$
                 BEGIN PERFORM pg_catalog.nextval('public.statements_calls'); RETURN 'x'; END $$;
-                ALTER DATABASE pm6143_aurora SET search_path = public, pg_catalog;
+                ALTER DATABASE {AuroraDatabase} SET search_path = public, pg_catalog;
                 """, ct);
 
             /* The premise: planning the call runs it. */
