@@ -71,12 +71,16 @@ public sealed class QueryStoreAbortsLiveTests
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live aborts test.");
         var ct = TestContext.Current.CancellationToken;
+        /* A scratch database of its own, as ForcedPlanStateLiveTests does: on the shared DARLING_TEST_PG database, CI
+           saw this class's server insert fail with 42P01 (relation "servers" does not exist) after another class ran in the same shard. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        cs = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        await LiveTimescaleProbe.TryEnableAsync(cs!, ct);
+        await LiveTimescaleProbe.TryEnableAsync(cs, ct);
         await DeleteRowsAsync(connection, ct);
-        await using var postgres = NpgsqlDataSource.Create(cs!);
+        await using var postgres = NpgsqlDataSource.Create(cs);
         var ok = false;
         try
         {
