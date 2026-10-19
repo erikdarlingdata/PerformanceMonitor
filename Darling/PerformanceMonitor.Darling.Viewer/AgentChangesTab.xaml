@@ -27,6 +27,7 @@
                 <DataGridTextColumn Header="Why" Binding="{Binding Why}" Width="*"/>
                 <DataGridTextColumn Header="Result" Binding="{Binding ResultDisplay}" Width="130"/>
                 <DataGridTextColumn Header="Muted" Binding="{Binding MutedDisplay}" Width="150"/>
+                <DataGridTextColumn Header="Review" Binding="{Binding ReviewDisplay}" Width="150"/>
             </DataGrid.Columns>
         </DataGrid>
         <StackPanel x:Name="UndoPanel" Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,8">

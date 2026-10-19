@@ -513,6 +513,52 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
     }
 
     [Fact]
+    public async Task TheAgentChangesList_MarksAForce_AnsweredOf_NotReviewedYet_AndNotReviewed()
+    {
+        await RunAsync(async (dataSource, connection, at, ct) =>
+        {
+            var force = await ForceAsync(at(T), connection, T, ct);
+            await PassAsync(connection, T.AddMinutes(5), ct);
+            await PassAsync(connection, T.AddMinutes(10), ct);
+            string Review(AgentChangesRead read) =>
+                (string)PerformanceMonitor.Darling.Service.DarlingWebEndpoints.AgentChangesBody(read, true, T)["changes"]!.AsArray()
+                    .Single(c => (long)c!["called_id"]! == force.CalledId)!["force_review"]!;
+            async Task<AgentChangesRead> ReadAt(DateTime now) => await new AgentChangeUndo(dataSource, 30, () => now).ReadAsync(200, ct);
+
+            /* The schedule runs and no check is opened: not reviewed yet. */
+            Assert.Equal("not reviewed yet", Review(await ReadAt(T.AddMinutes(3))));
+
+            /* One check opened and not answered: still not reviewed yet. */
+            Assert.Equal(1, (await at(T.AddMinutes(6)).SweepAsync(ct)).FollowUps);
+            Assert.Equal("not reviewed yet", Review(await ReadAt(T.AddMinutes(7))));
+
+            /* One answered, one opened: "checks answered 1 of 2". */
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported' WHERE force_check_of = {force.CalledId}", ct);
+            Assert.Equal(1, (await at(T.AddMinutes(11)).SweepAsync(ct)).FollowUps);
+            Assert.Equal("checks answered 1 of 2", Review(await ReadAt(T.AddMinutes(12))));
+
+            /* The schedule ended (past T + 25 h) with one answered: the mark still counts it. */
+            Assert.Equal("checks answered 1 of 2", Review(await ReadAt(T.AddHours(26))));
+        });
+
+        await RunAsync(async (dataSource, connection, at, ct) =>
+        {
+            var force = await ForceAsync(at(T), connection, T, ct);
+            await PassAsync(connection, T.AddMinutes(5), ct);
+            Assert.Equal(1, (await at(T.AddMinutes(6)).SweepAsync(ct)).FollowUps);
+            string Review(AgentChangesRead read) =>
+                (string)PerformanceMonitor.Darling.Service.DarlingWebEndpoints.AgentChangesBody(read, true, T)["changes"]!.AsArray()
+                    .Single(c => (long)c!["called_id"]! == force.CalledId)!["force_review"]!;
+
+            /* Nothing answered and the schedule ended: not reviewed. */
+            Assert.Equal("not reviewed", Review(await new AgentChangeUndo(dataSource, 30, () => T.AddHours(26)).ReadAsync(200, ct)));
+            /* Nothing answered and an unforce of the query was done: the schedule stopped, so not reviewed. */
+            await ForceAsync(at(T.AddMinutes(30)), connection, T.AddMinutes(30), ct, kind: "plan_unforce");
+            Assert.Equal("not reviewed", Review(await new AgentChangeUndo(dataSource, 30, () => T.AddHours(2)).ReadAsync(200, ct)));
+        });
+    }
+
+    [Fact]
     public void TheCheckSchedule_FollowsTheRules()
     {
         var t = new DateTime(2026, 10, 18, 10, 0, 0, DateTimeKind.Utc);

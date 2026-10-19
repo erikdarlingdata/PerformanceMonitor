@@ -27,6 +27,7 @@ export const AGENT_CHANGE_COLUMNS = [
   { key: "reason", label: "Why", wrap: true },
   { key: "result", label: "Result" },
   { key: "muted", label: "Muted since" },
+  { key: "review", label: "Review" },
 ];
 
 const LIST_ONLY =
@@ -67,6 +68,7 @@ export function agentChangeRows(data) {
     reason: c.reason || null,
     result: agentResultText(c),
     muted: Number.isInteger(c.muted_alerts) ? String(c.muted_alerts) + " alerts" : null,
+    review: typeof c.force_review === "string" && c.force_review ? c.force_review : null,
     can_undo: c.can_undo === true,
   }));
 }

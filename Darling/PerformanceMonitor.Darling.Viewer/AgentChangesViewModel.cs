@@ -93,6 +93,9 @@ public sealed class AgentChangeViewRow
 
     public string MutedDisplay => Row.MutedAlerts is int n ? n.ToString(CultureInfo.InvariantCulture) + " alerts muted since" : "";
 
+    /// <summary>The Review column (#5632, step 8): whether an agent kept or removed a plan force after Darling's checks. Empty for any other change.</summary>
+    public string ReviewDisplay => Row.ForceReview?.Words ?? "";
+
     /// <summary>True when Undo may be tried now.</summary>
     public bool CanUndo => Row.CanTryUndo(DateTime.UtcNow);
 

@@ -32,7 +32,8 @@ public sealed record AgentChangeRow(
     string? ResultJson,
     DateTime? UndoneAtUtc,
     string? UndoneBy,
-    int? MutedAlerts)
+    int? MutedAlerts,
+    ForceReviewMark? ForceReview = null)
 {
     /// <summary>The kind word the tool journaled (<c>mute</c>, <c>custom_rule</c> or <c>threshold_override</c>; <see cref="AgentChangeKinds"/>).</summary>
     public string? Kind => ReadString("kind");
@@ -48,6 +49,19 @@ public sealed record AgentChangeRow(
         Result == AgentChangeResult.Done && UndoneAtUtc is null
         && AgentChangeUndo.UndoableKinds.Contains(Kind ?? "")
         && nowUtc - CalledAtUtc <= AgentChangeUndo.Window;
+}
+
+/// <summary>
+/// Whether an agent reviewed a plan force (#5632, step 8): the checks Darling opened for it, how many were answered (the request reached
+/// <c>reported</c>), and whether the schedule is still running. Computed in <see cref="AgentChangeUndo.ReadAsync"/> for each plan force that was done.
+/// </summary>
+public sealed record ForceReviewMark(int Opened, int Answered, bool Running)
+{
+    /// <summary>The list's words: "checks answered 2 of 5" once any is answered, "not reviewed yet" while the schedule runs with none answered,
+    /// and "not reviewed" once it ended (or stopped) with none.</summary>
+    public string Words => Answered > 0
+        ? "checks answered " + Answered.ToString(System.Globalization.CultureInfo.InvariantCulture) + " of " + Opened.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        : Running ? "not reviewed yet" : "not reviewed";
 }
 
 /// <summary>How a journaled call ended (#5917). A call with neither an <c>action_done</c> nor an <c>action_failed</c> row is
@@ -169,6 +183,52 @@ WHERE a.muted
   AND ($2::integer IS NULL OR a.server_id = $2)
   AND ($3::text IS NULL OR a.metric_name = $3)";
 
+    /// <summary>
+    /// The review mark of a done plan force (#5632, step 8), one row: when it was done, the checks opened, the checks answered, and whether the
+    /// schedule has stopped: undone, a later done force or unforce of the same query on the server, or a check whose numbers showed it removed.
+    /// $1 the force's <c>action_called</c> journal id.
+    /// </summary>
+    internal const string ForceReviewSql = @"
+SELECT d.event_time,
+       (SELECT count(*) FROM config.investigation_requests AS f WHERE f.force_check_of = c.journal_id),
+       (SELECT count(*) FROM config.investigation_requests AS f WHERE f.force_check_of = c.journal_id AND f.state = 'reported'),
+       (EXISTS (SELECT 1 FROM config.investigation_journal AS u
+                WHERE u.request_id = c.request_id AND u.event = 'action_undone' AND u.detail->>'called_id' = c.journal_id::text)
+        OR EXISTS (
+            SELECT 1 FROM config.investigation_journal AS c2
+            JOIN config.investigation_journal AS d2
+              ON d2.request_id = c2.request_id AND d2.event = 'action_done' AND d2.detail->>'called_id' = c2.journal_id::text
+            WHERE c2.event = 'action_called'
+              AND c2.detail->>'kind' IN ('plan_force', 'plan_unforce')
+              AND c2.server_id = c.server_id
+              AND c2.journal_id <> c.journal_id
+              AND c2.event_time >= c.event_time
+              AND COALESCE(c2.detail->'before'->>'database', c2.detail->'target'->>'database') = COALESCE(c.detail->'before'->>'database', c.detail->'target'->>'database')
+              AND c2.detail->'before'->>'query_id' = c.detail->'before'->>'query_id'
+              AND d2.journal_id > d.journal_id)
+        OR EXISTS (
+            SELECT 1 FROM config.investigation_requests AS f
+            JOIN config.investigation_evidence AS e ON e.request_id = f.request_id AND e.section = 'plan_force_check'
+            WHERE f.force_check_of = c.journal_id AND e.content->>'state' = 'removed'))
+FROM config.investigation_journal AS c
+JOIN LATERAL (
+    SELECT x.journal_id, x.event_time FROM config.investigation_journal AS x
+    WHERE x.request_id = c.request_id AND x.event = 'action_done' AND x.detail->>'called_id' = c.journal_id::text
+    ORDER BY x.journal_id DESC LIMIT 1) AS d ON true
+WHERE c.journal_id = $1 AND c.event = 'action_called'";
+
+    private async Task<ForceReviewMark?> ForceReviewAsync(NpgsqlConnection connection, AgentChangeRow row, CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, null, ForceReviewSql, P(row.CalledId));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+        var forcedAt = Utc(reader.GetDateTime(0));
+        var stopped = reader.GetBoolean(3);
+        var running = !stopped && Now() <= forcedAt.AddHours(InvestigationRequestStore.ForceCheckStopHours);
+        return new ForceReviewMark((int)reader.GetInt64(1), (int)reader.GetInt64(2), running);
+    }
+
     /// <summary>The list: the calls and the refusals newest first, with the switch's state.</summary>
     public async Task<AgentChangesRead> ReadAsync(int limit = 200, CancellationToken cancellationToken = default)
     {
@@ -182,6 +242,8 @@ WHERE a.muted
         {
             if (changes[i].Kind == AgentChangeKinds.Mute && changes[i].Result == AgentChangeResult.Done)
                 changes[i] = changes[i] with { MutedAlerts = await MutedAlertCountAsync(connection, changes[i], cancellationToken) };
+            else if (changes[i].Kind == AgentChangeKinds.PlanForce && changes[i].Result == AgentChangeResult.Done)
+                changes[i] = changes[i] with { ForceReview = await ForceReviewAsync(connection, changes[i], cancellationToken) };
         }
 
         var refusals = new List<AgentRefusalRow>();

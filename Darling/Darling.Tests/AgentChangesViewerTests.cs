@@ -31,6 +31,18 @@ public sealed class AgentChangesViewerTests
         Assert.Equal(result == AgentChangeResult.Done, view.CanUndo);
     }
 
+    [Theory]
+    [InlineData(2, 5, true, "checks answered 2 of 5")]
+    [InlineData(0, 3, true, "not reviewed yet")]
+    [InlineData(0, 3, false, "not reviewed")]
+    [InlineData(1, 1, false, "checks answered 1 of 1")]
+    public void APlanForce_ShowsItsReviewMark_AndAnyOtherChangeShowsNone(int answered, int opened, bool running, string words)
+    {
+        var force = Row(AgentChangeResult.Done, kind: "plan_force") with { ForceReview = new ForceReviewMark(opened, answered, running) };
+        Assert.Equal(words, new AgentChangeViewRow(force).ReviewDisplay);
+        Assert.Equal("", new AgentChangeViewRow(Row(AgentChangeResult.Done)).ReviewDisplay);
+    }
+
     [Fact]
     public void AnUndoneChange_SaysWhoUndidIt_AndIsNotOfferedAgain_AndAnOldOrUnknownKindIsNot()
     {

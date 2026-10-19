@@ -1515,6 +1515,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["undone_at_utc"] = c.UndoneAtUtc?.ToString("o", CultureInfo.InvariantCulture),
                 ["undone_by"] = c.UndoneBy,
                 ["muted_alerts"] = c.MutedAlerts,
+                ["force_review"] = c.ForceReview?.Words,
+                ["force_checks_opened"] = c.ForceReview?.Opened,
+                ["force_checks_answered"] = c.ForceReview?.Answered,
                 ["can_undo"] = c.CanTryUndo(nowUtc),
             });
         }
