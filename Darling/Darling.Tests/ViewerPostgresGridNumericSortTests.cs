@@ -214,4 +214,38 @@ public sealed class ViewerPostgresGridNumericSortTests
             Assert.Equal(new long?[] { null, 9, 100 }, Sorted(Column(tab.PgBlockingChainsGrid, "Seen As Root"), rows).Select(r => r.SamplesAsRootSort));
         });
     }
+
+    /// <summary>#6135: the index bloat grid showed 22487040 where every other size reads "21.4 MB". The column shows the
+    /// converted size and still orders by the byte count the row holds.</summary>
+    [Fact]
+    public void IndexBloatSizes_ShowInHumanUnits_AndSortByBytes()
+    {
+        StaTestThread.Run(() =>
+        {
+            var tab = NewTab();
+            static DarlingPgIndexBloatReader.PgIndexBloatRow Bloat(string name, long bytes, long? reclaimable) => new(
+                "appdb", "public", "orders", name, bytes, null, null, null, null, null, reclaimable, null,
+                "estimated", 12.5, null, null, null, null, null, null, Utc);
+
+            var rows = new[]
+            {
+                PgDisplay.IndexBloat(Bloat("big", 22_487_040, 5_000_000)),
+                PgDisplay.IndexBloat(Bloat("small", 9_437_184, null)),
+                PgDisplay.IndexBloat(Bloat("huge", 3 * Gb, 1 * Gb)),
+            };
+
+            var size = Column(tab.PgIndexBloatGrid, "Size");
+            Assert.Equal(new[] { "small", "big", "huge" }, Sorted(size, rows).Select(r => r.IndexName));
+
+            var shown = ((System.Windows.Data.Binding)size.Binding).Converter.Convert(rows[0].IndexBytes, typeof(string), null!, System.Globalization.CultureInfo.CurrentCulture);
+            Assert.Equal(PgDisplay.Bytes(22_487_040), shown);
+            Assert.DoesNotContain("22487040", (string)shown, StringComparison.Ordinal);
+
+            var reclaimable = Column(tab.PgIndexBloatGrid, "Reclaimable (est.)");
+            var convert = ((System.Windows.Data.Binding)reclaimable.Binding).Converter;
+            Assert.Equal(PgDisplay.Bytes(5_000_000), convert.Convert(rows[0].EstimatedReclaimableBytes, typeof(string), null!, System.Globalization.CultureInfo.CurrentCulture));
+            Assert.Equal("", convert.Convert(rows[1].EstimatedReclaimableBytes, typeof(string), null!, System.Globalization.CultureInfo.CurrentCulture));
+            Assert.Equal(new[] { "small", "big", "huge" }, Sorted(reclaimable, rows).Select(r => r.IndexName));
+        });
+    }
 }

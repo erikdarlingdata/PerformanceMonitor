@@ -25,10 +25,7 @@ namespace Darling.Tests;
 /// because that half is what made an observed window that produced no fact say "collection appears to have
 /// stopped". (2) The observed-window-no-facts branch follows it, sets no message, does not return, and
 /// precedes both the partial-coverage caveat and the anomaly detector — so an all-clear out of it is a real
-/// pass at the stated coverage and the detector still gets its say. (3) The composed
-/// <c>WindowEmptyMessage</c> statement — both arms, the point-in-time one and the bare one — is byte-identical
-/// across the SKUs, and still carries the #3524 prose, because that prose is now true of exactly the case it
-/// is emitted for.</para>
+/// pass at the stated coverage and the detector still gets its say. The message text itself is composed by one shared function (<c>WindowEmptyText.Compose</c>) and is covered by behaviour tests, so it cannot differ between the SKUs.</para>
 /// </summary>
 public sealed class AnalysisWindowEmptyRuleParityTests
 {
@@ -37,7 +34,7 @@ public sealed class AnalysisWindowEmptyRuleParityTests
     private const string ObservedZeroBranch = "if (facts.Count == 0)";
     private const string PartialCaveat = "if (context.Coverage is { IsPartial: true } partial)";
     private const string Detector = ".DetectAnomaliesAsync(context)";
-    private const string MessageStart = "WindowEmptyMessage = hasPointInTimeFactsOnly";
+    private const string MessageStart = "WindowEmptyMessage = WindowEmptyText.Compose(";
     private const string MessageEnd = "— this is NOT an all-clear.\";";
 
     private static IEnumerable<(string Sku, string Source)> Sources()
@@ -102,28 +99,6 @@ public sealed class AnalysisWindowEmptyRuleParityTests
         }
     }
 
-    [Fact]
-    public void TheComposedWindowEmptyMessage_IsByteIdenticalAcrossTheSkus_AndStillNamesTheDeadCollector()
-    {
-        string? darling = null, lite = null;
-        foreach (var (sku, source) in Sources())
-        {
-            var statement = MessageStatement(source, sku);
-            if (sku == "Darling") darling = statement; else lite = statement;
-        }
-
-        Assert.NotNull(darling);
-        Assert.NotNull(lite);
-        Assert.Equal(darling, lite);
-
-        /* Both arms, and the prose that is now true of exactly the case it is emitted for. */
-        Assert.Contains("The collector observed none of the analysis window", darling, StringComparison.Ordinal);
-        Assert.Contains("No facts were collected in the analysis window", darling, StringComparison.Ordinal);
-        Assert.Contains("point-in-time", darling, StringComparison.Ordinal);
-        Assert.Equal(2, CountOf(darling!, "Collection appears to have stopped or "));
-        Assert.Equal(2, CountOf(darling!, "this is NOT an all-clear."));
-    }
-
     private static string PassBody(string source, string sku)
     {
         var start = source.IndexOf(PassEntry, StringComparison.Ordinal);
@@ -131,23 +106,5 @@ public sealed class AnalysisWindowEmptyRuleParityTests
         var end = source.IndexOf("CollectAndScoreFactsAsync(", start, StringComparison.Ordinal);
         Assert.True(end > start, $"{sku}: CollectAndScoreFactsAsync no longer follows the pass");
         return source[start..end];
-    }
-
-    private static string MessageStatement(string source, string sku)
-    {
-        var pass = PassBody(source, sku);
-        var start = pass.IndexOf(MessageStart, StringComparison.Ordinal);
-        Assert.True(start > 0, $"{sku}: the WindowEmptyMessage assignment has moved");
-        var end = pass.IndexOf(MessageEnd, start, StringComparison.Ordinal);
-        Assert.True(end > start, $"{sku}: the WindowEmptyMessage assignment no longer ends on the #3524 sentence");
-        return pass[start..(end + MessageEnd.Length)];
-    }
-
-    private static int CountOf(string text, string needle)
-    {
-        var count = 0;
-        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
-            count++;
-        return count;
     }
 }

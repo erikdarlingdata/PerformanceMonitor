@@ -84,7 +84,8 @@ internal static class DarlingQueryStoreRegressionReader
         int RecentPlanCount,
         string Severity,
         string QueryTextSample,
-        DateTime? LastExecutionTime);
+        DateTime? LastExecutionTime,
+        long TotalCount = 0);
 
     /// <summary>
     /// The viewer's regression read over raw <c>query_store_stats</c>. $1 server_id, $2 window start (the baseline is
@@ -205,7 +206,10 @@ internal static class DarlingQueryStoreRegressionReader
                The MAX(query_text) sample below it stays as the fallback: it is where text lived before the
                cutover, and it is what keeps the regression rows readable for existing history. */
             COALESCE(x.query_sql_text, r.query_text_sample) AS query_text_sample,
-            r.last_execution_time
+            r.last_execution_time,
+            /* #6128: the rows that passed the gate, before LIMIT. A window count runs ahead of the LIMIT in the same
+               statement, over rows the join and the gate already produced, so it costs no second pass. */
+            COUNT(*) OVER () AS total_count
         FROM recent_performance AS r
         JOIN baseline_performance AS b
           ON  b.database_name = r.database_name
@@ -496,7 +500,8 @@ internal static class DarlingQueryStoreRegressionReader
                 reader.IsDBNull(15) ? 0 : reader.GetInt32(15),
                 reader.IsDBNull(16) ? "" : reader.GetString(16),
                 reader.IsDBNull(17) ? "" : reader.GetString(17),
-                reader.IsDBNull(18) ? null : reader.GetDateTime(18)));
+                reader.IsDBNull(18) ? null : reader.GetDateTime(18),
+                reader.IsDBNull(19) ? 0 : reader.GetInt64(19)));
         }
 
         return rows;

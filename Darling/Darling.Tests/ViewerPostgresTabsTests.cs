@@ -340,7 +340,9 @@ public sealed class ViewerPostgresTabsTests
         Assert.False(waits.IsFault);
         Assert.Contains("aurora_stat_system_waits()", waits.Explanation, StringComparison.Ordinal);
         Assert.Contains("never will", waits.Explanation, StringComparison.Ordinal);
-        Assert.Contains(stock.ServerName, waits.Explanation, StringComparison.Ordinal);
+        /* #6135: the sentence names the server the way every other screen does, not by its connection key. */
+        Assert.Contains(stock.DisplayName, waits.Explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain(stock.ServerName, waits.Explanation, StringComparison.Ordinal);
 
         /* A collector that CAN run here and has no rows is a fault to chase, not a fact to read. The two
            states are deliberately distinct because they need different responses. */

@@ -561,7 +561,11 @@ public sealed class RecommendationsViewModel
             RawSeverity = row.RawSeverity,
             Database = string.IsNullOrEmpty(row.DatabaseName) ? null : row.DatabaseName,
             Title = row.Title,
-            AdviceText = ComposeAdvice(advice),
+            // #6135: the PostgreSQL blocks are written for agents too (tool names, how the engine judged it).
+            // The card keeps what happened and what to do; MCP readers still get the whole block.
+            AdviceText = PgTargetAdvice.IsPgKey(finding.RootFactKey)
+                ? ComposeShortPostgresAdvice(advice)
+                : ComposeAdvice(advice),
             CopyPasteSql = BuildCopyPasteSql(finding.Remediation),
             Remediation = finding.Remediation,
             IncidentId = finding.IncidentId,
@@ -607,6 +611,47 @@ public sealed class RecommendationsViewModel
         }
 
         return sb.Length == 0 ? null : sb.ToString();
+    }
+
+    /// <summary>
+    /// #6135: the card text for a PostgreSQL finding: one line of what was seen (the investigation's first
+    /// sentence) and up to two sentences of what to do (the remediation's first). A sentence that names an MCP
+    /// tool or an internal term is dropped whole, not trimmed, so no half sentence is left. The finding's
+    /// title already says what happened in a line; the full block stays in the MCP and agent reads.
+    /// Null when nothing is left to show.
+    /// </summary>
+    internal static string? ComposeShortPostgresAdvice(AdviceBlock? advice)
+    {
+        if (advice is null)
+            return null;
+
+        var seen = FirstPlainSentences(advice.Investigation, 1);
+        var todo = FirstPlainSentences(advice.Remediation, 2);
+        if (seen.Length == 0 && todo.Length == 0)
+            return null;
+        if (seen.Length == 0)
+            return todo;
+        return todo.Length == 0 ? seen : seen + "\n" + todo;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex s_sentenceBreak =
+        new(@"(?<=[.!?])\s+(?=[A-Z0-9])", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>MCP tool names (get_pg_...) and the agent-side vocabulary a viewer reader has no use for.</summary>
+    private static readonly System.Text.RegularExpressions.Regex s_agentOnlyTerm =
+        new(@"\bget_[a-z0-9_]+|\bMCP\b|\bFALLBACK\b|\bfleet\b|\bfifty\b|\bagents?\b",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static string FirstPlainSentences(string? text, int count)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        var kept = s_sentenceBreak.Split(text.Trim())
+            .Select(x => x.Trim())
+            .Where(x => x.Length > 0 && !s_agentOnlyTerm.IsMatch(x))
+            .Take(count);
+        return string.Join(" ", kept);
     }
 
     /// <summary>
@@ -724,6 +769,17 @@ public sealed class RecommendationsViewModel
             "get_analysis_findings and the relevant wait/blocking/memory tools, then tell me the " +
             "likely cause and what to do.",
             serverName, title, from, to);
+    }
+
+    /// <summary>
+    /// #6135: the status line with the Overview card's offline sentence after it for an offline server, so findings
+    /// from the last collection do not read as current. Unchanged for a server that is not offline.
+    /// </summary>
+    internal static string WithOfflineNote(string status, bool offline)
+    {
+        if (!offline)
+            return status;
+        return string.IsNullOrEmpty(status) ? FleetRollup.OfflineNote : status + ". " + FleetRollup.OfflineNote;
     }
 
     /// <summary>

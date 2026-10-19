@@ -113,7 +113,8 @@ public sealed class DarlingMcpMemoryGrantTools
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 age_seconds = LatestSnapshotStamp.AgeSeconds(rows[0].CollectionTime, now),
                 grants,
-                window = window.Select(WindowShape)
+                window = window.Select(WindowShape),
+                window_note = WindowSamplingNote
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -172,7 +173,8 @@ public sealed class DarlingMcpMemoryGrantTools
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 age_seconds = LatestSnapshotStamp.AgeSeconds(rows[0].CollectionTime, now),
                 grants,
-                window = window.Select(WindowShape)
+                window = window.Select(WindowShape),
+                window_note = WindowSamplingNote
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -181,13 +183,19 @@ public sealed class DarlingMcpMemoryGrantTools
         }
     }
 
+    /// <summary>#6129: the window's peaks are maxima over the snapshots taken every collection interval, so a wait or grant
+    /// shorter than the interval can fall between two snapshots. A peak of 0 is therefore "none sampled", not "no grant
+    /// pressure": RESOURCE_SEMAPHORE waits in get_wait_stats can coexist with peak_waiter_count 0.</summary>
+    internal const string WindowSamplingNote =
+        "window[] peaks are sampled once per collection interval and can miss a wait or grant shorter than it; a peak of 0 does not rule out grant pressure (check RESOURCE_SEMAPHORE in get_wait_stats). A peak of 0 has a null *_at.";
+
     /// <summary>
     /// The window half's payload shape, shared by both lenses so the same key set describes a semaphore's
     /// window and a pool's window (the pool lens carries a null <c>resource_semaphore_id</c>, which
     /// <see cref="McpHelpers.JsonOptions"/> writes rather than drops — the key is present on both so a
     /// caller can read one shape).
     /// </summary>
-    private static object WindowShape(DarlingMemoryGrantReader.MemoryGrantWindowRow w) => new
+    internal static object WindowShape(DarlingMemoryGrantReader.MemoryGrantWindowRow w) => new
     {
         resource_semaphore_id = w.ResourceSemaphoreId,
         pool_id = w.PoolId,
@@ -195,9 +203,9 @@ public sealed class DarlingMcpMemoryGrantTools
         first_snapshot_at = w.FirstSnapshotAt.ToString("o"),
         last_snapshot_at = w.LastSnapshotAt.ToString("o"),
         peak_waiter_count = w.PeakWaiterCount,
-        peak_waiters_at = w.PeakWaitersAt.ToString("o"),
+        peak_waiters_at = w.PeakWaiterCount > 0 ? w.PeakWaitersAt.ToString("o") : null,
         peak_granted_memory_mb = Math.Round(w.PeakGrantedMemoryMb, 2),
-        peak_granted_at = w.PeakGrantedAt.ToString("o"),
+        peak_granted_at = w.PeakGrantedMemoryMb > 0 ? w.PeakGrantedAt.ToString("o") : null,
         min_available_memory_mb = Math.Round(w.MinAvailableMemoryMb, 2),
         timeout_errors_in_window = w.TimeoutErrorsInWindow,
         forced_grants_in_window = w.ForcedGrantsInWindow

@@ -118,7 +118,7 @@ public partial class ViewerServerTab
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
         var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName);
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName);
 
         if (gap is not null)
         {
@@ -132,7 +132,7 @@ public partial class ViewerServerTab
     /// spend a round trip proving a permanent gap is still permanent.</summary>
     private bool PgCollectorIsGatedOff(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName) is not null;
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders
@@ -1306,5 +1306,43 @@ public partial class ViewerServerTab
                  are withheld by the privilege filter reads as a ranking of the server, and the operator has
                  no way to see the difference from the grid itself. */
               + coverage.Message;
+    }
+
+    /// <summary>
+    /// #6133: the Vacuum tab scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
+    /// mouse wheel handled even when it has nothing left to scroll, so over a grid the page would not move.
+    /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself.
+    /// </summary>
+    private void PgVacuumScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (sender is not ScrollViewer page || e.Handled)
+        {
+            return;
+        }
+
+        ScrollViewer? inner = null;
+        for (DependencyObject? d = e.OriginalSource as DependencyObject;
+             d != null && !ReferenceEquals(d, page);
+             d = System.Windows.Media.VisualTreeHelper.GetParent(d))
+        {
+            if (d is ScrollViewer sv)
+            {
+                inner = sv;
+                break;
+            }
+        }
+
+        if (inner != null && inner.ScrollableHeight > 0)
+        {
+            bool atTop = inner.VerticalOffset <= 0;
+            bool atBottom = inner.VerticalOffset >= inner.ScrollableHeight;
+            if ((e.Delta > 0 && !atTop) || (e.Delta < 0 && !atBottom))
+            {
+                return;
+            }
+        }
+
+        page.ScrollToVerticalOffset(page.VerticalOffset - e.Delta);
+        e.Handled = true;
     }
 }
