@@ -32,7 +32,7 @@ public sealed class WebBytesFormatTests
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(harness);
         psi.ArgumentList.Add(js);
-        Process proc;
+        Process? proc = null;
         try
         {
             proc = Process.Start(psi)!;
@@ -40,10 +40,9 @@ public sealed class WebBytesFormatTests
         catch (Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped formatter cannot be run.");
-            return;
         }
 
-        using (proc)
+        using (proc!)
         {
             var error = proc.StandardError.ReadToEndAsync();
             var output = proc.StandardOutput.ReadToEnd().Trim();
