@@ -44,11 +44,15 @@ public sealed record AgentChangeRow(
     private string? ReadString(string key) =>
         JsonNode.Parse(DetailJson) is JsonObject o && o[key] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
 
-    /// <summary>True when an undo can be tried: the change was made, nobody undid it, and the kind has an undo.</summary>
+    /// <summary>True for a plan force or unforce (#5632, step 9): the server's state decides its undo, not the journal's result.</summary>
+    public bool IsPlanChange => Kind is AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce;
+
+    /// <summary>True when an undo can be tried: nobody undid it, it is inside the window, and the kind has an undo. A store kind needs a done
+    /// change. A plan force or unforce may be done, failed or unknown, because the undo reads the server first and decides from what it finds.</summary>
     public bool CanTryUndo(DateTime nowUtc) =>
-        Result == AgentChangeResult.Done && UndoneAtUtc is null
-        && AgentChangeUndo.UndoableKinds.Contains(Kind ?? "")
-        && nowUtc - CalledAtUtc <= AgentChangeUndo.Window;
+        UndoneAtUtc is null
+        && nowUtc - CalledAtUtc <= AgentChangeUndo.Window
+        && (IsPlanChange || (Result == AgentChangeResult.Done && AgentChangeUndo.UndoableKinds.Contains(Kind ?? "")));
 }
 
 /// <summary>
@@ -101,7 +105,7 @@ public sealed record AgentUndoResult(bool Undone, string? Code, string Words)
 /// (a rule with <c>OVERRIDING SYSTEM VALUE</c>, so it keeps its <c>Custom:&lt;id&gt;</c>; a rule with that name since is refused).
 /// Undo works for <see cref="Window"/> from the call.</para>
 /// </summary>
-public sealed class AgentChangeUndo
+public sealed partial class AgentChangeUndo
 {
     /// <summary>How long after the call an undo is offered (365 days).</summary>
     public static readonly TimeSpan Window = TimeSpan.FromDays(365);
@@ -323,6 +327,13 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         while (await reader.ReadAsync(cancellationToken))
             rows.Add(new MutedAlertRow(Utc(reader.GetDateTime(0)), reader.GetInt32(1), reader.GetString(2), reader.GetString(3), reader.GetDouble(4), reader.GetDouble(5)));
         return rows;
+    }
+
+    /// <summary>One change by its journal id (no window), or null when no such <c>action_called</c> row exists. The web route reads the kind from it.</summary>
+    public async Task<AgentChangeRow?> GetAsync(long calledId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await ReadAsync(connection, calledId, cancellationToken);
     }
 
     private async Task<AgentChangeRow?> ReadAsync(NpgsqlConnection connection, long calledId, CancellationToken cancellationToken) =>

@@ -138,25 +138,40 @@ public sealed partial class InvestigationRequestStore
             return new AgentActionRefusal(AgentActionCodes.OtherServer,
                 $"This action targets {call.Target.ServerName}; the request is for {live.ServerName}. An action runs only on the request's server.");
 
-        /* 3: this server's switch for this action. No row means off. */
+        /* 3 and 4: this server's switch and its remediation login, the two server-side conditions. */
+        return await SwitchAndCredentialRefusalAsync(connection, transaction, live.ServerId, live.ServerName, call.ServerAction, hooks.ReadCredential,
+            person: false, cancellationToken);
+    }
+
+    /// <summary>
+    /// The two server-side conditions of the gate, shared by an agent's action and a person's undo (#5632, step 9): 3 this server's switch for this
+    /// action (no row means off), 4 the remediation login, a reference only. The secret is classified by its prefix and never resolved here.
+    /// <paramref name="person"/> only changes the words: a person is told how to turn the switch on, or to remove the force in SQL Server.
+    /// </summary>
+    internal async Task<AgentActionRefusal?> SwitchAndCredentialRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        int serverId, string serverName, string serverAction, Func<int, CancellationToken, Task<ServerCredentialState>> readCredential, bool person,
+        CancellationToken cancellationToken)
+    {
         bool on;
-        await using (var command = Command(connection, transaction, ServerActionSwitchSql, P(live.ServerId), PText(call.ServerAction)))
+        await using (var command = Command(connection, transaction, ServerActionSwitchSql, P(serverId), PText(serverAction)))
         {
             on = await command.ExecuteScalarAsync(cancellationToken) is true;
         }
 
         if (!on)
-            return new AgentActionRefusal(AgentActionCodes.SwitchOff,
-                $"{call.ServerAction} is turned off for {live.ServerName}. Every server action starts off until a person turns it on for that server.");
+            return new AgentActionRefusal(AgentActionCodes.SwitchOff, person
+                ? $"{serverAction} is turned off for {serverName}, so Darling will not change that server. To allow it, set enabled to true for that server and action in config.config_server_actions. Or remove the plan force in SQL Server yourself."
+                : $"{serverAction} is turned off for {serverName}. Every server action starts off until a person turns it on for that server.");
 
-        /* 4: the remediation login, a reference only. The secret is classified by its prefix and never resolved here. */
-        return await hooks.ReadCredential(live.ServerId, cancellationToken) switch
+        return await readCredential(serverId, cancellationToken) switch
         {
             ServerCredentialState.Reference => null,
-            ServerCredentialState.StoredPassword => new AgentActionRefusal(AgentActionCodes.CredentialNotReference,
-                $"{live.ServerName}'s remediation password is stored, not given as an env: or file: reference. Server actions use references only."),
-            _ => new AgentActionRefusal(AgentActionCodes.NoCredential,
-                $"{live.ServerName} has no remediation login (a login name and an env: or file: reference). Report what you would change instead."),
+            ServerCredentialState.StoredPassword => new AgentActionRefusal(AgentActionCodes.CredentialNotReference, person
+                ? $"{serverName}'s remediation password is stored, not given as an env: or file: reference. Server actions use references only. Set a reference, or remove the plan force in SQL Server yourself."
+                : $"{serverName}'s remediation password is stored, not given as an env: or file: reference. Server actions use references only."),
+            _ => new AgentActionRefusal(AgentActionCodes.NoCredential, person
+                ? $"{serverName} has no remediation login (a login name and an env: or file: reference). Set one, or remove the plan force in SQL Server yourself."
+                : $"{serverName} has no remediation login (a login name and an env: or file: reference). Report what you would change instead."),
         };
     }
 

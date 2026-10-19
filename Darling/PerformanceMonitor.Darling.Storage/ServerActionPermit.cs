@@ -36,6 +36,20 @@ public sealed class ServerActionPermit
         AgentId = call.Action.AgentId;
     }
 
+    /// <summary>A permit for a person's undo (#5632, step 9): issued by <see cref="AgentChangeUndo"/> after the two server-side conditions
+    /// (the server's switch and its remediation login) and nothing else. <paramref name="actor"/> is the person (<c>person:&lt;login&gt;</c>) and
+    /// <paramref name="requestId"/> is the request of the change being undone.</summary>
+    internal ServerActionPermit(string serverAction, int serverId, string serverName, string? id, string? database, Guid requestId, string actor)
+    {
+        ServerAction = serverAction;
+        ServerId = serverId;
+        ServerName = serverName;
+        Id = id;
+        Database = database;
+        RequestId = requestId;
+        AgentId = actor;
+    }
+
     /// <summary>One of <see cref="ServerActionNames"/>.</summary>
     public string ServerAction { get; }
 
