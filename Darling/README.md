@@ -1,4 +1,4 @@
-﻿# Performance Monitor Darling — Headless Edition
+# Performance Monitor Darling — Headless Edition
 
 Darling is the headless, centralized edition of Performance Monitor: a 24/7 Windows service that collects from your SQL Servers into a central PostgreSQL (optionally TimescaleDB) store, plus a detached desktop viewer that reads that store. No desktop app has to stay open for collection to happen, and every viewer seat reads the same central data.
 
@@ -575,7 +575,29 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 
 **Least privilege for the remediation credential.** Grant `ALTER` on each database you intend to force a plan in — that is what `sp_query_store_force_plan` / `sp_query_store_unforce_plan` need. `ALTER SERVER STATE` is needed *only* to evict a plan (`evict_cached_plan`, #5632), because that is what a targeted `DBCC FREEPROCCACHE(plan_handle)` requires, and it is the expensive grant. It is genuinely optional: without it an eviction is refused as `evict_permission_denied`, a named reason and never silent, and nothing is run. The service does not guess per platform: before it evicts (and on a dry run) it asks the server with a read-only `HAS_PERMS_BY_NAME` check, which answers for the credential's effective permissions however the grant arrived. Azure SQL Database has no plan handle eviction at all, which no grant changes, and that is refused as its own reason, `evict_unsupported_on_platform`, rather than as a permission problem. An eviction has no undo, and it also needs that server's `evict_plan` switch; no server has it on after an upgrade.
 
-**`ALTER ANY CONNECTION` is a strong grant, and it is needed only to kill (`kill_session`, #5632).** It lets the remediation login kill ANY session on that server, not only the one an agent names, so grant it only on a server where you want an agent to be able to kill. Darling checks that the session id and its sign-in time still match what the agent read from `get_blocking` before it runs `KILL`, and refuses with `kill_permission_denied` (a named reason, nothing run) when the login lacks the grant. A kill also needs that server's `kill_session` switch, which is off after an upgrade. A person turns it on the way they turn on `evict_plan`: set `enabled` to true for that server and the action `kill_session` in `config.config_server_actions`. There is no switch screen for it. **PostgreSQL kill is NOT built:** a PostgreSQL target is refused with `postgres_target` and nothing is run. Azure SQL Database is not built either (`kill_not_built_on_platform`).
+**`ALTER ANY CONNECTION` is a strong grant, and it is needed only to kill (`kill_session`, #5632).** It lets the remediation login kill ANY session on that server, not only the one an agent names, so grant it only on a server where you want an agent to be able to kill. Darling checks that the session id and its sign-in time still match what the agent read from `get_blocking` before it runs `KILL`, and refuses with `kill_permission_denied` (a named reason, nothing run) when the login lacks the grant. A kill also needs that server's `kill_session` switch, which is off after an upgrade. A person turns it on the way they turn on `evict_plan`: set `enabled` to true for that server and the action `kill_session` in `config.config_server_actions`. There is no switch screen for it. Azure SQL Database kill is not built: it is refused as `kill_not_built_on_platform` and nothing is run.
+
+### Ending a PostgreSQL session
+
+On a PostgreSQL server the remediation login ends one session with `pg_terminate_backend` (`kill_session`, #5632). The agent names the session by its `backend_id`. `get_pg_blocking` returns it as `root_backend_id`, and `get_pg_session_states` returns it as `backend_id`. It holds the session's start time in whole seconds, then its pid in seven digits.
+
+Darling checks the pid and the start second in the same statement that ends the session. A pid that the operating system gave to a new session is never ended. A different session would also need the same pid and the same start second. The operating system would have to use up its whole pid space inside one second.
+
+The login needs two grants: `pg_signal_backend`, and `pg_read_all_stats` (or `pg_monitor`, which includes it). Without `pg_read_all_stats` the server hides another role's start time. Darling then cannot check the session and refuses. Darling reads what the login can do before it tries. It refuses with `not_permitted` and a message that names the missing grant, and it does not try the kill anyway.
+
+Darling also refuses a session that belongs to a superuser. PostgreSQL lets only a superuser end one, and `pg_signal_backend` does not change that.
+
+Darling ends client sessions only. A background process or a replication sender is refused as `not_user_session`, and Darling's own connection is refused as `own_session`. Ending a session rolls back its open transaction. There is no undo. A kill also needs that server's `kill_session` switch, which is off after an upgrade.
+
+### Managed PostgreSQL
+
+None of the three providers' pages says whether its admin role holds `pg_signal_backend`. Check your own login: a dry run asks the server and ends nothing. These are the facts each page states.
+
+- Amazon RDS and Aurora: `rds_superuser` can stop connections with `pg_terminate_backend`. The internal `rdsadmin` role does the work of a superuser ([AWS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.PostgreSQL.CommonDBATasks.Roles.rds_superuser.html)).
+- Azure Database for PostgreSQL flexible server: the server admin belongs to `azure_pg_admin`, a pseudo-superuser role. It does not belong to `azuresu`, the role with superuser privileges ([Microsoft](https://learn.microsoft.com/en-us/azure/postgresql/security/security-access-control)).
+- Google Cloud SQL: `cloudsqlsuperuser` holds limited superuser privileges. `cloudsqladmin` is a system user with superuser privileges ([Google](https://docs.cloud.google.com/sql/docs/postgres/users)).
+
+On any of them, a login that is not a superuser cannot end a superuser's session. Darling refuses it as `not_permitted`.
 
 > Phase 1 ships **no consumer of this credential**. It is accepted, stored and resolvable so the arming model can be reviewed and provisioned ahead of the write path; the service logs at connect that an armed server is inert in this build. Nothing in this release can write to a monitored server.
 
