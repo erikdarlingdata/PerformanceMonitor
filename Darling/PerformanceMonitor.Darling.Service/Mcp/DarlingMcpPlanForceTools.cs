@@ -141,7 +141,7 @@ public sealed class DarlingMcpPlanForceTools
     }
 
     /// <summary>
-    /// Adds the <c>warning</c> a made change carries (#5632, step 13): the store recorded the change late, or could not record it,
+    /// Adds the <c>notice</c> a made change carries (not <c>warnings</c>: evict and kill already answer a list under that key) (#5632, step 13): the store recorded the change late, or could not record it,
     /// and what a later read could not show. A change the server accepted is never answered as an error.
     /// </summary>
     internal static string WithWarnings(string answer, AgentActionResult result, params string?[] more)
@@ -157,7 +157,7 @@ public sealed class DarlingMcpPlanForceTools
         if (parts.Count == 0)
             return answer;
         var node = JsonNode.Parse(answer)!.AsObject();
-        node["warning"] = string.Join(" ", parts);
+        node["notice"] = string.Join(" ", parts);
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 

@@ -42,7 +42,7 @@ CREATE CONSTRAINT TRIGGER test_fail_done AFTER INSERT ON config.investigation_jo
             var json = Parse(answer);
 
             Assert.Equal("done", (string?)json["status"]);
-            Assert.Contains("The change was made on the server. The store recorded it late.", (string?)json["warning"], StringComparison.Ordinal);
+            Assert.Contains("The change was made on the server. The store recorded it late.", (string?)json["notice"], StringComparison.Ordinal);
             Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
             Assert.Empty(await RowsAsync(c, "action_failed"));
             var done = Assert.Single(await RowsAsync(c, "action_done"));
