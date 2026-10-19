@@ -73,7 +73,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -102,9 +102,9 @@ public sealed class DarlingMcpPgWaitSamplingTools
                    pg_wait_sampling needs shared_preload_libraries and a server restart, so an operator
                    who has not done that gets told what to do rather than shown a blank. */
                 var bare = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken);
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken);
                 if (bare is not null)
                 {
                     return bare;
@@ -121,7 +121,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No sampled waits for {resolved.ServerName} in the last {hours_back} hour(s). The "
+                            factual: $"No sampled waits for {resolved.DisplayName} in the last {hours_back} hour(s). The "
                                 + "figures here are per-interval deltas, so a single collection has nothing to "
                                 + "difference against and the window fills on the second one",
                             coveredClaim: ". On a genuinely idle "
@@ -137,7 +137,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_wait_sampling", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
-            return BuildWaitSamplingJson(resolved.ServerName, hours_back, page, limit, instrument, notice);
+            return BuildWaitSamplingJson(resolved.DisplayName, hours_back, page, limit, instrument, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -18,6 +18,7 @@
     -->
     <UserControl.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <local:PgBytesConverter x:Key="PgBytes"/>
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="14"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
@@ -4209,7 +4210,7 @@
                              nothing. Half of what an operator wants the moment they decide to change it. -->
                         <DataGridTextColumn Header="Change Needs" Binding="{Binding Context}" Width="120"/>
                         <DataGridTextColumn Header="Pending Restart" Binding="{Binding PendingRestart}" Width="120"/>
-                        <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" Width="*"/>
+                        <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" MinWidth="200" Width="*"/>
                         <!-- The snapshot these settings came from; every row shares it. -->
                         <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
                     </DataGrid.Columns>
@@ -4591,25 +4592,30 @@
              idle-in-transaction session pins NOTHING, which is the correction the rest of the tab cannot
              make and the reason it has to be met before the vacuum backlog below it. -->
         <TabItem x:Name="PgVacuumTab" Header="Vacuum" Visibility="Collapsed">
+            <!-- #6133: five panels do not fit one screen, and star rows gave the four grids whatever the
+                 wrapped notes and the plan-capture grid left (a header strip). Every row is Auto now and
+                 each grid has a MinHeight (several rows) and a MaxHeight (inner scroll), so the tab scrolls. -->
+            <ScrollViewer x:Name="PgVacuumScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          PreviewMouseWheel="PgVacuumScroll_PreviewMouseWheel">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="2*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-</Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgVacuumNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
@@ -4623,6 +4629,7 @@
                                Background="#22FFAA00"/>
                 </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgSessionStatesGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="300"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -4694,6 +4701,7 @@
                                Background="#22FFAA00"/>
                 </StackPanel>
                 <DataGrid Grid.Row="6" x:Name="PgXminHorizonGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="240"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Cause" Binding="{Binding Source}" Width="200"/>
@@ -4723,6 +4731,7 @@
                                Background="#22FFAA00"/>
                 </StackPanel>
                 <DataGrid Grid.Row="9" x:Name="PgAutovacuumGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="360"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -4762,6 +4771,7 @@
                 <TextBlock Grid.Row="11" x:Name="PgWraparoundNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="12" x:Name="PgWraparoundGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="90" MaxHeight="200"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
@@ -4786,6 +4796,7 @@
                 <TextBlock Grid.Row="14" x:Name="PgPlanCaptureNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="15" x:Name="PgPlanCaptureGrid" Style="{StaticResource DarkGrid}"
+                          MinHeight="110" MaxHeight="260"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True"
                           AutoGenerateColumns="False" IsReadOnly="True">
                     <DataGrid.Columns>
@@ -4799,6 +4810,7 @@
                 </DataGrid>
 
             </Grid>
+            </ScrollViewer>
         </TabItem>
 
         <TabItem x:Name="PgWaitsTab" Header="Waits" Visibility="Collapsed">
@@ -5102,7 +5114,7 @@
                         <DataGridTextColumn Header="Heap" Binding="{Binding HeapSize}" SortMemberPath="HeapSizeSort" Width="100"/>
                         <DataGridTextColumn Header="Bloat (est.)" Binding="{Binding BloatEstimate}" SortMemberPath="BloatEstimateSort" Width="120"/>
                         <DataGridTextColumn Header="Bloat % (est.)" Binding="{Binding BloatPctEstimate}" SortMemberPath="BloatPctEstimateSort" Width="120"/>
-                        <DataGridTextColumn Header="Dead Tuples" Binding="{Binding DeadTuplePct}" SortMemberPath="DeadTuplePctSort" Width="120"/>
+                        <DataGridTextColumn Header="Dead %" Binding="{Binding DeadTuplePct}" SortMemberPath="DeadTuplePctSort" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                         <DataGridTextColumn Header="TOAST" Binding="{Binding ToastSize}" SortMemberPath="ToastSizeSort" Width="100"/>
                         <DataGridTextColumn Header="Indexes" Binding="{Binding IndexSize}" SortMemberPath="IndexSizeSort" Width="100"/>
                         <DataGridTextColumn Header="Heap Growth" Binding="{Binding HeapGrowth}" SortMemberPath="HeapGrowthSort" Width="120"/>
@@ -5198,8 +5210,8 @@
                              "never walked" on the first and "the walk found no leaf pages" on the second,
                              and those two readings lead to opposite conclusions. -->
                         <DataGridTextColumn Header="Kind" Binding="{Binding MeasurementKind}" Width="90"/>
-                        <DataGridTextColumn Header="Size (bytes)" Binding="{Binding IndexBytes}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Reclaimable (est.)" Binding="{Binding EstimatedReclaimableBytes}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding IndexBytes, Converter={StaticResource PgBytes}}" SortMemberPath="IndexBytes" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Reclaimable (est.)" Binding="{Binding EstimatedReclaimableBytes, Converter={StaticResource PgBytes}}" SortMemberPath="EstimatedReclaimableBytes" ElementStyle="{StaticResource NumericCell}" Width="150"/>
                         <!-- A page-count comparison, never derived from a density. Blank whenever the
                              reason column is populated, so a suppressed estimate cannot read as zero. -->
                         <DataGridTextColumn Header="Bloat % (est.)" Binding="{Binding EstBloatPct}" ElementStyle="{StaticResource NumericCell}" Width="120"/>

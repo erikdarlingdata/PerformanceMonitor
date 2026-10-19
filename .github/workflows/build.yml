@@ -2564,7 +2564,7 @@ jobs:
   # PUBLISHES it: before them, a stable release shipped Windows zips and Setup.exes while the linux
   # tar.gz and the ghcr image existed only at nightly quality (nightly.yml, tag :nightly) — the compose
   # quickstart pointed released users at a nightly image. This job tars the linux-x64 publish into
-  # PerformanceMonitorDarling-linux-x64-<v>.tar.gz + SHA256SUMS-linux.txt and hands both to the publish
+  # PerformanceMonitorDarling-linux-x64-<v>.tar.gz and the Compose files into PerformanceMonitorDarling-compose-<v>.tar.gz (#6123), writes SHA256SUMS-linux.txt over both and hands them to the publish
   # job as this run's darling-linux-release artifact; it publishes nothing itself, so it needs only read
   # access (#5804). Linux binaries are NOT SignPath-signed (SignPath signs Windows PEs); the checksums
   # file is the integrity story, same as the nightly.
@@ -2690,7 +2690,25 @@ jobs:
             echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
             exit 1
           fi
-          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          # #6123: the Compose files are their own release asset, because no other download holds Darling/compose/.
+          # The packed copy names THIS release's image tag instead of :latest, so a release's files pull that
+          # release's image (darling-linux-publish pushes the ghcr :<version> tag). Only tracked files ship:
+          # the checkout has no local secrets. The archive opens into one folder so a user can extract it and
+          # cd into it. Line endings are made LF, because .gitattributes checks text out as CRLF.
+          compose_dir="PerformanceMonitorDarling-compose-${version}"
+          compose_stage="$(mktemp -d)"
+          mkdir -p "${compose_stage}/${compose_dir}"
+          cp -R Darling/compose/. "${compose_stage}/${compose_dir}/"
+          find "${compose_stage}/${compose_dir}" -type f -exec sed -i 's/\r$//' {} +
+          compose_file="${compose_stage}/${compose_dir}/docker-compose.yml"
+          sed -i "s|\(image: ghcr\.io/erikdarlingdata/performancemonitor-darling\):latest|\1:${version}|" "${compose_file}"
+          if [ "$(grep -c "image: ghcr\.io/erikdarlingdata/performancemonitor-darling:${version}$" "${compose_file}")" != "1" ] || grep -q "performancemonitor-darling:latest" "${compose_file}"; then
+            echo "::error::The packed compose file does not name the darling image at :${version}."
+            exit 1
+          fi
+          tar -C "${compose_stage}" -czf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" "${compose_dir}"
+          tar -tzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
 
       # #5804: the tarball and its checksums leave this job as a same-run artifact rather than as release
       # assets. darling-linux-publish uploads them only after the Windows build job, whose release steps
@@ -2759,13 +2777,14 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.VERSION }}"
           test -f "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz"
+          test -f "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
           (cd releases && sha256sum -c SHA256SUMS-linux.txt)
 
       - name: Upload linux artifact to the release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
+        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt releases/PerformanceMonitorDarling-compose-*.tar.gz --clobber
 
       - name: Build and push container image (ghcr, versioned + latest)
         if: github.event_name == 'release'
@@ -2807,7 +2826,9 @@ jobs:
         if: github.event_name == 'release'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
+          subject-path: |
+            releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
+            releases/PerformanceMonitorDarling-compose-*.tar.gz
 
   # Darling.Tests is not only Darling's test suite: some of its guards take the WHOLE REPOSITORY as
   # input rather than the Darling tree.

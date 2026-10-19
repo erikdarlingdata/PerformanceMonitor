@@ -611,6 +611,14 @@ public sealed class WindowCoverage
     /// <summary>Distinct collections whose rows landed inside the window (the orphan first row included).</summary>
     public int SampleCount { get; init; }
 
+    /// <summary>When the first collection inside the window landed (UTC), or null when none did. With
+    /// <see cref="LastSampleTime"/> it lets the empty-window message say when collection came back instead of
+    /// guessing that it is still down (#6132).</summary>
+    public DateTime? FirstSampleTime { get; init; }
+
+    /// <summary>When the latest collection inside the window landed (UTC), or null when none did.</summary>
+    public DateTime? LastSampleTime { get; init; }
+
     /// <summary>
     /// The longest single unobserved stretch inside the window, in milliseconds: the largest interval
     /// that exceeded the gap policy (clipped to the window), the lead-in before a first row that had no

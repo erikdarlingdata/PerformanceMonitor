@@ -360,7 +360,8 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, limit: 1));
 
         Assert.True(root.GetProperty("truncated").GetBoolean());
-        Assert.Equal(1, root.GetProperty("regression_count").GetInt32());
+        Assert.Equal(2, root.GetProperty("regression_count").GetInt32());
+        Assert.Equal(1, root.GetProperty("returned_count").GetInt32());
         AssertCovered(root, now.AddHours(-24 - 7 * 24));
     }
 

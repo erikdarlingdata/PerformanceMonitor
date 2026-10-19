@@ -88,7 +88,7 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
-                    " Check get_collection_health to see when collectors last succeeded and why they stopped." +
+                    " Check get_collection_health to see when each collector last succeeded." +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
                     unobservedCollection.Attach(new
                     {
@@ -342,7 +342,7 @@ public sealed class McpAnalysisTools
                     "unavailable",
                     $"The collector observed none of the requested window for {resolved.ServerName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
-                    "Check get_collection_health to see when collectors last succeeded and why they stopped." +
+                    "Check get_collection_health to see when each collector last succeeded." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }

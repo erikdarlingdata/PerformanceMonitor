@@ -143,7 +143,9 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 baseline_end = start.ToString("o"),
                 baseline_is = $"Query Store captures from baseline_start to recent_window_start ({DarlingQueryStoreRegressionReader.BaselineLookbackDays} days)",
                 gate = "average CPU regressed by more than 25%",
-                regression_count = Math.Min(rows.Count, limit),
+                /* #6128: every regression that passed the gate, whatever limit asked for; returned_count is this page. */
+                regression_count = Math.Max(rows[0].TotalCount, rows.Count),
+                returned_count = shown.Count(),
                 truncated,
                 regressions = shown.Select(r => new
                 {

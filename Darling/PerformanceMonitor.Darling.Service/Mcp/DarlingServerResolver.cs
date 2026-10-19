@@ -110,6 +110,49 @@ ORDER BY server_name";
     }
 
     /// <summary>
+    /// <see cref="ResolveOrErrorAsync"/> that also hands back the server's DISPLAY name (#6130), for a read whose answer names the
+    /// server. The storage name (<c>host:database:pg</c> on a PostgreSQL target) is what the collectors stamp on rows and what the
+    /// window probes match, so <c>ServerName</c> stays that; the answer's <c>server</c> field and its sentences use
+    /// <c>DisplayName</c>, which is what <c>list_servers</c> shows the caller as the server's name. A row with no display name
+    /// falls back to the storage name.
+    /// </summary>
+    public static async Task<((int ServerId, string ServerName, string DisplayName) resolved, string? error)> ResolveOrErrorForAnswerAsync(
+        NpgsqlDataSource postgres,
+        string? serverName,
+        CancellationToken cancellationToken = default)
+    {
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
+        if (fault is not null)
+        {
+            return (default, fault);
+        }
+
+        var answer = ResolveOrErrorForAnswer(servers, serverName);
+        if (answer.error is null)
+        {
+            ReadScope.NoteServer(answer.resolved.ServerId);
+            DarlingWebFailureLog.NoteResolvedServer(answer.resolved.ServerName);
+        }
+
+        return answer;
+    }
+
+    /// <summary>The pure half of <see cref="ResolveOrErrorForAnswerAsync"/>, over an already-read registry.</summary>
+    internal static ((int ServerId, string ServerName, string DisplayName) resolved, string? error) ResolveOrErrorForAnswer(
+        IReadOnlyList<RegisteredServer> servers, string? serverName)
+    {
+        var (resolved, error) = ResolveOrError(servers, serverName);
+        if (error != null)
+        {
+            return (default, error);
+        }
+
+        var row = servers.FirstOrDefault(s => s.ServerId == resolved.ServerId);
+        var display = row is null || string.IsNullOrWhiteSpace(row.DisplayName) ? resolved.ServerName : row.DisplayName!;
+        return ((resolved.ServerId, resolved.ServerName, display), null);
+    }
+
+    /// <summary>
     /// The registry read behind every resolving entry point, with its failure as a SENTENCE rather than a throw:
     /// the tools' always-return-a-string contract holds instead of surfacing the MCP SDK's generic invocation
     /// error. Deliberately not the <c>invalid</c> envelope and not <c>FormatError</c>: it is a store fault, not
