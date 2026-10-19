@@ -83,6 +83,8 @@ public sealed class UnpooledDropConnectionCensusTests
             "pm_test_enc1252 is a bare WIN1252 database made from template0, so it never holds the TimescaleDB extension.",
         ["RingBufferAmpersandLiveSqlTests.cs::DeadlockOnTablesNamedWithAnAmpersand_IsCollectedAndTheObjectNameReadsWithTheAmpersand"] =
             "The DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
+        ["BlockingHeadEvidenceLiveSqlTests.cs::TwoIdleHeadBlockers_ReadAsSleepingWithTheirLoginTimeOneOpenTransactionAndExactLogBytes"] =
+            "The DROP DATABASE is T-SQL on a SQL Server scratch database, which never holds a TimescaleDB job.",
     };
 
     /// <summary>Matches case-insensitively: T-SQL and PostgreSQL both accept <c>drop database</c>.</summary>

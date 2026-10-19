@@ -356,13 +356,17 @@ public sealed partial class StatementCollectionCensusTests
             ("blocking_sql_text", typeof(string)), ("blocked_login_name", typeof(string)), ("blocked_host_name", typeof(string)),
             ("blocked_client_app", typeof(string)), ("blocking_login_name", typeof(string)), ("blocking_host_name", typeof(string)),
             ("blocking_client_app", typeof(string)),
+            /* #5632: the head blocker's evidence, appended last. */
+            ("blocking_login_time", typeof(DateTime)), ("blocking_last_request_end_time", typeof(DateTime)),
+            ("blocking_open_transaction_count", typeof(int)), ("blocking_tran_log_bytes_used", typeof(long)),
         })
         {
             table.Columns.Add(name, type);
         }
 
         table.Rows.Add("db1", 55, 0, EventTime, 66, 0, EventTime, 9000L, "X", "sleeping", "t1",
-            StatementScrubCanary.CanaryStatement, StatementScrubCanary.PlainStatement, "l1", "h1", "a1", "l2", "h2", "a2");
+            StatementScrubCanary.CanaryStatement, StatementScrubCanary.PlainStatement, "l1", "h1", "a1", "l2", "h2", "a2",
+            EventTime, EventTime, 1, 0L);
 
         var context = BlockingContext();
         var rows = await DmvBlockingSnapshotCollector.Instance.ReadAsync(table.CreateDataReader(), context, CancellationToken.None);
