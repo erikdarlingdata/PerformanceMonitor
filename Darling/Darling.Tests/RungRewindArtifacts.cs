@@ -361,9 +361,9 @@ CREATE OR REPLACE VIEW collect.v_dmv_blocking_snapshots AS SELECT * FROM collect
             @"
 ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS excluded_volumes;"),
 
-        // /// V201 (#6159): the primary replica's name on the AG replica states. The column is the probe's newest sentinel. The rewind drops
-        // it, so a re-run of V201 adds it again. Safe on a store that never had it.
-        new(201, "hasAgPrimaryReplica",
+        // /// V202 (#6159): the primary replica's name on the AG replica states. The column is the probe's newest sentinel. The rewind drops
+        // it, so a re-run of V202 adds it again. Safe on a store that never had it.
+        new(202, "hasAgPrimaryReplica",
             @"
 ALTER TABLE IF EXISTS collect.ag_replica_states DROP COLUMN IF EXISTS primary_replica;"),
     ];

@@ -512,7 +512,9 @@ public sealed class PgSchemaGeneratorTests
            contract as V37 above. */
         var v151ReplicaAlter = Lf(PgMigrations.Scripts.Single(m => m.Version == 151).Sql);
 
-        foreach (var column in replicaColumns.Skip(V37ReplicaColumnCount))
+        const int V151ReplicaColumnCount = 12;
+
+        foreach (var column in replicaColumns.Skip(V37ReplicaColumnCount).Take(V151ReplicaColumnCount - V37ReplicaColumnCount))
         {
             var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
                 .Split('\n')
@@ -521,6 +523,20 @@ public sealed class PgSchemaGeneratorTests
                 .TrimEnd(',');
 
             Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v151ReplicaAlter, StringComparison.Ordinal);
+        }
+
+        /* V202 (#6159) appends primary_replica, the last replica-grain column, as its own additive rung - same contract again. */
+        var v202ReplicaAlter = Lf(PgMigrations.Scripts.Single(m => m.Version == 202).Sql);
+
+        foreach (var column in replicaColumns.Skip(V151ReplicaColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v202ReplicaAlter, StringComparison.Ordinal);
         }
 
         /* No "V34 was not widened in place" sweep for this grain, unlike the database one below: the

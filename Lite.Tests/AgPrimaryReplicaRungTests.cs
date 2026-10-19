@@ -19,7 +19,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// Lite v77 / Darling V201 (#6159): <c>ag_replica_states</c> gains <c>primary_replica</c>, the name of the replica that was the
+/// Lite v77 / Darling V202 (#6159): <c>ag_replica_states</c> gains <c>primary_replica</c>, the name of the replica that was the
 /// primary when the row was collected. The column is VARCHAR, nullable, and the LAST payload column, because the DuckDB appender
 /// is positional. A fresh file gets it from the generator; an existing file gets it from the shared added-columns list. The
 /// collector side is <see cref="AgCollectorDefinitionTests"/>; the reader is <see cref="AgPrimaryReplicaReadTests"/>.

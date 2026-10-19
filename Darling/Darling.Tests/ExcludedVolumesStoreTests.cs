@@ -38,7 +38,7 @@ public sealed class ExcludedVolumesStoreTests
         var rung = PgMigrations.Scripts.Single(m => m.Version == 200);
 
         Assert.Equal("excluded-volumes", rung.Name);
-        Assert.True(StorageVersion.SchemaVersion >= 200); /* not the top any more: V201 (#6159) sits above this rung */
+        Assert.True(StorageVersion.SchemaVersion >= 200); /* not the top any more: V202 (#6159) sits above this rung */
         Assert.Equal(PgMigrations.Scripts.Select(s => s.Version).OrderBy(v => v), PgMigrations.Scripts.Select(s => s.Version));
     }
 

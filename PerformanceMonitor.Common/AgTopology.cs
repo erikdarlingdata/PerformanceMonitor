@@ -723,7 +723,7 @@ public sealed class AgTopologyReplicaRow
     /// of one AG, stamped by the engine. Null on a row collected before this column existed.</summary>
     public string? GroupId { get; init; }
 
-    /// <summary><c>sys.dm_hadr_availability_group_states.primary_replica</c> (V201, #6159) — the name of the replica that was the
+    /// <summary><c>sys.dm_hadr_availability_group_states.primary_replica</c> (V202, #6159) — the name of the replica that was the
     /// primary when the row was collected, readable from a secondary. Null on a row collected before this column existed, and while
     /// the group has no primary.</summary>
     public string? PrimaryReplica { get; init; }

@@ -1266,7 +1266,7 @@ SELECT
     /* V200 (#6098) adds the Volume Free Space alert's excluded-volumes list to the alert settings row. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'excluded_volumes' AND NOT attisdropped),
-    /* V201 (#6159) adds the primary replica's name to the AG replica states. Found by catalog so the answer does not depend on the
+    /* V202 (#6159) adds the primary replica's name to the AG replica states. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.ag_replica_states') AND attname = 'primary_replica' AND NOT attisdropped)";
 
@@ -1518,12 +1518,12 @@ SELECT
         /* V200 (#6098): the excluded-volumes column on the alert settings row. Column-existence sentinel, newest-first, and the TOP rung,
            so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 199 and showing a spurious
            upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
-        /* V201 (#6159): the primary replica's name on the AG replica states. Column-existence sentinel, newest-first, and the TOP rung,
-           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 200 and showing a spurious
+        /* V202 (#6159): the primary replica's name on the AG replica states. Column-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 201 and showing a spurious
            upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
         if (hasAgPrimaryReplica)
         {
-            return 201;
+            return 202;
         }
         if (hasExcludedVolumes)
         {

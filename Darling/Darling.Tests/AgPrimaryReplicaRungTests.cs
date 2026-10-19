@@ -26,9 +26,9 @@ namespace Darling.Tests;
    test's rows, so none is [Collection("live-postgres")]. */
 
 /// <summary>
-/// #6159, V201: <c>collect.ag_replica_states.primary_replica</c>, the primary's name read from
+/// #6159, V202: <c>collect.ag_replica_states.primary_replica</c>, the primary's name read from
 /// <c>sys.dm_hadr_availability_group_states</c>, which a secondary can read. A row written through the collector's own
-/// payload lands in it; a store upgraded from V200 gets the same column in the same place as a fresh one, and its old rows
+/// payload lands in it; a store upgraded from the prior rung gets the same column in the same place as a fresh one, and its old rows
 /// read NULL; and the stored name reaches the web card and the Viewer card, by display name when the primary is a monitored
 /// server, with the "not visible from this secondary" note kept for a row that carries none.
 /// </summary>
@@ -39,9 +39,9 @@ public sealed class AgPrimaryReplicaRungTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task AFreshStore_AndOneUpgradedFromV200_StoreAndReadBackThePrimary_WithTheColumnLast()
+    public async Task AFreshStore_AndOneUpgradedFromThePriorRung_StoreAndReadBackThePrimary_WithTheColumnLast()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V201 rung pins (each mints its own scratch database).");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V202 rung pins (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -59,7 +59,7 @@ public sealed class AgPrimaryReplicaRungTests
             Assert.Equal("NODE1", (string)(await ScalarAsync(connection, "SELECT primary_replica FROM collect.ag_replica_states WHERE server_id = " + TestServerId, ct))!);
             await ExecAsync(connection, "DELETE FROM collect.ag_replica_states WHERE server_id = " + TestServerId, ct);
 
-            /* Upgraded: a store at V200 has no such column, and the probe says so. A row collected then is kept through the rung. */
+            /* Upgraded: a store at V200 (the newest rung on dev when this was written) has no such column, and the probe says so. A row collected then is kept through the rung. */
             await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 200, ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 201", ct);
             Assert.DoesNotContain("primary_replica", await ColumnOrderAsync(connection, ct));
@@ -88,7 +88,7 @@ public sealed class AgPrimaryReplicaRungTests
     [Fact]
     public async Task TheStoredPrimary_ReachesTheWebCardAndTheViewerCard_ByDisplayName_AndTheNoteStaysForARowWithoutOne()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V201 reader pins (each mints its own scratch database).");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V202 reader pins (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
         var bodySucceeded = false;

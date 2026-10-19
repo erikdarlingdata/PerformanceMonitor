@@ -1860,7 +1860,7 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS excluded_volumes text[] NOT NULL DEFAULT '{}'::text[];";
 
     /// <summary>
-    /// V201 (#6159): <c>collect.ag_replica_states.primary_replica</c>, the name of the replica that was the primary when the row was
+    /// V202 (#6159): <c>collect.ag_replica_states.primary_replica</c>, the name of the replica that was the primary when the row was
     /// collected, read from <c>sys.dm_hadr_availability_group_states.primary_replica</c>. A secondary can read that DMV, so the Availability
     /// Groups card built from a secondary's own view can say "Primary: NODE1" instead of leaving the reader to guess why the replica
     /// list it was given has no PRIMARY row.
@@ -1871,7 +1871,7 @@ ALTER TABLE config.config_alert_settings
     /// collector's payload, and this ALTER no-ops there) and an upgraded store share one physical column order. The table has no
     /// passthrough view, so the rung is one ALTER. An older build ignores the column.</para>
     /// </summary>
-    private const string V201Sql = @"
+    private const string V202Sql = @"
 ALTER TABLE collect.ag_replica_states ADD COLUMN IF NOT EXISTS primary_replica text;";
 
     /// <summary>
@@ -2249,7 +2249,7 @@ $rung$;";
         new Migration(198, "pseudonym-key", V198Sql),
         new Migration(199, "blocking-head-evidence", V199Sql),
         new Migration(200, "excluded-volumes", V200Sql),
-        new Migration(201, "ag-primary-replica", V201Sql),
+        new Migration(202, "ag-primary-replica", V202Sql),
     };
 
     /// <summary>
