@@ -178,9 +178,9 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         Assert.Equal(3, answer["changes"]!.AsArray().Count);
 
         await using var store = NeverConnects();
-        /* The envelope that says nothing changed (no_changes) is probed like rows since #4966, so the answer for a new server says
+        /* The envelope that says nothing changed (empty) is probed like rows since #4966, so the answer for a new server says
            where its data starts; one that keeps its own message (not_collected) is still left as it is. */
-        const string Unchanged = "{\"status\":\"no_changes\",\"message\":\"No configuration parameter changed value.\"}";
+        const string Unchanged = "{\"status\":\"empty\",\"message\":\"No configuration parameter changed value.\"}";
         const string Elsewhere = "{\"status\":\"not_collected\",\"message\":\"This engine has no configuration parameters.\"}";
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => WebDataStartNote.AddAsync(store, "get_pg_server_config_changes", "pg01", 168, null, Unchanged, null, Cancelled));
@@ -195,7 +195,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
     /* An empty span over a short history reads as "nothing happened" when it is only short (#4966), so the answer that says the
        read looked and found nothing goes to the coverage probe the way rows do: a store that never connects and a cancelled
        token make the probe show as an OperationCanceledException. Each admitted read answers its own word (the PostgreSQL
-       changes read says no_changes, every other one says empty). */
+       every read says empty since #6130). */
     [Fact]
     public async Task AnAnswerSayingTheReadLookedAndFoundNothing_GoesToTheCoverageProbe_OnEachAdmittedRead()
     {
@@ -208,7 +208,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
                 () => WebDataStartNote.AddAsync(store, read, "sql01", 168, null, Envelope(word), null, Cancelled));
         }
 
-        Assert.Equal("no_changes", WebDataStartNote.NothingFoundStatusByRead["get_pg_server_config_changes"]);
+        Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead["get_pg_server_config_changes"]);
         foreach (var read in new[] { "get_server_config_changes", "get_database_config_changes", "get_trace_flag_changes", "get_collection_log", "get_waiting_tasks" })
         {
             Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead[read]);
@@ -224,7 +224,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
 
         foreach (var read in WebDataStartNote.TableByRead.Keys)
         {
-            foreach (var status in new[] { "not_collected", "unavailable", "invalid", "error", "empty", "no_changes", "precondition", "not_sampled" })
+            foreach (var status in new[] { "not_collected", "unavailable", "invalid", "error", "empty", "precondition" })
             {
                 if (WebDataStartNote.NothingFoundStatusByRead.TryGetValue(read, out var admitted) && admitted == status)
                 {
@@ -313,7 +313,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             }
             else
             {
-                Assert.Contains("\"unavailable\"", body, StringComparison.Ordinal);
+                Assert.True(body.Contains("\"unavailable\"", StringComparison.Ordinal) || body.Contains("UnavailableAsync(", StringComparison.Ordinal), read + " answers neither a nothing-found word nor unavailable");
                 Assert.DoesNotContain("\"empty\"", body, StringComparison.Ordinal);
             }
         }
@@ -325,10 +325,10 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
     private static readonly (string Read, string Table, string? Admitted, string[] RowWords, string[] KeptWords, string File)[] PgWindowReads =
     [
         ("get_pg_top_queries", "pg_statement_stats", null, [], ["unavailable"], "DarlingMcpPgStatementTools.cs"),
-        ("get_pg_blocking", "pg_blocking_edges", "no_blocking_sampled", ["blocking_sampled", "cycles_only"], ["not_sampled"], "DarlingMcpPgBlockingTools.cs"),
+        ("get_pg_blocking", "pg_blocking_edges", "empty", ["blocking_sampled", "cycles_only"], ["unavailable"], "DarlingMcpPgBlockingTools.cs"),
         ("get_pg_database_stats", "pg_database_stats", "empty", ["database_activity"], ["unavailable"], "DarlingMcpPgDatabaseTools.cs"),
         ("get_pg_session_states", "pg_session_states", "empty", ["session_states"], ["unavailable"], "DarlingMcpPgSessionStatesTools.cs"),
-        ("get_pg_io_stats", "pg_io_stats", "no_io_activity", ["io_activity"], [], "DarlingMcpPgIoTools.cs"),
+        ("get_pg_io_stats", "pg_io_stats", "empty", ["io_activity"], [], "DarlingMcpPgIoTools.cs"),
         ("get_pg_replication_stats", "pg_replication_stats", "empty", [], [], "DarlingMcpPgReplicationStatsTools.cs"),
         ("get_pg_database_trend", "pg_database_stats", "empty", ["database_trend"], [], "DarlingMcpPgTrendTools.cs"),
         ("get_pg_query_duration_trend", "pg_statement_stats", "empty", ["query_duration_trend"], [], "DarlingMcpPgTrendTools.cs"),
@@ -336,21 +336,21 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         ("get_pg_io_trend", "pg_io_stats", "empty", ["io_trend"], [], "DarlingMcpPgTrendTools.cs"),
         ("get_pg_plans", "pg_plan_capture", "empty", [], ["precondition"], "DarlingMcpPgPlanTools.cs"),
 
-        /* The vacuum, horizon, slot and write tiles. Only the horizon read admits a word: no_holder is answered after the log shows the
+        /* The vacuum, horizon, slot and write tiles. Only the horizon read admits a word: empty is answered after the log shows the
            collector captured in the window, and unavailable (no capture logged) is kept. The other four answer their healthy-or-empty
-           word without asking the log whether the collector ran (no_pending_maintenance, no_slots), or say the collector has not
+           word without asking the log whether the collector ran (both say empty), or say the collector has not
            collected (unavailable), or say a window too short to difference holds nothing (empty), so none of those is admitted. */
         ("get_pg_wraparound_risk", "pg_wraparound_stats", null, [], ["unavailable"], "DarlingMcpPgWraparoundTools.cs"),
-        ("get_pg_xmin_horizon", "pg_xmin_horizon", "no_holder", ["holder_present"], ["unavailable"], "DarlingMcpPgXminTools.cs"),
-        ("get_pg_autovacuum_health", "pg_autovacuum_stats", null, ["tables_with_pending_maintenance"], ["no_pending_maintenance"], "DarlingMcpPgAutovacuumTools.cs"),
-        ("get_pg_replication_slots", "pg_replication_slot_stats", null, ["slots_present"], ["no_slots"], "DarlingMcpPgSlotTools.cs"),
+        ("get_pg_xmin_horizon", "pg_xmin_horizon", "empty", ["holder_present"], ["unavailable"], "DarlingMcpPgXminTools.cs"),
+        ("get_pg_autovacuum_health", "pg_autovacuum_stats", null, ["tables_with_pending_maintenance"], ["empty"], "DarlingMcpPgAutovacuumTools.cs"),
+        ("get_pg_replication_slots", "pg_replication_slot_stats", null, ["slots_present"], ["empty"], "DarlingMcpPgSlotTools.cs"),
         ("get_pg_write_stats", "pg_write_stats", null, [], ["empty"], "DarlingMcpPgServerStateTools.cs"),
         ("get_pg_index_usage", "pg_index_usage_stats", "empty", ["index_usage"], ["unavailable"], "DarlingMcpPgIndexUsageTools.cs"),
     ];
 
     /* Each read is listed over its raw relation, served by the web mirror, drawn by the page, and admitted for exactly the word
        its tool answers when it captured and found nothing. The words that say nothing was captured (unavailable, not_collected,
-       not_sampled, precondition) are never admitted. The tools' source holds both halves, so a tool that renames a word fails here. */
+       precondition) are never admitted. The tools' source holds both halves, so a tool that renames a word fails here. */
     [Fact]
     public void ThePostgresWindowReads_AreListedOverTheirTables_AndAdmitOnlyAWordThatMeansCapturedAndFoundNothing()
     {
@@ -374,12 +374,12 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             {
                 Assert.Equal(admitted, WebDataStartNote.NothingFoundStatusByRead[read]);
                 Assert.Contains("\"" + admitted + "\"", tool, StringComparison.Ordinal);
-                Assert.DoesNotContain(admitted, new[] { "unavailable", "not_collected", "not_sampled", "precondition", "invalid" });
+                Assert.DoesNotContain(admitted, new[] { "unavailable", "not_collected", "precondition", "invalid" });
             }
 
             foreach (var word in rowWords.Concat(keptWords))
             {
-                Assert.Contains("\"" + word + "\"", tool, StringComparison.Ordinal);
+                Assert.True(tool.Contains("\"" + word + "\"", StringComparison.Ordinal) || (word == "unavailable" && tool.Contains("UnavailableAsync(", StringComparison.Ordinal)), read + " no longer answers " + word);
                 Assert.NotEqual(admitted, word);
             }
         }
@@ -407,7 +407,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
                     () => WebDataStartNote.AddAsync(store, read, "pg01", 168, null, page, null, Cancelled));
             }
 
-            foreach (var word in keptWords.Concat(new[] { "unavailable", "not_collected", "invalid", "precondition", "not_sampled" }).Where(w => w != admitted))
+            foreach (var word in keptWords.Concat(new[] { "unavailable", "not_collected", "invalid", "precondition" }).Where(w => w != admitted))
             {
                 var envelope = Envelope(word);
                 Assert.Same(envelope, await WebDataStartNote.AddAsync(store, read, "pg01", 168, null, envelope, null, Cancelled));

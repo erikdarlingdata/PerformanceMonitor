@@ -102,7 +102,7 @@ public sealed class PgLoggingCollectorOffTests
 
         var capability = source.IndexOf("DarlingEngineCapability.NotCollectedStatusAsync", System.StringComparison.Ordinal);
         var precondition = source.IndexOf("DarlingRuntimePrecondition.StatusAsync", System.StringComparison.Ordinal);
-        var miss = source.IndexOf("McpHelpers.Status(\n                        \"no_deadlocks\"", System.StringComparison.Ordinal);
+        var miss = source.IndexOf("McpHelpers.Status(\n                        \"empty\"", System.StringComparison.Ordinal);
 
         Assert.True(capability >= 0, "get_pg_deadlocks no longer asks the capability question at all");
         Assert.True(precondition >= 0, "get_pg_deadlocks no longer asks the precondition question, so a recorded log-read denial, missing file or switched-off logging collector falls through to the generic empty miss");
@@ -114,7 +114,7 @@ public sealed class PgLoggingCollectorOffTests
         /* And the question is asked about the collector that serves this read — a retyped name would make
            the branch dead against a collection_log that has no rows under it. */
         Assert.Contains(
-            "DarlingRuntimePrecondition.StatusAsync(\n                        postgres, resolved.ServerId, resolved.ServerName, \"pg_deadlocks\", cancellationToken)",
+            "DarlingRuntimePrecondition.StatusAsync(\n                        postgres, resolved.ServerId, resolved.DisplayName, \"pg_deadlocks\", cancellationToken)",
             source,
             System.StringComparison.Ordinal);
     }

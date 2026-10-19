@@ -373,13 +373,13 @@ public sealed class WebDataStartNoteConfigAndLogLiveTests : IClassFixture<Config
     }
 
     /// <summary>A server added two days ago whose configuration has not changed, read over a week: the tool answers that
-    /// nothing changed (<c>empty</c>, and <c>no_changes</c> for PostgreSQL), and the note still says the data starts at the
+    /// nothing changed (<c>empty</c>, PostgreSQL included since #6130), and the note still says the data starts at the
     /// server's first collection, with the three instants beside it, so the grid does not read as a quiet week.</summary>
     [Theory]
     [InlineData(ConfigAndLogNoteStore.ServerConfigRead, "empty")]
     [InlineData(ConfigAndLogNoteStore.DatabaseConfigRead, "empty")]
     [InlineData(ConfigAndLogNoteStore.TraceFlagRead, "empty")]
-    [InlineData(ConfigAndLogNoteStore.PgConfigRead, "no_changes")]
+    [InlineData(ConfigAndLogNoteStore.PgConfigRead, "empty")]
     public async Task AnEmptyAnswerOverANewServer_GetsTheNoteNamingTheCoverageStart_OnEachChangeRead_AgainstDevPostgres(string read, string status)
     {
         var answer = await AskAsync(read, "flat", hours: 168);

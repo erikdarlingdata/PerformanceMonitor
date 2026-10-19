@@ -966,7 +966,7 @@ public sealed class ServerPageTabsTests
 
         /* And vizStat's twin of that guard (#2530). Several PostgreSQL reads answer their HEALTHY case with a
            data body carrying prose under `finding` and NONE of the summary keys — get_pg_xmin_horizon's
-           {status:"no_holder", finding} is the type. That is not the {status,message} envelope, so
+           {status:"empty", finding} is the type. That is not the {status,message} envelope, so
            classifyResponse calls it data, it reaches a viz, and a tile set over keys the body does not have
            renders as a row of em-dashes that says nothing. All-null is the only state where the descriptor's
            sentence beats the tiles, so that is exactly when it wins; a descriptor with no emptyText — every
