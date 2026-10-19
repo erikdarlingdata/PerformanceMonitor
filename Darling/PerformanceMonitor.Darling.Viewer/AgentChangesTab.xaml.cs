@@ -74,10 +74,25 @@ public partial class AgentChangesTab : UserControl
     /// <summary>The check before Undo: what is missing, or null.</summary>
     internal static string? UndoError(AgentChangeViewRow? selected) =>
         selected is null ? "Select a change first."
-        : selected.Row.Result == PerformanceMonitor.Darling.Storage.AgentChangeResult.Unknown ? "The result of this call is unknown, so what it changed is unknown and it cannot be undone from here."
         : selected.Row.UndoneAtUtc is not null ? "This change was already undone."
+        /* A plan force or unforce is offered whatever its result: the undo reads the server first and decides from what it finds (#5632, step 9). */
+        : selected.Row.Result == PerformanceMonitor.Darling.Storage.AgentChangeResult.Unknown && !selected.Row.IsPlanChange ? "The result of this call is unknown, so what it changed is unknown and it cannot be undone from here."
         : !selected.CanUndo ? "This change cannot be undone (it failed, is not a kind that has an undo, or is older than 365 days)."
         : null;
+
+    /// <summary>The words of a plan undo's confirm step: what the service read, the exact statement, and the question.</summary>
+    internal static string ConfirmText(PerformanceMonitor.Darling.Storage.PlanUndoAnswer answer) =>
+        answer.Message + Environment.NewLine + Environment.NewLine + StateText(answer.State) + Environment.NewLine + Environment.NewLine
+        + (answer.Statement ?? "") + Environment.NewLine + Environment.NewLine + "Run this statement on the monitored server?";
+
+    /// <summary>The state the service read, in a line: the plan forced now, or that none is.</summary>
+    internal static string StateText(System.Text.Json.Nodes.JsonNode? state)
+    {
+        var forced = state?["forced_plan"];
+        return forced is null
+            ? "On the server now: no plan of the query is forced."
+            : "On the server now: plan " + forced["plan_id"] + " is forced (" + forced["forcing_type"] + ").";
+    }
 
     internal async Task UndoCommandAsync()
     {
@@ -92,7 +107,13 @@ public partial class AgentChangesTab : UserControl
 
         try
         {
-            var result = await _dataService.UndoAgentChangeAsync(selected!.CalledId, _login);
+            if (selected!.Row.IsPlanChange)
+            {
+                await UndoPlanChangeAsync(selected.CalledId);
+                return;
+            }
+
+            var result = await _dataService.UndoAgentChangeAsync(selected.CalledId, _login);
             Status?.Invoke(result.Words);
             await LoadAsync();
         }
@@ -100,6 +121,30 @@ public partial class AgentChangesTab : UserControl
         {
             Status?.Invoke("Could not undo the change: " + ex.Message);
         }
+    }
+
+    /// <summary>The first command reads the server and answers the statement; the second runs only after the person confirms it.</summary>
+    private async Task UndoPlanChangeAsync(long calledId)
+    {
+        Status?.Invoke("Asking the service to read the server...");
+        var shown = await _dataService!.UndoPlanChangeAsync(calledId, _login, confirm: false, statement: null);
+        if (shown.Status != PerformanceMonitor.Darling.Storage.PlanUndoAnswer.Confirm)
+        {
+            Status?.Invoke(shown.Message);
+            await LoadAsync();
+            return;
+        }
+
+        var ask = MessageBox.Show(Window.GetWindow(this), ConfirmText(shown), "Undo plan change", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (ask != MessageBoxResult.OK)
+        {
+            Status?.Invoke("Not undone.");
+            return;
+        }
+
+        var done = await _dataService.UndoPlanChangeAsync(calledId, _login, confirm: true, statement: shown.Statement);
+        Status?.Invoke(done.Message);
+        await LoadAsync();
     }
 
     internal async Task SwitchCommandAsync()

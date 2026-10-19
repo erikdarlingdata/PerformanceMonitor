@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -290,6 +291,68 @@ public sealed partial class PlanForceToolLiveTests
             var mute = await InsertJournalAsync(c, request!, "action_called", "agent:agent-a", new JsonObject { ["kind"] = "mute" }.ToJsonString());
             Assert.Equal("not_undoable", (await UndoAsync(c, mute, confirm: true)).Code);
         });
+    }
+
+    /// <summary>The Viewer's path (#5632, step 9, rule 8): a queued undo_plan_change row, claimed and run by the service's executor, answers in result_json.</summary>
+    [Fact]
+    public async Task TheViewersCommand_RunsTheSameUndo_AsThePerson_ShowingTheStatementFirst_AndWritesOnlyOnTheSecondCommand()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pu11", c.Ct);
+            Assert.Equal("done", (string?)Parse(await c.Tool(force: true, query, planA, dryRun: false))["status"]);
+            var called = await LastCalledIdAsync(c);
+            var executor = new PerformanceMonitor.Darling.Service.DarlingCommandExecutor(c.Source, new NoCommandHost(), "test-instance", c.Log);
+
+            var first = await RunCommandAsync(c, executor, "{\"called_id\": " + called + ", \"confirm\": false}", "alice");
+            Assert.Equal("confirm", first.Status);
+            Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
+            Assert.Empty(await RowsAsync(c, "action_undone"));
+
+            var second = await RunCommandAsync(c, executor,
+                new JsonObject { ["called_id"] = called, ["confirm"] = true, ["statement"] = first.Statement }.ToJsonString(), "alice");
+            Assert.Equal("undone", second.Status);
+            Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
+            await AssertUndoneRowAsync(c, called, ForceKind);
+
+            var again = await RunCommandAsync(c, executor, "{\"called_id\": " + called + ", \"confirm\": true}", "alice");
+            Assert.Equal("already_undone", again.Code);
+            AssertNoSecret(c, await PgScalarAsync(c.Connection, "SELECT coalesce(string_agg(result_json::text, ' '), '') FROM config.config_command", c.Ct) ?? "", await JournalTextAsync(c));
+        });
+    }
+
+    private static async Task<PlanUndoAnswer> RunCommandAsync(Ctx c, PerformanceMonitor.Darling.Service.DarlingCommandExecutor executor, string args, string requestedBy)
+    {
+        await using (var insert = new NpgsqlCommand(
+            "INSERT INTO config.config_command (requested_by, command_type, args_json, status) VALUES ($1, 'undo_plan_change', $2::jsonb, 'pending')", c.Connection))
+        {
+            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = requestedBy, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = args, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            await insert.ExecuteNonQueryAsync(c.Ct);
+        }
+
+        Assert.True(await executor.PollOnceAsync(c.Ct));
+        var json = await PgScalarAsync(c.Connection, "SELECT result_json::text FROM config.config_command ORDER BY command_id DESC LIMIT 1", c.Ct);
+        return PlanUndoAnswer.TryRead(json) ?? throw new InvalidOperationException("The command left no answer: " + json);
+    }
+
+    private sealed class NoCommandHost : PerformanceMonitor.Darling.Service.IDarlingCommandHost
+    {
+        private static Task<PerformanceMonitor.Darling.Service.CommandOutcome> No() => throw new InvalidOperationException("the undo does not use the host");
+
+        public Task<PerformanceMonitor.Darling.Service.CommandOutcome> SnapshotNowAsync(int serverId, IReadOnlyList<string>? collectors, CancellationToken cancellationToken) => No();
+
+        public Task<PerformanceMonitor.Darling.Service.CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken) => No();
+
+        public Task<PerformanceMonitor.Darling.Service.CommandOutcome> PurgeNowAsync(int? customRetentionDays, CancellationToken cancellationToken) => No();
+
+        public Task<PerformanceMonitor.Darling.Service.CommandOutcome> FetchPlanAsync(int serverId, PerformanceMonitor.Darling.Service.PlanFetchRequest request, CancellationToken cancellationToken) => No();
+
+        public Task<PerformanceMonitor.Darling.Service.CommandOutcome> ExecuteActualPlanAsync(int serverId, PerformanceMonitor.Darling.Service.ActualPlanRequest request, CancellationToken cancellationToken) => No();
+
+        public Task<PerformanceMonitor.Darling.Service.CommandOutcome> TestHypotheticalIndexAsync(int serverId, PerformanceMonitor.Darling.Service.HypotheticalIndexRequest request, CancellationToken cancellationToken) => No();
+
+        public Task<PerformanceMonitor.Darling.Service.CommandOutcome> FetchActiveQueriesLiveAsync(int serverId, CancellationToken cancellationToken) => No();
     }
 
     [Fact]

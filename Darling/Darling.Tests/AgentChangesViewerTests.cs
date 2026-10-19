@@ -29,6 +29,7 @@ public sealed class AgentChangesViewerTests
         var view = new AgentChangeViewRow(Row(result));
         Assert.Equal(words, view.ResultDisplay);
         Assert.Equal(result == AgentChangeResult.Done, view.CanUndo);
+        Assert.Equal(result == AgentChangeResult.Unknown, AgentChangesTab.UndoError(view) is not null);
     }
 
     [Theory]
@@ -41,6 +42,34 @@ public sealed class AgentChangesViewerTests
         var force = Row(AgentChangeResult.Done, kind: "plan_force") with { ForceReview = new ForceReviewMark(opened, answered, running) };
         Assert.Equal(words, new AgentChangeViewRow(force).ReviewDisplay);
         Assert.Equal("", new AgentChangeViewRow(Row(AgentChangeResult.Done)).ReviewDisplay);
+    }
+
+    /// <summary>#5632 step 9: a plan force or unforce is offered Undo whether it is done, failed or unknown (the server's state decides), and the store kinds keep their rule.</summary>
+    [Theory]
+    [InlineData("plan_force", AgentChangeResult.Done, true)]
+    [InlineData("plan_force", AgentChangeResult.Failed, true)]
+    [InlineData("plan_force", AgentChangeResult.Unknown, true)]
+    [InlineData("plan_unforce", AgentChangeResult.Unknown, true)]
+    [InlineData("mute", AgentChangeResult.Failed, false)]
+    [InlineData("mute", AgentChangeResult.Unknown, false)]
+    public void APlanRow_IsOfferedUndoWhateverItsResult_AndAStoreKindOnlyWhenDone(string kind, AgentChangeResult result, bool offered)
+    {
+        var view = new AgentChangeViewRow(Row(result, kind: kind));
+        Assert.Equal(offered, view.CanUndo);
+        Assert.Equal(!offered, AgentChangesTab.UndoError(view) is not null);
+        Assert.False(new AgentChangeViewRow(Row(result, DateTime.UtcNow, kind)).CanUndo);
+        Assert.False(new AgentChangeViewRow(Row(result, kind: kind, ageDays: 366)).CanUndo);
+    }
+
+    [Fact]
+    public void TheConfirmStep_ShowsTheMessage_TheStateRead_AndTheExactStatement()
+    {
+        var state = System.Text.Json.Nodes.JsonNode.Parse("{\"forced_plan\":{\"plan_id\":42,\"forcing_type\":\"MANUAL\"}}");
+        var text = AgentChangesTab.ConfirmText(new PlanUndoAnswer(PlanUndoAnswer.Confirm, null, "Undo would unforce plan 42.", "EXEC [d].sys.sp_query_store_unforce_plan @query_id = 1, @plan_id = 42;", state));
+        Assert.Contains("Undo would unforce plan 42.", text, StringComparison.Ordinal);
+        Assert.Contains("plan 42 is forced (MANUAL)", text, StringComparison.Ordinal);
+        Assert.Contains("EXEC [d].sys.sp_query_store_unforce_plan @query_id = 1, @plan_id = 42;", text, StringComparison.Ordinal);
+        Assert.Contains("no plan of the query is forced", AgentChangesTab.StateText(System.Text.Json.Nodes.JsonNode.Parse("{\"forced_plan\":null}")), StringComparison.Ordinal);
     }
 
     [Fact]

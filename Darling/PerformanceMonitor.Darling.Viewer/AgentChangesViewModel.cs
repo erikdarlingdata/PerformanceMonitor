@@ -38,6 +38,54 @@ public sealed partial class ViewerDataService
         }
     }
 
+    /// <summary>The command type for a person's undo of a plan force or unforce (#5632, step 9); matches the service executor's <c>undo_plan_change</c> case.</summary>
+    public const string CommandUndoPlanChange = "undo_plan_change";
+
+    /// <summary>The wait for an undo's answer: the service reads the server, then writes to it.</summary>
+    public static readonly TimeSpan UndoPlanChangeTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// A person's undo of a plan force or unforce (#5632, step 9). The Viewer cannot write to a monitored server and cannot resolve its
+    /// remediation credential, so it asks the service through the command queue and reads the answer from <c>result_json</c>.
+    /// Without <paramref name="confirm"/> the answer is the exact statement and the state read, and nothing is written; with it (and the
+    /// statement that was shown) the service writes. <paramref name="login"/> is the person, sent as <c>requested_by</c>. A read-only role throws.
+    /// </summary>
+    public async Task<PlanUndoAnswer> UndoPlanChangeAsync(long calledId, string login, bool confirm, string? statement, CancellationToken cancellationToken = default)
+    {
+        _ = AgentChangeUndo.PersonActor(login);
+        var args = System.Text.Json.JsonSerializer.Serialize(new { called_id = calledId, confirm, statement });
+        var commandId = await EnqueueCommandAsync(CommandUndoPlanChange, targetServerId: null, args, login, cancellationToken);
+        var result = await PollCommandResultAsync(commandId, UndoPlanChangeTimeout, cancellationToken);
+        if (result is null)
+        {
+            return new PlanUndoAnswer(PlanUndoAnswer.Failed, "timed_out", "The service has not answered yet. Check that it is running, then look at the list again before trying twice.");
+        }
+
+        try
+        {
+            await DeleteCommandAsync(commandId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The row holds no secret; the service-side reaper is the backstop. */
+        }
+
+        return PlanUndoAnswer.TryRead(result.ResultJson)
+            ?? new PlanUndoAnswer(PlanUndoAnswer.RefusedStatus, result.ResultStatus, ReadError(result.ResultJson) ?? "The service could not run the undo.");
+    }
+
+    private static string? ReadError(string? json)
+    {
+        try
+        {
+            return json is not null && System.Text.Json.Nodes.JsonNode.Parse(json) is System.Text.Json.Nodes.JsonObject o && o["error"] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue(out string? text) ? text : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Turns every agent change on or off and journals it by the person.</summary>
     public async Task SetAgentActionsEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default)
     {
