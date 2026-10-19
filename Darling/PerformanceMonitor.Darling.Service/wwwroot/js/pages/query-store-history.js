@@ -173,7 +173,7 @@ function chartFor(key, data, hours, axis) {
   const points = (data.points || []).map((p) => ({ collection_time: p.collection_time, ["p" + p.plan_id]: p.avg_duration_ms }));
   const series = data.plans.map((p, i) => ({ key: "p" + p.plan_id, label: "Plan " + p.plan_id, color: SERIES_COLORS[i % SERIES_COLORS.length] }));
   return zoomableLineChart(
-    { points, xKey: "collection_time", series, formatValue: (v) => fmtMs(v), unit: "ms", ...(axis || {}) },
+    { points, xKey: "collection_time", series, formatValue: fmtMs, unit: "ms", ...(axis || {}) },
     "qs-history|" + key,
     chartZoomScope(hours)
   );

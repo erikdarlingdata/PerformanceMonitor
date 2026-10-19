@@ -3,8 +3,9 @@
 # postgres.managed stays false and this file's `store` service takes its place.
 #
 # Quickstart (from this directory):
-#   1. cp darling.sample.json darling.json           # then edit: servers, tokens, alerting
-#   2. echo 'YourSqlPassword' > secrets/sql_password.txt   # one file per secret; see `secrets:` below
+#   1. ./setup.sh                      # makes secrets/ (the store password and connection string, the web and MCP
+#                                      # tokens, and the SQL login's password, which it asks for) and darling.json
+#   2. edit darling.json               # servers, alerting
 #   3. docker compose up -d
 #   4. web dashboard: http://127.0.0.1:5153 on the docker host only (MCP, if enabled: http://127.0.0.1:5152; bearer token,
 #      https with mcp.network.tls).
@@ -109,8 +110,9 @@ services:
       retries: 12
 
   darling:
-    # The newest release image (#5629: not :nightly, which is the newest dev build). Substitute a version tag
-    # for something pinned, or build from a checkout:
+    # In a source checkout this is the newest release image (#5629: not :nightly, which is the newest dev build).
+    # The copy in a release's PerformanceMonitorDarling-compose-<version>.tar.gz names that release's own tag
+    # instead (#6123). Substitute a version tag for something pinned, or build from a checkout:
     #   build: { context: ../.., dockerfile: Darling/Dockerfile }
     image: ghcr.io/erikdarlingdata/performancemonitor-darling:latest
     restart: unless-stopped
@@ -156,7 +158,9 @@ services:
       - store_connection
       - sql_password
       - web_token
-      - mcp_token
+      # MCP is off in the sample, so its token is not mounted: uncomment this and the mcp_token entry in the
+      # `secrets:` block at the bottom, and set mcp.enabled to true in darling.json, to turn MCP on (#6140).
+      # - mcp_token
       # Uncomment with the `secrets:` entries at the bottom to serve the dashboard over HTTPS (#2562),
       # then point web.network.tls at these paths in darling.json. Without them the web token and its
       # session cookie cross the network in the clear — which is why the ports below stay on the host's
@@ -200,8 +204,9 @@ secrets:
     file: ./secrets/sql_password.txt
   web_token:
     file: ./secrets/web_token.txt
-  mcp_token:
-    file: ./secrets/mcp_token.txt
+  # MCP's bearer token (#6140) - uncomment together with the `secrets:` list above to turn MCP on.
+  # mcp_token:
+  #   file: ./secrets/mcp_token.txt
   # HTTPS for the dashboard (#2562) — uncomment together with the `secrets:` list above.
   # web_tls_cert:
   #   file: ./secrets/web_tls_cert.pem

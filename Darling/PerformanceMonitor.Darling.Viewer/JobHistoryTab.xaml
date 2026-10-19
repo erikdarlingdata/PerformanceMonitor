@@ -65,7 +65,7 @@
         </Grid.RowDefinitions>
 
         <!-- Header Controls -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" MinHeight="36">
             <TextBlock Text="Job History" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
@@ -102,7 +102,7 @@
                        FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
-        </StackPanel>
+        </WrapPanel>
 
         <!-- #4966: "Showing since <time>" when the runs below start after the range does. Job history is an event
              surface: the first collection copies the server's msdb history, so a run's own time can sit long before

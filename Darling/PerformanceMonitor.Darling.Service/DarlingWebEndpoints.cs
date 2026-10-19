@@ -6773,7 +6773,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_scheduler_issues"] = R(CatSystemHealth, "system_health: non-yielding scheduler issues.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 19) errors.", PServer(), PHours(24), PLimit(50), PAsOf(), PDatabases()),
             ["get_health_parser_significant_waits"] = R(CatSystemHealth, "system_health: individual 500 ms+ waits with their statement.", PServer(), PHours(24), PLimit(50), PAsOf()),
-            ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records.", PServer(), PHours(24), PLimit(50), PAsOf()),
+            ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records. chart=true answers one row per time bucket (mean CPU) across the whole window instead of the newest limit rows; bucket_minutes picks the width.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("chart", false), PInt("bucket_minutes")),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
             ["get_finops_inventory"] = R(CatFinOps, "FinOps Server Inventory for the whole fleet, one row per configured server. view is server_inventory; limit caps servers returned; include_removed adds servers removed from the configuration.", PText("view"), PInt("limit", DarlingMcpFinOpsInventoryTools.DefaultLimit), PBool("include_removed", false)),
             ["get_finops_recommendations"] = R(CatFinOps, "FinOps recommendations for one server, High severity first; est_savings_usd_month is null without a monthly cost.", PServer()),
@@ -7927,7 +7927,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), databases, AsOf(c), null, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_system_health"] = (c, pg, an) => !QueryBool(c, "chart", false)
+                ? DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted)
+                : OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                    ? DarlingMcpHealthParserTools.GetSystemHealthChart(pg, Server(c), Hours(c, 24), bucketMinutes, AsOf(c), cancellationToken: c.RequestAborted)
+                    : UnparseableParam("bucket_minutes"),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
             ["get_finops_inventory"] = (c, pg, an) => DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(pg, First(c, "view") ?? "", QueryInt(c, "limit", null, DarlingMcpFinOpsInventoryTools.DefaultLimit), QueryBool(c, "include_removed", false), c.RequestAborted),
             ["get_finops_recommendations"] = (c, pg, an) => DarlingMcpFinOpsRecommendationsTools.GetFinOpsRecommendations(pg, Server(c), logger, c.RequestAborted),

@@ -1247,6 +1247,10 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>#6136: the status bar names the tab that was just refreshed. Alert History, Job History and the other tabs that set no
+    /// text of their own kept reading "overview - refreshed ..." from the last Overview load.</summary>
+    private void StampRefreshed(string tabName) => StatusText.Text = $"{tabName} — refreshed {DateTime.Now:HH:mm:ss}";
+
     private async Task LoadVisibleTabAsync()
     {
         try
@@ -1264,12 +1268,15 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, AlertsTab):
                     await AlertsHistoryContent.RefreshAlertsAsync();
+                    StampRefreshed("alert history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
+                    StampRefreshed("job history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();
+                    StampRefreshed("availability groups");
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     /* The picker lists the servers known when LoadServersAsync last ran; a server added since
@@ -1290,6 +1297,7 @@ public partial class MainWindow : Window
                         }
                     }
                     await FinOpsContent.RefreshActiveSubTabAsync();
+                    StampRefreshed("finops");
                     break;
             }
         }
@@ -1893,7 +1901,8 @@ public partial class MainWindow : Window
                 insufficientData: analysisState?.InsufficientData == true,
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
-                windowEmptyMessage: analysisState?.Message).WithReplicaNote(replicaNote));
+                windowEmptyMessage: analysisState?.Message,
+                isPostgres: server.IsPostgres).WithReplicaNote(replicaNote));
 
         /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
            the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
@@ -1903,6 +1912,9 @@ public partial class MainWindow : Window
             ? RecommendationsViewModel.FormatLastAnalyzed(
                 rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode, serverClock)
             : string.Empty;
+        /* #6135: an offline server's findings are the last it collected; say so beside the time they came from. */
+        RecommendationsStatusText.Text = RecommendationsViewModel.WithOfflineNote(
+            RecommendationsStatusText.Text, server.CardStatus == ServerCollectionStatus.Offline);
         StatusText.Text = $"{server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}";
     }
 
@@ -2102,6 +2114,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #6134: the engine of the server the link opens decides the tab; a PostgreSQL server never gets a SQL Server one. */
+        var target = RecommendationDeepLink.Resolve(server.IsPostgres, card.Item.RootFactKey);
+        if (target == RecommendationLinkTarget.None)
+        {
+            RecommendationsStatusText.Text = "This PostgreSQL server has no view for that finding.";
+            return;
+        }
+
         var (fromUtc, toUtc) = card.DeepLinkWindowUtc();
         var serverTab = OpenServerTab(server);
         if (serverTab is null)
@@ -2111,7 +2131,14 @@ public partial class MainWindow : Window
 
         try
         {
-            await serverTab.DeepLinkToActiveQueriesAsync(fromUtc, toUtc);
+            if (target == RecommendationLinkTarget.SqlServerActiveQueries)
+            {
+                await serverTab.DeepLinkToActiveQueriesAsync(fromUtc, toUtc);
+            }
+            else
+            {
+                await serverTab.DeepLinkToPgActivityAsync(target, fromUtc, toUtc);
+            }
         }
         catch (Exception ex)
         {

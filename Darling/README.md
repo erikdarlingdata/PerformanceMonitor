@@ -10,8 +10,6 @@ It runs the **same monitoring brain as the Lite edition** — one shared codebas
 
 A collector, alert, or analysis change lands once in the shared libraries and both editions get it. A Darling install monitoring a server even derives the **same `server_id`** Lite would for that server, because the identity rule (`host[:database][:RO]`, hashed) is shared too.
 
-> **Status: in development.** Darling builds and runs from source (it is wired into the solution and CI), but is not yet packaged into the signed release artifacts. Expect the surface documented here to grow.
-
 ---
 
 ## When to Choose Darling vs. Lite
@@ -195,20 +193,34 @@ Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonito
 
 Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v44, ...)` — the number is whatever the current migration count is), the TimescaleDB detection result, and per-server connects. Per-collector run lines with row counts are at `Debug` and so are not in that output by default — add `--Logging:LogLevel:PerformanceMonitor.Darling.Service=Debug` to the command above to watch a first sweep collector by collector, or read the outcomes back from `collection_log` and the Viewer's Collection Health tab, which record every run at any level. See [Logs](#logs).
 
-### Run on Linux (Docker Compose or systemd) {#1804}
+<a id="run-on-linux-docker-compose-or-systemd-1804"></a>
+### Run on Linux (Docker Compose or systemd)
 
 The service is cross-platform .NET; only the **bundled zero-admin store** and DPAPI are Windows-specific. On Linux you pair the service with the official TimescaleDB image (compose, the recommended shape) or point it at PostgreSQL you already run (systemd), keeping `postgres.managed = false` either way. The Viewer stays a Windows desktop app — Linux hosts read the **web dashboard**, which the container exposes.
 
-**Compose (the whole stack as one deployment)** — everything lives in [`Darling/compose/`](compose/):
+Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums.
+
+- **Docker Compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz`. Extract it, then `cd` into the folder it makes.
+- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder. Those releases have no `setup.sh`, so make the secret files by hand from the list in [`compose/secrets/README.md`](compose/secrets/README.md).
+- **systemd:** download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`.
+
+**Compose (the whole stack as one deployment).** The files are in the compose archive, or in [`Darling/compose/`](compose/) of a source checkout:
 
 ```bash
-cd Darling/compose
-cp darling.sample.json darling.json        # edit: servers, alerting, tokens
-#   one secret per file — see secrets/README.md for the exact list
+tar -xzf PerformanceMonitorDarling-compose-<version>.tar.gz
+cd PerformanceMonitorDarling-compose-<version>   # from a source checkout or a "Source code" archive: cd Darling/compose
+./setup.sh                                 # makes secrets/ and darling.json
+#   edit darling.json: servers, alerting
 docker compose up -d
 ```
 
-The compose file pulls the `:latest` image, which is the newest release. To pin a release, change the `darling` service's `image:` line to that version's tag, for example `performancemonitor-darling:3.10.0`. The `:nightly` tag is the newest dev build; use it only to test unreleased changes.
+`setup.sh` makes the secret files that a default install needs, and it never changes a file that exists. It writes a random store password and the matching store connection string, the web token, and the MCP token. It copies `darling.sample.json` to `darling.json`. It asks for the monitoring login's SQL password with hidden input. To skip the question, set `DARLING_SQL_PASSWORD` and add `--no-prompt`. With `--no-prompt` and no variable, it tells you to make `secrets/sql_password.txt` yourself. It never prints a secret.
+
+The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
+
+MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](compose/secrets/README.md).
+
+The compose file in the compose archive names the image tag of its own release, for example `performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `performancemonitor-darling:3.10.0`. The `:nightly` tag is the newest dev build. Use it only to test unreleased changes.
 
 Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:5152` behind its bearer token. The port mappings are the exposure boundary: the container-aware bind gate honors `web.network`/`mcp.network` under `managed = false` **inside a container only**, and the tokens are still mandatory. Five rules worth knowing before they bite:
 
@@ -221,7 +233,9 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 
 **A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` says why, and so does `/api/ping` when the web dashboard is enabled. A failure the service is still retrying does not count as a stop. This needs the current `docker-compose.yml`: the healthcheck and `DARLING_STOPPED_MARKER` are set there, not in the image, so an older compose file has neither.
 
-**systemd + bring-your-own PostgreSQL** — download `PerformanceMonitorDarling-linux-x64-*.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under a unit like:
+**systemd + bring-your-own PostgreSQL.** The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. The container image carries both already.
+
+Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under a unit like:
 
 ```ini
 [Unit]

@@ -309,7 +309,7 @@ public sealed class McpToolGuideHeadsPgBKernelXminBloatTests
         ("get_pg_kernel_stats", "SHARES ARE OF THE WINDOW: pct_of_total_cpu divides by total_cpu_ms, not the page sum"),
         ("get_pg_kernel_stats", "per-interval deltas needing a second to difference"),
         ("get_pg_xmin_horizon", "EVERY capture in the window, not just captures with a holder"),
-        ("get_pg_xmin_horizon", "no_holder: captured, found nothing - all-clear"),
+        ("get_pg_xmin_horizon", "empty: captured, found nothing - all-clear"),
         ("get_pg_xmin_horizon", "unavailable: no capture in the window"),
         ("get_pg_xmin_horizon", "feeds get_pg_wraparound_risk"),
         ("get_pg_table_bloat", "ESTIMATE, NOT MEASUREMENT"),

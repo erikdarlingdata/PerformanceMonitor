@@ -265,7 +265,7 @@ public partial class ViewerServerTab
         var data = dataReadTask.Result;
         _seDefaultTraceFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "Default Trace", startUtc, data.Select(r => r.EventTimeUtc));
-        if (DefaultTraceGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)
+        if (DefaultTraceGapNote(_server.DisplayName, _server.EngineEdition, _server.EngineKind) is { } gap)
             DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
@@ -292,7 +292,7 @@ public partial class ViewerServerTab
     /// says so, in place of the grid's "no events in this window" text.</summary>
     private void ShowSystemHealthEmptyState(TextBlock message, int rowCount)
     {
-        if (SystemHealthGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)
+        if (SystemHealthGapNote(_server.DisplayName, _server.EngineEdition, _server.EngineKind) is { } gap)
             message.Text = gap;
         message.Visibility = rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
