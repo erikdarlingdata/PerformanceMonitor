@@ -89,6 +89,11 @@ public sealed class PgCollectorSearchPathLiveTests
         var bodySucceeded = false;
         try
         {
+            if (await ScalarLongAsync(admin.ConnectionString, $"SELECT pg_catalog.count(*) FROM pg_catalog.pg_database WHERE datname = '{Database}'", ct) > 0)
+            {
+                await ScratchPostgres.QuiesceTimescaleJobsAsync(admin.ConnectionString, Database, ct);
+            }
+
             await ExecAsync(admin.ConnectionString, $"DROP DATABASE IF EXISTS {Database} WITH (FORCE)", ct);
             await ExecAsync(admin.ConnectionString, $"DROP ROLE IF EXISTS {Owner}", ct);
             await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Owner} LOGIN NOSUPERUSER", ct);
@@ -174,6 +179,7 @@ public sealed class PgCollectorSearchPathLiveTests
         {
             await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
+                await ScratchPostgres.QuiesceTimescaleJobsAsync(admin.ConnectionString, Database, cleanupCt);
                 await using (var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {Database} WITH (FORCE)", cleanup))
                 {
                     await drop.ExecuteNonQueryAsync(cleanupCt);

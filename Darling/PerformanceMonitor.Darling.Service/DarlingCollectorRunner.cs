@@ -1800,6 +1800,9 @@ public sealed class DarlingCollectorRunner
 FROM pg_catalog.pg_extension AS e
 JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) e.extnamespace";
 
+    /// <summary>#6143: a catalog read of a handful of rows; the other connection-time reads beside it use 5 s too.</summary>
+    internal const int PgExtensionSchemasTimeoutSeconds = 5;
+
     /// <summary>
     /// #6143: sets <see cref="CollectorContext.PgExtensionSchemas"/> from <paramref name="targetConnection"/>, for a
     /// PostgreSQL collector that declares an extension it reads (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>),
@@ -1824,8 +1827,8 @@ JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
         try
         {
             using var command = targetConnection.CreateCommand();
+            command.CommandTimeout = PgExtensionSchemasTimeoutSeconds;
             command.CommandText = PgExtensionSchemasSql;
-            command.CommandTimeout = 5;
             var schemas = new Dictionary<string, string>(StringComparer.Ordinal);
             using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
