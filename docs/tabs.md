@@ -37,7 +37,7 @@ The Darling web dashboard has these pages in its sidebar:
 - Fleet Sweeps
 - Alert History and Alert Rules
 - Admin, with the tabs Servers, Notification Routes, Alert Settings, and Report Feedback
-- Custom Views, Mute Rules, and Manage Tags
+- Custom Views, Mute Rules, and Manage Tags (create, rename, recolour, move under another tag, put sibling tags in order with Move up and Move down, delete, and assign servers)
 - Job History
 
 The page for one SQL Server has these tabs:

@@ -8,7 +8,7 @@ The optional built-in web dashboard is off by default and uses its own port, 515
 
 - save views, and edit alert rules and mute rules
 - dismiss alerts
-- manage server tags
+- manage server tags, including the order of sibling tags (Move Up and Move Down in the viewer, Move up and Move down on the web page)
 - add or edit a monitored server
 
 Operators can watch the fleet without installing the viewer. See [Tabs](tabs.md#tabs) for the pages.

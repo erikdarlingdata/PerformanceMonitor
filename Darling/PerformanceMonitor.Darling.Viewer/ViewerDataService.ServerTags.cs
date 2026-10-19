@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using Npgsql;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
@@ -125,6 +126,12 @@ public sealed partial class ViewerDataService
     public async Task ReparentServerTagAsync(int tagId, int? newParentId, CancellationToken cancellationToken = default) =>
         RequireOk(await TagWriteAsync(() => TagStore.UpdateAsync(
             tagId, new ServerTagEdit(false, null, false, null, true, newParentId), cancellationToken)));
+
+    /// <summary>Moves a tag one place up or down among its siblings (#6094). The store renumbers every sibling
+    /// in one transaction from a fresh read, so a concurrent reorder is not overwritten. Moving past an edge is a
+    /// no-op.</summary>
+    public async Task MoveServerTagAsync(int tagId, TagMoveDirection direction, CancellationToken cancellationToken = default) =>
+        RequireOk(await TagWriteAsync(() => TagStore.MoveAsync(tagId, direction, cancellationToken)));
 
     /// <summary>Whether a tag currently has children, read fresh from the store.</summary>
     public Task<bool> ServerTagHasChildrenAsync(int tagId, CancellationToken cancellationToken = default) =>

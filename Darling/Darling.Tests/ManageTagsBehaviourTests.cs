@@ -72,6 +72,27 @@ public sealed class ManageTagsBehaviourTests
     }
 
     [Fact]
+    public void MoveUpAndDown_AreDisabledAtAnEdgeOrForALoneTag_AndSendOnlyTheDirection()
+    {
+        if (!TryRun("move", out var r)) return;
+
+        var states = r.GetProperty("states");
+        Assert.True(states.GetProperty("first").GetProperty("up").GetBoolean());
+        Assert.False(states.GetProperty("first").GetProperty("down").GetBoolean());
+        Assert.True(states.GetProperty("alone").GetProperty("up").GetBoolean());
+        Assert.True(states.GetProperty("alone").GetProperty("down").GetBoolean());
+        Assert.False(states.GetProperty("last").GetProperty("up").GetBoolean());
+        Assert.True(states.GetProperty("last").GetProperty("down").GetBoolean());
+
+        var call = Assert.Single(r.GetProperty("calls").EnumerateArray());
+        Assert.Equal("PATCH", call.GetProperty("method").GetString());
+        Assert.Equal("/api/server-tags/3", call.GetProperty("url").GetString());
+        Assert.Equal("up", call.GetProperty("body").GetProperty("move").GetString());
+        Assert.Single(call.GetProperty("body").EnumerateObject());
+        Assert.Contains("Tag moved up.", r.GetProperty("text").GetString(), System.StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ACreate_PostsTrimmedFieldsAsJson_AndListsTheRulesItChanged()
     {
         if (!TryRun("create", out var r)) return;

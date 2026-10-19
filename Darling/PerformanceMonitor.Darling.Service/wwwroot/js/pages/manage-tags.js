@@ -10,7 +10,7 @@
  * Manage Tags page (#5085) — the web twin of the desktop viewer's tag manager. It reads the tag forest and each
  * server's directly-assigned tags from the fleet roll-up (apiGetFleet: `tags` and `cards[].tags`) and, for a
  * sign-in the session reports can_edit, writes through the five /api/server-tags routes: POST (create), PATCH
- * (partial edit), DELETE ?confirm=true, POST .../servers (assign) and DELETE .../servers (unassign). The server is
+ * (partial edit, or {move:"up"|"down"} to reorder siblings), DELETE ?confirm=true, POST .../servers (assign) and DELETE .../servers (unassign). The server is
  * the authority for every write; this page is only the affordance and computes no figure.
  *
  * Every write result names the custom alert rules whose coverage changed (`affected_rules`); the page lists them
@@ -76,6 +76,16 @@ export function subtreeIds(forest, id) {
   return out;
 }
 
+/** Whether a tag can move one place up or down among its siblings (the tags under the same parent). The forest
+ *  arrives in display order (sort order, then name), so a tag's place is its index among the siblings in forest
+ *  order; the server renumbers from a fresh read and is the authority. */
+export function movePossible(forest, tag) {
+  const parent = tag.parent_id == null ? null : tag.parent_id;
+  const siblings = forest.filter((t) => (t.parent_id == null ? null : t.parent_id) === parent);
+  const i = siblings.findIndex((t) => t.id === tag.id);
+  return { up: i > 0, down: i >= 0 && i < siblings.length - 1 };
+}
+
 /** The POST body for a create: only the fields that hold a value. */
 export function formToCreateBody(values) {
   const body = { name: String(values.name || "").trim() };
@@ -139,6 +149,7 @@ async function send(method, path, body) {
 const tagPath = (id) => "/api/server-tags/" + encodeURIComponent(id);
 const createTag = (body) => send("POST", "/api/server-tags", body);
 const patchTag = (id, body) => send("PATCH", tagPath(id), body);
+const moveTag = (id, direction) => send("PATCH", tagPath(id), { move: direction });
 const deleteTag = (id, confirm) => send("DELETE", tagPath(id) + (confirm ? "?confirm=true" : ""));
 const assignServers = (id, ids) => send("POST", tagPath(id) + "/servers", { server_ids: ids });
 const unassignServers = (id, ids) => send("DELETE", tagPath(id) + "/servers", { server_ids: ids });
@@ -305,10 +316,13 @@ function select(id) {
 function detailNode(state) {
   const tag = state.forest.find((t) => t.id === selectedId);
   if (!tag) return emptyStrip("Select a tag to see and change its servers.");
+  const moves = movePossible(state.forest, tag);
   const actions = state.canEdit
     ? el("div", { class: "form-actions" }, [
         lockButton({ class: "btn", type: "button", text: "New child tag", onClick: () => openForm({ mode: "create", values: { name: "", colour: "", parent_id: String(tag.id) } }) }),
         lockButton({ class: "btn", type: "button", text: "Edit", onClick: () => openForm({ mode: "edit", id: tag.id, original: tag, values: { name: tag.name, colour: tag.colour || "", parent_id: tag.parent_id == null ? "" : String(tag.parent_id) } }) }),
+        el("button", { class: "btn", type: "button", text: "Move up", disabled: moves.up ? null : "", onClick: () => move(tag, "up") }),
+        el("button", { class: "btn", type: "button", text: "Move down", disabled: moves.down ? null : "", onClick: () => move(tag, "down") }),
         el("button", { class: "btn", type: "button", text: "Delete", onClick: () => remove(tag) }),
       ])
     : null;
@@ -413,6 +427,26 @@ function failNotice(res) {
 async function afterWrite(message, rules) {
   notice = { message, isError: false, rules };
   await refresh(live);
+}
+
+/* Move up / Move down (#6094): one PATCH {move}. The server swaps the tag with its neighbour and renumbers every
+   sibling in one transaction, so the page sends only the direction and re-reads the order afterwards. */
+async function move(tag, direction) {
+  if (busy) return;
+  setBusy(true);
+  try {
+    notice = null;
+    const res = await moveTag(tag.id, direction);
+    if (res.kind === "notfound") {
+      edits.delete(tag.id);
+      if (selectedId === tag.id) selectedId = null;
+      return await afterWrite(res.message, []);
+    }
+    if (res.kind !== "ok") return failNotice(res);
+    await afterWrite(res.status === "unchanged" ? "Already at the " + (direction === "up" ? "top" : "bottom") + " of its siblings." : "Tag moved " + direction + ".", []);
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function remove(tag) {

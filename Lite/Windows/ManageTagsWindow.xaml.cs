@@ -44,6 +44,10 @@ public sealed class TagNode
     public System.Windows.Media.Brush SwatchBrush => TagColorBrushes.Fill(Tag.Colour);
 
     public ObservableCollection<TagNode> Children { get; } = new();
+
+    /// <summary>Bound two-way to the tree item, so a rebuilt tree can re-select the tag the operator was on
+    /// (a Move Up or Move Down rebuilds every node).</summary>
+    public bool IsSelected { get; set; }
 }
 
 /// <summary>A server row in the assignment checklist — its membership in the selected tag is
@@ -201,9 +205,15 @@ public partial class ManageTagsWindow : Window
             }
         }
 
+        var reselect = selectedId is int id ? FindNode(nodes, id) : null;
+        if (reselect is not null)
+        {
+            reselect.IsSelected = true;
+        }
+
         TagTree.ItemsSource = nodes;
 
-        _selectedNode = selectedId is int id ? FindNode(nodes, id) : null;
+        _selectedNode = reselect;
         UpdateButtons();
     }
 
@@ -240,8 +250,61 @@ public partial class ManageTagsWindow : Window
         RenameButton.IsEnabled = hasSelection;
         ColourButton.IsEnabled = hasSelection;
         DeleteButton.IsEnabled = hasSelection;
+        MoveUpButton.IsEnabled = CanMoveSelected(TagMoveDirection.Up);
+        MoveDownButton.IsEnabled = CanMoveSelected(TagMoveDirection.Down);
         CheckAllButton.IsEnabled = hasSelection;
         UncheckAllButton.IsEnabled = hasSelection;
+    }
+
+    /// <summary>Whether the selected tag has a sibling to swap with in <paramref name="direction"/>, from the
+    /// siblings (same parent) in the order the tree shows them.</summary>
+    private bool CanMoveSelected(TagMoveDirection direction)
+    {
+        if (_selectedNode is null)
+        {
+            return false;
+        }
+
+        var parentId = _selectedNode.Tag.ParentId;
+        var siblings = _tags
+            .Where(t => t.ParentId == parentId)
+            .Select(t => new TagSibling(t.Id, t.Name, t.SortOrder))
+            .ToList();
+        return TagSiblingOrder.CanMove(siblings, _selectedNode.Tag.Id, direction);
+    }
+
+    private async void MoveUp_Click(object sender, RoutedEventArgs e) => await MoveSelectedAsync(TagMoveDirection.Up);
+
+    private async void MoveDown_Click(object sender, RoutedEventArgs e) => await MoveSelectedAsync(TagMoveDirection.Down);
+
+    /// <summary>Moves the selected tag one place among its siblings (#6094). The data service renumbers the
+    /// siblings in one statement from a fresh read; the tree is rebuilt and the same tag stays selected.</summary>
+    private async Task MoveSelectedAsync(TagMoveDirection direction)
+    {
+        if (_selectedNode is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var movedId = _selectedNode.Tag.Id;
+            if (!await WriteWhileWaitingAsync(
+                    "moving the tag", "Move tag",
+                    () => Task.Run(() => _dataService.MoveServerTagAsync(movedId, direction))))
+            {
+                return;
+            }
+
+            ChangedAny = true;
+            await ReloadTagsAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("ManageTags", "Move tag failed", ex);
+            MessageBox.Show(this, $"Could not move the tag: {ex.Message}", "Manage Tags",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void RefreshMembers()
