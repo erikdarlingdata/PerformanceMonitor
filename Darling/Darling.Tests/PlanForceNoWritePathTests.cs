@@ -157,6 +157,30 @@ public sealed class PlanForceNoWritePathTests
     }
 
     /// <summary>
+    /// #5632 step 7: <see cref="StoreOwnerSource"/> hands the store owner's data source to MCP tool code, so the force tools can read one
+    /// server's remediation slot, which the <c>mcp</c> role cannot read. It is registered in the MCP host's services, so any tool method could
+    /// ask for it by type and then read or write the store as the owner. This pin keeps it to the one class: no other MCP tool method takes it,
+    /// and the force tools take it as a service parameter, never as a client argument.
+    /// </summary>
+    [Fact]
+    public void OnlyTheForceToolClass_TakesTheStoreOwnerSource()
+    {
+        var takers = typeof(PlanForceBot).Assembly.GetTypes()
+            .SelectMany(type => type.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            .Where(method => method.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false).Length > 0)
+            .Where(method => method.GetParameters().Any(parameter => parameter.ParameterType == typeof(StoreOwnerSource)))
+            .Select(method => method.DeclaringType!.Name + "." + method.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(new[]
+        {
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.ForceQueryStorePlan),
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.UnforceQueryStorePlan),
+        }, takers);
+    }
+
+    /// <summary>
     /// #5632 step 7: the service now references the Remediation assembly, for ONE class. Two proofs that the door has one hinge. By
     /// reflection: no field, property, method signature or local of any other service type names a Remediation type, and the executor
     /// itself is named only by <c>DarlingMcpPlanForceTools</c> (and the compiler's nested types for its async bodies). By source: the
