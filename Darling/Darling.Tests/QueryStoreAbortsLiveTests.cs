@@ -71,12 +71,17 @@ public sealed class QueryStoreAbortsLiveTests
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live aborts test.");
         var ct = TestContext.Current.CancellationToken;
+        /* A scratch database of its own, as ForcedPlanStateLiveTests does: on the shared DARLING_TEST_PG database, CI
+           saw this class's server insert fail with 42P01 (relation "servers" does not exist) after another class ran in the same shard. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        cs = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        await LiveTimescaleProbe.TryEnableAsync(cs!, ct);
+        await LiveTimescaleProbe.TryEnableAsync(cs, ct);
         await DeleteRowsAsync(connection, ct);
-        await using var postgres = NpgsqlDataSource.Create(cs!);
+        /* The body's seed connections come from this data source too, so seed and read share the scratch database. */
+        await using var postgres = NpgsqlDataSource.Create(cs);
         var ok = false;
         try
         {
@@ -92,7 +97,7 @@ public sealed class QueryStoreAbortsLiveTests
     [Fact]
     public Task ACheapQueryThatAbortsOften_RanksAboveAnExpensiveQueryThatAbortedOnce_AndRegularOnlyQueriesAreAbsent() => RunAsync(async (postgres, ct) =>
     {
-        await using (var seed = new NpgsqlConnection(ConnectionString)) { await seed.OpenAsync(ct); await SeedAsync(seed, ct); }
+        await using (var seed = await postgres.OpenConnectionAsync(ct)) { await SeedAsync(seed, ct); }
         using var doc = await ReadAsync(postgres, ct);
         var ids = doc.RootElement.GetProperty("queries").EnumerateArray().Select(q => q.GetProperty("query_id").GetInt64()).ToArray();
         /* 8 failed runs, then 3, then 1; query 3 has none and is not listed. */
@@ -103,7 +108,7 @@ public sealed class QueryStoreAbortsLiveTests
     [Fact]
     public Task TheShare_IsTheQuerysOwnFailedRunsOverItsOwnTotalRuns_AndTheCountsFoldEachIntervalOnce() => RunAsync(async (postgres, ct) =>
     {
-        await using (var seed = new NpgsqlConnection(ConnectionString)) { await seed.OpenAsync(ct); await SeedAsync(seed, ct); }
+        await using (var seed = await postgres.OpenConnectionAsync(ct)) { await SeedAsync(seed, ct); }
         using var doc = await ReadAsync(postgres, ct);
         var rows = doc.RootElement.GetProperty("queries").EnumerateArray().ToDictionary(q => q.GetProperty("query_id").GetInt64());
         var cheap = rows[1];
@@ -124,7 +129,7 @@ public sealed class QueryStoreAbortsLiveTests
     [Fact]
     public Task TheAverageDuration_CountsAbortedRunsOnly() => RunAsync(async (postgres, ct) =>
     {
-        await using (var seed = new NpgsqlConnection(ConnectionString)) { await seed.OpenAsync(ct); await SeedAsync(seed, ct); }
+        await using (var seed = await postgres.OpenConnectionAsync(ct)) { await SeedAsync(seed, ct); }
         using var doc = await ReadAsync(postgres, ct);
         var rows = doc.RootElement.GetProperty("queries").EnumerateArray().ToDictionary(q => q.GetProperty("query_id").GetInt64());
         /* (4 x 400 ms + 4 x 600 ms) / 8 = 500 ms. The 10 Regular runs at 5 ms would pull a mixed average to about 280 ms. */
@@ -139,7 +144,7 @@ public sealed class QueryStoreAbortsLiveTests
     [Fact]
     public Task TheDatabaseFilter_AndTheRowLimit_Hold() => RunAsync(async (postgres, ct) =>
     {
-        await using (var seed = new NpgsqlConnection(ConnectionString)) { await seed.OpenAsync(ct); await SeedAsync(seed, ct); }
+        await using (var seed = await postgres.OpenConnectionAsync(ct)) { await SeedAsync(seed, ct); }
         using (var one = await ReadAsync(postgres, ct, database: OtherDb))
         {
             Assert.Equal(new long[] { 4 }, one.RootElement.GetProperty("queries").EnumerateArray().Select(q => q.GetProperty("query_id").GetInt64()));
@@ -157,9 +162,8 @@ public sealed class QueryStoreAbortsLiveTests
     public Task AnEmptyAnswer_SaysWhy_ForNoAbortedRuns_AndForNoData() => RunAsync(async (postgres, ct) =>
     {
         /* Runs, but none aborted: a measured zero. */
-        await using (var seed = new NpgsqlConnection(ConnectionString))
+        await using (var seed = await postgres.OpenConnectionAsync(ct))
         {
-            await seed.OpenAsync(ct);
             await RegisterServerAsync(seed, ct);
             await InsertAsync(seed, Db, 3, 31, 1, Anchor.AddMinutes(1), Anchor, 500, 1_000_000, "Regular", ct);
         }

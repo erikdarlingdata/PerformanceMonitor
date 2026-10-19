@@ -25,7 +25,7 @@ export const FILTERED = new Set([
   "get_blocked_process_xml",
   // Duration trends, Query Store clutter, long queries and plan corrections (#5244 PR4).
   "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
-  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections",
+  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections", "get_forced_plans",
   // Configuration, Query Store health, configuration changes, severe errors and the default trace (#5244 PR6).
   "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
   "get_health_parser_severe_errors", "get_default_trace_events",
@@ -35,7 +35,7 @@ export const FILTERED = new Set([
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
- *  chip). 34 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
+ *  chip). 35 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([

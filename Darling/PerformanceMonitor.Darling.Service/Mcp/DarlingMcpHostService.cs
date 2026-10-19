@@ -1287,6 +1287,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpQueryStoreHistoryTools>()
             /* #5632 step A2: get_plan_force_precheck, the read that checks a Query Store plan before anyone forces it. */
             .WithGeminiCompatibleTools<DarlingMcpPlanForcePrecheckTools>()
+            /* #5632 step 1b: get_forced_plans, whether each Query Store force works. */
+            .WithGeminiCompatibleTools<DarlingMcpForcedPlanTools>()
             /* #6073: get_query_store_aborts, the queries ranked by aborted and failed Query Store runs. */
             .WithGeminiCompatibleTools<DarlingMcpQueryStoreAbortsTools>()
             /* #6074: find_database, which monitored server holds a database. */
