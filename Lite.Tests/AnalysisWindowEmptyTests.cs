@@ -101,6 +101,51 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
     }
 
     /// <summary>
+    /// #6132: collection that came back seconds ago, after more than a week offline, leaves ONE row in the window
+    /// (the first collection after the outage has no earlier one to difference against). The window is unobserved
+    /// all the same, but collection is running: the answer must say it was missing until that row and has resumed,
+    /// not that it "stopped or broken".
+    /// </summary>
+    [Fact]
+    public async Task ACollectorThatResumedSecondsAgo_IsToldAsResumed_NotAsStoppedOrBroken()
+    {
+        await PlantWaitAsync(DateTime.UtcNow.AddDays(-9), StaleWait, 60_000L);
+        await PlantWaitAsync(DateTime.UtcNow.AddSeconds(-50), StaleWait, 60_000L);
+
+        var service = new AnalysisService(_duckDb);
+        var result = await McpAnalysisTools.AnalyzeServer(service, _serverManager);
+
+        using var doc = JsonDocument.Parse(result);
+        Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+        var message = service.WindowEmptyMessage;
+        Assert.NotNull(message);
+        Assert.Contains("Collection was missing until about", message, StringComparison.Ordinal);
+        Assert.Contains("has resumed", message, StringComparison.Ordinal);
+        Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("stopped or broken", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("why they stopped", result, StringComparison.Ordinal);
+    }
+
+    /// <summary>The other half: when no collection landed in the window at all, nothing in it shows a resumption,
+    /// so the answer says that and keeps the all-clear warning without claiming either outcome.</summary>
+    [Fact]
+    public async Task AWindowWithNoCollectionAtAll_SaysNothingLandedAndDoesNotClaimResumption()
+    {
+        await PlantWaitAsync(DateTime.UtcNow.AddDays(-9), StaleWait, 60_000L);
+        await PlantWaitAsync(DateTime.UtcNow.AddHours(-30), StaleWait, 60_000L);
+
+        var service = new AnalysisService(_duckDb);
+        await McpAnalysisTools.AnalyzeServer(service, _serverManager);
+
+        var message = service.WindowEmptyMessage;
+        Assert.NotNull(message);
+        Assert.Contains("No collection landed inside it", message, StringComparison.Ordinal);
+        Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("has resumed.", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("appears to have stopped", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The control, and the reason the fix is a distinction rather than a rewording: the SAME server
     /// with a benign wait collected THROUGHOUT the window has facts to score, finds nothing wrong, and
     /// keeps the genuine true-negative all-clear.
