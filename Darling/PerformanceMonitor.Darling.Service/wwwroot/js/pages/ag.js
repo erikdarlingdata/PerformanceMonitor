@@ -24,6 +24,7 @@ import {
   el,
   mount,
   apiGet,
+  apiGetFleet,
   loadingStrip,
   errorStrip,
   emptyStrip,
@@ -37,6 +38,7 @@ import {
   rollupTextId,
 } from "../util.js";
 import { VIZ } from "../panels.js";
+import { displayNameFor } from "../server-order.js";
 
 /* The empty state is the NORMAL case for most fleets — Always On is opt-in, and the collectors write no rows for
    an instance that hosts no AGs (and never run against Azure SQL Database). Say so plainly rather than implying
@@ -69,7 +71,10 @@ const DATABASE_COLUMNS = [
 export async function renderAg(main) {
   mount(main, [pageHead(null), loadingStrip("Loading availability groups…")]);
 
-  const res = await apiGet("/api/ag");
+  /* #6157: a card names the reporting server by its display name, as the fleet page and the sidebar do. The fleet read is the
+     source of that name; if it fails the cards fall back to the connection key rather than blocking the page. */
+  const [res, fleet] = await Promise.all([apiGet("/api/ag"), apiGetFleet()]);
+  const fleetCards = fleet.kind === "data" && fleet.data && Array.isArray(fleet.data.cards) ? fleet.data.cards : [];
   if (res.kind === "error") {
     mount(main, [pageHead(null), errorStrip(res.message)]);
     return;
@@ -82,7 +87,7 @@ export async function renderAg(main) {
     return;
   }
 
-  mount(main, [pageHead(d), truncationNote(d), rollup(d), ...groups.map(agCard)]);
+  mount(main, [pageHead(d), truncationNote(d), rollup(d), ...groups.map((g) => agCard(g, fleetCards))]);
 }
 
 /* #5042: the tiles count every view in scope, so when a response says it was cut (a limit or a byte cap) the page
@@ -153,7 +158,7 @@ export function countLabel(num, plural) {
   return num === 1 ? plural.replace(/s$/, "") : plural;
 }
 
-function agCard(g) {
+function agCard(g, fleetCards) {
   const cls = bandClass(g.severity);
 
   return el("div", { class: "card ag-card " + cls }, [
@@ -166,7 +171,7 @@ function agCard(g) {
         ? el("span", { class: "ag-primary-note", text: "Primary: " + g.primary_replica })
         : el("span", { class: "ag-primary-note muted", text: "No primary reported" }),
     ]),
-    el("div", { class: "status-line", text: viewSubtitle(g) }),
+    el("div", { class: "status-line", text: viewSubtitle(g, fleetCards) }),
     el("div", { class: "ag-replicas" }, (g.replicas || []).map(replicaChip)),
     databaseGrid(g),
   ]);
@@ -174,12 +179,12 @@ function agCard(g) {
 
 /* Whose view this is, and how fresh. The two collector sweeps land independently, so the database grain gets its
    own "as of" whenever it differs from the replica grain. */
-function viewSubtitle(g) {
+export function viewSubtitle(g, fleetCards) {
   /* #5489: a group past the fleet's offline mark is a memory of the last snapshot, not a current status — say
      so ahead of the "as reported by" line, which keeps the time the snapshot was taken. */
   let text =
     (g.is_stale ? "Stale: no current data. " : "") +
-    "As reported by " + g.server_name + " · " + (g.is_stale ? "last collected " : "collected ") + relTime(g.collection_time);
+    "As reported by " + displayNameFor(fleetCards, g.server_name) + " · " + (g.is_stale ? "last collected " : "collected ") + relTime(g.collection_time);
   if (g.database_collection_time && g.database_collection_time !== g.collection_time) {
     text += " · databases " + relTime(g.database_collection_time);
   }
