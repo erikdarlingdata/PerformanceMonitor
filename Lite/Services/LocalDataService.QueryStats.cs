@@ -258,6 +258,43 @@ LEFT JOIN page p ON TRUE
 ORDER BY p.page_ord";
 
     /// <summary>
+    /// #6127: what an empty <see cref="GetTopQueriesByCpuAsync"/> left unsaid. The ranking keeps only groups whose summed
+    /// deltas are above zero, so a window of first sightings and unmoved repeats ranks nothing while the archive holds its
+    /// snapshots. Returns how many snapshots the window stored and the newest snapshot at or before the window's end that
+    /// carries a measured delta (null when none does), over the same database filter. Darling's twin is
+    /// <c>GetQueryStatsSnapshotProbeAsync</c>.
+    /// </summary>
+    public async Task<(long SnapshotsInWindow, DateTime? NewestMeasuredDeltaAt)> GetQueryStatsSnapshotProbeAsync(
+        int serverId, int hoursBack, DateTime? asOfUtc = null, IReadOnlyList<string>? databaseNames = null)
+    {
+        using var _q = TimeQuery("GetQueryStatsSnapshotProbeAsync", "v_query_stats snapshot probe");
+        using var connection = await OpenConnectionAsync();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT
+    (SELECT COUNT(*) FROM v_query_stats
+     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"),
+    (SELECT MAX(collection_time) FROM v_query_stats
+     WHERE server_id = $1 AND collection_time <= $3" + dbClause + @"
+     AND   (delta_execution_count > 0 OR delta_elapsed_time > 0))";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        using var reader = await command.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        return (
+            reader.IsDBNull(0) ? 0 : Convert.ToInt64(reader.GetValue(0)),
+            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+    }
+
+    /// <summary>
     /// The top-N query-stats groups by CPU over the window. <paramref name="minMaxDop"/> is the lifetime
     /// <c>max_dop</c> floor a group must reach to be RANKED at all (#3541 A13): 0 for no parallelism filter
     /// (the grids' read, byte-identical to before), 2 for the MCP tool's <c>parallel_only</c>, the caller's
