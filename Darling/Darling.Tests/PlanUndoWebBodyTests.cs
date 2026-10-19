@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PlanUndoWebBodyTests
 {
-    private const string ServerWords = "A network-related error occurred while connecting to sql-host-07 on port 1433. Login failed for user 'remediation'.";
+    private const string ServerWords = "A network-related error occurred while connecting to sqlbox-west on port 1433. Login failed for user 'remediation'.";
 
     [Fact]
     public void AFailedUndo_AnswersTheFixedSentence_NeverTheServersOwnWords()
@@ -39,7 +39,7 @@ public sealed class PlanUndoWebBodyTests
         Assert.Equal("sign_in_failed", (string?)body["code"]);
         Assert.Equal(PlanUndoAnswer.Failed, (string?)body["status"]);
         Assert.Equal(12, (int?)body["state"]?["forced_plan"]);
-        Assert.DoesNotContain("sql-host-07", body.ToJsonString(), System.StringComparison.Ordinal);
+        Assert.DoesNotContain("sqlbox-west", body.ToJsonString(), System.StringComparison.Ordinal);
         Assert.DoesNotContain("port 1433", body.ToJsonString(), System.StringComparison.Ordinal);
         Assert.DoesNotContain("Login failed", body.ToJsonString(), System.StringComparison.Ordinal);
     }
