@@ -330,6 +330,23 @@ VALUES ($1,$2,$3,$4,$5)", CollectionIdGenerator.Next(), at, ServerId, ServerName
             Assert.Equal("FAILING", doc.RootElement.GetProperty("state").GetString());
             Assert.Equal("pg_obj", doc.RootElement.GetProperty("plan_guide").GetProperty("name").GetString());
             Assert.False(doc.RootElement.GetProperty("plan_guide").GetProperty("enabled").GetBoolean());
+
+            /* The Query Store history tool lists the same force with its variant and its guide. */
+            var asOf = AsOf.ToString("o", CultureInfo.InvariantCulture);
+            using (var history = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, db, 1, ServerName, 24, asOf, ct)))
+            {
+                var forced = Assert.Single(history.RootElement.GetProperty("forced_plans").EnumerateArray());
+                Assert.Equal("WORKING", forced.GetProperty("state").GetString());
+                Assert.Equal(12, Assert.Single(forced.GetProperty("variant_plans").EnumerateArray()).GetProperty("plan_id").GetInt64());
+            }
+
+            using (var history = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, db, 2, ServerName, 24, asOf, ct)))
+            {
+                var forced = Assert.Single(history.RootElement.GetProperty("forced_plans").EnumerateArray());
+                Assert.Equal("FAILING", forced.GetProperty("state").GetString());
+                Assert.Equal("pg_obj", forced.GetProperty("plan_guide").GetProperty("name").GetString());
+            }
+
             return 0;
         });
     }
