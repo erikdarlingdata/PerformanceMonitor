@@ -409,8 +409,14 @@ WHERE calls > 0";
         },
     };
 
+    /* #6143: the stock view named by the schema pg_stat_statements was created in, which need not be public; the
+       monitoring connection's search_path is pg_catalog. Aurora's aurora_stat_statements() is built in, so it resolves
+       there unqualified. */
     public override CollectorQuery BuildQuery(CollectorContext context)
-        => new(BuildQueryText(context.Target.PostgresMajorVersion, context.Target.IsAurora));
+        => new(BuildQueryText(context.Target.PostgresMajorVersion, context.Target.IsAurora).Replace(
+            "FROM public.pg_stat_statements",
+            "FROM " + context.PgExtensionSchema("pg_stat_statements") + ".pg_stat_statements",
+            StringComparison.Ordinal));
 
     /// <summary>
     /// The statements epoch this collector persists per server (#3653 A5): <c>pg_stat_statements_info.stats_reset</c>

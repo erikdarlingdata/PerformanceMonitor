@@ -14998,7 +14998,10 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
+            /* #6143: the one target connection without the pinned search_path. EXPLAIN plans the application's own
+               statement, whose unqualified table names resolve through the database's search_path. */
+            await using var connection = new NpgsqlConnection(
+                MonitoredServerConnection.WithoutPinnedSearchPath(runtime.ConnectionString));
             await connection.OpenAsync(cancellationToken);
 
             var result = await Targets.HypotheticalIndexExperiment.RunAsync(

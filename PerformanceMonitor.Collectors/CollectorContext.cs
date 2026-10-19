@@ -105,6 +105,25 @@ public sealed class CollectorContext
     public string? CurrentDatabaseName { get; set; }
 
     /// <summary>
+    /// Extension name to the schema it was created in, read from <c>pg_catalog.pg_extension</c> on the connection
+    /// that is about to run the query (#6143). Null until the host has read it; the per-database path reads it again
+    /// for each database, because an extension is created per database.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? PgExtensionSchemas { get; set; }
+
+    /// <summary>
+    /// The schema of <paramref name="extensionName"/>, quoted as an identifier, for collector SQL to name the
+    /// extension's objects with (#6143). Monitoring connections pin search_path to pg_catalog, so an extension object
+    /// named without its schema would not resolve. An extension the host did not find (not created in this
+    /// database, or the lookup did not run) gives the unquoted <c>public</c> the SQL named before, so the query and
+    /// its "does not exist" error stay what they were.
+    /// </summary>
+    public string PgExtensionSchema(string extensionName) =>
+        PgExtensionSchemas is not null && PgExtensionSchemas.TryGetValue(extensionName, out var schema)
+            ? PgIdentifier.Quote(schema)
+            : "public";
+
+    /// <summary>
     /// The most recent already-collected value of the definition's <c>NumericWatermarkColumn</c>,
     /// fetched by the host from ITS store (Lite: DuckDB; Darling: Postgres) before the query is
     /// built — the numeric (bigint) twin of <see cref="Watermark"/>, for collectors that dedup on a

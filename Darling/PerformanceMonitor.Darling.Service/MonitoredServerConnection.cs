@@ -227,6 +227,44 @@ public static class MonitoredServerConnection
             builder.Port = server.Port;
         }
 
+        builder.Options = PinSearchPath(builder.Options);
+
+        return builder.ConnectionString;
+    }
+
+    /// <summary>The startup option every monitoring connection to a PostgreSQL target carries (#6143).</summary>
+    public const string PinnedSearchPathOption = "-c search_path=pg_catalog,pg_temp";
+
+    /// <summary>
+    /// Adds <see cref="PinnedSearchPathOption"/> to a connection's startup <c>Options</c>, keeping any option already
+    /// there (#6143).
+    /// <para>The collectors connect to every database on a target, and a database or role setting
+    /// (<c>ALTER DATABASE ... SET search_path</c>, <c>ALTER ROLE ... SET search_path</c>) would otherwise decide how
+    /// each unqualified function, operator and relation name in their SQL resolves. A setting sent at sign-in takes
+    /// precedence over both, so collector SQL resolves against pg_catalog, with pg_temp last. Extension objects are
+    /// named by the schema they were created in instead (<c>CollectorContext.PgExtensionSchema</c>).</para>
+    /// </summary>
+    public static string PinSearchPath(string? options) =>
+        string.IsNullOrWhiteSpace(options)
+            ? PinnedSearchPathOption
+            : options.Contains(PinnedSearchPathOption, StringComparison.Ordinal)
+                ? options
+                : options.TrimEnd() + " " + PinnedSearchPathOption;
+
+    /// <summary>
+    /// The same connection string without <see cref="PinnedSearchPathOption"/>, for the one target connection that must
+    /// resolve names the way the application does: the hypothetical-index experiment EXPLAINs an application statement,
+    /// whose unqualified table names resolve through the database's own search_path (#6143).
+    /// </summary>
+    public static string WithoutPinnedSearchPath(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        if (builder.Options is { } options && options.Contains(PinnedSearchPathOption, StringComparison.Ordinal))
+        {
+            var rest = options.Replace(PinnedSearchPathOption, string.Empty, StringComparison.Ordinal).Trim();
+            builder.Options = rest.Length == 0 ? null : rest;
+        }
+
         return builder.ConnectionString;
     }
 }
