@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// only against that server, and never against a monitored one. Each test makes its own database with Query Store on and its own remediation
 /// login, hands the login to the code as an <c>env:</c> reference set in this process, and drops both in its own <c>finally</c>.
 /// </summary>
+[Collection("remediation-live-sql")]
 public sealed class RemediationLiveSqlTests
 {
     private static string? Host => Environment.GetEnvironmentVariable("DARLING_TEST_SQL");

@@ -26,7 +26,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /* #1776 own-store: every fact mints its own scratch database through ScratchPostgres and its own SQL Server database, and never touches
-   another test's rows, so the class is deliberately NOT [Collection("live-postgres")]. */
+   another test's rows, so the class is deliberately NOT [Collection("live-postgres")]. It shares the "remediation-live-sql" collection with
+   RemediationLiveSqlTests instead: that class counts the sessions of the remediation application name on the one test SQL Server, and a
+   force running beside it would change the count. */
 
 /// <summary>
 /// <c>force_query_store_plan</c> and <c>unforce_query_store_plan</c> against a live store AND a live SQL Server (#5632, step 7). Needs
@@ -34,6 +36,7 @@ namespace Darling.Tests;
 /// Each test makes its own store database, migrated, and its own SQL Server database with Query Store on and its own remediation login, hands the login to
 /// the tool as an <c>env:</c> reference set in this process, and drops both in its own <c>finally</c>. The server row's host is the test SQL Server.
 /// </summary>
+[Collection("remediation-live-sql")]
 public sealed class PlanForceToolLiveTests
 {
     private static string? StoreConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

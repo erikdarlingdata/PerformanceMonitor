@@ -246,9 +246,10 @@ SELECT host, database, encrypt_mode, trust_server_certificate, multi_subnet_fail
 FROM config.config_monitored_servers
 WHERE server_id = $1";
 
-    private static async Task<ServerRow?> ReadServerRowAsync(NpgsqlDataSource owner, int serverId, CancellationToken ct)
+    /// <summary><paramref name="postgres"/> is the store owner's data source here, not the mcp role's: the secret column is not readable by that role.</summary>
+    private static async Task<ServerRow?> ReadServerRowAsync(NpgsqlDataSource postgres, int serverId, CancellationToken ct)
     {
-        await using var connection = await owner.OpenConnectionAsync(ct);
+        await using var connection = await postgres.OpenConnectionAsync(ct);
         await using var command = new NpgsqlCommand(ServerRowSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         await using var reader = await command.ExecuteReaderAsync(ct);
