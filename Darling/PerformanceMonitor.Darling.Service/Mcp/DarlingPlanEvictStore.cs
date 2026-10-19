@@ -92,7 +92,7 @@ LIMIT $6";
     private static DateTime Naive(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
     internal static NpgsqlCommand Command(NpgsqlConnection connection, string sql) =>
-        new(sql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        new NpgsqlCommand(sql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
 
     private static string? Text(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
 
