@@ -446,18 +446,18 @@ internal static class DarlingWhoDroveItReader
 
     /// <summary>
     /// For each time in $4 (<c>timestamp[]</c>), the DMV blocking snapshot nearest to it within $5 seconds, either side; ties go to the earlier
-    /// snapshot. $1 server_id. Returns (asked time, snapshot time). The probe is a range scan on (server_id, collection_time) over 2 x $5 seconds
+    /// snapshot. $1 server_id. Returns (asked time, snapshot time). The probe is a range scan on (server_id, collection_time) over 2 x $3 seconds
     /// per time, and the snapshot collector writes rows only while something is blocked.
     /// </summary>
     internal const string NearestBlockingSnapshotSql = """
         SELECT t.at AS asked, n.collection_time AS found
-        FROM unnest($4::timestamp[]) AS t(at)
+        FROM unnest($2::timestamp[]) AS t(at)
         CROSS JOIN LATERAL (
             SELECT b.collection_time
             FROM collect.dmv_blocking_snapshots AS b
             WHERE b.server_id = $1
-            AND   b.collection_time >= t.at - make_interval(secs => $5)
-            AND   b.collection_time <= t.at + make_interval(secs => $5)
+            AND   b.collection_time >= t.at - make_interval(secs => $3)
+            AND   b.collection_time <= t.at + make_interval(secs => $3)
             GROUP BY b.collection_time
             ORDER BY ABS(EXTRACT(EPOCH FROM (b.collection_time - t.at))), b.collection_time
             LIMIT 1
