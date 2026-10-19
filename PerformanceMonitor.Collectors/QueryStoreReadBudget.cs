@@ -20,8 +20,8 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>What it bounds.</b> ONE statement: the runtime-stats read for one database, from the open to the end of the
 /// drain. The watermark refresh before it and the plan and text fetches after it are outside it. Darling's plan-XML fetch
-/// has its own per-database budget, <see cref="PlanFetchBudget"/>; the text fetch keeps
-/// <see cref="QueryStoreCollector.PerDatabaseWallClockBudget"/> and the collector's 500 s command timeout.</para>
+/// has its own per-database budget, <see cref="PlanFetchBudget"/>, and so does its statement-text fetch,
+/// <see cref="TextFetchBudget"/> (#6102).</para>
 ///
 /// <para><b>Why it exists.</b> Before this the read was bounded only by the 500 s command timeout and the 10-minute item
 /// budget, so one database whose Query Store was slow to answer held a 5-minute collector for up to 144 s in the field.
@@ -85,19 +85,22 @@ public static class QueryStoreReadBudget
     /// the time left does not fit one more plan, leave the rest to the next pass". No time left is always 0. Worked
     /// figures at a 30 s budget: 2 s a plan asks for 11, 56 ms or less asks for 400.
     /// </summary>
-    public static int PlanFetchWidth(TimeSpan timeLeft, double? msPerPlan, int maxWidth, bool firstChunk)
+    public static int PlanFetchWidth(TimeSpan timeLeft, double? msPerPlan, int maxWidth, bool firstChunk) =>
+        FetchWidth(timeLeft, msPerPlan, maxWidth, firstChunk, PlanFetchHeadroom);
+
+    private static int FetchWidth(TimeSpan timeLeft, double? msPerId, int maxWidth, bool firstChunk, double headroom)
     {
         if (timeLeft <= TimeSpan.Zero || maxWidth <= 0)
         {
             return 0;
         }
 
-        if (msPerPlan is not double perPlan || perPlan <= 0 || double.IsNaN(perPlan) || double.IsInfinity(perPlan))
+        if (msPerId is not double perId || perId <= 0 || double.IsNaN(perId) || double.IsInfinity(perId))
         {
             return maxWidth;
         }
 
-        var predicted = Math.Floor(timeLeft.TotalMilliseconds * PlanFetchHeadroom / perPlan);
+        var predicted = Math.Floor(timeLeft.TotalMilliseconds * headroom / perId);
         var floor = firstChunk ? 1 : 0;
         if (predicted <= floor)
         {
@@ -114,11 +117,14 @@ public static class QueryStoreReadBudget
     /// chunk's share, <c>2 x targetMs / cutWidth</c>: the next width is then at most half the cut one, the halving that
     /// ends a cut-empty loop. Any other pass (nothing received, nothing cut) keeps the previous figure.
     /// </summary>
-    public static double? NextMsPerPlan(double? previous, long targetMs, int plansReceived, bool cut, int cutWidth)
+    public static double? NextMsPerPlan(double? previous, long targetMs, int plansReceived, bool cut, int cutWidth) =>
+        NextMsPerId(previous, targetMs, plansReceived, cut, cutWidth);
+
+    private static double? NextMsPerId(double? previous, long targetMs, int received, bool cut, int cutWidth)
     {
-        if (plansReceived > 0)
+        if (received > 0)
         {
-            return Math.Max(targetMs, 1L) / (double)plansReceived;
+            return Math.Max(targetMs, 1L) / (double)received;
         }
 
         if (cut && cutWidth > 0)
@@ -128,6 +134,48 @@ public static class QueryStoreReadBudget
 
         return previous;
     }
+
+    /// <summary>
+    /// The per-database, per-pass budget on Darling's statement-text fetch (#6102), the twin of
+    /// <see cref="PlanFetchBudget"/> and a separate budget: text and plans are fetched by two statements with their own
+    /// measured cost per id. In the field (#6102, Azure SQL Database targets, 3.10.0) the text fetch ran 20 to 27 s of
+    /// target time for 320 to 580 ids on a pass, about 45 ms an id, with nothing bounding it but the byte budget and the
+    /// 500 s command timeout. 30 s for the reason <see cref="PlanFetchBudget"/> gives, a tenth of the 5-minute cadence, so
+    /// read plus plan fetch plus text fetch stay inside three tenths of it per database; the measured field runs sit
+    /// under it and keep their full width, and what it bounds is the pass that grows past them.
+    ///
+    /// <para>The mechanism is the plan side's: each chunk asks for <see cref="TextFetchWidth"/> ids, predicted from the
+    /// database's last measured time per id; a chunk cut anyway keeps the texts it received, and every id not received
+    /// stays in the text backlog that the next pass fetches first. The text statement also materialises every requested
+    /// text into a temp table before it ships a row, so a cut usually receives nothing; the runner then counts the pass as
+    /// a fetch failure (the #2776 backoff) and records a time per id (<see cref="NextMsPerText"/>) that halves the next
+    /// width.</para>
+    /// </summary>
+    public static readonly TimeSpan TextFetchBudget = TimeSpan.FromSeconds(30);
+
+    /// <summary>The share of the time left a predicted text-fetch chunk aims to fill (#6102): the same quarter of
+    /// headroom as <see cref="PlanFetchHeadroom"/>, for the same reason (a width sized to end exactly at the budget is cut
+    /// whenever the next pass runs a little slower, and a cut usually receives nothing).</summary>
+    public const double TextFetchHeadroom = 0.75;
+
+    /// <summary>
+    /// How many ids the next text-fetch chunk asks for (#6102):
+    /// <c>clamp(floor(timeLeft x TextFetchHeadroom / msPerText), floor, maxWidth)</c>, with <paramref name="msPerText"/>
+    /// the database's last measured time per text id. No measurement yet is <paramref name="maxWidth"/> (the 1000 ids per
+    /// statement the fetch has always used). The floor is 1 for a pass's first chunk and 0 for a later one ("stop, leave
+    /// the rest to the next pass"); no time left is always 0. Worked figures at a 30 s budget: 45 ms an id asks for 500,
+    /// 22 ms or less asks for 1000.
+    /// </summary>
+    public static int TextFetchWidth(TimeSpan timeLeft, double? msPerText, int maxWidth, bool firstChunk) =>
+        FetchWidth(timeLeft, msPerText, maxWidth, firstChunk, TextFetchHeadroom);
+
+    /// <summary>
+    /// The time per text id a text-fetch pass leaves for the next one (#6102), the rules of <see cref="NextMsPerPlan"/>:
+    /// target milliseconds over the ids received; twice the cut chunk's share when a cut received nothing; otherwise the
+    /// previous figure.
+    /// </summary>
+    public static double? NextMsPerText(double? previous, long targetMs, int textsReceived, bool cut, int cutWidth) =>
+        NextMsPerId(previous, targetMs, textsReceived, cut, cutWidth);
 
     /// <summary>
     /// The words <c>get_collection_health</c> appends to a timed-out database's name (#5813). Rendered, never stored:

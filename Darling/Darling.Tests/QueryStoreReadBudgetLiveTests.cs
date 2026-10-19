@@ -88,6 +88,27 @@ public sealed class QueryStoreReadBudgetLiveTests
         /// <summary>How many ids each plan-fetch statement asked for, in order, across passes.</summary>
         public List<(string Database, int Width)> RequestedWidths { get; } = [];
 
+        /// <summary>#6102 text fetch: how long the statement takes per requested id before it ships its first row, the stand-in
+        /// for the real statement's materialising every requested text into a temp table.</summary>
+        public TimeSpan MaterialisePerText { get; set; }
+
+        /// <summary>#6102 text fetch: how long each text row then takes to arrive.</summary>
+        public TimeSpan ShipPerText { get; set; }
+
+        /// <summary>Every query id the text fetch shipped, in order, across passes.</summary>
+        public List<long> ShippedTexts { get; } = [];
+
+        /// <summary>How many ids each text-fetch statement asked for, in order, across passes.</summary>
+        public List<(string Database, int Width)> RequestedTextWidths { get; } = [];
+
+        public List<int> TextWidthsFor(string database)
+        {
+            lock (RequestedTextWidths)
+            {
+                return RequestedTextWidths.Where(w => w.Database == database).Select(static w => w.Width).ToList();
+            }
+        }
+
         public List<int> WidthsFor(string database)
         {
             lock (RequestedWidths)
@@ -116,6 +137,17 @@ public sealed class QueryStoreReadBudgetLiveTests
             lock (Lines)
             {
                 return Lines.Count(l => l.Level == LogLevel.Information && l.Text.StartsWith("query_store plan fetch on", StringComparison.Ordinal)
+                    && l.Text.Contains(" budget: ", StringComparison.Ordinal)
+                    && l.Text.Contains("[" + database + "]", StringComparison.Ordinal));
+            }
+        }
+
+        /// <summary>The text fetch's once-a-day budget line for <paramref name="database"/>, at Information (#6102).</summary>
+        public int TextFetchBudgetLines(string database)
+        {
+            lock (Lines)
+            {
+                return Lines.Count(l => l.Level == LogLevel.Information && l.Text.StartsWith("query_store text fetch on", StringComparison.Ordinal)
                     && l.Text.Contains(" budget: ", StringComparison.Ordinal)
                     && l.Text.Contains("[" + database + "]", StringComparison.Ordinal));
             }
@@ -642,6 +674,167 @@ public sealed class QueryStoreReadBudgetLiveTests
         Assert.Equal(0, rig.Log.PlanFetchBudgetLines(Zeta));
     }
 
+    /// <summary>
+    /// #6102 (a): the text fetch's time budget, the twin of the plan fetch's, on the same fake. Six texts at 400 ms each
+    /// against a 1 s budget, with no measured time per id yet: the first pass asks for all six, is cut at the budget,
+    /// stores the texts it received and leaves the rest in the text backlog; later passes ask for the predicted width
+    /// and fetch the rest from that backlog first, every text exactly once. The budget line is logged once that UTC day
+    /// and again the next.
+    /// </summary>
+    [Fact]
+    public async Task ASlowTextFetch_IsCutAtItsBudget_StoresWhatItReceived_AndLaterPassesFetchTheRestOnce()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6102 text-fetch budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStoreTextFetchBudgetSpan = TimeSpan.FromSeconds(1);
+
+        var now = WholeSecondNow();
+        var target = new Target { ShipPerText = TimeSpan.FromMilliseconds(400) };
+        target.Rows[Alpha] = Enumerable.Range(1, 6).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+
+        await PassAsync(rig, target, token, Alpha);
+
+        /* The intervals are all written; the text fetch asked for all six, was cut, and stored what it received. */
+        Assert.Equal(6, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Equal([6], target.TextWidthsFor(Alpha));
+        var afterFirst = await StoredTextsAsync(rig, Alpha, token);
+        Assert.InRange(afterFirst.Count, 1, 5);
+        Assert.Equal(afterFirst, target.ShippedTexts.Order().ToList());
+        Assert.NotNull(rig.Runner.TextFetchMsPerTextForTests(LiveServerId, Alpha, QueryStoreCollector.Instance.Name));
+        Assert.Equal(1, rig.Log.TextFetchBudgetLines(Alpha));
+        /* The plan side is its own budget: the instant plan fetch was neither cut nor held. */
+        Assert.Equal(0, rig.Log.PlanFetchBudgetLines(Alpha));
+
+        /* Later passes read no new interval and fetch the owed texts from the backlog, a predicted few at a time. */
+        for (var pass = 0; pass < 10 && (await StoredTextsAsync(rig, Alpha, token)).Count < 6; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        Assert.Equal([1L, 2L, 3L, 4L, 5L, 6L], await StoredTextsAsync(rig, Alpha, token));
+        Assert.Equal(target.ShippedTexts.Count, target.ShippedTexts.Distinct().Count());
+        Assert.All(target.TextWidthsFor(Alpha).Skip(1), w => Assert.InRange(w, 1, 2));
+        Assert.Equal(6, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Equal(1, rig.Log.TextFetchBudgetLines(Alpha));
+
+        /* The next UTC day, four new queries at the same pace: the pass is held to its budget again and says so once. */
+        rig.Runner.QueryStoreReadTimeoutClockForTests = () => DateTime.UtcNow.AddDays(1);
+        target.Rows[Alpha].AddRange(Enumerable.Range(7, 4).Select(id => Row(id, now.AddMinutes(-4))));
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal(2, rig.Log.TextFetchBudgetLines(Alpha));
+    }
+
+    /// <summary>
+    /// #6102 (b): the binding catch, as on the plan side. The text statement materialises every requested text before it
+    /// ships the first row, so a cut usually receives nothing. Eight texts at 400 ms each against a 2 s budget: the first
+    /// pass is cut empty, which counts as a text-fetch failure and leaves a time per id that asks for at most half as many
+    /// next pass, which then fits; a pass that receives texts clears the failure; every text is fetched exactly once.
+    /// </summary>
+    [Fact]
+    public async Task ATextCutThatReceivedNothing_IsAFetchFailure_AndTheNextPassAsksForAtMostHalf()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6102 text-fetch budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStoreTextFetchBudgetSpan = TimeSpan.FromSeconds(2);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target { MaterialisePerText = TimeSpan.FromMilliseconds(400) };
+        target.Rows[Alpha] = Enumerable.Range(1, 8).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal([8], target.TextWidthsFor(Alpha));
+        Assert.Empty(target.ShippedTexts);
+        Assert.Empty(await StoredTextsAsync(rig, Alpha, token));
+        Assert.Equal(1, rig.Runner.TextFetchFailuresForTests(LiveServerId, Alpha, collector));
+
+        /* Not `>= 2 x 2000 / 8`: the cut runs under the time LEFT and the timer can fire a tick early (see the plan twin). */
+        var cutMsPerText = rig.Runner.TextFetchMsPerTextForTests(LiveServerId, Alpha, collector);
+        Assert.True(
+            QueryStoreReadBudget.TextFetchWidth(TimeSpan.FromSeconds(2), cutMsPerText, 1000, firstChunk: true) <= 8 / 2,
+            $"a cut-empty pass of 8 texts recorded {cutMsPerText} ms an id, which asks for more than half as many next pass");
+        Assert.Equal(1, rig.Log.TextFetchBudgetLines(Alpha));
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.InRange(target.TextWidthsFor(Alpha)[1], 1, 4);
+        Assert.NotEmpty(await StoredTextsAsync(rig, Alpha, token));
+        Assert.Equal(0, rig.Runner.TextFetchFailuresForTests(LiveServerId, Alpha, collector));
+
+        for (var pass = 0; pass < 10 && (await StoredTextsAsync(rig, Alpha, token)).Count < 8; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        Assert.Equal(Enumerable.Range(1, 8).Select(static id => (long)id).ToList(), await StoredTextsAsync(rig, Alpha, token));
+        Assert.Equal(8, target.ShippedTexts.Count);
+        Assert.Equal(0, rig.Runner.TextFetchFailuresForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>
+    /// #6102 (c): the predicted width's two clamps on the real text fetch. A database slower per id than the whole budget
+    /// still asks for one id each pass, never none. A fast one's measured time per id predicts the full 1000 ids per
+    /// statement, so the budget leaves its passes exactly as they were: one statement for the whole backlog, no pass held
+    /// to the budget.
+    /// </summary>
+    [Fact]
+    public async Task ThePredictedTextWidth_NeverFallsBelowOneId_NorRisesAboveTheStatementWidth()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6102 text-fetch budget pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStoreTextFetchBudgetSpan = TimeSpan.FromSeconds(1);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var slow = new Target { ShipPerText = TimeSpan.FromMilliseconds(1500) };
+        slow.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        for (var pass = 0; pass < 3; pass++)
+        {
+            await PassAsync(rig, slow, token, Alpha);
+        }
+
+        /* 3 unmeasured, cut empty; then 2 x 1000 / 3 ms an id asks for 1; cut empty again, 2000 ms an id would ask for
+           none, and the floor keeps it at 1. */
+        Assert.Equal([3, 1, 1], slow.TextWidthsFor(Alpha));
+        Assert.Equal(0, QueryStoreReadBudget.TextFetchWidth(
+            TimeSpan.FromSeconds(1), rig.Runner.TextFetchMsPerTextForTests(LiveServerId, Alpha, collector), 1000, firstChunk: false));
+
+        var fast = new Target();
+        fast.Rows[Zeta] = Enumerable.Range(1, 600).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        for (var pass = 0; pass < 12 && (await StoredTextsAsync(rig, Zeta, token)).Count < 600; pass++)
+        {
+            await PassAsync(rig, fast, token, Zeta);
+        }
+
+        Assert.True(600 == (await StoredTextsAsync(rig, Zeta, token)).Count, "widths " + string.Join(",", fast.TextWidthsFor(Zeta)));
+        Assert.Equal([600], fast.TextWidthsFor(Zeta));
+        Assert.Equal(1000, QueryStoreReadBudget.TextFetchWidth(
+            TimeSpan.FromSeconds(1), rig.Runner.TextFetchMsPerTextForTests(LiveServerId, Zeta, collector), 1000, firstChunk: true));
+        Assert.Equal(0, rig.Log.TextFetchBudgetLines(Zeta));
+    }
+
+    /// <summary>The query ids the store holds statement text for in <paramref name="database"/>, ascending.</summary>
+    private static async Task<List<long>> StoredTextsAsync(Rig rig, string database, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        await using var command = new NpgsqlCommand(
+            "SELECT query_id FROM collect.query_store_text WHERE server_id = @s AND database_name = @d ORDER BY query_id",
+            connection);
+        command.Parameters.AddWithValue("s", LiveServerId);
+        command.Parameters.AddWithValue("d", database);
+        var result = new List<long>();
+        await using var reader = await command.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            result.Add(reader.GetInt64(0));
+        }
+
+        return result;
+    }
+
     private static DateTime WholeSecondNow()
     {
         var now = DateTime.UtcNow;
@@ -752,6 +945,28 @@ public sealed class QueryStoreReadBudgetLiveTests
                 return new PlanReader(target, ids);
             }
 
+            if (cutoff is null && query.Text.Contains("FROM sys.query_store_query AS qsq", StringComparison.Ordinal))
+            {
+                /* #6102: the statement-text fetch by ids. Like the real statement it spends MaterialisePerText on every
+                   requested id before the first row, then ships the texts in ascending query_id order. */
+                var ids = System.Text.RegularExpressions.Regex.Match(query.Text, @"query_id IN \(([0-9, ]+)\)").Groups[1].Value
+                    .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                    .Select(static id => long.Parse(id, System.Globalization.CultureInfo.InvariantCulture))
+                    .Order()
+                    .ToArray();
+                lock (target.RequestedTextWidths)
+                {
+                    target.RequestedTextWidths.Add((owner.DatabaseName, ids.Length));
+                }
+
+                if (target.MaterialisePerText > TimeSpan.Zero)
+                {
+                    await Task.Delay(target.MaterialisePerText * ids.Length, cancellationToken);
+                }
+
+                return new PlanReader(target, ids, text: true);
+            }
+
             if (cutoff is null && target.Enumerated is { } listed && query.Text.Contains("FROM sys.databases AS d", StringComparison.Ordinal))
             {
                 return new Reader(listed.Select(static d => new object[] { d }).ToArray());
@@ -778,7 +993,7 @@ public sealed class QueryStoreReadBudgetLiveTests
     }
 
     /// <summary>The plan fetch's rows (plan_id, plan hash, plan XML); each takes <see cref="Target.ShipPerPlan"/> to arrive.</summary>
-    private sealed class PlanReader(Target target, long[] ids) : DbDataReader
+    private sealed class PlanReader(Target target, long[] ids, bool text = false) : DbDataReader
     {
         private int _row = -1;
 
@@ -789,15 +1004,17 @@ public sealed class QueryStoreReadBudgetLiveTests
                 return false;
             }
 
-            if (target.ShipPerPlan > TimeSpan.Zero)
+            var shipPer = text ? target.ShipPerText : target.ShipPerPlan;
+            if (shipPer > TimeSpan.Zero)
             {
-                await Task.Delay(target.ShipPerPlan, cancellationToken);
+                await Task.Delay(shipPer, cancellationToken);
             }
 
             _row++;
-            lock (target.ShippedPlans)
+            var shipped = text ? target.ShippedTexts : target.ShippedPlans;
+            lock (shipped)
             {
-                target.ShippedPlans.Add(ids[_row]);
+                shipped.Add(ids[_row]);
             }
 
             return true;
@@ -808,7 +1025,9 @@ public sealed class QueryStoreReadBudgetLiveTests
         public override long GetInt64(int o) => ids[_row];
         public override string GetString(int o) => o == 1
             ? "0x" + ids[_row].ToString("X8", System.Globalization.CultureInfo.InvariantCulture)
-            : "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.0\" />";
+            : text
+                ? "SELECT " + ids[_row].ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.0\" />";
         public override bool IsDBNull(int o) => false;
         public override object GetValue(int o) => o == 0 ? ids[_row] : GetString(o);
         public override int FieldCount => 3;

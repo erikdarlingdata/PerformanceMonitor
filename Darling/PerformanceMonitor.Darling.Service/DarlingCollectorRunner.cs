@@ -539,6 +539,32 @@ public sealed class DarlingCollectorRunner
     internal double? PlanFetchMsPerPlanForTests(int serverId, string database, string collector) =>
         _planFetchMsPerPlan.TryGetValue(FetchStateKey(serverId, database, collector), out var ms) ? ms : null;
 
+    /// <summary>The same once-per-database-per-UTC-day throttle, on the text fetch's budget line (#6102).</summary>
+    private readonly QueryStoreReadTimeoutLog _queryStoreTextFetchBudgetLog = new();
+
+    /// <summary>
+    /// The per-database, per-pass statement-text fetch budget (#6102), <see cref="QueryStoreReadBudget.TextFetchBudget"/> in
+    /// production, separate from <see cref="QueryStorePlanFetchBudgetSpan"/>. Settable so a test can plant slow texts
+    /// without waiting 30 seconds.
+    /// </summary>
+    internal TimeSpan QueryStoreTextFetchBudgetSpan { get; set; } = QueryStoreReadBudget.TextFetchBudget;
+
+    /// <summary>
+    /// Each database's last measured text-fetch time per id, in milliseconds (#6102), the text twin of
+    /// <see cref="_planFetchMsPerPlan"/>: <see cref="QueryStoreReadBudget.TextFetchWidth"/> sizes the next pass's chunks
+    /// from it. In memory like the plan side: a restart costs one pass at the full width, which the budget still bounds.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), double> _textFetchMsPerText = new();
+
+    /// <summary>The time per text id the next text-fetch pass of one database will size its chunks from (#6102); null before
+    /// its first measured pass. For tests.</summary>
+    internal double? TextFetchMsPerTextForTests(int serverId, string database, string collector) =>
+        _textFetchMsPerText.TryGetValue(FetchStateKey(serverId, database, collector), out var ms) ? ms : null;
+
+    /// <summary>The consecutive text-fetch failures a database carries into its next pass (#2776, #6102); 0 when none. For tests.</summary>
+    internal int TextFetchFailuresForTests(int serverId, string database, string collector) =>
+        _textFetchFailures.TryGetValue(FetchStateKey(serverId, database, collector), out var failures) ? failures : 0;
+
     /// <summary>
     /// #5813 review: adds a failed database's SQL slice to the run's blended SQL time, on the Azure per-database loop,
     /// when the fault came before the straight path folded it. Stopped first, so the fault line printed next shows the
@@ -582,6 +608,32 @@ public sealed class DarlingCollectorRunner
         {
             _logger?.LogDebug(
                 "query_store plan fetch on '{Server}' database [{Database}] {How} its budget again today: {Received} received, {Deferred} deferred, next {NextWidth}.",
+                server.Config.DisplayName, databaseName, how, received, deferred, nextWidth);
+        }
+    }
+
+    /// <summary>
+    /// #6102: one database's statement-text fetch was bounded by <see cref="QueryStoreTextFetchBudgetSpan"/>, by a cut or by
+    /// a predicted width that left ids for the next pass. The text twin of <see cref="NoteQueryStorePlanFetchBudget"/>:
+    /// Information once per database per UTC day, Debug for the rest of that day, because it is the budget working, not a
+    /// fault, and the ids not received stay in the backlog.
+    /// </summary>
+    private void NoteQueryStoreTextFetchBudget(
+        ServerRuntime server, string databaseName, bool cut, int received, int deferred, int nextWidth, double? msPerText)
+    {
+        var how = cut ? "cut at" : "held to";
+        var perText = msPerText is double ms ? ms.ToString("0", System.Globalization.CultureInfo.InvariantCulture) : "?";
+        if (_queryStoreTextFetchBudgetLog.ShouldWarn(server.ServerId, databaseName, QueryStoreReadTimeoutClockForTests()))
+        {
+            _logger?.LogInformation(
+                "query_store text fetch on '{Server}' database [{Database}] {How} its {Budget} budget: {Received} text(s) received, {Deferred} id(s) deferred to the next pass, next pass asks for {NextWidth} ({MsPerText} ms an id). Logged once per database per UTC day.",
+                server.Config.DisplayName, databaseName, how, EnumeratedCollectorDriver.DescribeBudget(QueryStoreTextFetchBudgetSpan),
+                received, deferred, nextWidth, perText);
+        }
+        else
+        {
+            _logger?.LogDebug(
+                "query_store text fetch on '{Server}' database [{Database}] {How} its budget again today: {Received} received, {Deferred} deferred, next {NextWidth}.",
                 server.Config.DisplayName, databaseName, how, received, deferred, nextWidth);
         }
     }
@@ -6344,7 +6396,8 @@ public sealed class DarlingCollectorRunner
     /// <para>Simpler than the plan fetch on purpose, in the same two ways the builders differ: no
     /// candidate-cap estimator (DATALENGTH on text is cheap — no decompression to bound) and larger id
     /// chunks. The budget, the carry-over debt, and the uncut-pass target-side-gone cleanup all work
-    /// exactly as the plan side documents.</para>
+    /// exactly as the plan side documents, and since #6102 so does the per-database time budget
+    /// (<see cref="QueryStoreReadBudget.TextFetchBudget"/>).</para>
     /// </summary>
     private async Task FetchAndStoreQueryTextAsync(
         ITargetProvider targetProvider,
@@ -6545,7 +6598,22 @@ public sealed class DarlingCollectorRunner
             /* #2811: target half only, same contract as the plan side. */
             var targetMs = 0L;
 
-            foreach (var chunk in attempt.Chunk(TextFetchIdsPerStatement))
+            /* #6102: the text fetch's TIME budget for this database and pass, beside the byte budget above and the
+               twin of the plan fetch's (#5813). In the field the text fetch spent 20 to 27 s a pass on 320 to 580
+               ids with nothing but the byte budget and the 500 s command timeout bounding it. Each chunk asks for as
+               many ids as the time left fits at this database's last measured time per id
+               (QueryStoreReadBudget.TextFetchWidth), and runs under the time left as a linked token (shutdown and the
+               item budget keep precedence), so a pass slower than predicted is still cut at the budget. Either way the
+               ids not received stay in `missing` and go to the carryover, which the next pass fetches first; the
+               uncut-only cleanup below stays off (brokeOnBudget), so no id the cut did not reach is dropped. */
+            var textFetchClock = Stopwatch.StartNew();
+            double? msPerText = _textFetchMsPerText.TryGetValue(carryKey, out var measuredMsPerText) ? measuredMsPerText : null;
+            var timeBound = false;
+            var cutOnTime = false;
+            var lastChunkWidth = 0;
+            var offset = 0;
+
+            while (offset < attempt.Count)
             {
                 if (shippedBytes >= budget)
                 {
@@ -6553,16 +6621,32 @@ public sealed class DarlingCollectorRunner
                     break;
                 }
 
+                var timeLeft = QueryStoreTextFetchBudgetSpan - textFetchClock.Elapsed;
+                var width = QueryStoreReadBudget.TextFetchWidth(timeLeft, msPerText, TextFetchIdsPerStatement, firstChunk: offset == 0);
+                if (width <= 0)
+                {
+                    /* The time left does not fit one more id: leave the rest to the next pass. */
+                    brokeOnBudget = true;
+                    timeBound = true;
+                    break;
+                }
+
+                var chunk = attempt.GetRange(offset, Math.Min(width, attempt.Count - offset)).ToArray();
+                offset += chunk.Length;
+                lastChunkWidth = chunk.Length;
+
                 var query = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(
                     databaseName, context, chunk, budget - shippedBytes);
 
+                using var fetchBudget = EnumeratedCollectorDriver.StartItemBudget(timeLeft, cancellationToken);
+                var fetchToken = fetchBudget?.Token ?? cancellationToken;
                 var chunkWatch = Stopwatch.StartNew();
                 try
                 {
                     using var command = CreateCollectorCommand(targetProvider, query, targetConnection, itemTimeout);
-                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    await using var reader = await command.ExecuteReaderAsync(fetchToken);
                     attempted.AddRange(chunk);
-                    while (await reader.ReadAsync(cancellationToken))
+                    while (await reader.ReadAsync(fetchToken))
                     {
                         var text = reader.IsDBNull(2) ? null : reader.GetString(2);
                         fetched.Add(new FetchedQueryText(
@@ -6575,6 +6659,14 @@ public sealed class DarlingCollectorRunner
                         }
                     }
                 }
+                catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(fetchBudget, cancellationToken))
+                {
+                    /* #6102: the text-fetch time budget fired, not shutdown or the item budget (those propagate as
+                       before). Keep every text already received; they are written below. */
+                    brokeOnBudget = true;
+                    timeBound = true;
+                    cutOnTime = true;
+                }
                 finally
                 {
                     targetMs += chunkWatch.ElapsedMilliseconds;
@@ -6582,7 +6674,23 @@ public sealed class DarlingCollectorRunner
                     context.PerItemTextChunks++;
                     context.PerItemTextIdsAttempted += chunk.Length;
                 }
+
+                if (cutOnTime)
+                {
+                    break;
+                }
             }
+
+            /* #6102: the time per id the next pass sizes its chunks from. A pass cut before it received anything
+               records twice the cut chunk's share, so the next pass asks for at most half as many: the statement
+               materialises every requested text before it ships one, so the same width would be cut empty again. */
+            var nextMsPerText = QueryStoreReadBudget.NextMsPerText(msPerText, targetMs, fetched.Count, cutOnTime, lastChunkWidth);
+            if (nextMsPerText is double nextMs)
+            {
+                _textFetchMsPerText[carryKey] = nextMs;
+            }
+
+            var cutEmpty = cutOnTime && fetched.Count == 0;
 
             var returned = new HashSet<long>(fetched.Count);
             if (fetched.Count > 0)
@@ -6637,8 +6745,33 @@ public sealed class DarlingCollectorRunner
             }
 
             /* #2776: the pass completed — restore full width. Removing the key rather than zeroing it keeps
-               the dictionary to just the databases currently backing off. */
-            _textFetchFailures.TryRemove(carryKey, out _);
+               the dictionary to just the databases currently backing off.
+
+               #6102: except a pass the time budget cut before it received any text. It made no progress, and the
+               same width would be cut empty again, so it counts as a failure as on the plan side: the backoff
+               narrows the next pass's width beside the halved time per id above. Any text received is progress and
+               restores full width as before. */
+            if (cutEmpty)
+            {
+                _textFetchFailures.AddOrUpdate(
+                    carryKey,
+                    1,
+                    static (_, current) => current >= QueryStorePlanXmlState.MaxBackoffHalvings
+                        ? QueryStorePlanXmlState.MaxBackoffHalvings
+                        : current + 1);
+            }
+            else
+            {
+                _textFetchFailures.TryRemove(carryKey, out _);
+            }
+
+            if (timeBound)
+            {
+                NoteQueryStoreTextFetchBudget(
+                    server, databaseName, cutOnTime, fetched.Count, missing.Count,
+                    QueryStoreReadBudget.TextFetchWidth(QueryStoreTextFetchBudgetSpan, nextMsPerText, TextFetchIdsPerStatement, firstChunk: true),
+                    nextMsPerText);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
