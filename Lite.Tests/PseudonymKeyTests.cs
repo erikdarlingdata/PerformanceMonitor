@@ -25,14 +25,13 @@ public sealed class PseudonymKeyTests
     {
         public CredentialReadOutcome Outcome = CredentialReadOutcome.NotFound;
         public string? Stored;
-        public string? ReadFailure;
         public string? WriteFailure;
         public int Writes;
 
         public CredentialReadOutcome Read(out string? text, out string? failure)
         {
             text = Outcome == CredentialReadOutcome.Found ? Stored : null;
-            failure = Outcome == CredentialReadOutcome.Unreadable ? ReadFailure ?? "Windows returned error 5" : null;
+            failure = Outcome == CredentialReadOutcome.Unreadable ? "Windows returned error 5" : null;
             return Outcome;
         }
 
