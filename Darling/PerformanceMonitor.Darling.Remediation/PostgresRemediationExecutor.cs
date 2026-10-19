@@ -56,46 +56,54 @@ public sealed class PostgresRemediationExecutor
     /// What the kill is decided from: the target's row and what the signed-in login may do to it. A login that cannot see a backend's details
     /// (no <c>pg_read_all_stats</c>, not the backend's own role) gets NULL for everything but a few columns, so <c>start_epoch</c> is NULL there.
     /// <c>pg_has_role(.., 'USAGE')</c> is the test the server itself uses (the privileges of a role, not only membership in it).
+    /// <para>Every statement here names each relation, function, type and operator with its schema, <c>pg_catalog</c>, as well as signing in
+    /// with search_path set to <c>pg_catalog</c> (<see cref="RemediationConnection.PostgresSearchPathOption"/>): an object of the same name
+    /// in another schema is never used. <c>extract(.. FROM ..)</c>, <c>coalesce</c>, <c>current_user</c> and <c>::bigint</c> are SQL syntax
+    /// that the parser itself resolves to pg_catalog.</para>
     /// </summary>
     internal const string FactsSql = @"
 SELECT a.pid,
        a.backend_start,
        extract(epoch FROM a.backend_start)::bigint AS start_epoch,
-       a.usename::text,
+       a.usename::pg_catalog.text,
        a.application_name,
-       a.client_addr::text,
+       a.client_addr::pg_catalog.text,
        a.state,
        a.backend_type,
-       a.datname::text,
+       a.datname::pg_catalog.text,
        a.xact_start,
        a.state_change,
-       pg_backend_pid() AS own_pid,
+       pg_catalog.pg_backend_pid() AS own_pid,
        coalesce(r.rolsuper, false) AS target_is_superuser,
-       (a.usesysid IS NOT NULL AND pg_has_role(current_user, a.usesysid, 'USAGE')) AS caller_has_target_role,
-       pg_has_role(current_user, 'pg_signal_backend', 'USAGE') AS caller_has_signal_backend,
-       coalesce((SELECT c.rolsuper FROM pg_roles AS c WHERE c.rolname = current_user), false) AS caller_is_superuser
-FROM pg_stat_activity AS a
-LEFT JOIN pg_roles AS r ON r.oid = a.usesysid
-WHERE a.pid = @pid;";
+       (a.usesysid IS NOT NULL AND pg_catalog.pg_has_role(current_user, a.usesysid, 'USAGE')) AS caller_has_target_role,
+       pg_catalog.pg_has_role(current_user, 'pg_signal_backend', 'USAGE') AS caller_has_signal_backend,
+       coalesce((SELECT c.rolsuper FROM pg_catalog.pg_roles AS c WHERE c.rolname OPERATOR(pg_catalog.=) current_user), false) AS caller_is_superuser
+FROM pg_catalog.pg_stat_activity AS a
+LEFT JOIN pg_catalog.pg_roles AS r ON r.oid OPERATOR(pg_catalog.=) a.usesysid
+WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
     /// <summary>
     /// The kill: the identity check and the termination are ONE statement, so nothing separates them. The start second is derived exactly the way the
     /// collector derives the one inside <c>backend_id</c> (<c>extract(epoch FROM backend_start)::bigint</c>, the cast's own rounding), and a backend
     /// with no visible start time matches nothing. No row means nothing was signalled. A row is <c>pg_terminate_backend</c>'s answer: true when the
-    /// server accepted the signal. The tool's own backend is never matched.
+    /// server accepted the signal. The tool's own backend is never matched, and neither is anything but a client session: the check
+    /// <see cref="KillRefusal"/> makes from the read before is repeated here, in the statement that ends the session.
     /// </summary>
     internal const string KillSql = @"
-SELECT pg_terminate_backend(a.pid)
-FROM pg_stat_activity AS a
-WHERE a.pid = @pid
-AND   extract(epoch FROM a.backend_start)::bigint = @start_epoch
-AND   a.pid <> pg_backend_pid();";
+SELECT pg_catalog.pg_terminate_backend(a.pid)
+FROM pg_catalog.pg_stat_activity AS a
+WHERE a.pid OPERATOR(pg_catalog.=) @pid
+AND   extract(epoch FROM a.backend_start)::bigint OPERATOR(pg_catalog.=) @start_epoch
+AND   a.backend_type OPERATOR(pg_catalog.=) 'client backend'
+AND   a.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid();";
 
-    /// <summary>Read AFTER a kill statement that signalled nothing: is the pid still there, and is it the same start second.</summary>
+    /// <summary>Read AFTER a kill statement that signalled nothing: is the pid still there, is it the same start second, and is it a client session.</summary>
     internal const string AfterSql = @"
-SELECT extract(epoch FROM a.backend_start)::bigint AS start_epoch, (a.pid = pg_backend_pid()) AS is_own
-FROM pg_stat_activity AS a
-WHERE a.pid = @pid;";
+SELECT extract(epoch FROM a.backend_start)::bigint AS start_epoch,
+       (a.pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()) AS is_own,
+       a.backend_type
+FROM pg_catalog.pg_stat_activity AS a
+WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
     /// <summary>The backend's row as <see cref="FactsSql"/> reads it, with what the login may do to it.</summary>
     internal sealed record PgBackendRow(
@@ -126,7 +134,9 @@ WHERE a.pid = @pid;";
         try
         {
             await using var connection = new NpgsqlConnection(RemediationConnection.BuildPostgresConnectionString(_server, login));
-            await connection.OpenAsync(ct);
+            var notOpened = await OpenAsync(connection, name, dryRun, login, ct);
+            if (notOpened is not null)
+                return Log(notOpened);
 
             var row = await ReadRowAsync(connection, pid, ct);
             var refusal = KillRefusal(name, dryRun, pid, startEpoch, row);
@@ -178,6 +188,48 @@ WHERE a.pid = @pid;";
         }
     }
 
+    /// <summary>
+    /// Opens the remediation connection. Null means it is open. A sign-in the connection's own rules refuse
+    /// (<see cref="RemediationConnection.BuildPostgresConnectionString"/>: SCRAM-SHA-256 only, with channel binding unless the certificate is
+    /// verified) and a <c>postgres</c> database the login may not open are refusals that say what to change; nothing was sent but the sign-in.
+    /// </summary>
+    private static async Task<RemediationResult?> OpenAsync(NpgsqlConnection connection, string name, bool dryRun, RemediationLogin login, CancellationToken ct)
+    {
+        try
+        {
+            await connection.OpenAsync(ct);
+            return null;
+        }
+        catch (PostgresException ex) when (ex.SqlState is "3D000" or "42501")
+        {
+            /* 3D000: no such database; 42501: no CONNECT privilege on it. */
+            return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInFailed,
+                $"The remediation login could not open the database {RemediationConnection.PostgresDatabase} on this server: {SqlServerRemediationExecutor.Scrub(ex.MessageText, login)}. "
+                + $"The kill always connects to {RemediationConnection.PostgresDatabase}; a person can run GRANT CONNECT ON DATABASE {RemediationConnection.PostgresDatabase} TO the remediation login. Nothing was run.");
+        }
+        catch (NpgsqlException ex) when (ex is not PostgresException && IsSignInRuleRefusal(ex))
+        {
+            return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInNotStrongEnough,
+                $"The remediation connection did not sign in: {SqlServerRemediationExecutor.Scrub(ex.Message, login).TrimEnd('.')}. {SignInRule} Nothing was run.");
+        }
+    }
+
+    /// <summary>What the remediation connection needs from the server's sign-in, and what to change when the server does not offer it.</summary>
+    internal const string SignInRule =
+        "The remediation login signs in with SCRAM-SHA-256 only (set password_encryption = 'scram-sha-256', set the login's password again, "
+        + "and give it a scram-sha-256 line in pg_hba.conf). Unless the server entry verifies the server's certificate in full (encryption not "
+        + "Optional and Trust server certificate off), it also needs SCRAM channel binding, which needs TLS turned on at the server (ssl = on).";
+
+    /// <summary>
+    /// Npgsql's own refusals of a sign-in the connection string rules out: the server asked for a method other than SCRAM-SHA-256
+    /// (<c>RequireAuth</c>), or offered SCRAM without channel binding when it is required (<c>ChannelBinding=Require</c>, which is what a
+    /// server without TLS offers). Npgsql raises both as a plain <see cref="NpgsqlException"/>, so the text is what tells them apart.
+    /// </summary>
+    internal static bool IsSignInRuleRefusal(NpgsqlException ex) =>
+        ex.InnerException is null
+        && (ex.Message.Contains("authentication method is not allowed", StringComparison.Ordinal)
+            || ex.Message.Contains(nameof(ChannelBinding), StringComparison.Ordinal));
+
     private static async Task<PgBackendRow?> ReadRowAsync(NpgsqlConnection connection, int pid, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(FactsSql, connection) { CommandTimeout = 30 };
@@ -205,6 +257,7 @@ WHERE a.pid = @pid;";
         long? actual = null;
         var own = false;
         var found = false;
+        string? backendType = null;
         await using (var command = new NpgsqlCommand(AfterSql, connection) { CommandTimeout = 30 })
         {
             command.Parameters.Add(new NpgsqlParameter("pid", NpgsqlDbType.Integer) { Value = pid });
@@ -214,17 +267,19 @@ WHERE a.pid = @pid;";
                 found = true;
                 actual = reader.IsDBNull(0) ? null : reader.GetInt64(0);
                 own = !reader.IsDBNull(1) && reader.GetBoolean(1);
+                backendType = reader.IsDBNull(2) ? null : reader.GetString(2);
             }
         }
 
-        return AfterAnswer(name, pid, startEpoch, facts, found, actual, own);
+        return AfterAnswer(name, pid, startEpoch, facts, found, actual, own, backendType);
     }
 
     /// <summary>
     /// Turns the read after a kill statement that signalled nothing into the answer. Pure, so a test needs no server. Gone: no row. Reused: a row with
-    /// another start second. Anything else is a failure, never a kill: the statement matched and the server did not take the signal.
+    /// another start second. Not a client session: a row whose backend type is another. Anything else is a failure, never a kill: the statement
+    /// matched and the server did not take the signal.
     /// </summary>
-    internal static RemediationResult AfterAnswer(string name, int pid, long startEpoch, PgKillSessionFacts facts, bool found, long? actualEpoch, bool own)
+    internal static RemediationResult AfterAnswer(string name, int pid, long startEpoch, PgKillSessionFacts facts, bool found, long? actualEpoch, bool own, string? backendType = null)
     {
         if (!found)
             return RemediationResult.Refused(name, false, RemediationResult.Reasons.SessionGone, $"Backend {pid} is gone. Nothing was run.");
@@ -235,6 +290,12 @@ WHERE a.pid = @pid;";
             return RemediationResult.Refused(name, false, RemediationResult.Reasons.SessionReused,
                 $"Backend {pid} is now a different session: it has another start time, so the server reused the pid. Nothing was run.")
                 with { PgSession = facts with { BackendStartEpoch = actualEpoch, BackendStartUtc = null } };
+        }
+
+        if (backendType is not null && !string.Equals(backendType, "client backend", StringComparison.Ordinal))
+        {
+            return RemediationResult.Refused(name, false, RemediationResult.Reasons.NotUserSession,
+                $"Backend {pid} is not a client session (it is {backendType}). Nothing was run.") with { PgSession = facts };
         }
 
         return RemediationResult.Failed(name, false, $"The server did not take the signal for backend {pid}. Nothing is known to have ended.");

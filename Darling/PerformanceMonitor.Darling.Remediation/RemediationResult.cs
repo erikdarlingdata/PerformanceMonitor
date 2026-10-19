@@ -64,6 +64,7 @@ public sealed record RemediationResult(
         public const string SecretUnreadable = "secret_unreadable";
         public const string SecretEmpty = "secret_empty";
         public const string SignInFailed = "sign_in_failed";
+        public const string SignInNotStrongEnough = "sign_in_not_strong_enough";
     }
 
     internal static RemediationResult Done(string action, bool dryRun, bool wrote, string message) =>

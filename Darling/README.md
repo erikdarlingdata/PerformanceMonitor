@@ -589,6 +589,22 @@ Darling also refuses a session that belongs to a superuser. PostgreSQL lets only
 
 Darling ends client sessions only. A background process or a replication sender is refused as `not_user_session`, and Darling's own connection is refused as `own_session`. Ending a session rolls back its open transaction. There is no undo. A kill also needs that server's `kill_session` switch, which is off after an upgrade.
 
+#### How the remediation login signs in to PostgreSQL
+
+The remediation connection always opens the `postgres` database. It does not use the database that the server entry names. `pg_stat_activity` and `pg_terminate_backend` cover the whole cluster, so that database is enough. If the login cannot connect to `postgres`, Darling refuses with `sign_in_failed` and names that database. A person can run `GRANT CONNECT ON DATABASE postgres TO <remediation login>`.
+
+The connection sets `search_path` to `pg_catalog, pg_temp` when it signs in. A setting made with `ALTER DATABASE` or `ALTER ROLE` does not change it. Each statement that Darling runs also names its views, functions and operators with the `pg_catalog` schema. Darling never uses a function or an operator of the same name in another schema.
+
+The remediation login signs in with SCRAM-SHA-256 only. If the server asks for a password in clear text or as MD5, or asks for no password, Darling refuses with `sign_in_not_strong_enough`. It does not send the password. If the server entry does not verify the server's certificate in full, the sign-in also needs SCRAM channel binding. Channel binding ties the sign-in to the TLS session. The sign-in then fails when that TLS session does not end at the server that holds the login. The monitoring connection does not change.
+
+Before a kill or a dry run can sign in, do these steps:
+
+1. Set `password_encryption = 'scram-sha-256'` on the server. It is the default from PostgreSQL 14.
+2. Set the password of the remediation login again, so that the server stores it as SCRAM.
+3. Give the remediation login a `scram-sha-256` line in `pg_hba.conf`.
+4. Turn TLS on at the server (`ssl = on`). Channel binding needs TLS, and a verified certificate needs TLS too.
+5. If you do not want channel binding, verify the certificate. In the server entry, set an encryption mode other than Optional and turn off Trust server certificate.
+
 ### Managed PostgreSQL
 
 None of the three providers' pages says whether its admin role holds `pg_signal_backend`. Check your own login: a dry run asks the server and ends nothing. These are the facts each page states.

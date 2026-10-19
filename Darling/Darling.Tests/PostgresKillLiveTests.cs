@@ -8,8 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,6 +23,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Remediation;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
@@ -25,14 +32,137 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The PostgreSQL arm of <c>kill_session</c> (#5632), against a throwaway cluster: <c>DARLING_TEST_PG</c> names it, and it plays both the store
-/// (a scratch database per test) and the monitored PostgreSQL server (roles made per test, dropped after). Skips without it. The victim is a real
-/// backend, named by the <c>backend_id</c> the collector's own expression builds, and the tool is driven end to end through the gate and the journal.
+/// The PostgreSQL arm of <c>kill_session</c> (#5632). The store is a scratch database on the cluster <c>DARLING_TEST_PG</c> names. The monitored
+/// PostgreSQL server is a cluster of this class's own (<see cref="ScramTlsCluster"/>), booted from the runtime <c>DARLING_TEST_PGRUNTIME</c> names,
+/// because the remediation connection signs in only with SCRAM over TLS and the shared cluster has neither. Skips without both. Roles are made
+/// per test and dropped after. The victim is a real backend, named by the <c>backend_id</c> the collector's own expression builds, and the tool is
+/// driven end to end through the gate and the journal.
 /// </summary>
 /* #1776 own-store: each test mints its own scratch store database through ScratchPostgres and its own roles on the cluster. */
-public sealed class PostgresKillLiveTests
+public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster target) : IClassFixture<PostgresKillLiveTests.ScramTlsCluster>
 {
     private static string? Cluster => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    /// <summary>
+    /// The monitored server for this class: a cluster initialised with SCRAM-SHA-256 for every sign-in, TLS on with a certificate made for the run,
+    /// and pg_hba lines for 127.0.0.1 only. A role whose name starts <c>pmk_md5_</c> signs in with MD5 instead, for the refusal test. Stopped and
+    /// deleted when the class ends. Its superuser connection pins search_path, so a test's own reads never run a planted operator.
+    /// </summary>
+    public sealed class ScramTlsCluster : IAsyncLifetime
+    {
+        public const string Superuser = "darling";
+
+        private string? _root;
+        private string? _bin;
+
+        public string? SkipReason { get; private set; }
+
+        public int Port { get; private set; }
+
+        public string SuperuserPassword { get; } = "Aa1" + Guid.NewGuid().ToString("N");
+
+        private string Data => Path.Combine(_root!, "data");
+
+        public string ConnectionString(string user, string password, bool pinSearchPath = false)
+        {
+            var builder = new NpgsqlConnectionStringBuilder
+            {
+                Host = "127.0.0.1", Port = Port, Username = user, Password = password, Database = "postgres", Pooling = false, SslMode = SslMode.Require,
+            };
+            if (pinSearchPath)
+                builder.Options = "-c search_path=pg_catalog";
+            return builder.ConnectionString;
+        }
+
+        public string SuperuserConnectionString => ConnectionString(Superuser, SuperuserPassword, pinSearchPath: true);
+
+        public async ValueTask InitializeAsync()
+        {
+            var runtime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+            if (string.IsNullOrEmpty(Cluster) || string.IsNullOrWhiteSpace(runtime) || !File.Exists(Path.Combine(runtime, "pgsql", "bin", "initdb.exe")))
+            {
+                SkipReason = "Set DARLING_TEST_PG and DARLING_TEST_PGRUNTIME (a runtime folder holding pgsql\\bin\\initdb.exe) to run the PostgreSQL kill live tests.";
+                return;
+            }
+
+            _bin = Path.Combine(runtime, "pgsql", "bin");
+            _root = Path.Combine(Path.GetTempPath(), "pmk-" + Guid.NewGuid().ToString("N")[..12]);
+            Directory.CreateDirectory(_root);
+            var passwordFile = Path.Combine(_root, "pw.txt");
+            await File.WriteAllTextAsync(passwordFile, SuperuserPassword);
+            await RunAsync("initdb.exe", $"-D \"{Data}\" -U {Superuser} -A scram-sha-256 --pwfile=\"{passwordFile}\" --encoding=UTF8 --no-instructions");
+            File.Delete(passwordFile);
+
+            using (var key = RSA.Create(2048))
+            {
+                var request = new CertificateRequest("CN=127.0.0.1", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(2));
+                await File.WriteAllTextAsync(Path.Combine(Data, "server.crt"), certificate.ExportCertificatePem());
+                await File.WriteAllTextAsync(Path.Combine(Data, "server.key"), key.ExportPkcs8PrivateKeyPem());
+            }
+
+            using (var listener = new TcpListener(IPAddress.Loopback, 0))
+            {
+                listener.Start();
+                Port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            }
+
+            await File.AppendAllTextAsync(Path.Combine(Data, "postgresql.conf"),
+                $"\nport = {Port}\nlisten_addresses = '127.0.0.1'\nssl = on\nmax_connections = 40\ntimezone = 'UTC'\nlog_timezone = 'UTC'\n");
+            await File.WriteAllTextAsync(Path.Combine(Data, "pg_hba.conf"),
+                "hostssl all /^pmk_md5_ 127.0.0.1/32 md5\nhost all all 127.0.0.1/32 scram-sha-256\n");
+            /* Not through RunToolAsync: the server inherits a redirected output pipe, which then never closes. Its output goes to the log. */
+            using var start = Process.Start(new ProcessStartInfo(Path.Combine(_bin, "pg_ctl.exe"), $"start -D \"{Data}\" -l \"{Path.Combine(_root, "server.log")}\" -w -t 60")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            })!;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await start.WaitForExitAsync(timeout.Token);
+            if (start.ExitCode != 0)
+                throw new InvalidOperationException($"pg_ctl start exited {start.ExitCode}: {await File.ReadAllTextAsync(Path.Combine(_root, "server.log"))}");
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_root is null)
+                return;
+            if (File.Exists(Path.Combine(Data, "postmaster.pid")))
+                await RunAsync("pg_ctl.exe", $"stop -D \"{Data}\" -m immediate -w -t 60", throwOnError: false);
+            DarlingManagedPostgresTests.TryDeleteRecursive(_root);
+        }
+
+        /// <summary>Turns TLS off or on at the server and waits until a new connection sees it.</summary>
+        public async Task SetSslAsync(bool on, CancellationToken ct)
+        {
+            var prefer = new NpgsqlConnectionStringBuilder(SuperuserConnectionString) { SslMode = SslMode.Prefer }.ConnectionString;
+            await using (var admin = new NpgsqlConnection(prefer))
+            {
+                await admin.OpenAsync(ct);
+                await ExecAsync(admin, on ? "ALTER SYSTEM RESET ssl" : "ALTER SYSTEM SET ssl = off", ct);
+                await ExecAsync(admin, "SELECT pg_reload_conf()", ct);
+            }
+
+            for (var i = 0; i < 100; i++)
+            {
+                await using var connection = new NpgsqlConnection(prefer);
+                await connection.OpenAsync(ct);
+                await using var command = new NpgsqlCommand("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()", connection);
+                if ((bool)(await command.ExecuteScalarAsync(ct))! == on)
+                    return;
+                await Task.Delay(100, ct);
+            }
+
+            throw new InvalidOperationException($"The test cluster did not turn TLS {(on ? "on" : "off")} after a reload.");
+        }
+
+        private async Task RunAsync(string tool, string arguments, bool throwOnError = true)
+        {
+            var (exitCode, output) = await DarlingManagedPostgres.RunToolAsync(Path.Combine(_bin!, tool), arguments, TimeSpan.FromSeconds(90), CancellationToken.None);
+            if (exitCode != 0 && throwOnError)
+                throw new InvalidOperationException($"{tool} {arguments} exited {exitCode}: {output}");
+        }
+    }
 
     /// <summary>The collector's own expression for <c>backend_id</c> (PgBlockingCollector, PgSessionStatesCollector), run on the server for one pid.</summary>
     private const string CollectorBackendIdSql =
@@ -55,14 +185,14 @@ public sealed class PostgresKillLiveTests
         public string EnvName => "PM_PGK_" + _tag;
     }
 
-    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, Roles Roles, string Arg, CancellationToken Ct)
+    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, ScramTlsCluster Target, Roles Roles, string Arg, CancellationToken Ct)
     {
         public Task<string> Kill(string? backendId, bool dryRun, int? session = null) =>
             DarlingMcpPlanForceTools.RunKillAsync(Source, Source, null, "pg-7", session, null, backendId, Arg, dryRun, Ct);
 
-        public async Task<(NpgsqlConnection Connection, int Pid, string BackendId)> OpenVictimAsync(string? role = null)
+        public async Task<(NpgsqlConnection Connection, int Pid, string BackendId)> OpenVictimAsync(string? role = null, string? password = null)
         {
-            var builder = new NpgsqlConnectionStringBuilder(Cluster!) { Username = role ?? Roles.Victim, Pooling = false, Database = "postgres", ApplicationName = "PerformanceMonitorDarling-KillVictim" };
+            var builder = new NpgsqlConnectionStringBuilder(Target.ConnectionString(role ?? Roles.Victim, password ?? VictimPassword)) { ApplicationName = "PerformanceMonitorDarling-KillVictim" };
             var connection = new NpgsqlConnection(builder.ConnectionString);
             await connection.OpenAsync(Ct);
             var pid = Convert.ToInt32(await Scalar(connection, "SELECT pg_backend_pid()"), CultureInfo.InvariantCulture);
@@ -99,18 +229,20 @@ public sealed class PostgresKillLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task RunAsync(Grants grants, Without without, Func<Ctx, Task> body)
+    private const string VictimPassword = "Victim-1x";
+
+    private async Task RunAsync(Grants grants, Without without, Func<Ctx, Task> body)
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(Cluster), "Set DARLING_TEST_PG to run the PostgreSQL kill live tests.");
+        Assert.SkipWhen(target.SkipReason is not null, target.SkipReason ?? "");
         var ct = TestContext.Current.CancellationToken;
         var roles = new Roles();
         await using var scratch = await ScratchPostgres.CreateAsync(Cluster!, ct);
         var bodySucceeded = false;
-        await using var admin = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(Cluster!) { Pooling = false }.ConnectionString);
+        await using var admin = new NpgsqlConnection(target.SuperuserConnectionString);
         await admin.OpenAsync(ct);
         try
         {
-            await ExecAsync(admin, $"CREATE ROLE \"{roles.Victim}\" LOGIN PASSWORD 'x'", ct);
+            await ExecAsync(admin, $"CREATE ROLE \"{roles.Victim}\" LOGIN PASSWORD '{VictimPassword}'", ct);
             await ExecAsync(admin, $"CREATE ROLE \"{roles.Remediation}\" LOGIN PASSWORD '{roles.Secret}'", ct);
             if (grants == Grants.SignalAndStats)
                 await ExecAsync(admin, $"GRANT pg_signal_backend TO \"{roles.Remediation}\"", ct);
@@ -121,10 +253,9 @@ public sealed class PostgresKillLiveTests
             await using var store = new NpgsqlConnection(scratch.ConnectionString);
             await store.OpenAsync(ct);
             await PgMigrations.MigrateAsync(store, ct);
-            var cluster = new NpgsqlConnectionStringBuilder(Cluster!);
             await ExecAsync(store,
                 "INSERT INTO config.config_monitored_servers (server_id, name, host, port, encrypt_mode, trust_server_certificate, remediation_username, remediation_encrypted_password) "
-                + $"VALUES (7, 'pg-7', '{cluster.Host}', {cluster.Port}, 'Optional', TRUE, '{roles.Remediation}', 'env:{roles.EnvName}')", ct);
+                + $"VALUES (7, 'pg-7', '127.0.0.1', {target.Port}, 'Optional', TRUE,'{roles.Remediation}', 'env:{roles.EnvName}')", ct);
             await ExecAsync(store, "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, engine_kind, created_date, modified_date) "
                 + "VALUES (7, 'pg-7', 'pg-7', TRUE, NULL, 'postgres', now(), now())", ct);
             await ExecAsync(store, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
@@ -140,7 +271,7 @@ public sealed class PostgresKillLiveTests
             var opened = await requests.OpenOrJoinAsync(alert, ct);
             var claim = await requests.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
             var arg = AgentActionArgumentTests.Arg(opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), reason: "the blocker holds a transaction open");
-            await body(new Ctx(source, store, admin, roles, arg, ct));
+            await body(new Ctx(source, store, admin, target, roles, arg, ct));
             bodySucceeded = true;
         }
         finally
@@ -303,7 +434,7 @@ public sealed class PostgresKillLiveTests
     {
         await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
         {
-            var (connection, pid, id) = await c.OpenVictimAsync(new NpgsqlConnectionStringBuilder(Cluster!).Username);
+            var (connection, pid, id) = await c.OpenVictimAsync(ScramTlsCluster.Superuser, c.Target.SuperuserPassword);
             await using var victimConnection = connection;
             var json = Parse(await c.Kill(id, dryRun: false));
             Assert.Equal("refused", (string?)json["status"]);
@@ -327,9 +458,192 @@ public sealed class PostgresKillLiveTests
         });
     }
 
+    /// <summary>
+    /// What the owner of a database plants: operators for = and &lt;&gt; on integer and = on bigint that match every row and record each call.
+    /// The functions run as their owner, so a call by any login is recorded.
+    /// </summary>
+    private const string PlantSql = """
+        CREATE SCHEMA planted;
+        GRANT USAGE ON SCHEMA planted TO PUBLIC;
+        CREATE TABLE planted.calls (at timestamptz NOT NULL DEFAULT now());
+        CREATE FUNCTION planted.eq(integer, integer) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+            AS $$ BEGIN INSERT INTO planted.calls DEFAULT VALUES; RETURN true; END $$;
+        CREATE FUNCTION planted.ne(integer, integer) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+            AS $$ BEGIN INSERT INTO planted.calls DEFAULT VALUES; RETURN true; END $$;
+        CREATE FUNCTION planted.eq8(bigint, bigint) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+            AS $$ BEGIN INSERT INTO planted.calls DEFAULT VALUES; RETURN true; END $$;
+        CREATE OPERATOR planted.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = planted.eq);
+        CREATE OPERATOR planted.<> (LEFTARG = integer, RIGHTARG = integer, FUNCTION = planted.ne);
+        CREATE OPERATOR planted.= (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = planted.eq8);
+        """;
+
+    [Fact]
+    public async Task AnOperatorPlantedInTheDatabasesSearchPath_NeverRuns_AndOnlyTheNamedBackendEnds_OnADryRunAndAKill()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var owner = "pmk_own_" + Guid.NewGuid().ToString("N")[..12];
+            await ExecAsync(c.Admin, $"CREATE ROLE \"{owner}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
+            await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{owner}\"", c.Ct);
+            try
+            {
+                /* A database owner who is not a superuser can do all of this. */
+                await using (var asOwner = new NpgsqlConnection(c.Target.ConnectionString(owner, VictimPassword)))
+                {
+                    await asOwner.OpenAsync(c.Ct);
+                    await ExecAsync(asOwner, PlantSql, c.Ct);
+                    await ExecAsync(asOwner, "ALTER DATABASE postgres SET search_path = planted, pg_catalog", c.Ct);
+                }
+
+                /* The plant works: a session that takes the database's setting runs it, and its pid filter matches every row. */
+                await using (var plain = new NpgsqlConnection(c.Target.ConnectionString(c.Roles.Victim, VictimPassword)))
+                {
+                    await plain.OpenAsync(c.Ct);
+                    await using var probe = new NpgsqlCommand("SELECT count(*) FROM pg_stat_activity WHERE pid = 0", plain);
+                    Assert.True(Convert.ToInt64(await probe.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture) > 0);
+                }
+
+                Assert.True(await CallsAsync(c) > 0);
+                await ExecAsync(c.Admin, "TRUNCATE planted.calls", c.Ct);
+
+                var (connection, pid, id) = await c.OpenVictimAsync();
+                await using var victimConnection = connection;
+                var (bystanderConnection, bystanderPid, _) = await c.OpenVictimAsync();
+                await using var bystander = bystanderConnection;
+
+                var dry = Parse(await c.Kill(id, dryRun: true));
+                Assert.Equal("dry_run", (string?)dry["status"]);
+                Assert.Equal(0, await CallsAsync(c));
+
+                var json = Parse(await c.Kill(id, dryRun: false));
+                Assert.Equal("done", (string?)json["status"]);
+                Assert.False(await c.AliveAsync(pid));
+                Assert.True(await c.AliveAsync(bystanderPid));
+                Assert.Equal(0, await CallsAsync(c));
+            }
+            finally
+            {
+                await ExecAsync(c.Admin, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
+                await ExecAsync(c.Admin, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
+                await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
+                await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
+                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+            }
+        });
+    }
+
+    private static async Task<long> CallsAsync(Ctx c)
+    {
+        await using var command = new NpgsqlCommand("SELECT count(*) FROM planted.calls", c.Admin);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture);
+    }
+
+    [Fact]
+    public async Task AServerThatAsksForMd5_OrHasNoTls_IsRefused_WithWhatToChange_AndNothingIsKilled()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+
+            /* MD5: a login whose password is stored as MD5, and a pg_hba line that asks it for MD5. */
+            var md5 = "pmk_md5_" + Guid.NewGuid().ToString("N")[..12];
+            await ExecAsync(c.Admin, $"SET password_encryption = 'md5'; CREATE ROLE \"{md5}\" LOGIN PASSWORD '{c.Roles.Secret}'; RESET password_encryption;", c.Ct);
+            await ExecAsync(c.Admin, $"GRANT pg_signal_backend, pg_read_all_stats TO \"{md5}\"", c.Ct);
+            try
+            {
+                /* A TLS mode that requires TLS: under Optional, Npgsql tries again without TLS after a failed sign-in, and the server then
+                   offers SCRAM without channel binding, which is refused for that reason instead. */
+                await ExecAsync(c.Store, $"UPDATE config.config_monitored_servers SET remediation_username = '{md5}', encrypt_mode = 'Mandatory' WHERE server_id = 7", c.Ct);
+                foreach (var dryRun in new[] { true, false })
+                {
+                    var json = Parse(await c.Kill(id, dryRun));
+                    Assert.Equal("refused", (string?)json["status"]);
+                    Assert.Equal(RemediationResult.Reasons.SignInNotStrongEnough, (string?)json["reason"]);
+                    Assert.Contains("\"MD5\" authentication method is not allowed", (string?)json["message"], StringComparison.Ordinal);
+                    Assert.Contains("password_encryption = 'scram-sha-256'", (string?)json["message"], StringComparison.Ordinal);
+                }
+            }
+            finally
+            {
+                await ExecAsync(c.Store, $"UPDATE config.config_monitored_servers SET remediation_username = '{c.Roles.Remediation}', encrypt_mode = 'Optional' WHERE server_id = 7", CancellationToken.None);
+                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{md5}\"", CancellationToken.None);
+            }
+
+            /* No TLS: SCRAM is offered, but channel binding needs TLS. */
+            await c.Target.SetSslAsync(on: false, c.Ct);
+            try
+            {
+                foreach (var dryRun in new[] { true, false })
+                {
+                    var json = Parse(await c.Kill(id, dryRun));
+                    Assert.Equal("refused", (string?)json["status"]);
+                    Assert.Equal(RemediationResult.Reasons.SignInNotStrongEnough, (string?)json["reason"]);
+                    Assert.Contains("ssl = on", (string?)json["message"], StringComparison.Ordinal);
+                }
+            }
+            finally
+            {
+                await c.Target.SetSslAsync(on: true, CancellationToken.None);
+            }
+
+            Assert.True(await c.AliveAsync(pid));
+            Assert.Equal(0, await c.JournalAsync("action_called"));
+
+            /* With TLS back, the same call goes through. */
+            Assert.Equal("dry_run", (string?)Parse(await c.Kill(id, dryRun: true))["status"]);
+        });
+    }
+
+    [Fact]
+    public async Task ALoginThatMayNotOpenThePostgresDatabase_IsRefused_NamingThatDatabase()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            await ExecAsync(c.Admin, "REVOKE CONNECT ON DATABASE postgres FROM PUBLIC", c.Ct);
+            try
+            {
+                var json = Parse(await c.Kill(id, dryRun: false));
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal(RemediationResult.Reasons.SignInFailed, (string?)json["reason"]);
+                Assert.Contains("GRANT CONNECT ON DATABASE postgres", (string?)json["message"], StringComparison.Ordinal);
+            }
+            finally
+            {
+                await ExecAsync(c.Admin, "GRANT CONNECT ON DATABASE postgres TO PUBLIC", CancellationToken.None);
+            }
+
+            Assert.True(await c.AliveAsync(pid));
+        });
+    }
+
+    [Theory]
+    [InlineData("Optional", true, SslMode.Prefer, ChannelBinding.Require)]
+    [InlineData("Optional", false, SslMode.Prefer, ChannelBinding.Require)]
+    [InlineData("Mandatory", true, SslMode.Require, ChannelBinding.Require)]
+    [InlineData("Mandatory", false, SslMode.VerifyFull, ChannelBinding.Prefer)]
+    [InlineData(null, false, SslMode.VerifyFull, ChannelBinding.Prefer)]
+    public void TheRemediationConnection_OpensPostgres_PinsSearchPath_AndRequiresScram_WithChannelBindingUnlessTheCertificateIsVerified(
+        string? encryptMode, bool trust, SslMode sslMode, ChannelBinding channelBinding)
+    {
+        var server = new RemediationServer("db.example.test", Database: "app", EncryptMode: encryptMode, TrustServerCertificate: trust, Port: 5433);
+        var built = new NpgsqlConnectionStringBuilder(RemediationConnection.BuildPostgresConnectionString(server, new RemediationLogin("rem", "pw")));
+        Assert.Equal("postgres", built.Database);
+        Assert.Equal("-c search_path=pg_catalog,pg_temp", built.Options);
+        Assert.Equal("ScramSHA256", built.RequireAuth);
+        Assert.Equal(sslMode, built.SslMode);
+        Assert.Equal(channelBinding, built.ChannelBinding);
+    }
+
     [Fact]
     public void TheToolsOwnBackend_AndANonClientBackend_AreRefused_WhateverTheLoginMayDo()
     {
+        var facts = new PgKillSessionFacts(43, null, 1_700_000_000, "u", "app", "127.0.0.1", "active", "client backend", "postgres", null, null);
+        Assert.Equal(RemediationResult.Reasons.NotUserSession,
+            PostgresRemediationExecutor.AfterAnswer("kill_session", 43, 1_700_000_000, facts, found: true, actualEpoch: 1_700_000_000, own: false, backendType: "walsender").Reason);
+
         PostgresRemediationExecutor.PgBackendRow Row(int pid, string type, long epoch = 1_700_000_000) =>
             new(new PgKillSessionFacts(pid, null, epoch, "u", "app", "127.0.0.1", "active", type, "postgres", null, null),
                 OwnPid: 42, TargetIsSuperuser: false, CallerHasTargetRole: true, CallerHasSignalBackend: true, CallerIsSuperuser: true);

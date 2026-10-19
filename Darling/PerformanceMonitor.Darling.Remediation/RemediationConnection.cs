@@ -63,28 +63,52 @@ public static class RemediationConnection
         return builder.ConnectionString;
     }
 
+    /// <summary>The database the PostgreSQL remediation connection always opens (#5632). The server entry's own database is not used.</summary>
+    public const string PostgresDatabase = "postgres";
+
     /// <summary>
-    /// The remediation connection to a monitored PostgreSQL server (#5632): the posture of <see cref="BuildConnectionString"/> and of the
-    /// service's PostgreSQL monitoring connection (same host and port, the same TLS rule: an Optional mode prefers TLS, a trusted certificate
-    /// requires it, anything else verifies the certificate in full), the remediation login, a 15-second connect budget, a 30-second command
-    /// budget, no pooled connection, and the application name that says so in <c>pg_stat_activity.application_name</c>.
+    /// The search_path the PostgreSQL remediation connection signs in with (#5632). A setting sent at sign-in outranks one set with
+    /// ALTER DATABASE or ALTER ROLE, so no database or role setting can put another schema's functions or operators in front of the
+    /// built-in ones, for the remediation statements or for Npgsql's own start-up queries.
+    /// </summary>
+    public const string PostgresSearchPathOption = "-c search_path=pg_catalog,pg_temp";
+
+    /// <summary>
+    /// The remediation connection to a monitored PostgreSQL server (#5632): the same host and port as the service's PostgreSQL monitoring
+    /// connection, and the same TLS mode (an Optional mode prefers TLS, a trusted certificate requires it, anything else verifies the
+    /// certificate in full); the remediation login, a 15-second connect budget, a 30-second command budget, no pooled connection, and the
+    /// application name that says so in <c>pg_stat_activity.application_name</c>.
+    /// <para>It differs from the monitoring connection in four ways, because its login can end sessions:</para>
+    /// <list type="bullet">
+    /// <item>It always opens the <c>postgres</c> database. pg_stat_activity and pg_terminate_backend are cluster-wide, so that is enough,
+    /// and the settings of a database somebody else owns never apply to this connection.</item>
+    /// <item>It sets <c>search_path</c> to <c>pg_catalog, pg_temp</c> at sign-in (<see cref="PostgresSearchPathOption"/>).</item>
+    /// <item>It accepts SCRAM-SHA-256 sign-in only: a server that asks for a password in clear text or MD5, or asks for none, is refused
+    /// before the password is sent.</item>
+    /// <item>Unless the certificate is verified in full, it requires SCRAM channel binding, which ties the sign-in to the TLS session, so it
+    /// fails when the TLS session does not end at the server the password was set on. Channel binding needs TLS, so a server without TLS
+    /// is refused.</item>
+    /// </list>
     /// </summary>
     internal static string BuildPostgresConnectionString(RemediationServer server, RemediationLogin login)
     {
+        var sslMode = server.EncryptMode?.Trim().ToUpperInvariant() == "OPTIONAL"
+            ? SslMode.Prefer
+            : server.TrustServerCertificate ? SslMode.Require : SslMode.VerifyFull;
         var builder = new NpgsqlConnectionStringBuilder
         {
             Host = server.Host,
-            /* pg_stat_activity and pg_terminate_backend are cluster-wide: the maintenance database every cluster has is enough. */
-            Database = string.IsNullOrWhiteSpace(server.Database) ? "postgres" : server.Database,
+            Database = PostgresDatabase,
             Username = login.UserName,
             Password = login.Secret,
             ApplicationName = ApplicationName,
             Timeout = 15,
             CommandTimeout = 30,
             Pooling = false,
-            SslMode = server.EncryptMode?.Trim().ToUpperInvariant() == "OPTIONAL"
-                ? SslMode.Prefer
-                : server.TrustServerCertificate ? SslMode.Require : SslMode.VerifyFull,
+            Options = PostgresSearchPathOption,
+            SslMode = sslMode,
+            RequireAuth = "ScramSHA256",
+            ChannelBinding = sslMode == SslMode.VerifyFull ? ChannelBinding.Prefer : ChannelBinding.Require,
         };
         if (server.Port > 0)
             builder.Port = server.Port;
