@@ -29,7 +29,7 @@ public sealed class AgentChangesViewerTests
         var view = new AgentChangeViewRow(Row(result));
         Assert.Equal(words, view.ResultDisplay);
         Assert.Equal(result == AgentChangeResult.Done, view.CanUndo);
-        Assert.Equal(result == AgentChangeResult.Unknown, AgentChangesTab.UndoError(view) is not null);
+        Assert.Equal(result != AgentChangeResult.Done, AgentChangesTab.UndoError(view) is not null);
     }
 
     [Theory]
