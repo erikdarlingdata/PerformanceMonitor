@@ -20,7 +20,7 @@ import { el, mount, clear, readTool, readToolWithinKeptHistory, keptWindowStrip,
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { plainText } from "../plain-text.js";
 import { relativeSpec } from "../time-range.js";
-import { orderServers } from "../server-order.js";
+import { orderServers, displayNameFor } from "../server-order.js";
 
 const DEFAULT_HOURS = 24;
 const FLEET = "";
@@ -133,7 +133,7 @@ function isEmptyBlock(block) {
 }
 
 /** One section: its heading, then one table (a server) or one table per server with the fleet line (Fleet). */
-export function sectionCard(section, block, onTag, range = "this time range") {
+export function sectionCard(section, block, onTag, range = "this time range", servers = []) {
   const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + block.source : "" })])];
   if (!block) {
     parts.push(emptyStrip("The read sent no " + section.title + " section."));
@@ -148,7 +148,8 @@ export function sectionCard(section, block, onTag, range = "this time range") {
   if (note) parts.push(note);
   if (Array.isArray(block.servers)) {
     for (const s of block.servers) {
-      parts.push(el("h4", { text: s.server || "" }));
+      /* #6157: the heading is the display name of the server; the read names it by its connection key. */
+      parts.push(el("h4", { text: displayNameFor(servers, s.server) }));
       if (isEmptyBlock(s)) {
         parts.push(emptyStrip("None in " + range + "."));
         continue;
@@ -261,6 +262,8 @@ export function renderQueryTagUsage(main) {
     mount(body, loadingStrip("Loading query tag usage…"));
     const w = currentWindow();
     const res = await readToolWithinKeptHistory("get_resource_use_by_tag", readParams(w), signal);
+    /* The server list the headings are named from may still be on its way: wait for it so the first paint is not the keys. */
+    await serversReady;
     if (ticket !== loadSeq) return;
     if (res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -269,7 +272,7 @@ export function renderQueryTagUsage(main) {
     const sections = Array.isArray(data.sections) ? data.sections : [];
     const range = rangeText(w.hours);
     if (res.kind === "empty" && sections.length === 0) return mount(body, [kept, emptyStrip("None in " + range + ".")]);
-    const cards = SECTIONS.map((s) => sectionCard(s, sections.find((b) => b && b.section === s.name) || null, openTag, range));
+    const cards = SECTIONS.map((s) => sectionCard(s, sections.find((b) => b && b.section === s.name) || null, openTag, range, knownServers));
     mount(body, [
       kept,
       noticeStrip("Each section counts from its own source, so sections are not added together: the plan cache and Query Store count the same executions, and procedures overlap both."),
@@ -277,7 +280,7 @@ export function renderQueryTagUsage(main) {
     ]);
   }
 
-  (async () => {
+  const serversReady = (async () => {
     const res = await readTool("list_servers", {}, controller.signal);
     if (mine !== pageSeq || res.kind !== "data") return;
     knownServers = orderServers(serverRows(res.data));

@@ -52,7 +52,7 @@ public sealed class DarlingMcpPgPredicateTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -68,9 +68,9 @@ public sealed class DarlingMcpPgPredicateTools
             if (rows.Count == 0)
             {
                 var bare = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_predicate_stats", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats", cancellationToken);
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_predicate_stats", cancellationToken);
                 if (bare is not null)
                 {
                     return bare;
@@ -85,7 +85,7 @@ public sealed class DarlingMcpPgPredicateTools
 
                 return McpHelpers.Status(
                         "empty",
-                        $"No predicate statistics for {resolved.ServerName} in the last {hours_back} "
+                        $"No predicate statistics for {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s). pg_qualstats SAMPLES executions — at the default 1% rate a low-traffic "
                         + "database can genuinely record nothing — and it needs shared_preload_libraries "
                         + "plus a restart to be active at all.",
@@ -124,7 +124,7 @@ public sealed class DarlingMcpPgPredicateTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,

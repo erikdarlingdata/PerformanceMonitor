@@ -44,8 +44,8 @@ public sealed class McpToolGuideHeadsBlockingSlotsTests
         ("get_blocking", "wait_time_ms is milliseconds"),
         ("get_blocking", "last_tran/last_batch stamps are de-skewed"),
         ("get_pg_replication_slots", "not_collected: engine is not PostgreSQL"),
-        ("get_pg_replication_slots", "no_slots: none sampled in hours_back, none exist or none collected"),
-        ("get_pg_replication_slots", "a replica's no_slots doesn't clear the writer"),
+        ("get_pg_replication_slots", "empty: none sampled in hours_back, none exist or none collected"),
+        ("get_pg_replication_slots", "a replica's empty doesn't clear the writer"),
         ("get_pg_replication_slots", "slots_present: slots in window; read worst_severity"),
         ("get_pg_replication_slots", "null on the collector's -1 sentinel"),
         ("get_pg_replication_slots", "no ceiling by default isn't a gap"),
@@ -120,14 +120,14 @@ public sealed class McpToolGuideHeadsBlockingSlotsTests
     }
 
     /// <summary>D9: a bare "no replication slots" reads like a clean, fully-observed all-clear. It is not one:
-    /// <c>no_slots</c> only follows a successful <c>not_collected</c> engine check, never a freshness check, so
+    /// <c>empty</c> only follows a successful <c>not_collected</c> engine check, never a freshness check, so
     /// it is silent on whether the window actually had a sample. The head states the ambiguity instead of
-    /// letting an agent treat <c>no_slots</c> as proof the collector ran.</summary>
+    /// letting an agent treat <c>empty</c> as proof the collector ran.</summary>
     [Fact]
     public void GetPgReplicationSlots_NoSlotsDoesNotClaimTheCollectorRan()
     {
         var head = McpToolGuideTests.Served("get_pg_replication_slots").Served;
-        Assert.Contains("no_slots: none sampled in hours_back, none exist or none collected", head, StringComparison.Ordinal);
+        Assert.Contains("empty: none sampled in hours_back, none exist or none collected", head, StringComparison.Ordinal);
     }
 
     /// <summary>D9: the collector's <c>-1</c> sentinel (not applicable / unmeasured) and a real measured <c>0</c>

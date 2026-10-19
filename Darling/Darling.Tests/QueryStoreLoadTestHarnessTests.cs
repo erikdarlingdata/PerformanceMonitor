@@ -11,6 +11,8 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -107,17 +109,105 @@ public sealed partial class QueryStoreLoadTestHarnessTests
             ("Darling/PerformanceMonitor.Darling.Storage/QueryStoreComposeStamp.cs", "Query Store compose rollup"),
             ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "Store object convergence"),
         ];
-        foreach (var (file, job) in sources)
+        /* The line each template becomes is the one the service's own file logger writes, read back from the log file.
+           A hand-built line had a "[INF]" level the logger never writes: the real one is padded to five characters
+           ("[INFO ]"), which a \[\w+\] pattern refuses. */
+        var logDirectory = Path.Combine(Path.GetTempPath(), "darling-5794-jobs-" + Guid.NewGuid().ToString("N"));
+        try
         {
-            var source = File.ReadAllText(Path.Combine(RepoRoot(), file));
-            var templates = Regex.Matches(source, @"LogInformation\(\s*""(?<t>" + Regex.Escape(job) + @": [^""]*\{ElapsedMs\} ms)""");
-            Assert.True(templates.Count == 1, $"{file}: expected one LogInformation(\"{job}: ... {{ElapsedMs}} ms\"), found {templates.Count}.");
+            string logFile;
+            using (var provider = new DarlingFileLoggerProvider(logDirectory))
+            {
+                var logger = provider.CreateLogger("PerformanceMonitor.Darling.Test");
+                foreach (var (file, job) in sources)
+                {
+                    var source = File.ReadAllText(Path.Combine(RepoRoot(), file));
+                    var templates = Regex.Matches(source, @"LogInformation\(\s*""(?<t>" + Regex.Escape(job) + @": [^""]*\{ElapsedMs\} ms)""");
+                    Assert.True(templates.Count == 1, $"{file}: expected one LogInformation(\"{job}: ... {{ElapsedMs}} ms\"), found {templates.Count}.");
+                    logger.Log(LogLevel.Information, "{Line}", Regex.Replace(templates[0].Groups["t"].Value, @"\{\w+\}", "1"));
+                }
 
-            var line = "2026-10-14 09:00:00.000 [INF] [X] " + Regex.Replace(templates[0].Groups["t"].Value, @"\{\w+\}", "1");
-            var match = pattern.Match(line);
-            Assert.True(match.Success, $"measure.ps1's Jobs pattern does not match the {job} line: {line}");
-            Assert.Equal(job, match.Groups["job"].Value);
-            Assert.Equal("1", match.Groups["ms"].Value);
+                provider.Flush();
+                logFile = provider.CurrentLogFile();
+            }
+
+            var written = File.ReadAllLines(logFile);
+            foreach (var (_, job) in sources)
+            {
+                var line = Assert.Single(written, l => l.Contains(job, StringComparison.Ordinal));
+                Assert.Contains("[INFO ]", line, StringComparison.Ordinal);
+                var match = pattern.Match(line);
+                Assert.True(match.Success, $"measure.ps1's Jobs pattern does not match the {job} line the service's logger wrote: {line}");
+                Assert.Equal(job, match.Groups["job"].Value);
+                Assert.Equal("1", match.Groups["ms"].Value);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(logDirectory, recursive: true); } catch (IOException) { /* best-effort */ } catch (UnauthorizedAccessException) { /* best-effort */ }
+        }
+    }
+
+    /* #5794: under `pwsh -File`, `-Steps Jobs,Compression` reaches the script as the one string "Jobs,Compression", which the
+       old ValidateSet refused. The script now splits and checks the list itself, before it does anything else. This runs the
+       real script with a -Psql path that does not exist, so a run that gets past step parsing prints the first step's
+       header and then stops at the missing program, and a bad step name stops before any header. */
+    [Fact]
+    public void MeasureScript_Steps_TakesACommaListUnderFile_AndRefusesAnUnknownStep()
+    {
+        var accepted = RunMeasureScript("Jobs,Compression");
+        if (accepted is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+
+        Assert.DoesNotContain("ValidateSet", accepted.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown step", accepted.Output, StringComparison.Ordinal);
+        Assert.Contains("## Jobs", accepted.Output, StringComparison.Ordinal);
+        Assert.NotEqual(0, accepted.ExitCode);
+
+        var refused = RunMeasureScript("Jobs,Bogus");
+        Assert.NotNull(refused);
+        Assert.NotEqual(0, refused!.ExitCode);
+        Assert.Contains("Unknown step 'Bogus'", refused.Output, StringComparison.Ordinal);
+        foreach (var name in new[] { "Reads", "ReadLatency", "Jobs", "Writes", "Compression" })
+        {
+            Assert.Contains(name, refused.Output, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("## Jobs", refused.Output, StringComparison.Ordinal);
+    }
+
+    private sealed record ScriptRun(int ExitCode, string Output);
+
+    /* Runs measure.ps1 under pwsh with -Steps as one argument and a -Psql that does not exist. Null when pwsh is missing. */
+    private static ScriptRun? RunMeasureScript(string steps)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo("pwsh")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in new[]
+        {
+            "-NoProfile", "-File", Path.Combine(RepoRoot(), "Darling/loadtest/measure.ps1"),
+            "-Psql", Path.Combine(Path.GetTempPath(), "darling-5794-no-such-psql-" + Guid.NewGuid().ToString("N")),
+            "-Store", "host=127.0.0.1 dbname=none",
+            "-Steps", steps,
+        })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        System.Diagnostics.Process? process;
+        try { process = System.Diagnostics.Process.Start(startInfo); }
+        catch (System.ComponentModel.Win32Exception) { return null; }
+        Assert.NotNull(process);
+        using (process)
+        {
+            var stderr = process!.StandardError.ReadToEndAsync();
+            var stdout = process.StandardOutput.ReadToEnd();
+            Assert.True(process.WaitForExit(120_000), "measure.ps1 did not stop.");
+            return new ScriptRun(process.ExitCode, stdout + stderr.GetAwaiter().GetResult());
         }
     }
 

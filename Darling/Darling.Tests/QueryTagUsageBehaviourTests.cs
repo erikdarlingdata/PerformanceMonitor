@@ -92,6 +92,25 @@ public sealed class QueryTagUsageBehaviourTests
     }
 
     [Fact]
+    public void TheFleetSections_NameEachServerByDisplayName_AndKeepTheKeyWhenThereIsNone()
+    {
+        // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it.
+        var headings = Run().GetProperty("fleetHeadings").EnumerateArray().Select(h => h.GetString()).ToArray();
+        Assert.Equal(new[] { "Server A", "b" }, headings);
+    }
+
+    [Fact]
+    public void TheAvailabilityGroupCard_SaysAsReportedByTheDisplayName_AndFallsBackToTheKey()
+    {
+        // #6157: "As reported by <name>" read the connection key before.
+        var run = Run();
+        Assert.StartsWith("As reported by Server A · ", run.GetProperty("agSubtitleNamed").GetString());
+        Assert.StartsWith("As reported by b · ", run.GetProperty("agSubtitleNoDisplayName").GetString());
+        Assert.StartsWith("As reported by zz · ", run.GetProperty("agSubtitleUnknown").GetString());
+        Assert.StartsWith("As reported by a · ", run.GetProperty("agSubtitleNoFleet").GetString());
+    }
+
+    [Fact]
     public void AClickOnATag_OpensItsSubtree_ThroughTheReadsTagParameter()
     {
         var run = Run();

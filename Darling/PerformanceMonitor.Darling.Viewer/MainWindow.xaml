@@ -1257,10 +1257,10 @@
                                     <!-- Affordances (advise-only): Open in Active Queries (incidents), Copy
                                          fix (when derivable), Ask AI. -->
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
-                                        <Button Content="Open in Active Queries" Padding="10,3" Margin="0,0,8,0"
+                                        <Button Content="{Binding OpenLinkLabel}" Padding="10,3" Margin="0,0,8,0"
                                                 Visibility="{Binding ShowOpenInActiveQueries, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="OpenInActiveQueries_Click"
-                                                ToolTip="Open this server's Active Queries scoped to the finding's time window"/>
+                                                ToolTip="{Binding OpenLinkToolTip}"/>
                                         <Button Content="Copy fix" Padding="10,3" Margin="0,0,8,0"
                                                 Visibility="{Binding ShowCopyFix, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="CopyFix_Click"
@@ -1525,7 +1525,7 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
             <TextBlock Grid.Column="1" x:Name="SeatText" Text="Seat: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="2" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>

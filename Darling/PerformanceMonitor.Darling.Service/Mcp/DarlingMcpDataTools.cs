@@ -861,6 +861,29 @@ public sealed class DarlingMcpDataTools
                         });
                 }
 
+                /* #6127: the ranking reads only rows that carry a measured delta. A window that stored snapshots but none of
+                   those (a plan sighted once stores zero deltas, and so does one sighted again with unmoved counters) is not a
+                   collection miss, and "no query stats available" sent callers to collection health, which shows rows. Said
+                   plainly, with the newest window that does carry a delta. Raw tier only: the hourly rollups keep their own
+                   rows. */
+                if (!hourly)
+                {
+                    var probe = await DarlingDataReader.GetQueryStatsSnapshotProbeAsync(postgres, resolved.ServerId, requestedStart, now, databases, cancellationToken);
+                    if (probe.SnapshotsInWindow > 0)
+                    {
+                        return McpHelpers.Status(
+                            "empty",
+                            McpHelpers.SnapshotsWithoutDeltaMessage(resolved.ServerName, hours_back, probe.SnapshotsInWindow, probe.NewestMeasuredDeltaAt, now),
+                            new
+                            {
+                                snapshots_in_window = probe.SnapshotsInWindow,
+                                snapshots_with_measured_delta = 0,
+                                newest_measured_delta_at = probe.NewestMeasuredDeltaAt is { } newest ? McpHelpers.FormatEffectiveStart(newest) : null,
+                                suggested_hours_back = probe.NewestMeasuredDeltaAt is { } at ? McpHelpers.SuggestedHoursBack(at, now) : (int?)null
+                            });
+                    }
+                }
+
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }

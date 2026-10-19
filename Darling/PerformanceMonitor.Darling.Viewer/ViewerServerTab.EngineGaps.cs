@@ -172,7 +172,7 @@ public partial class ViewerServerTab
     private Task<(string Text, Visibility Visibility)> EngineGapStateAsync(string collectorName, int rowCount) =>
         ReadEngineGapStateAsync(
             (serverId, collector) => _dataService.GetCollectorLastRunAsync(serverId, collector), _collectorsSeenToRun,
-            _server.ServerId, _server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount);
+            _server.ServerId, _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount);
 
     /// <summary>
     /// Fills a surface's message element once its data is bound, with what <see cref="EngineGapStateFromRuns"/> says for this
