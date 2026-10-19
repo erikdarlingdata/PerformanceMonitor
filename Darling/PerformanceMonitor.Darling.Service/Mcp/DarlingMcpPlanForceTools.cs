@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Storage;
@@ -43,10 +44,13 @@ public sealed class DarlingMcpPlanForceTools
     internal const string ForceToolName = "force_query_store_plan";
     internal const string UnforceToolName = "unforce_query_store_plan";
     internal const string EvictToolName = "evict_cached_plan";
+    internal const string KillToolName = "kill_session";
 
     /// <summary>Refusal codes of this tool; the gate's codes are <see cref="AgentActionCodes"/> and the executor's are <see cref="RemediationResult.Reasons"/>.</summary>
     internal const string PostgresTarget = "postgres_target";
     internal const string NoOwnerSource = "owner_source_unavailable";
+    internal const string BadLoginTime = "bad_login_time";
+    internal const string ServerClockUnknown = "server_clock_unknown";
 
     [McpServerTool(Name = "force_query_store_plan"), Description(
         "Agent arm, SQL Server only: forces one Query Store plan for a query on the monitored server (replaces another plan of the query that is forced now). Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
@@ -102,6 +106,26 @@ public sealed class DarlingMcpPlanForceTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         RunEvictAsync(postgres, ownerSource?.Read(), logger, server_name, plan_handle, agent_action, dry_run, cancellationToken);
+
+    [McpServerTool(Name = "kill_session"), Description(
+        "SQL Server only. PostgreSQL kill is NOT built. Agent arm: kills ONE session on the monitored SQL Server, after checking in the same batch that it is still the session you named (the same session_id and the same login_time). Dry run by default: runs that check, returns what the server says about the session, and kills nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's kill_session switch and remediation login (with ALTER ANY CONNECTION, which can kill any session on that server); ships off. " +
+        "<<GUIDE>>" +
+        "Take session_id and login_time from get_blocking (blocking_session_id and blocking_login_time, UTC, pass it back as read). SQL Server reuses a session id after a disconnect, so a kill without the login_time check could hit a new, unrelated session. The check and the KILL run in one batch but are not atomic: a session can end and its id be reused between them. " +
+        "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
+        "The answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. There is no undo. " +
+        "Refusals: own_session, session_gone, session_reused (the id now belongs to another session; its login_time is returned), not_user_session, kill_permission_denied (the login lacks ALTER ANY CONNECTION), bad_session_id, bad_login_time, server_clock_unknown (no clock collected for the server yet), kill_not_built_on_platform (Azure SQL Database) and postgres_target. " +
+        "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason) or failed, with session, warnings, rollback and journal_id.")]
+    public static Task<string> KillSession(
+        NpgsqlDataSource postgres,
+        [Description("The session id: blocking_session_id from get_blocking.")] int session_id,
+        [Description("The session's login time as get_blocking returns it (blocking_login_time, ISO 8601 UTC). It must be the value you read, not a later one.")] string login_time,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Required: the agent_action object (request_id, claim_id, agent_id, reason, evidence); see the tool guide. The reason is recorded with the change.")] string? agent_action = null,
+        [Description("Default true: run the check and kill nothing. Pass false to kill.")] bool dry_run = true,
+        StoreOwnerSource? ownerSource = null,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default) =>
+        RunKillAsync(postgres, ownerSource?.Read(), logger, server_name, session_id, login_time, agent_action, dry_run, cancellationToken);
 
     private static string Answer(string status, string? reason, string message, object? extra = null)
     {
@@ -334,6 +358,185 @@ public sealed class DarlingMcpPlanForceTools
             return McpHelpers.FormatError(tool, ex);
         }
     }
+
+    /// <summary>The kill tool body (#5632, step 12), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
+    internal static async Task<string> RunKillAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name,
+        int session_id, string? login_time, string? agent_action, bool dry_run, CancellationToken ct)
+    {
+        const string tool = KillToolName;
+        logger ??= NullLogger.Instance;
+        try
+        {
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct);
+            if (error is not null)
+                return error;
+
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+
+            /* 1: a session id or a login time that cannot be read can do nothing. Refused before the gate, and journaled as a block is. */
+            if (session_id <= 0)
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadSession,
+                    "session_id is a positive whole number, the blocking_session_id get_blocking returns. Nothing was run.", ct);
+            }
+
+            if (!TryReadLoginTime(login_time, out var loginUtc))
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, BadLoginTime,
+                    "login_time is the blocking_login_time get_blocking returns (ISO 8601, UTC), passed back as it was read. Nothing was run.", ct);
+            }
+
+            /* 2: SQL Server only. PostgreSQL kill (pg_terminate_backend) is NOT built. */
+            var (_, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
+                    $"{resolved.ServerName} is a PostgreSQL target. Killing a session is SQL Server only. PostgreSQL kill (pg_terminate_backend) is NOT built, so nothing was run.", ct);
+            }
+
+            if (owner is null)
+            {
+                return DarlingAgentActionGate.RefusalAnswer(new AgentActionRefusal(NoOwnerSource,
+                    "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly."));
+            }
+
+            /* 3: the gate, for a dry run too. The permit's Id and the journal's target.id are the session id in decimal. */
+            var idText = session_id.ToString(CultureInfo.InvariantCulture);
+            var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, null);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
+            if (decision.Refusal is { } gateRefusal)
+                return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
+            var permit = decision.Permit!;
+            _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
+
+            /* 4: login_time is the engine's own local clock. Without the server's clock Darling cannot say what the UTC value means there, and it does not guess. */
+            var clock = await DarlingServerClockReader.ReadOrNullAsync(postgres, resolved.ServerId, ct);
+            if (clock is null)
+            {
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, ServerClockUnknown, ct);
+                return Answer("refused", ServerClockUnknown,
+                    $"Darling has not collected {resolved.ServerName}'s clock yet, so it cannot turn login_time into that server's own time. Nothing was run.");
+            }
+
+            var loginLocal = clock.ToServerLocal(loginUtc);
+
+            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
+            if (row is null)
+                return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
+            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+
+            /* 5: one batch decides, for a dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
+            var dry = await executor.KillSessionAsync(permit, session_id, loginLocal, dryRun: true, ct);
+            if (dry.Outcome != RemediationOutcome.Done)
+            {
+                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                return KillNotDone(dry, clock, dry_run);
+            }
+
+            var before = KillSessionImage(dry.Session, clock);
+            var warnings = KillWarnings(dry.Session);
+            if (dry_run)
+                return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
+
+            RemediationResult? killed = null;
+
+            /* 6: the kill, journaled. action_called holds the facts the dry batch read; action_done holds the facts the kill batch read and the rollback read. */
+            try
+            {
+                var hooks = new AgentActionHooks
+                {
+                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
+                    Write = async (_, _, token) =>
+                    {
+                        var written = await executor.KillSessionAsync(permit, session_id, loginLocal, dryRun: false, token);
+                        if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
+                            throw new PlanForceWriteException(written.Message, KillNotDone(written, clock, dryRun: false));
+                        killed = written;
+                        return JsonSerializer.Serialize(new
+                        {
+                            message = written.Message,
+                            session = KillSessionImage(written.Session, clock),
+                            rollback = KillRollbackImage(written.Rollback),
+                        }, McpHelpers.JsonOptions);
+                    },
+                };
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.SessionKill, action!, target), hooks, ct);
+                if (result.Refusal is { } refused)
+                    return DarlingAgentActionGate.RefusalAnswer(refused);
+                return Answer("done", null,
+                    $"Session {session_id} was killed. There is no undo."
+                    + (killed?.Rollback is { InProgress: true } ? " A rollback is running: the session keeps its locks until it ends. Do not kill it again; read get_blocking to see it clear." : ""),
+                    new
+                    {
+                        dry_run = false,
+                        session = KillSessionImage(killed?.Session ?? dry.Session, clock),
+                        warnings,
+                        rollback = KillRollbackImage(killed?.Rollback),
+                        journal_id = result.CalledId,
+                    });
+            }
+            catch (PlanForceWriteException ex)
+            {
+                return ex.Answer;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError(tool, ex);
+        }
+    }
+
+    /// <summary>
+    /// The login time as the agent passes it: the ISO 8601 UTC text <c>get_blocking</c> returns (naive, so no zone means UTC). Fractions are kept
+    /// (the engine's <c>datetime</c> has 3.33 ms steps), and nothing is truncated to seconds.
+    /// </summary>
+    internal static bool TryReadLoginTime(string? text, out DateTime utc)
+    {
+        utc = default;
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        if (!DateTime.TryParse(text.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+            return false;
+        utc = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+        return true;
+    }
+
+    /// <summary>A refusal or a failure of the kill batch. A reused id shows the session's actual login time and nothing else about the session.</summary>
+    private static string KillNotDone(RemediationResult result, ServerClock clock, bool dryRun)
+    {
+        var status = result.Outcome == RemediationOutcome.Refused ? "refused" : "failed";
+        if (result.Reason == RemediationResult.Reasons.SessionReused)
+            return Answer(status, result.Reason, result.Message, new { dry_run = dryRun, actual_login_time = UtcText(clock, result.Session?.LoginTime) });
+        return Answer(status, result.Reason, result.Message, new { dry_run = dryRun, session = result.Session is null ? null : KillSessionImage(result.Session, clock) });
+    }
+
+    private static string? UtcText(ServerClock clock, DateTime? local) => local is { } value ? clock.ToUtc(value).ToString("o", CultureInfo.InvariantCulture) : null;
+
+    /// <summary>The session's facts as the answer and the journal show them. Times are UTC, as get_blocking returns them, and the last request's end also in the server's own clock.</summary>
+    internal static object? KillSessionImage(KillSessionFacts? facts, ServerClock clock) => facts is null ? null : new
+    {
+        session_id = facts.SessionId,
+        login_time = UtcText(clock, facts.LoginTime),
+        login_name = facts.LoginName,
+        host_name = facts.HostName,
+        program_name = facts.ProgramName,
+        status = facts.Status,
+        open_transaction_count = facts.OpenTransactionCount,
+        last_request_end_time = UtcText(clock, facts.LastRequestEndTime),
+        last_request_end_time_server_local = facts.LastRequestEndTime?.ToString("o", CultureInfo.InvariantCulture),
+        log_bytes_used = facts.LogBytesUsed,
+    };
+
+    private static object? KillRollbackImage(KillRollback? rollback) =>
+        rollback is null ? null : new { in_progress = rollback.InProgress, percent_complete = rollback.PercentComplete };
+
+    /// <summary>What a kill will cost, with no threshold: any log used means a rollback. A warning, never a refusal.</summary>
+    internal static string[] KillWarnings(KillSessionFacts? facts) =>
+        facts?.LogBytesUsed is > 0
+            ? [$"This session has used {facts.LogBytesUsed} bytes of transaction log. Killing it rolls that work back: it keeps its locks until the rollback ends, and the rollback can block others for as long as the work took. Do not kill it again; read get_blocking to see it clear."]
+            : [];
 
     /// <summary>What a person should know before the eviction runs. A warning, never a refusal.</summary>
     internal static string[] EvictWarnings(int statementCount) => statementCount switch

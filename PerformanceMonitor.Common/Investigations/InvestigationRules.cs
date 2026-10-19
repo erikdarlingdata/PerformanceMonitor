@@ -73,6 +73,7 @@ public static class InvestigationRules
         "force_query_store_plan",
         "unforce_query_store_plan",
         "evict_cached_plan",
+        "kill_session",
     };
 
     /// <summary>What a valid agent id is (#5632 review round 2, L4).</summary>

@@ -32,6 +32,12 @@ public sealed record RemediationResult(
     /// <summary>The exact statement a force, unforce or eviction runs (or would run, on a dry run). A force names the database quoted the way <c>QUOTENAME</c> quotes it; an eviction names the handle in its normal form. Null when the result is not about one.</summary>
     public string? Statement { get; init; }
 
+    /// <summary>A kill's facts about the session it named, read in the batch that decided (#5632, step 12). Null for every other action, and when no such session was found.</summary>
+    public KillSessionFacts? Session { get; init; }
+
+    /// <summary>A real kill's rollback read (#5632, step 12): whether the session's request showed a rollback right after the kill. Null except after a kill.</summary>
+    public KillRollback? Rollback { get; init; }
+
     public static class Reasons
     {
         public const string PermitMismatch = "permit_mismatch";
@@ -42,7 +48,12 @@ public sealed record RemediationResult(
         public const string AlreadyForced = "plan_already_forced";
         public const string NotForced = "plan_not_forced";
         public const string NotCached = "plan_not_cached";
-        public const string SessionChanged = "session_changed";
+        public const string SessionGone = "session_gone";
+        public const string SessionReused = "session_reused";
+        public const string OwnSession = "own_session";
+        public const string NotUserSession = "not_user_session";
+        public const string KillPermissionDenied = "kill_permission_denied";
+        public const string KillNotBuiltOnPlatform = "kill_not_built_on_platform";
         public const string LoginMissing = "login_missing";
         public const string SecretSlotMissing = "secret_slot_missing";
         public const string StoredPassword = "stored_password_refused";

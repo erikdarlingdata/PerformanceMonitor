@@ -24,8 +24,8 @@ namespace PerformanceMonitor.Darling.Remediation;
 
 /// <summary>
 /// The server write code (#5632, step 6): force and unforce a Query Store plan, evict one plan handle and kill one session on ONE monitored
-/// SQL Server, each with a dry run. <b>One class in the service calls the force and unforce methods</b> (#5632, step 7:
-/// <c>DarlingMcpPlanForceTools</c>); steps 10 and 12 will add the evict and the kill. <c>PlanForceNoWritePathTests</c> pins that no other
+/// SQL Server, each with a dry run. <b>One class in the service calls the force, unforce, evict and kill methods</b> (#5632, steps 7, 10 and 12:
+/// <c>DarlingMcpPlanForceTools</c>). <c>PlanForceNoWritePathTests</c> pins that no other
 /// service type touches this class, and that the service assembly holds none of the write statements: they live here.
 /// <para><b>No write runs without a passed gate check.</b> Every method takes a <see cref="ServerActionPermit"/> first, the value
 /// <see cref="InvestigationRequestStore.AuthorizeServerActionAsync"/> hands out only when the gate returned no refusal, and its constructor
@@ -33,7 +33,7 @@ namespace PerformanceMonitor.Darling.Remediation;
 /// action, another server, another database or another object, before it reads the secret or opens a connection.</para>
 /// <para><b>The sign-in</b> is the server's remediation login: its name, and the secret read from the <c>env:</c> or <c>file:</c> reference when
 /// the action runs. The secret reaches the connection string and nothing else: every message that leaves here has it removed first.</para>
-/// <para><b>PostgreSQL is not built:</b> this is SQL Server only, and there is no PostgreSQL kill.</para>
+/// <para><b>PostgreSQL is not built:</b> this is SQL Server only, and there is no PostgreSQL kill (<c>pg_terminate_backend</c>).</para>
 /// </summary>
 public sealed class SqlServerRemediationExecutor
 {
@@ -88,21 +88,82 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     internal const string EvictSql = "DBCC FREEPROCCACHE (@plan_handle);";
 
     /// <summary>
-    /// One batch: <c>KILL</c> runs only when <c>sys.dm_exec_sessions</c> still has that session id with that <c>login_time</c>. The session id is an
-    /// int parameter and the only thing that joins the <c>KILL</c> text is its decimal form. The answer is 1 when it killed.
+    /// The one kill batch (#5632, step 12), for a dry run and a write alike (<c>@dry</c>). It reads the session's facts, then decides in this order
+    /// and stops at the first that applies: the engine is an Azure SQL Database (<c>kill_not_built_on_platform</c>), the session is this connection's
+    /// own (<c>own_session</c>), no such session (<c>session_gone</c>), a different <c>login_time</c> (<c>session_reused</c>: the id was reused),
+    /// not a user session (<c>not_user_session</c>), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
+    /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
+    /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
+    /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. No statement text and no input
+    /// buffer are read.
     /// </summary>
     internal const string KillSql = @"
-DECLARE @killed bit = 0;
-IF EXISTS (SELECT 1 FROM sys.dm_exec_sessions AS s WHERE s.session_id = @session_id AND s.login_time = @login_time)
+DECLARE @edition bigint = CONVERT(bigint, SERVERPROPERTY('EngineEdition'));
+DECLARE @outcome varchar(40) = NULL;
+DECLARE @found bit = 0;
+DECLARE @login_time_actual datetime = NULL;
+DECLARE @is_user bit = NULL;
+DECLARE @login_name nvarchar(128) = NULL;
+DECLARE @host_name nvarchar(128) = NULL;
+DECLARE @program_name nvarchar(128) = NULL;
+DECLARE @status nvarchar(30) = NULL;
+DECLARE @open_tran int = NULL;
+DECLARE @last_end datetime = NULL;
+DECLARE @log_bytes bigint = NULL;
+DECLARE @command nvarchar(32) = NULL;
+DECLARE @percent real = NULL;
+IF @edition = 5
+    SET @outcome = 'kill_not_built_on_platform';
+ELSE
 BEGIN
-    DECLARE @kill nvarchar(40) = N'KILL ' + CONVERT(nvarchar(11), @session_id) + N';';
-    EXEC (@kill);
-    SET @killed = 1;
-END;
-SELECT killed = @killed;";
+    SELECT
+        @found = 1,
+        @login_time_actual = s.login_time,
+        @is_user = s.is_user_process,
+        @login_name = s.login_name,
+        @host_name = s.host_name,
+        @program_name = s.program_name,
+        @status = s.status,
+        @open_tran = s.open_transaction_count,
+        @last_end = s.last_request_end_time,
+        @log_bytes =
+        (
+            SELECT SUM(CONVERT(bigint, ddt.database_transaction_log_bytes_used))
+            FROM sys.dm_tran_session_transactions AS stx
+            JOIN sys.dm_tran_database_transactions AS ddt
+              ON ddt.transaction_id = stx.transaction_id
+            WHERE stx.session_id = s.session_id
+        )
+    FROM sys.dm_exec_sessions AS s
+    WHERE s.session_id = @session_id
+    OPTION(RECOMPILE);
 
-    internal const string SessionMatchesSql =
-        "SELECT matches = COUNT_BIG(*) FROM sys.dm_exec_sessions AS s WHERE s.session_id = @session_id AND s.login_time = @login_time OPTION(RECOMPILE);";
+    IF @session_id = @@SPID
+        SET @outcome = 'own_session';
+    ELSE IF @found = 0
+        SET @outcome = 'session_gone';
+    ELSE IF @login_time_actual <> @login_time
+        SET @outcome = 'session_reused';
+    ELSE IF @is_user = 0
+        SET @outcome = 'not_user_session';
+    ELSE IF ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY CONNECTION'), 0) <> 1
+        SET @outcome = 'kill_permission_denied';
+    ELSE IF @dry = 1
+        SET @outcome = 'dry_ok';
+    ELSE
+    BEGIN
+        DECLARE @kill nvarchar(40) = N'KILL ' + CONVERT(nvarchar(11), @session_id) + N';';
+        EXEC (@kill);
+        SET @outcome = 'killed';
+        SELECT @command = r.command, @percent = r.percent_complete
+        FROM sys.dm_exec_requests AS r
+        WHERE r.session_id = @session_id
+        OPTION(RECOMPILE);
+    END;
+END;
+SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
+       program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
+       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent;";
 
     /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
     internal const string PlanFactsSql =
@@ -291,8 +352,11 @@ SELECT killed = @killed;";
     }
 
     /// <summary>
-    /// Kills one session, only when it still has that <paramref name="loginTime"/> (read from <c>sys.dm_exec_sessions.login_time</c>, a server-local
-    /// time with no zone: pass it back as it was read). A reused session id has a different login time, so it is left alone.
+    /// Kills one session, only when it is still the session the caller named: the same session id and the same <paramref name="loginTime"/>
+    /// (<c>sys.dm_exec_sessions.login_time</c>, a <c>datetime</c> in the server's own local time with no zone: pass it as the server's clock shows it).
+    /// A reused session id has a different login time, so it is left alone. <see cref="KillSql"/> decides in one batch, for a dry run and a write
+    /// alike; the result carries the session's <see cref="RemediationResult.Session"/> facts, and after a real kill its
+    /// <see cref="RemediationResult.Rollback"/>. Not atomic: a session can end and its id be reused between the check and the <c>KILL</c>.
     /// </summary>
     public async Task<RemediationResult> KillSessionAsync(ServerActionPermit permit, int sessionId, DateTime loginTime, bool dryRun, CancellationToken ct)
     {
@@ -304,31 +368,69 @@ SELECT killed = @killed;";
 
         return await RunAsync(name, dryRun, null, async (connection, secret) =>
         {
-            if (dryRun)
+            await using var command = Command(connection, KillSql);
+            command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = sessionId });
+            command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = DateTime.SpecifyKind(loginTime, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dryRun });
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+                return RemediationResult.Failed(name, dryRun, "The server returned no answer to the session check.");
+            var outcome = reader.IsDBNull(0) ? null : reader.GetString(0);
+            var found = !reader.IsDBNull(1) && Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture) == 1;
+            KillSessionFacts? facts = null;
+            if (found && outcome is not (KillOutcomes.OwnSession or KillOutcomes.NotBuiltOnPlatform))
             {
-                await using var read = Command(connection, SessionMatchesSql);
-                AddSessionParameters(read, sessionId, loginTime);
-                var matches = Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) > 0;
-                return matches
-                    ? RemediationResult.Done(name, dryRun, wrote: false, $"Dry run: session {sessionId} still has that login time and would be killed. Nothing was run.")
-                    : RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionChanged,
-                        $"Session {sessionId} is gone or no longer has that login time. Nothing was run.");
+                facts = new KillSessionFacts(sessionId,
+                    reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                    reader.IsDBNull(9) ? null : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture));
             }
 
-            await using var command = Command(connection, KillSql);
-            AddSessionParameters(command, sessionId, loginTime);
-            var killed = await command.ExecuteScalarAsync(ct) is true;
-            return killed
-                ? RemediationResult.Done(name, dryRun, wrote: true, $"Session {sessionId} was killed.")
-                : RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionChanged,
-                    $"Session {sessionId} is gone or no longer has that login time. Nothing was killed.");
+            var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
+            double? percent = reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
+            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent);
         }, ct);
     }
 
-    private static void AddSessionParameters(SqlCommand command, int sessionId, DateTime loginTime)
+    /// <summary>
+    /// Turns the kill batch's outcome into the executor's answer. Pure, so a test needs no server. An outcome the batch does not name is a failure,
+    /// never a kill: only <c>killed</c> says <see cref="RemediationResult.Wrote"/>.
+    /// </summary>
+    internal static RemediationResult KillAnswer(string name, bool dryRun, int sessionId, string? outcome, KillSessionFacts? facts, string? rollbackCommand, double? percent)
     {
-        command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = sessionId });
-        command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = DateTime.SpecifyKind(loginTime, DateTimeKind.Unspecified) });
+        var result = outcome switch
+        {
+            KillOutcomes.NotBuiltOnPlatform => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillNotBuiltOnPlatform,
+                "Killing a session is not built for Azure SQL Database. Nothing was run."),
+            KillOutcomes.OwnSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.OwnSession,
+                $"Session {sessionId} is the remediation connection's own session. Nothing was run."),
+            KillOutcomes.SessionGone => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionGone,
+                $"Session {sessionId} is gone. Nothing was run."),
+            KillOutcomes.SessionReused => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionReused,
+                $"Session {sessionId} is now a different session: it has another login time, so the server reused the id. Nothing was run."),
+            KillOutcomes.NotUserSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotUserSession,
+                $"Session {sessionId} is not a user session. Nothing was run."),
+            KillOutcomes.PermissionDenied => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
+                "The remediation login does not hold ALTER ANY CONNECTION on this server, which killing a session needs. A person can grant it. Nothing was run."),
+            KillOutcomes.DryOk => RemediationResult.Done(name, dryRun, wrote: false,
+                $"Dry run: session {sessionId} is still the session that was named and would be killed. Nothing was run."),
+            KillOutcomes.Killed => RemediationResult.Done(name, dryRun, wrote: true, $"Session {sessionId} was killed."),
+            _ => RemediationResult.Failed(name, dryRun, "The server returned an answer to the session check that this code does not know. Nothing is known to have run."),
+        };
+
+        result = result with { Session = facts };
+        if (outcome == KillOutcomes.Killed)
+        {
+            var inProgress = rollbackCommand is not null && rollbackCommand.StartsWith("KILLED/ROLLBACK", StringComparison.OrdinalIgnoreCase);
+            result = result with { Rollback = new KillRollback(inProgress, inProgress ? percent : null) };
+        }
+
+        return result;
     }
 
     /// <summary>The permit rule: for this action, this server, and this object. A mismatch is refused before the secret is read.</summary>
@@ -410,6 +512,31 @@ SELECT killed = @killed;";
         return result;
     }
 }
+
+/// <summary>What the kill batch answers (#5632, step 12). The batch is <see cref="SqlServerRemediationExecutor.KillSql"/>.</summary>
+internal static class KillOutcomes
+{
+    internal const string NotBuiltOnPlatform = "kill_not_built_on_platform";
+    internal const string OwnSession = "own_session";
+    internal const string SessionGone = "session_gone";
+    internal const string SessionReused = "session_reused";
+    internal const string NotUserSession = "not_user_session";
+    internal const string PermissionDenied = "kill_permission_denied";
+    internal const string DryOk = "dry_ok";
+    internal const string Killed = "killed";
+}
+
+/// <summary>
+/// What the server's session view held for the session the kill named, read in the same batch as the decision (#5632, step 12). <c>LoginTime</c> is
+/// the session's actual value, so a reused id shows the new session's time. Times are the server's own clock, with no zone. No statement text and no
+/// input buffer: they are never read.
+/// </summary>
+public sealed record KillSessionFacts(
+    int SessionId, DateTime? LoginTime, string? LoginName, string? HostName, string? ProgramName, string? Status,
+    int? OpenTransactionCount, DateTime? LastRequestEndTime, long? LogBytesUsed);
+
+/// <summary>Whether the session's request showed a rollback right after a real kill, read once. <c>PercentComplete</c> is null when none runs.</summary>
+public sealed record KillRollback(bool InProgress, double? PercentComplete);
 
 /// <summary>The one strict reading of a plan handle (#5632, step 6): <c>0x</c>, then hex digits in whole bytes, 1 to 64 bytes.</summary>
 internal static class PlanHandleText

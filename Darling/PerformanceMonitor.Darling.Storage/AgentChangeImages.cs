@@ -48,6 +48,9 @@ public static class AgentChangeKinds
 
     /// <summary>One plan handle evicted from a monitored SQL Server's plan cache (#5632, step 10). It has no undo: an evicted plan cannot be put back, so the kind is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
     public const string PlanEvict = "plan_evict";
+
+    /// <summary>One session killed on a monitored SQL Server (#5632, step 12). It has no undo: a killed session cannot be brought back, so the kind is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
+    public const string SessionKill = "session_kill";
 }
 
 /// <summary>A mute rule as <c>config.config_mute_rules</c> holds it. Also the wire shape of the mute tools' <c>mute_rule</c> object.</summary>

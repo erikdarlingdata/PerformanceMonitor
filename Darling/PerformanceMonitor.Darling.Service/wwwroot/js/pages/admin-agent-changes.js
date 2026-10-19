@@ -36,7 +36,7 @@ const LIST_ONLY =
   "To undo a change or switch agent changes off, use the Viewer app, or run the web under the admin login.";
 const CAN_DECIDE =
   "Agent changes, newest first. Undo restores what the setting was before the agent's change, but only if nobody has changed it since; " +
-  "otherwise it says so and leaves the setting alone. Undo works for 365 days. An evicted plan has no undo. The next run compiles a new plan.";
+  "otherwise it says so and leaves the setting alone. Undo works for 365 days. An evicted plan has no undo. The next run compiles a new plan. A killed session has no undo.";
 
 /** The Kind column's words. The Level 2 kinds read as the journal names them; a plan force on a monitored server (#5632) says so in plain words. */
 export function agentKindText(kind) {

@@ -72,7 +72,7 @@ public sealed class ServerActionLevelThreeTests
         Assert.Equal(twoRules.Count, threeRules.Count);
         Assert.Contains(threeRules, r => r.Contains("writes refuse after submit", StringComparison.Ordinal));
         var sentence = Assert.Single(threeRules, r => r.Contains("Level 3", StringComparison.Ordinal));
-        foreach (var tool in new[] { "force_query_store_plan", "unforce_query_store_plan", "evict_cached_plan" })
+        foreach (var tool in new[] { "force_query_store_plan", "unforce_query_store_plan", "evict_cached_plan", "kill_session" })
             Assert.Contains(tool, sentence, StringComparison.Ordinal);
         Assert.Contains("can change the monitored server", sentence, StringComparison.Ordinal);
         Assert.Contains("switch and remediation credential", sentence, StringComparison.Ordinal);

@@ -49,6 +49,15 @@ internal static class DarlingServerClockReader
     /// snapshot's fixed offset, else UTC (no offset collected yet).
     /// </summary>
     public static async Task<ServerClock> ReadAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        await ReadOrNullAsync(postgres, serverId, cancellationToken) ?? ServerClock.Utc;
+
+    /// <summary>
+    /// The same clock, or null when the store has no snapshot with an offset for this server. A reader that only
+    /// shows a time may treat that as UTC; a caller that writes a server-local time to the server (<c>kill_session</c>,
+    /// #5632) must not guess, so it asks here.
+    /// </summary>
+    public static async Task<ServerClock?> ReadOrNullAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(ServerClockSql);
@@ -57,7 +66,7 @@ internal static class DarlingServerClockReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return ServerClock.Utc;
+            return null;
         }
 
         return ServerClock.Resolve(

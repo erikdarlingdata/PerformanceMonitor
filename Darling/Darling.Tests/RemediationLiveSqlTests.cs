@@ -378,10 +378,10 @@ public sealed class RemediationLiveSqlTests
 
             var wrong = await executor.KillSessionAsync(permit, sessionId, loginTime.AddSeconds(1), dryRun: false, ct);
             Assert.Equal(RemediationOutcome.Refused, wrong.Outcome);
-            Assert.Equal(RemediationResult.Reasons.SessionChanged, wrong.Reason);
+            Assert.Equal(RemediationResult.Reasons.SessionReused, wrong.Reason);
             Assert.False(wrong.Wrote);
             var wrongDry = await executor.KillSessionAsync(permit, sessionId, loginTime.AddSeconds(1), dryRun: true, ct);
-            Assert.Equal(RemediationResult.Reasons.SessionChanged, wrongDry.Reason);
+            Assert.Equal(RemediationResult.Reasons.SessionReused, wrongDry.Reason);
             Assert.True(await SessionExistsAsync(sessionId, loginTime, ct));
             Assert.Equal(1, Convert.ToInt32(await ScalarAsync(victim, "SELECT 1;", ct), CultureInfo.InvariantCulture));
 
@@ -396,7 +396,7 @@ public sealed class RemediationLiveSqlTests
 
             /* The session is gone: the same kill is refused rather than failing. */
             var gone = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
-            Assert.Equal(RemediationResult.Reasons.SessionChanged, gone.Reason);
+            Assert.Equal(RemediationResult.Reasons.SessionGone, gone.Reason);
 
             AssertNoSecret(scratch, logger, dry, wrong, wrongDry, killed, gone);
         }

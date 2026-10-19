@@ -82,6 +82,7 @@ internal static class DarlingMcpWritePolicy
         "force_query_store_plan",
         "unforce_query_store_plan",
         "evict_cached_plan",
+        "kill_session",
         "delete_notification_route",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
