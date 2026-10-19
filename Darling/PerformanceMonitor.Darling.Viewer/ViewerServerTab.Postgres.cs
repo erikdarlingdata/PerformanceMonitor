@@ -283,6 +283,42 @@ public partial class ViewerServerTab
                 : string.Empty);
     }
 
+    /// <summary>The Blocking sub-tab of <c>PgActivitySubTabs</c> (its first).</summary>
+    private const int PgBlockingSubTabIndex = 0;
+
+    /// <summary>The Query Shapes sub-tab of <c>PgActivitySubTabs</c> (its third, after Blocking and Locks).</summary>
+    private const int PgQueryShapesSubTabIndex = 2;
+
+    /// <summary>
+    /// #6134: a recommendation's deep link on a PostgreSQL server: scope the toolbar to the finding's window, show the
+    /// Activity tab on the sub-tab for the finding, and load it over that window. The same steps
+    /// <see cref="DeepLinkToIncidentAsync"/> takes for SQL Server: hold the window, switch the tabs under
+    /// <see cref="_suppressDrillDownAutoRefresh"/> so the tab-switch refresh does not race the targeted read, then load.
+    /// </summary>
+    internal async Task DeepLinkToPgActivityAsync(RecommendationLinkTarget target, DateTime fromUtc, DateTime toUtc)
+    {
+        SetToolbarWindowUtc(fromUtc, toUtc);
+        _suppressDrillDownAutoRefresh = true;
+        try
+        {
+            InnerTabs.SelectedIndex = PgActivityInnerTabIndex;
+            PgActivitySubTabs.SelectedIndex = target == RecommendationLinkTarget.PgBlocking
+                ? PgBlockingSubTabIndex
+                : PgQueryShapesSubTabIndex;
+        }
+        finally
+        {
+            _suppressDrillDownAutoRefresh = false;
+        }
+
+        /* This server's clock, so the picker draws the held window in the tab's display zone. */
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
+        RefreshRangePicker();
+
+        await LoadPgActivityAsync();
+    }
+
     /// <summary>
     /// Activity — blocking (denominator, chains, cycles) and query shapes (statements over per-database
     /// counters). All five reads fire together: the sub-tabs are two views of one load, so switching
