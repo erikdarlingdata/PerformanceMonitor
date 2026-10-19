@@ -1,4 +1,4 @@
-# Performance Monitor Darling — Headless Edition
+﻿# Performance Monitor Darling — Headless Edition
 
 Darling is the headless, centralized edition of Performance Monitor: a 24/7 Windows service that collects from your SQL Servers into a central PostgreSQL (optionally TimescaleDB) store, plus a detached desktop viewer that reads that store. No desktop app has to stay open for collection to happen, and every viewer seat reads the same central data.
 
