@@ -31,9 +31,7 @@ public static class FinOpsUtilizationFigures
 
     /// <summary>Stolen memory: (total server memory - buffer pool) / total server memory, in percent; 0 when no total.</summary>
     public static double StolenMemoryPct(int totalMb, int bufferPoolMb) =>
-        totalMb > 0
-            ? (double)(totalMb - bufferPoolMb) / totalMb * 100.0
-            : 0;
+        (double)ProvisioningVerdict.StolenMemoryPercent(totalMb, bufferPoolMb);
 
     /// <summary>The buffer pool's share of physical memory, in percent; 0 when no physical memory.</summary>
     public static double BufferPoolPct(int bufferPoolMb, int physicalMb) =>
@@ -92,7 +90,9 @@ public static class FinOpsUtilizationFigures
                    worker saturation is not explained as a memory ratio that no longer decides anything (#2246). */
                 "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
                     d.P95CpuPct, d.MaxGrantWaiters, d.GrantTimeouts, d.ForcedGrants,
-                    d.MaxWorkersCount, d.CurrentWorkersCount),
+                    d.MaxWorkersCount, d.CurrentWorkersCount,
+                    (decimal)StolenMemoryPct(d.TotalMemoryMb, d.BufferPoolMb), d.EngineEdition),
+                ProvisioningVerdict.NotEnoughData => ProvisioningVerdict.NotEnoughDataExplanation(d.CpuSamples),
                 ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
                 _ => ""
             };

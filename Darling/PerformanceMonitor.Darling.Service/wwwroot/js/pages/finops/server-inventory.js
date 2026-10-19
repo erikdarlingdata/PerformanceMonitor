@@ -24,6 +24,8 @@ const PROVISIONING = {
   OVER_PROVISIONED: ["OVER PROVISIONED", "Warning"],
   UNDER_PROVISIONED: ["UNDER PROVISIONED", "Critical"],
   NOT_APPLICABLE: ["N/A", null],
+  /* The Viewer's grid words (ProvisioningVerdict.NotEnoughDataShortLabel): too few CPU samples in the window for a verdict. */
+  NOT_ENOUGH_DATA: ["not enough data yet", null],
 };
 
 const COLUMNS = [

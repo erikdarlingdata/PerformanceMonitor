@@ -145,6 +145,36 @@ public sealed class FinOpsUtilizationFiguresTests
         Assert.Equal(old, FinOpsUtilizationFigures.Explanation(dto, CultureInfo.CurrentCulture));
     }
 
+    /// <summary>#6139: six samples is no verdict, and the sentence says how many the window holds and how many it needs.</summary>
+    [Fact]
+    public void Explanation_ForNotEnoughData_SaysTheSampleCountAndTheMinimum()
+    {
+        var dto = Dto(ProvisioningVerdict.NotEnoughData) with { CpuSamples = 6 };
+        Assert.Equal(
+            "The last 24 hours hold 6 CPU samples; a verdict needs at least 12.",
+            FinOpsUtilizationFigures.Explanation(dto, CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>#6139: 72.5% stolen memory is explained as memory pressure, in the same words the verdict used.</summary>
+    [Fact]
+    public void Explanation_ForHighStolenMemory_SaysMemoryIsUnderPressure()
+    {
+        var dto = Dto("UNDER_PROVISIONED", p95: 5m, total: 1000, bp: 275, phys: 1000);
+        var text = FinOpsUtilizationFigures.Explanation(dto, CultureInfo.InvariantCulture);
+        Assert.StartsWith("Memory is under pressure: stolen memory is 73%", text);
+        Assert.DoesNotContain("may have more resources", text);
+    }
+
+    /// <summary>#6139: the MCP answer carries the Stolen Mem % note when the figure reads amber or red, and no field when it does not.</summary>
+    [Fact]
+    public void TheMcpStolenMemoryNote_IsTheViewersTooltipTextAboveAmber_AndAbsentBelow()
+    {
+        Assert.Equal(ProvisioningVerdict.StolenMemoryNote(72.5), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(72.5));
+        Assert.Contains("outside the buffer pool", PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(72.5));
+        Assert.Null(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(20));
+        Assert.Equal("", ProvisioningVerdict.StolenMemoryNote(20));
+    }
+
     [Fact]
     public void Explanation_UsesTheCultureItIsGiven_AndRestoresTheCaller()
     {

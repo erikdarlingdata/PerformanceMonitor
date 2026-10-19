@@ -81,14 +81,30 @@ public static class ProvisioningVerdict
     /// <summary>Too few CPU samples in the window to say (<see cref="MinSamples"/>).</summary>
     public const string NotEnoughData = "NOT_ENOUGH_DATA";
 
+    /// <summary>What a grid cell shows for <see cref="NotEnoughData"/>, where the row carries no sample count.</summary>
+    public const string NotEnoughDataShortLabel = "not enough data yet";
+
     /// <summary>What the verdict badge shows for <see cref="NotEnoughData"/>: "not enough data yet (6 samples)".</summary>
     public static string NotEnoughDataLabel(long samples) =>
-        string.Create(System.Globalization.CultureInfo.CurrentCulture, $"not enough data yet ({samples:N0} {(samples == 1 ? "sample" : "samples")})");
+        string.Create(System.Globalization.CultureInfo.CurrentCulture, $"{NotEnoughDataShortLabel} ({samples:N0} {(samples == 1 ? "sample" : "samples")})");
+
+    /// <summary>The words a screen shows for a verdict token: "No Data" for none, "N/A" for a logical server's master, "not enough data yet
+    /// (6 samples)" for <see cref="NotEnoughData"/> (the short form when <paramref name="samples"/> is null), else the token with spaces.
+    /// One place, so the Viewer, Lite and the web page read alike (#6139).</summary>
+    public static string StatusLabel(string? status, long? samples = null) =>
+        string.IsNullOrEmpty(status) ? "No Data"
+        : status == NotApplicable ? NotApplicableLabel
+        : status == NotEnoughData ? (samples is long n ? NotEnoughDataLabel(n) : NotEnoughDataShortLabel)
+        : status.Replace("_", " ");
 
     /// <summary>The sentence shown beside <see cref="NotEnoughData"/>.</summary>
     public static string NotEnoughDataExplanation(long samples) =>
         string.Create(System.Globalization.CultureInfo.CurrentCulture,
             $"The last 24 hours hold {samples:N0} CPU {(samples == 1 ? "sample" : "samples")}; a verdict needs at least {MinSamples:N0}.");
+
+    /// <summary>Stolen memory: (total server memory - buffer pool) / total server memory, in percent; 0 when there is no total.</summary>
+    public static decimal StolenMemoryPercent(double totalServerMemoryMb, double bufferPoolMb) =>
+        totalServerMemoryMb > 0 ? (decimal)((totalServerMemoryMb - bufferPoolMb) / totalServerMemoryMb * 100.0) : 0m;
 
     /// <summary>The tooltip for a Stolen Mem % figure that reads amber or red, so a coloured figure says why; empty when it is not.</summary>
     public static string StolenMemoryNote(double stolenPercent) =>

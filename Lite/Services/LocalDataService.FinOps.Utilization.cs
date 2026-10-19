@@ -131,7 +131,10 @@ LEFT JOIN grants g ON true";
             maxWorkers: maxWorkers,
             currentWorkers: currentWorkers,
             engineEdition: reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
-            edition: reader.IsDBNull(17) ? null : reader.GetString(17));
+            edition: reader.IsDBNull(17) ? null : reader.GetString(17),
+            cpuSamples: reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3)),
+            stolenMemoryPercent: ProvisioningVerdict.StolenMemoryPercent(
+                reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)), reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7))));
 
         return new UtilizationEfficiencyRow
         {
@@ -172,7 +175,8 @@ WITH daily_cpu AS (
         CAST(collection_time AS DATE) AS day,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
+        COUNT(*) AS cpu_samples
     FROM v_cpu_utilization_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -181,6 +185,8 @@ WITH daily_cpu AS (
 daily_mem AS (
     SELECT
         CAST(collection_time AS DATE) AS day,
+        AVG(total_server_memory_mb) AS avg_total_mb,
+        AVG(buffer_pool_mb) AS avg_buffer_pool_mb,
         AVG(CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0)) AS avg_memory_ratio,
         MAX(max_workers_count) AS max_workers_count,
         MAX(current_workers_count) AS current_workers_count
@@ -216,7 +222,10 @@ SELECT
     COALESCE(m.max_workers_count, 0),
     m.current_workers_count,
     sp.engine_edition,
-    sp.edition
+    sp.edition,
+    c.cpu_samples,
+    m.avg_total_mb,
+    m.avg_buffer_pool_mb
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
@@ -250,7 +259,11 @@ ORDER BY c.day";
                 maxWorkers: reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
                 currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)),
                 engineEdition: reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
-                edition: reader.IsDBNull(12) ? null : reader.GetString(12));
+                edition: reader.IsDBNull(12) ? null : reader.GetString(12),
+                cpuSamples: ToInt64(reader.GetValue(13)),
+                stolenMemoryPercent: reader.IsDBNull(14) || reader.IsDBNull(15)
+                    ? null
+                    : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15))));
 
             items.Add(new ProvisioningTrendRow
             {

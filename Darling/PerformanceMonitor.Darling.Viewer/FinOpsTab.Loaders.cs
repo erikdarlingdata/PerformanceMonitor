@@ -262,6 +262,7 @@ public partial class FinOpsTab
             FinOpsAvgCpuBar.Width = FinOpsP95CpuBar.Width = FinOpsMaxCpuBar.Width = 0;
             FinOpsMemoryUtilBar.Width = FinOpsMemoryRatioBar.Width = 0;
             FinOpsMemoryUtilText.Text = FinOpsMemoryRatioText.Text = "-";
+            FinOpsMemoryUtilText.ToolTip = FinOpsMemoryUtilBar.ToolTip = null;
             FinOpsPhysicalMemoryText.Text = FinOpsTargetMemoryText.Text = FinOpsTotalMemoryText.Text = FinOpsBufferPoolText.Text = "-";
             FinOpsClassificationExplanation.Text = "";
             FinOpsUtilizationContent.Visibility = Visibility.Collapsed;
@@ -274,9 +275,7 @@ public partial class FinOpsTab
         FinOpsUtilizationContent.Visibility = Visibility.Visible;
 
         /* An empty status is "no verdict" (no CPU sample in the window), not a blank label. */
-        FinOpsProvisioningStatusText.Text = string.IsNullOrEmpty(data.ProvisioningStatus) ? "No Data"
-            : data.ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel
-            : data.ProvisioningStatus.Replace("_", " ");
+        FinOpsProvisioningStatusText.Text = ProvisioningVerdict.StatusLabel(data.ProvisioningStatus, data.CpuSamples);
         switch (data.ProvisioningStatus)
         {
             case "RIGHT_SIZED":
@@ -318,6 +317,9 @@ public partial class FinOpsTab
         var stolenPct = FinOpsUtilizationFigures.StolenMemoryPct(data.TotalMemoryMb, data.BufferPoolMb);
         FinOpsMemoryUtilText.Text = $"{stolenPct:N0}%";
         SetBar(FinOpsMemoryUtilBar, FinOpsMemUtilFilled, FinOpsMemUtilEmpty, stolenPct);
+        /* A figure that reads amber or red says why (#6139); below amber there is nothing to say. */
+        var stolenNote = ProvisioningVerdict.StolenMemoryNote(stolenPct);
+        FinOpsMemoryUtilText.ToolTip = FinOpsMemoryUtilBar.ToolTip = stolenNote.Length == 0 ? null : stolenNote;
 
         /* Buffer Pool % = Buffer Pool / Physical Memory */
         var bpPct = FinOpsUtilizationFigures.BufferPoolPct(data.BufferPoolMb, data.PhysicalMemoryMb);
