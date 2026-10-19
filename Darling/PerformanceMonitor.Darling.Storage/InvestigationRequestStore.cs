@@ -75,6 +75,7 @@ FROM config.investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
   AND r.practice_of IS NULL
+  AND r.force_check_of IS NULL
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
   AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
@@ -108,6 +109,7 @@ SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
 FROM config.investigation_requests
 WHERE route_id = $1
   AND practice_of IS NULL
+  AND force_check_of IS NULL
   AND opened_at > $2 - interval '1 day'";
 
     internal static readonly string OpenSql = @"
@@ -1359,7 +1361,11 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var followUpTransaction = await connection.BeginTransactionAsync(cancellationToken);
         var followUps = await SweepFollowUpsAsync(connection, followUpTransaction, now, cancellationToken);
         await followUpTransaction.CommitAsync(cancellationToken);
-        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps };
+        /* #5632 step 8: the plan-force checks, in a transaction of their own as well. They read the store and open requests, nothing else. */
+        await using var forceCheckTransaction = await connection.BeginTransactionAsync(cancellationToken);
+        var forceChecks = await SweepForceChecksAsync(connection, forceCheckTransaction, now, cancellationToken);
+        await forceCheckTransaction.CommitAsync(cancellationToken);
+        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps + forceChecks };
     }
 
     /// <summary>

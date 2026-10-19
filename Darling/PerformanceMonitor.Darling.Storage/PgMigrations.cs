@@ -1725,6 +1725,35 @@ CREATE TABLE IF NOT EXISTS collect.query_store_forced_plans (
 CREATE INDEX IF NOT EXISTS idx_query_store_forced_plans_time ON collect.query_store_forced_plans(server_id, collection_time);";
 
     /// <summary>
+    /// V197 (#5632, step 8): the link a plan-force check carries. <c>config.investigation_requests.force_check_of</c> is the
+    /// <c>action_called</c> journal id of the force the check is about, <c>force_check_no</c> its number (1 to 26). Both are null or both
+    /// are set (a CHECK), and the pair is unique where set, so a force has at most one request per check number whatever replays the sweep.
+    /// Not <c>follow_up_of</c>: a request has one follow-up child, and a check must not take the one the agent's own <c>follow_up_at</c> needs.
+    /// <b>No foreign key</b> (the journal id is a plain number, like <c>follow_up_of</c>). Both columns are nullable with no default, so each
+    /// <c>ADD COLUMN</c> is catalog-only and the one unique index is built over a column that is null on every stored row.
+    /// </summary>
+    private const string V197Sql = @"
+ALTER TABLE config.investigation_requests
+    ADD COLUMN IF NOT EXISTS force_check_of bigint,
+    ADD COLUMN IF NOT EXISTS force_check_no smallint;
+
+DO $do$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_investigation_requests_force_check'
+                     AND conrelid = 'config.investigation_requests'::regclass) THEN
+        ALTER TABLE config.investigation_requests
+            ADD CONSTRAINT ck_investigation_requests_force_check CHECK (
+                (force_check_of IS NULL AND force_check_no IS NULL)
+                OR (force_check_of IS NOT NULL AND force_check_no BETWEEN 1 AND 26));
+    END IF;
+END $do$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_requests_force_check
+    ON config.investigation_requests (force_check_of, force_check_no)
+    WHERE force_check_of IS NOT NULL;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2095,6 +2124,7 @@ $rung$;";
         new Migration(194, "query-tag-sightings-database", V194Sql),
         new Migration(195, "query-store-forced-plans", V195Sql),
         new Migration(196, "level-3-server-action-switches", V196Sql),
+        new Migration(197, "plan-force-checks", V197Sql),
     };
 
     /// <summary>

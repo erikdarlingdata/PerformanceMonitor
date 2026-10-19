@@ -327,6 +327,14 @@ BEGIN
             ADD CONSTRAINT ck_investigation_requests_autonomy CHECK (autonomy_level IN (1, 2));
     END IF;
 END $do$;"),
+
+        // /// V197 (#5632): the force-check link columns on the requests. The column is the probe's newest sentinel. The rewind drops the
+        // index, the CHECK and both columns, so a re-run of V197 does everything again. Safe on a store that never had them.
+        new(197, "hasForceChecks",
+            @"
+DROP INDEX IF EXISTS config.uq_investigation_requests_force_check;
+ALTER TABLE IF EXISTS config.investigation_requests DROP CONSTRAINT IF EXISTS ck_investigation_requests_force_check;
+ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS force_check_of, DROP COLUMN IF EXISTS force_check_no;"),
     ];
 
     /// <summary>

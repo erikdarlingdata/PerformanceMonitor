@@ -289,6 +289,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "config.config_server_actions table is created empty, and the migration inserts no row. It does not move the "
             + "lock-wait floor."),
         new(
+            197,
+            SetsTheFloor: false,
+            "CREATE UNIQUE INDEX on config.investigation_requests (#5632, created V184): a partial index over the two columns this rung "
+            + "adds (force_check_of, force_check_no), which are null on every stored row, so the index holds no entry and the build reads "
+            + "the requests table once, a narrow table of at most a year of investigation requests with no payload read. Both ADD COLUMNs "
+            + "are nullable with no default and rewrite nothing, and the CHECK is validated against rows that are all null in both "
+            + "columns. It does not move the lock-wait floor."),
+        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "

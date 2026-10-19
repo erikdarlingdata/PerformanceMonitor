@@ -78,6 +78,13 @@ public static class InvestigationEvents
     /// <summary>The once key of a follow-up's event (#6008): one <c>follow_up</c> row per earlier request, whatever replays the sweep.</summary>
     public static string FollowUpOnceKey(Guid earlierRequestId) => "follow_up:" + earlierRequestId.ToString("D");
 
+    /// <summary>The <c>trigger</c> of the <c>follow_up</c> event a plan-force check opens (#5632, step 8).</summary>
+    public const string ForceCheckTrigger = "force_check";
+
+    /// <summary>The once key of a plan-force check's event: one <c>follow_up</c> row per force (its <c>action_called</c> journal id) and check number.</summary>
+    public static string ForceCheckOnceKey(long calledId, int checkNo) =>
+        "force_check:" + calledId.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + checkNo.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
     /* #6003 review: the detail members each event kind may carry out to the agent route and the long-poll. The writers are
        the service's own, but deadlock_digest has none yet (#6005); follow_up's writer is the follow-up sweep (#6008), and a member nobody listed here is
        dropped at the read, so a later writer cannot put text that was never meant to leave the store on the wire. */
@@ -89,7 +96,7 @@ public static class InvestigationEvents
         [EvidenceReady] = ["sections", "not_collected", "pending"],
         /* #6005: the digest names signatures (a hash) and counts, never object names or statements. */
         [DeadlockDigest] = ["window_hours", "total", "signatures"],
-        [FollowUp] = ["follow_up_of", "trigger"],
+        [FollowUp] = ["follow_up_of", "trigger", "force_check_of", "check_no"],
     };
 
     /// <summary>

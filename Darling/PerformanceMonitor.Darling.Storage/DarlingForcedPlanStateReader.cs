@@ -36,7 +36,7 @@ public enum ForcedPlanState
 }
 
 /// <summary>One plan of the query other than the forced one, with what it did since the force was first seen.</summary>
-public sealed record ForcedPlanOtherPlan(long PlanId, long Executions, DateTime? LastExecution);
+public sealed record ForcedPlanOtherPlan(long PlanId, long Executions, DateTime? LastExecution, DarlingForcedPlanStateReader.Ran? Run = null);
 
 /// <summary>
 /// One force, its state and the evidence behind it. <see cref="Since"/> is the time "after the force" is measured from: the
@@ -56,7 +56,8 @@ public sealed record ForcedPlanFact(
     string? FailureReason,
     long ForcedExecutions,
     DateTime? ForcedLastExecution,
-    IReadOnlyList<ForcedPlanOtherPlan> OtherPlans);
+    IReadOnlyList<ForcedPlanOtherPlan> OtherPlans,
+    DarlingForcedPlanStateReader.Ran? ForcedRun = null);
 
 /// <summary>The newest forced-plan capture of one database inside the window.</summary>
 public sealed record ForcedPlanCapture(string DatabaseName, DateTime NewestCapture, int ForcedPlanCount);
@@ -137,29 +138,101 @@ ORDER BY database_name";
     /// read_from (since clamped to the window, the lower bound of the read). The interval dedupe is the history tool's (#1841): the
     /// collector stores an open interval again every cycle, so only its newest snapshot counts.
     /// </summary>
-    public const string StatsSql = @"
+    public static readonly string StatsSql = @"
 WITH t AS (
     SELECT * FROM unnest($3::text[], $4::bigint[], $5::bigint[], $6::timestamp[], $7::timestamp[])
         AS x(database_name, query_id, forced_plan_id, since, read_from)),
 d AS (
     SELECT t.database_name AS target_database, t.forced_plan_id, t.since, s.plan_id, s.execution_count, s.last_execution_time,
-           ROW_NUMBER() OVER (PARTITION BY t.database_name, t.forced_plan_id, s.plan_id, s.runtime_stats_interval_id, s.first_execution_time, s.execution_type_desc, s.replica_role
+           s.avg_cpu_time_us, s.avg_duration_us, s.max_duration_us, s.first_execution_time,
+           ROW_NUMBER() OVER (PARTITION BY t.database_name, t.forced_plan_id, s.plan_id, " + IntervalIdentity + @"
                               ORDER BY s.collection_time DESC, s.execution_count DESC) AS rn
     FROM t
     JOIN query_store_stats AS s
         ON s.server_id = $1 AND s.database_name = t.database_name AND s.query_id = t.query_id
         AND s.collection_time >= t.read_from AND s.collection_time <= $2)
-SELECT target_database, forced_plan_id, plan_id, SUM(execution_count), MAX(last_execution_time)
+SELECT target_database, forced_plan_id, plan_id, SUM(execution_count), MAX(last_execution_time),
+       " + WeightedAverage("avg_cpu_time_us") + @", " + WeightedAverage("avg_duration_us") + @", MAX(max_duration_us), MIN(first_execution_time)
 FROM d
 WHERE rn = 1 AND last_execution_time > since
 GROUP BY target_database, forced_plan_id, plan_id";
+
+    /// <summary>The columns that identify one Query Store interval of one plan: the dedupe key of every stats read here (#1841).</summary>
+    private const string IntervalIdentity = "s.runtime_stats_interval_id, s.first_execution_time, s.execution_type_desc, s.replica_role";
+
+    /// <summary>The execution-weighted mean of a per-execution average over the counted intervals (#5632, step 8): the sum of average times
+    /// executions over the executions of the rows that carry an average. NULL when no counted row carries one.</summary>
+    private static string WeightedAverage(string column) =>
+        $"SUM({column}::numeric * execution_count) / NULLIF(SUM(execution_count) FILTER (WHERE {column} IS NOT NULL), 0)";
+
+    /// <summary>
+    /// What every plan of one query did in a window that ends at the force (#5632, step 8), with the same interval dedupe as
+    /// <see cref="StatsSql"/>: only the newest stored snapshot of each interval counts, here the newest one collected by the window's end,
+    /// so an interval that was open at the force is counted as it stood at the last collection before it. $1 server, $2 database, $3 query_id,
+    /// $4 window start, $5 window end (both naive UTC, on <c>collection_time</c>). Per plan: executions, execution-weighted CPU and duration
+    /// per execution (microseconds), the largest maximum duration, the start of the earliest interval and the last execution seen.
+    /// </summary>
+    public static readonly string WindowStatsSql = @"
+WITH d AS (
+    SELECT s.plan_id, s.execution_count, s.last_execution_time, s.avg_cpu_time_us, s.avg_duration_us, s.max_duration_us, s.first_execution_time,
+           ROW_NUMBER() OVER (PARTITION BY s.plan_id, " + IntervalIdentity + @"
+                              ORDER BY s.collection_time DESC, s.execution_count DESC) AS rn
+    FROM query_store_stats AS s
+    WHERE s.server_id = $1 AND s.database_name = $2 AND s.query_id = $3 AND s.collection_time >= $4 AND s.collection_time <= $5)
+SELECT plan_id, SUM(execution_count), MAX(last_execution_time),
+       " + WeightedAverage("avg_cpu_time_us") + @", " + WeightedAverage("avg_duration_us") + @", MAX(max_duration_us), MIN(first_execution_time)
+FROM d
+WHERE rn = 1
+GROUP BY plan_id
+ORDER BY SUM(execution_count) DESC, plan_id
+LIMIT 50";
 
     private sealed record Force(
         string Database, long PlanId, long QueryId, string? ForcingType, long FailureCount, string? FailureReason,
         DateTime LastSeen, DateTime FirstSeen, DateTime? Newest);
 
     /// <summary>What a plan did after a force: the executions of its intervals that ended after the force, and the newest of those ends.</summary>
-    public readonly record struct Ran(long Executions, DateTime? LastExecution);
+    public readonly record struct Ran(long Executions, DateTime? LastExecution, double? AvgCpuUs = null, double? AvgDurationUs = null,
+        long? MaxDurationUs = null, DateTime? FirstExecution = null);
+
+    /// <summary>One plan of a query in <see cref="WindowStatsSql"/>'s window.</summary>
+    public sealed record PlanWindow(long PlanId, Ran Run);
+
+    private static Ran ReadRan(NpgsqlDataReader reader, int executions) => new(
+        reader.IsDBNull(executions) ? 0 : (long)reader.GetDecimal(executions),
+        reader.IsDBNull(executions + 1) ? null : reader.GetDateTime(executions + 1),
+        reader.IsDBNull(executions + 2) ? null : (double)reader.GetDecimal(executions + 2),
+        reader.IsDBNull(executions + 3) ? null : (double)reader.GetDecimal(executions + 3),
+        reader.IsDBNull(executions + 4) ? null : reader.GetInt64(executions + 4),
+        reader.IsDBNull(executions + 5) ? null : reader.GetDateTime(executions + 5));
+
+    /// <summary>
+    /// What every plan of one query did from <paramref name="start"/> to <paramref name="end"/> (naive UTC, on the stored rows'
+    /// <c>collection_time</c>), most executions first, at most 50 plans (<see cref="WindowStatsSql"/>).
+    /// </summary>
+    public static async Task<IReadOnlyList<PlanWindow>> ReadWindowAsync(
+        NpgsqlDataSource postgres, int serverId, string database, long queryId, DateTime start, DateTime end,
+        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        var plans = new List<PlanWindow>();
+        await using var command = postgres.CreateCommand(WindowStatsSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(NpgsqlDbType.Text, database);
+        command.Parameters.AddWithValue(NpgsqlDbType.Bigint, queryId);
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* Columns: plan_id, executions, last execution, CPU, duration, max duration, first execution: ReadRan wants them in the stats
+               read's order (executions, last, cpu, duration, max, first), which this select keeps. */
+            plans.Add(new PlanWindow(reader.GetInt64(0), ReadRan(reader, 1)));
+        }
+
+        return plans;
+    }
 
     /// <summary>
     /// The state, from the facts alone. REMOVED first (an absent force has no state to speak of), then FAILING (a failure count or a
@@ -251,8 +324,7 @@ GROUP BY target_database, forced_plan_id, plan_id";
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    ran[(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2))] =
-                        new Ran(reader.IsDBNull(3) ? 0 : (long)reader.GetDecimal(3), reader.IsDBNull(4) ? null : reader.GetDateTime(4));
+                    ran[(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2))] = ReadRan(reader, 3);
                 }
             }
 
@@ -269,14 +341,14 @@ GROUP BY target_database, forced_plan_id, plan_id";
             var inNewest = InNewest(f);
             var others = ran
                 .Where(r => r.Key.Database == f.Database && r.Key.ForcedPlan == f.PlanId && r.Key.Plan != f.PlanId && r.Value.Executions + 1 > 0)
-                .Select(r => new ForcedPlanOtherPlan(r.Key.Plan, r.Value.Executions, r.Value.LastExecution))
+                .Select(r => new ForcedPlanOtherPlan(r.Key.Plan, r.Value.Executions, r.Value.LastExecution, r.Value))
                 .OrderByDescending(o => o.Executions).ThenBy(o => o.PlanId)
                 .ToList();
             ran.TryGetValue((f.Database, f.PlanId, f.PlanId), out var own);
             var state = Classify(inNewest, f.FailureCount, f.FailureReason, others.Count > 0, own.LastExecution is not null);
             facts.Add(new ForcedPlanFact(
                 f.Database, f.QueryId, f.PlanId, state, f.FirstSeen, f.LastSeen, forcedAtValue, since, f.ForcingType,
-                f.FailureCount, f.FailureReason, own.Executions, own.LastExecution, others));
+                f.FailureCount, f.FailureReason, own.Executions, own.LastExecution, others, own.Executions > 0 || own.LastExecution is not null ? own : null));
         }
 
         var perDatabase = facts.Where(f => f.State != ForcedPlanState.Removed).GroupBy(f => f.DatabaseName, StringComparer.Ordinal)
