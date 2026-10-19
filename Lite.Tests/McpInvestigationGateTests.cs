@@ -57,6 +57,9 @@ public sealed class McpInvestigationGateTests
         [McpServerTool(Name = "mute_analysis_finding"), Description("stand-in")]
         public static string Mute() => "muted";
 
+        [McpServerTool(Name = "stand_in_login"), Description("stand-in")]
+        public static string Login() => "{\"rows\":[{\"login_name\":\"CORP\\\\Alice\",\"duration_ms\":5}]}";
+
         [McpServerTool(Name = "stand_in_statement"), Description("stand-in")]
         public static string Statement() =>
             "{\"rows\":[{\"query_text\":\"SELECT * FROM dbo.t WHERE name = '" + Secret + "'\",\"duration_ms\":5}]}";
@@ -67,13 +70,14 @@ public sealed class McpInvestigationGateTests
         "list_investigation_requests", "claim_investigation_request", "submit_investigation_report", "get_investigation_reports",
     };
 
-    private static async Task<TestServer> BuildServer(bool allowWrites, bool allowInvestigations, McpDataDetail dataDetail)
+    private static async Task<TestServer> BuildServer(bool allowWrites, bool allowInvestigations, McpDataDetail dataDetail,
+        IPseudonymKeySource? pseudonymKeys = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
 
-        McpHostService.RegisterMcpServer(builder.Services, allowWrites, allowInvestigations, dataDetail);
+        McpHostService.RegisterMcpServer(builder.Services, allowWrites, allowInvestigations, dataDetail, pseudonymKeys);
         builder.Services.AddMcpServer().WithTools<StandInTools>();
 
         var app = builder.Build();
@@ -237,6 +241,31 @@ public sealed class McpInvestigationGateTests
         var body = await CallAsync(server, "stand_in_statement");
         Assert.DoesNotContain(Secret, body, StringComparison.Ordinal);
         Assert.Contains("dbo.t", body, StringComparison.Ordinal);
+    }
+
+    /* #6066 rule 9, end to end: a real tools/call through the real MCP pipeline and the production filter, with the key
+       source registered by RegisterMcpServer's own parameter. The other key tests call Mask(result, mode, key) directly. */
+    private static string LoginOf(string body)
+    {
+        using var result = JsonDocument.Parse(ResultOf(body).GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!);
+        return result.RootElement.GetProperty("rows")[0].GetProperty("login_name").GetString()!;
+    }
+
+    [Fact]
+    public async Task DataDetailMetadataOnly_ShowsTheKeyedPseudonym_WhenTheSourceIsRegistered()
+    {
+        var key = new PseudonymKey(Enumerable.Range(0, PseudonymKey.Length).Select(i => (byte)i).ToArray());
+        using var server = await BuildServer(false, false, McpDataDetail.MetadataOnly, new FixedPseudonymKeySource(key));
+        string login = LoginOf(await CallAsync(server, "stand_in_login"));
+        Assert.Equal(key.Pseudonym("login", "CORP\\Alice"), login);
+        Assert.Equal("login#5f484746", login);
+    }
+
+    [Fact]
+    public async Task DataDetailMetadataOnly_NumbersPerAnswer_WhenNoSourceIsRegistered()
+    {
+        using var server = await BuildServer(false, false, McpDataDetail.MetadataOnly);
+        Assert.Equal("login#1", LoginOf(await CallAsync(server, "stand_in_login")));
     }
 
     // ---- the two settings ----

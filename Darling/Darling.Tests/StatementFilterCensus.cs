@@ -96,8 +96,10 @@ internal static class StatementFilterCensus
     /// <para><paramref name="gcf"/> pins the host's GCF format (#5320): <c>false</c> (the default) is plain output and
     /// <c>true</c> is GCF on. Neither reads <c>DARLING_OUTPUT_FORMAT</c>, so a class in the <c>DarlingOutputFormatEnv</c>
     /// collection that sets it cannot reach this host. <c>null</c> keeps the production default (the environment variable,
-    /// read on each call), for the test that pins the real wiring.</para></summary>
-    public static async Task<TestServer> BuildHostAsync(bool? gcf = false)
+    /// read on each call), for the test that pins the real wiring.</para>
+    /// <para><paramref name="pseudonymKeys"/> (#6066) is the key source the host registers the way production does: through
+    /// <c>DarlingMcpHostService.RegisterToolServices</c>'s own parameter, not a hand-written registration. Null registers none.</para></summary>
+    public static async Task<TestServer> BuildHostAsync(bool? gcf = false, IPseudonymKeySource? pseudonymKeys = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -118,6 +120,14 @@ internal static class StatementFilterCensus
             baselineCache: sharedBaselines));
         builder.Services.AddSingleton<Microsoft.Extensions.Logging.ILogger>(
             Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        if (pseudonymKeys is not null)
+        {
+            DarlingMcpHostService.RegisterToolServices(
+                builder.Services, postgres, new MonitoredServerRegistryState(), new PostgresConfig(), analyzer: null,
+                planFetcher: null, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, sharedBaselines,
+                ownerSource: null, pseudonymKeys: pseudonymKeys);
+        }
 
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, new ReadLatencyAccumulator(),

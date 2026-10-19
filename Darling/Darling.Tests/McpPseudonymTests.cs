@@ -144,4 +144,33 @@ public sealed class McpPseudonymTests
         string json = masker.Json(node.ToJsonString());
         Assert.Contains(PseudonymTestKey.Login("CORP\\alice"), json, StringComparison.Ordinal);
     }
+
+    /* Rule 9, end to end: a real tools/call through the real MCP pipeline and the production filter, with the key source
+       registered the way production registers it (RegisterToolServices). Every other key test calls Mask(result, mode, key)
+       directly, so none would notice a filter that stopped looking the source up. */
+    [Fact]
+    public async System.Threading.Tasks.Task ARealToolCall_AtMetadataOnly_ShowsTheKeyedPseudonym_WhenTheSourceIsRegistered()
+    {
+        using var server = await StatementFilterCensus.BuildHostAsync(
+            pseudonymKeys: new FixedPseudonymKeySource(PseudonymTestKey.Key));
+        const string raw = "{\"login_name\":\"CORP\\\\Alice\"}";
+
+        var (text, isError) = await StatementFilterCensus.FilterThroughHostAsync(server, raw, dataDetail: McpDataDetail.MetadataOnly);
+
+        Assert.False(isError);
+        Assert.Equal(PseudonymTestKey.Key.Pseudonym("login", "CORP\\Alice"), JsonNode.Parse(text)!["login_name"]!.GetValue<string>());
+        Assert.Equal("login#5f484746", JsonNode.Parse(text)!["login_name"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ARealToolCall_AtMetadataOnly_NumbersPerAnswer_WhenNoSourceIsRegistered()
+    {
+        using var server = await StatementFilterCensus.BuildHostAsync();
+        const string raw = "{\"login_name\":\"CORP\\\\Alice\"}";
+
+        var (text, isError) = await StatementFilterCensus.FilterThroughHostAsync(server, raw, dataDetail: McpDataDetail.MetadataOnly);
+
+        Assert.False(isError);
+        Assert.Equal("login#1", JsonNode.Parse(text)!["login_name"]!.GetValue<string>());
+    }
 }

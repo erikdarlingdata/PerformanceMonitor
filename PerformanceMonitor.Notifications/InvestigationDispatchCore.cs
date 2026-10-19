@@ -54,7 +54,7 @@ public sealed class InvestigationDispatchCore
     /// <param name="openOrJoin">The store's open-or-join (<see cref="IInvestigationRequestStore.OpenOrJoinAsync"/>).</param>
     /// <param name="settings">The live alert settings: the route list and the PagerDuty auto-resolve flag are read per call.</param>
     /// <param name="logger">Where a failure is logged.</param>
-    /// <param name="opened">Called with the route id when a request opens (#6066 aside: #5822); null calls nothing.</param>
+    /// <param name="opened">Called with the route id when a request opens (#5822); null calls nothing.</param>
     /// <param name="keys">#6066: the store's pseudonym key, read when a webhook token's brief is masked at <c>metadataOnly</c>; null numbers per answer.</param>
     public InvestigationDispatchCore(
         Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>> openOrJoin,
