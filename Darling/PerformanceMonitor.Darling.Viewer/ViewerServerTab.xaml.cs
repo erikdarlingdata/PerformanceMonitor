@@ -369,16 +369,31 @@ public partial class ViewerServerTab : UserControl
         try
         {
             var freshness = await _dataService.GetServerFreshnessAsync();
-            ServerFreshnessText.Text = freshness.TryGetValue(_server.ServerId, out var lastUtc)
-                ? $"collected {ViewerTimeHelper.FormatForDisplay(lastUtc, "yyyy-MM-dd HH:mm")}"
-                : ServerSummaryItem.ClassifyFreshness(null, _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline
-                    ? "no collection retained"
-                    : "no data collected yet";
+            ServerFreshnessText.Text = FreshnessLabel(
+                freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
+                _server.RegisteredAt, DateTime.UtcNow);
         }
         catch
         {
             ServerFreshnessText.Text = string.Empty;
         }
+    }
+
+    /// <summary>
+    /// The toolbar's freshness text (#6135): when the newest collection landed, and for a server the Overview card
+    /// calls Offline the same <see cref="FleetRollup.OfflineNote"/> sentence, so a red dot and an old time are not
+    /// all the header says. The offline rule is the card's own, <see cref="ServerSummaryItem.ClassifyFreshness(DateTime?, DateTime?, DateTime)"/>.
+    /// </summary>
+    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc)
+    {
+        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc) == ServerFreshness.Offline;
+        if (lastCollectionUtc is null)
+        {
+            return offline ? "no collection retained" : "no data collected yet";
+        }
+
+        var collected = $"collected {ViewerTimeHelper.FormatForDisplay(lastCollectionUtc.Value, "yyyy-MM-dd HH:mm")}";
+        return offline ? $"{collected}. {FleetRollup.OfflineNote}" : collected;
     }
 
     private async Task LoadInnerTabAsync(int tabIndex)
