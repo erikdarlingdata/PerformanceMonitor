@@ -40,6 +40,8 @@
   <ItemGroup>
     <ProjectReference Include="..\PerformanceMonitor.Darling.Analysis\PerformanceMonitor.Darling.Analysis.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Service\PerformanceMonitor.Darling.Service.csproj" />
+    <!-- #5632 step 6: the server write code; only the tests reference it (the service does not). -->
+    <ProjectReference Include="..\PerformanceMonitor.Darling.Remediation\PerformanceMonitor.Darling.Remediation.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Storage\PerformanceMonitor.Darling.Storage.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Darling.Viewer\PerformanceMonitor.Darling.Viewer.csproj" />
     <!-- SystemHealthParser (the code under test) lives in Common; reference it explicitly rather than

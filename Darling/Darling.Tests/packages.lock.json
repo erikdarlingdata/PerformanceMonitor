@@ -791,6 +791,15 @@
           "PerformanceMonitor.PlanAnalysis": "[3.10.0, )"
         }
       },
+      "performancemonitor.darling.remediation": {
+        "type": "Project",
+        "dependencies": {
+          "Microsoft.Data.SqlClient": "[7.1.1, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[10.0.12, )",
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.10.0, )"
+        }
+      },
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
