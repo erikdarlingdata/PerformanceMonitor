@@ -314,7 +314,8 @@ public sealed class McpPayloadClockFrameDisciplineTests
         ("Lite/Mcp/McpJobTools.cs", ["StartTime"]),
         ("Lite/Mcp/McpBlockingTools.cs",
             ["BlockedLastTranStarted", "BlockingLastTranStarted", "BlockedLastBatchStarted",
-             "BlockingLastBatchStarted", "BlockedLastBatchCompleted", "BlockingLastBatchCompleted"]),
+             "BlockingLastBatchStarted", "BlockedLastBatchCompleted", "BlockingLastBatchCompleted",
+             "BlockingLoginTime", "BlockingLastRequestEndTime"]),
         ("Lite/Mcp/McpObjectStatsTools.cs", ["LastUserAccess"]),
         ("Lite/Mcp/McpPvsTools.cs",
             ["AbortedCleanerStartTime", "AbortedCleanerEndTime", "OffrowCleanerStartTime", "OffrowCleanerEndTime"]),
@@ -459,7 +460,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
             .Count();
         var liteFields = LiteToolSites.Sum(x => x.Properties.Length);
 
-        Assert.Equal(12, darlingFields);
+        Assert.Equal(14, darlingFields);
         Assert.Equal(darlingFields, liteFields);
 
         /* And the overlap is exactly the DMV fallback's two columns — named as a number so that a THIRD read

@@ -76,10 +76,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer; V139 (#3955)
        added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql;
        V155 (#4765) added query_store_stats.interval_end_time_utc beside interval_start_time_utc, so 70 over 71,
-       51 SqlServer; #5640 added attention_events.event_time (a SQL Server XE table), so 71, 52 SqlServer; #5632 added two UTC columns on query_store_forced_plans, so 73, 54 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
+       51 SqlServer; #5640 added attention_events.event_time (a SQL Server XE table), so 71, 52 SqlServer; #5632 added two UTC columns on query_store_forced_plans, so 73, 54 SqlServer; #5632 added blocking_login_time and blocking_last_request_end_time on dmv_blocking_snapshots (SQL Server, server-local), so 75, 56 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
        a column vanish. */
-    private const int TimestampColumnCount = 73;
-    private const int SqlServerTimestampColumnCount = 54;
+    private const int TimestampColumnCount = 75;
+    private const int SqlServerTimestampColumnCount = 56;
     private const int PostgresTimestampColumnCount = 19;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
