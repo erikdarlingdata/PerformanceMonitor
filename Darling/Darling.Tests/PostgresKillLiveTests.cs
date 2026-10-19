@@ -187,8 +187,11 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
 
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, ScramTlsCluster Target, Roles Roles, string Arg, CancellationToken Ct)
     {
-        public Task<string> Kill(string? backendId, bool dryRun, int? session = null) =>
-            DarlingMcpPlanForceTools.RunKillAsync(Source, Source, null, "pg-7", session, null, backendId, Arg, dryRun, Ct);
+        /// <summary>The kill as an agent calls it: backend_id and, unless <paramref name="omitPid"/>, the pid (by default the one inside backend_id).</summary>
+        public Task<string> Kill(string? backendId, bool dryRun, int? session = null, bool omitPid = false) =>
+            DarlingMcpPlanForceTools.RunKillAsync(Source, Source, null, "pg-7",
+                omitPid ? null : session ?? (PostgresBackendId.TryUnpack(backendId, out var pid, out _) ? pid : null),
+                null, backendId, Arg, dryRun, Ct);
 
         public async Task<(NpgsqlConnection Connection, int Pid, string BackendId)> OpenVictimAsync(string? role = null, string? password = null)
         {
@@ -336,6 +339,9 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("done", (string?)json["status"]);
             Assert.Null(json["notice"]);
             Assert.Contains("There is no undo", (string?)json["message"], StringComparison.Ordinal);
+            /* The read after the signal: an idle session in a transaction ends at once, so it is gone when read. */
+            Assert.False((bool)json["still_there"]!);
+            Assert.Contains("signalled to end, and it was gone when read right after", (string?)json["message"], StringComparison.Ordinal);
             Assert.False(await c.AliveAsync(pid));
             Assert.Equal(1, await c.JournalAsync("action_called"));
             Assert.Equal(1, await c.JournalAsync("action_done"));
@@ -369,10 +375,14 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var wrong = PostgresBackendId.Pack(epoch - 1, pid).ToString(CultureInfo.InvariantCulture);
             foreach (var dryRun in new[] { true, false })
             {
-                var json = Parse(await c.Kill(wrong, dryRun));
+                var answer = await c.Kill(wrong, dryRun);
+                var json = Parse(answer);
                 Assert.Equal("refused", (string?)json["status"]);
                 Assert.Equal("session_reused", (string?)json["reason"]);
-                Assert.Equal(id, (string?)json["actual_backend_id"]);
+                /* Nothing about the session that has the pid now: not its id, not its facts. */
+                Assert.Null(json["actual_backend_id"]);
+                Assert.Null(json["session"]);
+                Assert.DoesNotContain(id, answer, StringComparison.Ordinal);
             }
 
             Assert.True(await c.AliveAsync(pid));
@@ -454,8 +464,152 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             foreach (var bad in new[] { null, "", "abc", "-5", "12345", "1.5e9" })
                 Assert.Equal("bad_backend_id", (string?)Parse(await c.Kill(bad, dryRun: false))["reason"]);
             Assert.Equal("bad_backend_id", (string?)Parse(await c.Kill(id, dryRun: false, session: pid + 1))["reason"]);
+            /* The pid is required alongside backend_id, so an id changed on the way is caught rather than naming a neighbour. */
+            foreach (var dryRun in new[] { true, false })
+                Assert.Equal("bad_backend_id", (string?)Parse(await c.Kill(id, dryRun, omitPid: true))["reason"]);
+            /* backend_id one off (what a conversion through a double can do): the pid passed with it no longer agrees. */
+            var nudged = (long.Parse(id, CultureInfo.InvariantCulture) + 1).ToString(CultureInfo.InvariantCulture);
+            Assert.Equal("bad_backend_id", (string?)Parse(await c.Kill(nudged, dryRun: false, session: pid))["reason"]);
             Assert.True(await c.AliveAsync(pid));
+            Assert.Equal(0, await c.JournalAsync("action_called"));
         });
+    }
+
+    [Fact]
+    public async Task AKillWhoseReplyIsLost_AnswersUnknown_JournalsNoFailure_AndTheListSaysResultUnknown()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            /* The real statement runs and ends the backend; then the reply is lost, the way a dropped connection loses it. */
+            PostgresRemediationExecutor.KillStatementSeam.Value = async (command, token) =>
+            {
+                await command.ExecuteScalarAsync(token);
+                throw new NpgsqlException("Exception while reading from stream", new System.IO.IOException("The connection was reset."));
+            };
+            string answer;
+            try
+            {
+                answer = await c.Kill(id, dryRun: false);
+            }
+            finally
+            {
+                PostgresRemediationExecutor.KillStatementSeam.Value = null;
+            }
+
+            var json = Parse(answer);
+            Assert.Equal("unknown", (string?)json["status"]);
+            Assert.Equal("outcome_unknown", (string?)json["reason"]);
+            Assert.Contains("may have ended", (string?)json["message"], StringComparison.Ordinal);
+            Assert.NotNull(json["journal_id"]);
+            Assert.False(await c.AliveAsync(pid));
+            Assert.Equal(1, await c.JournalAsync("action_called"));
+            Assert.Equal(0, await c.JournalAsync("action_failed"));
+            Assert.Equal(0, await c.JournalAsync("action_done"));
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            Assert.Equal(AgentChangeResult.Unknown, change.Result);
+        });
+    }
+
+    [Fact]
+    public async Task AServerErrorOnTheKillStatement_IsAFailure_NotUnknown_AndTheBackendLives()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            /* The server answers with an error instead of running the statement: it did not run, so this is a failure. */
+            PostgresRemediationExecutor.KillStatementSeam.Value = async (command, token) =>
+            {
+                await using var other = new NpgsqlCommand("SELECT 1/0", command.Connection);
+                return await other.ExecuteScalarAsync(token);
+            };
+            string answer;
+            try
+            {
+                answer = await c.Kill(id, dryRun: false);
+            }
+            finally
+            {
+                PostgresRemediationExecutor.KillStatementSeam.Value = null;
+            }
+
+            Assert.Equal("failed", (string?)Parse(answer)["status"]);
+            Assert.True(await c.AliveAsync(pid));
+            Assert.Equal(1, await c.JournalAsync("action_failed"));
+        });
+    }
+
+    [Fact]
+    public async Task ABackendIdThatHoldsTheServersStartTime_IsRefusedNamingTheGrant_NotCalledReused()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            /* The collector's own expression, run as a monitoring login without pg_read_all_stats: backend_start is NULL to it, so the id holds
+               the server's start time. */
+            var monitor = "pmk_mon_" + Guid.NewGuid().ToString("N")[..12];
+            await ExecAsync(c.Admin, $"CREATE ROLE \"{monitor}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
+            try
+            {
+                string collected;
+                await using (var seen = new NpgsqlConnection(c.Target.ConnectionString(monitor, VictimPassword)))
+                {
+                    await seen.OpenAsync(c.Ct);
+                    await using var read = new NpgsqlCommand(CollectorBackendIdSql, seen);
+                    read.Parameters.Add(new NpgsqlParameter { Value = pid, NpgsqlDbType = NpgsqlDbType.Integer });
+                    collected = (string)(await read.ExecuteScalarAsync(c.Ct))!;
+                }
+
+                Assert.NotEqual(id, collected);
+                foreach (var dryRun in new[] { true, false })
+                {
+                    var json = Parse(await c.Kill(collected, dryRun));
+                    Assert.Equal("refused", (string?)json["status"]);
+                    Assert.Equal("backend_id_has_no_session_start", (string?)json["reason"]);
+                    Assert.Contains("pg_read_all_stats", (string?)json["message"], StringComparison.Ordinal);
+                    Assert.DoesNotContain("reused", (string?)json["message"], StringComparison.Ordinal);
+                }
+
+                Assert.True(await c.AliveAsync(pid));
+                Assert.Equal(0, await c.JournalAsync("action_called"));
+            }
+            finally
+            {
+                await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{monitor}'", CancellationToken.None);
+                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{monitor}\"", CancellationToken.None);
+            }
+        });
+    }
+
+    [Fact]
+    public void ASessionWaitingForASynchronousStandby_IsWarnedItsCommitStays_NotThatItRollsBack()
+    {
+        var waiting = new PgKillSessionFacts(43, null, 1_700_000_000, "u", "app", "127.0.0.1", "active", "client backend", "postgres",
+            new DateTime(2026, 10, 19, 12, 0, 0), null, "SyncRep");
+        var warning = Assert.Single(DarlingMcpPlanForceTools.PgKillWarnings(waiting));
+        Assert.Contains("already committed", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("rolls that transaction back", warning, StringComparison.Ordinal);
+        Assert.Contains("rolls that transaction back",
+            Assert.Single(DarlingMcpPlanForceTools.PgKillWarnings(waiting with { WaitEvent = "ClientRead" })), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("57014", true)]
+    [InlineData("57P01", true)]
+    [InlineData("42501", false)]
+    [InlineData("22012", false)]
+    public void AServerErrorResponse_IsAFailure_ExceptACancelOrTheConnectionEnding(string sqlState, bool unknown) =>
+        Assert.Equal(unknown, PostgresRemediationExecutor.IsOutcomeUnknown(new PostgresException("m", "ERROR", "ERROR", sqlState)));
+
+    [Fact]
+    public void ALostConnectionOrATimeout_IsUnknown_AndACancelByTheCallerIsNeither()
+    {
+        Assert.True(PostgresRemediationExecutor.IsOutcomeUnknown(new NpgsqlException("Exception while reading from stream", new TimeoutException())));
+        Assert.True(PostgresRemediationExecutor.IsOutcomeUnknown(new System.IO.IOException("reset")));
+        Assert.False(PostgresRemediationExecutor.IsOutcomeUnknown(new OperationCanceledException()));
     }
 
     /// <summary>

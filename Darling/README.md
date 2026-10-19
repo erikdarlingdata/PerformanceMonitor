@@ -587,15 +587,19 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 
 ### Ending a PostgreSQL session
 
-On a PostgreSQL server the remediation login ends one session with `pg_terminate_backend` (`kill_session`, #5632). The agent names the session by its `backend_id`. `get_pg_blocking` returns it as `root_backend_id`, and `get_pg_session_states` returns it as `backend_id`. It holds the session's start time in whole seconds, then its pid in seven digits.
+On a PostgreSQL server the remediation login ends one session with `pg_terminate_backend` (`kill_session`, #5632). The agent names the session by its `backend_id` and its pid. `get_pg_blocking` returns them as `root_backend_id` and `root_pid`, and `get_pg_session_states` as `backend_id` and `pid`. The `backend_id` holds the session's start time in whole seconds, then its pid in seven digits. The two must agree, or Darling refuses.
 
-Darling checks the pid and the start second in the same statement that ends the session. A pid that the operating system gave to a new session is never ended. A different session would also need the same pid and the same start second. The operating system would have to use up its whole pid space inside one second.
+Darling checks the pid and the start second in the same statement that ends the session. A pid given to a session that started in another second is never ended. This is not a full guarantee. On Linux a pid comes back only after many others have been handed out. On Windows a pid can come back within about a second, so a new session there can have the same pid and the same start second.
+
+If the monitoring login lacks `pg_read_all_stats`, the collector cannot read another role's start time, and it stores the server's start time in `backend_id` instead. Such an id names no session, so Darling refuses it as `backend_id_has_no_session_start`. Grant `pg_read_all_stats` (or `pg_monitor`) to the monitoring login; the ids collected after that work.
 
 The login needs two grants: `pg_signal_backend`, and `pg_read_all_stats` (or `pg_monitor`, which includes it). Without `pg_read_all_stats` the server hides another role's start time. Darling then cannot check the session and refuses. Darling reads what the login can do before it tries. It refuses with `not_permitted` and a message that names the missing grant, and it does not try the kill anyway.
 
 Darling also refuses a session that belongs to a superuser. PostgreSQL lets only a superuser end one, and `pg_signal_backend` does not change that.
 
-Darling ends client sessions only. A background process or a replication sender is refused as `not_user_session`, and Darling's own connection is refused as `own_session`. Ending a session rolls back its open transaction. There is no undo. A kill also needs that server's `kill_session` switch, which is off after an upgrade.
+Darling ends client sessions only. A background process or a replication sender is refused as `not_user_session`, and Darling's own connection is refused as `own_session`. Ending a session rolls back its open transaction. A session that is waiting for a synchronous standby has already committed on the server, so its commit stays. There is no undo.
+
+`pg_terminate_backend` only sends the signal. After a kill Darling reads the session once more and says in `still_there` whether it was still there. If the reply to the kill is lost, for example because the connection drops, the answer is `unknown`: the session may have ended. The agent changes list then shows the kill as "result unknown", not failed. The SQL Server kill answers the same way. A kill also needs that server's `kill_session` switch, which is off after an upgrade.
 
 #### How the remediation login signs in to PostgreSQL
 

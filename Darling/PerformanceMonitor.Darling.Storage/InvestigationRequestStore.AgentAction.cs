@@ -74,13 +74,25 @@ public sealed class ServerChangeSignal
 
     /// <summary>The server accepted the change.</summary>
     public void MarkServerChanged() => _changed = true;
+
+    private volatile bool _unknown;
+
+    /// <summary>True once <see cref="MarkOutcomeUnknown"/> was called.</summary>
+    public bool OutcomeUnknown => _unknown;
+
+    /// <summary>
+    /// The write was sent to the server and its reply was lost, so nobody knows whether the server did it (#5632). The gate then writes no
+    /// result row: the call keeps its <c>action_called</c> alone, which the agent changes list reads as "result unknown". Never
+    /// <c>action_failed</c>, which would say nothing changed, and never <c>action_done</c>, which would say it did.
+    /// </summary>
+    public void MarkOutcomeUnknown() => _unknown = true;
 }
 
 /// <summary>What the gate did (#5912): a refusal, or the change with the <c>action_called</c> row's id and the after image.</summary>
 public sealed record AgentActionResult(AgentActionRefusal? Refusal, long? CalledId, string? AfterJson)
 {
     /// <summary>True when the change was made and journaled <c>action_done</c>.</summary>
-    public bool Done => Refusal is null && CalledId is not null;
+    public bool Done => Refusal is null && CalledId is not null && !OutcomeUnknown;
 
     /// <summary>True when the server accepted the change but the store's own transaction failed, so <c>action_done</c> was written
     /// afterwards on a fresh connection with <c>recorded_late</c> (#5632, step 13).</summary>
@@ -89,6 +101,10 @@ public sealed record AgentActionResult(AgentActionRefusal? Refusal, long? Called
     /// <summary>True when the server accepted the change and the store could not record it at all. The call has <c>action_called</c>
     /// and no result row, so the agent changes list reads "result unknown" (#5632, step 13).</summary>
     public bool JournalMissing { get; init; }
+
+    /// <summary>True when the tool sent the write and lost its reply (<see cref="ServerChangeSignal.MarkOutcomeUnknown"/>): the call has
+    /// <c>action_called</c> and no result row, so the agent changes list reads "result unknown" (#5632).</summary>
+    public bool OutcomeUnknown { get; init; }
 }
 
 public sealed partial class InvestigationRequestStore
@@ -248,6 +264,14 @@ RETURNING journal_id";
 
             requestServerId = request!.ServerId;
             after = await hooks.Write(connection, transaction, cancellationToken);
+            if (signal?.OutcomeUnknown == true && !signal.Changed)
+            {
+                /* The write was sent and its reply was lost (#5632): no result row, so the called row reads "result unknown". The
+                   transaction holds only the re-check's reads, so rolling it back undoes nothing on the server. */
+                await transaction.RollbackAsync(cancellationToken);
+                return new AgentActionResult(null, calledId, null) { OutcomeUnknown = true };
+            }
+
             await JournalReturningAsync(connection, transaction, writeNow, action.RequestId, request.ServerId, "action_done",
                 actor, null,
                 new JsonObject { ["called_id"] = calledId, ["after"] = after is null ? null : JsonNode.Parse(after) }.ToJsonString(),

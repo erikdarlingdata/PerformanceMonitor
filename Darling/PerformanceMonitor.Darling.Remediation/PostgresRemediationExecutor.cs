@@ -25,13 +25,15 @@ namespace PerformanceMonitor.Darling.Remediation;
 /// action, server or object before it reads the secret or opens a connection, and the secret reaches the connection string and nothing else.
 /// <para><b>The identity of the backend.</b> The agent names a backend by the <c>backend_id</c> the collector stores and
 /// <c>get_pg_blocking</c> and <c>get_pg_session_states</c> return: the backend's start time in whole epoch seconds, then its pid
-/// zero-padded to seven digits. The caller unpacks it into <c>pid</c> and <c>startEpoch</c>. <see cref="KillSql"/> checks both in the SAME
-/// statement that terminates, so a pid the operating system gave to a new backend is never signalled. Seconds are enough because for a
-/// different backend to carry the same pid and the same start second, the operating system would have to wrap its whole pid space inside
-/// that one second.</para>
+/// zero-padded to seven digits. The caller unpacks it into <c>pid</c> and <c>startEpoch</c>, and the agent must also pass the pid on its own,
+/// which has to agree. <see cref="KillSql"/> checks both in the SAME statement that terminates, so a pid given to a backend that started in
+/// another second is never signalled. The start second is not a full guarantee: on Linux a pid comes back only after the system has handed
+/// out much of its pid range, but on Windows a pid can come back within about a second, so two backends can share a pid and a start
+/// second there.</para>
 /// <para><b>What is read first.</b> <see cref="FactsSql"/> reads the target's row and what the remediation login may do to it, for a dry run
 /// and before a write, so a refusal can say which grant is missing. It decides nothing about identity on its own: the kill statement does.
-/// When the kill statement matches nothing, <see cref="AfterSql"/> reads the backend AFTER it and says which refusal it was (gone or reused).</para>
+/// When the kill statement matches nothing, <see cref="AfterSql"/> reads the backend AFTER it and says which refusal it was (gone or reused).
+/// When it signalled, the same read runs once, after a short wait, to say whether the backend is still there.</para>
 /// <para>Azure SQL Database kill is not built. This class is PostgreSQL only.</para>
 /// </summary>
 public sealed class PostgresRemediationExecutor
@@ -77,7 +79,9 @@ SELECT a.pid,
        coalesce(r.rolsuper, false) AS target_is_superuser,
        (a.usesysid IS NOT NULL AND pg_catalog.pg_has_role(current_user, a.usesysid, 'USAGE')) AS caller_has_target_role,
        pg_catalog.pg_has_role(current_user, 'pg_signal_backend', 'USAGE') AS caller_has_signal_backend,
-       coalesce((SELECT c.rolsuper FROM pg_catalog.pg_roles AS c WHERE c.rolname OPERATOR(pg_catalog.=) current_user), false) AS caller_is_superuser
+       coalesce((SELECT c.rolsuper FROM pg_catalog.pg_roles AS c WHERE c.rolname OPERATOR(pg_catalog.=) current_user), false) AS caller_is_superuser,
+       a.wait_event,
+       extract(epoch FROM pg_catalog.pg_postmaster_start_time())::bigint AS postmaster_epoch
 FROM pg_catalog.pg_stat_activity AS a
 LEFT JOIN pg_catalog.pg_roles AS r ON r.oid OPERATOR(pg_catalog.=) a.usesysid
 WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
@@ -97,7 +101,7 @@ AND   extract(epoch FROM a.backend_start)::bigint OPERATOR(pg_catalog.=) @start_
 AND   a.backend_type OPERATOR(pg_catalog.=) 'client backend'
 AND   a.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid();";
 
-    /// <summary>Read AFTER a kill statement that signalled nothing: is the pid still there, is it the same start second, and is it a client session.</summary>
+    /// <summary>Read AFTER the kill statement: is the pid still there, is it the same start second, and is it a client session.</summary>
     internal const string AfterSql = @"
 SELECT extract(epoch FROM a.backend_start)::bigint AS start_epoch,
        (a.pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()) AS is_own,
@@ -107,7 +111,20 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
     /// <summary>The backend's row as <see cref="FactsSql"/> reads it, with what the login may do to it.</summary>
     internal sealed record PgBackendRow(
-        PgKillSessionFacts Facts, int OwnPid, bool TargetIsSuperuser, bool CallerHasTargetRole, bool CallerHasSignalBackend, bool CallerIsSuperuser);
+        PgKillSessionFacts Facts, int OwnPid, bool TargetIsSuperuser, bool CallerHasTargetRole, bool CallerHasSignalBackend, bool CallerIsSuperuser,
+        long? PostmasterEpoch = null);
+
+    /// <summary>
+    /// How long the read after a kill that signalled waits first. pg_terminate_backend only sends the signal; an idle backend is gone a few
+    /// milliseconds later, so a read with no wait would nearly always still find it.
+    /// </summary>
+    internal static readonly TimeSpan StillThereWait = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// The test seam for the kill statement (#5632): null runs it with <c>ExecuteScalarAsync</c>. A test sets it, for its own async flow only,
+    /// to run the real statement and then lose the reply, the way a dropped connection would.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<NpgsqlCommand, CancellationToken, Task<object?>>?> KillStatementSeam = new();
 
     /// <summary>
     /// Kills one backend, only when it is still the backend the caller named: the same pid and the same start second. A dry run reads and decides and
@@ -156,7 +173,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
                 await using var kill = new NpgsqlCommand(KillSql, connection) { CommandTimeout = 30 };
                 kill.Parameters.Add(new NpgsqlParameter("pid", NpgsqlDbType.Integer) { Value = pid });
                 kill.Parameters.Add(new NpgsqlParameter("start_epoch", NpgsqlDbType.Bigint) { Value = startEpoch });
-                var answer = await kill.ExecuteScalarAsync(ct);
+                var answer = KillStatementSeam.Value is { } seam ? await seam(kill, ct) : await kill.ExecuteScalarAsync(ct);
                 terminated = answer is bool flag ? flag : null;
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
@@ -165,9 +182,25 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
                 return Log(RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotPermitted,
                     $"The server says the remediation login may not end backend {pid}. It needs the pg_signal_backend role, or membership in the role that owns the session, and only a superuser can end a superuser's session. Nothing was run.") with { PgSession = facts });
             }
+            catch (Exception ex) when (IsOutcomeUnknown(ex))
+            {
+                /* The statement was sent and its reply was lost: the server may have ended the backend. Never reported as failed (#5632). */
+                return Log(RemediationResult.Unknown(name,
+                    $"The kill statement for backend {pid} was sent, but its reply was lost ({SqlServerRemediationExecutor.Scrub(ex.GetType().Name + ": " + ex.Message, login)}). Backend {pid} may have ended. Read get_pg_session_states to see whether it is still there before you try again.")
+                    with { PgSession = facts });
+            }
 
             if (terminated == true)
-                return Log(RemediationResult.Done(name, dryRun, wrote: true, $"Backend {pid} was ended.") with { PgSession = facts });
+            {
+                var stillThere = await StillThereAsync(connection, pid, startEpoch, ct);
+                var message = stillThere switch
+                {
+                    false => $"Backend {pid} was signalled to end, and it was gone when read right after.",
+                    true => $"Backend {pid} was signalled to end, and it was still there when read right after. It ends when it next checks for the signal; read get_pg_session_states to see it go.",
+                    null => $"Backend {pid} was signalled to end. Whether it is gone was not read; read get_pg_session_states to see it go.",
+                };
+                return Log(RemediationResult.Done(name, dryRun, wrote: true, message) with { PgSession = facts, PgStillThere = stillThere });
+            }
 
             /* Nothing matched, or the server did not take the signal: read AFTER the statement and say which. */
             return Log(await AfterAsync(connection, name, pid, startEpoch, facts, ct));
@@ -214,6 +247,36 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
         }
     }
 
+    /// <summary>
+    /// True for an error that came after the kill statement was sent and is not the server refusing the statement: a lost or closed connection,
+    /// a timeout, the statement cancelled (57014), or its connection ended by the server (57P01 to 57P03). The server may have run it. Any other
+    /// server error response, such as 42501, means the statement did not run.
+    /// </summary>
+    internal static bool IsOutcomeUnknown(Exception ex) => ex switch
+    {
+        OperationCanceledException => false,
+        PostgresException pg => pg.SqlState is PostgresErrorCodes.QueryCanceled or PostgresErrorCodes.AdminShutdown
+            or PostgresErrorCodes.CrashShutdown or PostgresErrorCodes.CannotConnectNow,
+        _ => true,
+    };
+
+    /// <summary>The one read after a kill that signalled: true when the same backend is still there. Null when the read failed; it never turns a kill into an error.</summary>
+    private static async Task<bool?> StillThereAsync(NpgsqlConnection connection, int pid, long startEpoch, CancellationToken ct)
+    {
+        try
+        {
+            await Task.Delay(StillThereWait, ct);
+            await using var command = new NpgsqlCommand(AfterSql, connection) { CommandTimeout = 30 };
+            command.Parameters.Add(new NpgsqlParameter("pid", NpgsqlDbType.Integer) { Value = pid });
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            return await reader.ReadAsync(ct) && !reader.IsDBNull(0) && reader.GetInt64(0) == startEpoch;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>What the remediation connection needs from the server's sign-in, and what to change when the server does not offer it.</summary>
     internal const string SignInRule =
         "The remediation login signs in with SCRAM-SHA-256 only (set password_encryption = 'scram-sha-256', set the login's password again, "
@@ -248,8 +311,10 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             reader.IsDBNull(7) ? null : reader.GetString(7),
             reader.IsDBNull(8) ? null : reader.GetString(8),
             reader.IsDBNull(9) ? null : reader.GetFieldValue<DateTime>(9),
-            reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTime>(10));
-        return new PgBackendRow(facts, reader.GetInt32(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15));
+            reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTime>(10),
+            reader.IsDBNull(16) ? null : reader.GetString(16));
+        return new PgBackendRow(facts, reader.GetInt32(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15),
+            reader.IsDBNull(17) ? null : reader.GetInt64(17));
     }
 
     private static async Task<RemediationResult> AfterAsync(NpgsqlConnection connection, string name, int pid, long startEpoch, PgKillSessionFacts facts, CancellationToken ct)
@@ -288,8 +353,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
         if (actualEpoch != startEpoch)
         {
             return RemediationResult.Refused(name, false, RemediationResult.Reasons.SessionReused,
-                $"Backend {pid} is now a different session: it has another start time, so the server reused the pid. Nothing was run.")
-                with { PgSession = facts with { BackendStartEpoch = actualEpoch, BackendStartUtc = null } };
+                $"Backend {pid} is now a different session: it has another start time, so the server reused the pid. Nothing was run.");
         }
 
         if (backendType is not null && !string.Equals(backendType, "client backend", StringComparison.Ordinal))
@@ -303,7 +367,8 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
     /// <summary>
     /// The decision before the kill statement, for a dry run and a write alike. Null means every check passed. Pure, so a test needs no server.
-    /// The order: gone, own session, a start time the login cannot see, reused, not a client backend, then what the login may do to the backend.
+    /// The order: gone, own session, a start time the login cannot see, a backend_id that holds the server's start time, reused, not a client
+    /// backend, then what the login may do to the backend. A reused pid answers nothing about the session that has it now.
     /// </summary>
     internal static RemediationResult? KillRefusal(string name, bool dryRun, int pid, long startEpoch, PgBackendRow? row)
     {
@@ -318,10 +383,18 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
                 $"The remediation login cannot see the details of backend {pid} (its start time), so Darling cannot check that it is still the backend you named. Grant it the pg_read_all_stats role (or pg_monitor), or sign in as the role that owns the session. Nothing was run.");
         }
 
+        if (actual != startEpoch && row.PostmasterEpoch == startEpoch)
+        {
+            /* The collector falls back to the server's start time when backend_start is NULL, which is what the monitoring login sees
+               without pg_read_all_stats. Such an id names no session, so "reused" would be wrong. */
+            return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.BackendIdHoldsServerStart,
+                $"This backend_id holds the server's start time, not the start time of backend {pid}: the monitoring login could not read the session's start time when it was collected, so the id cannot name a session. Grant pg_read_all_stats (or pg_monitor) to the monitoring login; the ids collected after that name sessions. Nothing was run.");
+        }
+
         if (actual != startEpoch)
         {
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionReused,
-                $"Backend {pid} is now a different session: it has another start time, so the server reused the pid. Nothing was run.") with { PgSession = facts };
+                $"Backend {pid} is now a different session: it has another start time, so the server reused the pid. Nothing was run.");
         }
 
         if (!string.Equals(facts.BackendType, "client backend", StringComparison.Ordinal))
@@ -370,8 +443,11 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 /// </summary>
 public sealed record PgKillSessionFacts(
     int Pid, DateTime? BackendStartUtc, long? BackendStartEpoch, string? UserName, string? ApplicationName, string? ClientAddr, string? State,
-    string? BackendType, string? DatabaseName, DateTime? XactStartUtc, DateTime? StateChangeUtc)
+    string? BackendType, string? DatabaseName, DateTime? XactStartUtc, DateTime? StateChangeUtc, string? WaitEvent = null)
 {
+    /// <summary>True when the backend waits for a synchronous standby to confirm its commit: its transaction has already committed on this server.</summary>
+    public bool WaitsForSyncReplication => string.Equals(WaitEvent, "SyncRep", StringComparison.Ordinal);
+
     /// <summary>The collector's synthetic id for this backend: its start epoch in seconds, then the pid zero-padded to seven digits. Null when the start time is not visible or the pid has more than seven digits.</summary>
     public string? BackendId => BackendStartEpoch is { } epoch && Pid is > 0 and <= PostgresBackendId.MaxPid
         ? PostgresBackendId.Pack(epoch, Pid).ToString(CultureInfo.InvariantCulture)

@@ -164,10 +164,14 @@ public sealed partial class PlanForceToolLiveTests
             var other = victim with { LoginLocal = victim.LoginLocal.AddSeconds(5) };
             foreach (var dryRun in new[] { true, false })
             {
-                var json = Parse(await KillAsync(c, victim.SessionId, UtcText(other, offset), dryRun));
+                var answer = await KillAsync(c, victim.SessionId, UtcText(other, offset), dryRun);
+                var json = Parse(answer);
                 Assert.Equal("refused", (string?)json["status"]);
                 Assert.Equal("session_reused", (string?)json["reason"]);
-                Assert.Equal(UtcText(victim, offset), (string?)json["actual_login_time"]);
+                /* Nothing about the session that has the id now: not its login time, not its facts. */
+                Assert.Null(json["actual_login_time"]);
+                Assert.Null(json["session"]);
+                Assert.DoesNotContain(UtcText(victim, offset), answer, StringComparison.Ordinal);
             }
 
             Assert.True(await SessionAliveAsync(c, victim));
@@ -175,6 +179,50 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal(0, await JournalActionRowsAsync(c));
             /* A refusal is journaled once per request, tool, code and hour, so two refused calls leave one row. */
             Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'session_reused'", c.Ct));
+        });
+    }
+
+    [Fact]
+    public async Task AKillWhoseReplyIsLost_AnswersUnknown_JournalsNoFailure_AndTheListSaysResultUnknown()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            /* The real batch runs and kills the session; then the reply is lost, the way a dropped connection loses it. */
+            PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.KillBatchSeam.Value = async (command, token) =>
+            {
+                await using (var reader = await command.ExecuteReaderAsync(token))
+                    while (await reader.ReadAsync(token))
+                    {
+                    }
+
+                throw new System.IO.IOException("The connection was reset.");
+            };
+            string answer;
+            try
+            {
+                answer = await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: false);
+            }
+            finally
+            {
+                PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.KillBatchSeam.Value = null;
+            }
+
+            var json = Parse(answer);
+            Assert.Equal("unknown", (string?)json["status"]);
+            Assert.Equal("outcome_unknown", (string?)json["reason"]);
+            Assert.Contains("may have been killed", (string?)json["message"], StringComparison.Ordinal);
+            for (var i = 0; i < 50 && await SessionAliveAsync(c, victim); i++)
+                await Task.Delay(100, c.Ct);
+            Assert.False(await SessionAliveAsync(c, victim));
+            Assert.Single(await RowsAsync(c, "action_called"));
+            Assert.Empty(await RowsAsync(c, "action_failed"));
+            Assert.Empty(await RowsAsync(c, "action_done"));
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            Assert.Equal(AgentChangeResult.Unknown, change.Result);
+            AssertNoSecret(c, answer, await JournalTextAsync(c));
         });
     }
 
@@ -233,7 +281,7 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     [Fact]
-    public async Task AKillOnAPostgreSqlTarget_IsRefusedPostgresTarget_NamesPostgreSql_AndNothingReachesAnyTarget()
+    public async Task AKillOnAPostgreSqlTarget_WithSqlServerArguments_IsRefusedBadBackendId_AndNothingReachesAnyTarget()
     {
         await RunAsync(Without.Nothing, async c =>
         {
@@ -242,19 +290,17 @@ public sealed partial class PlanForceToolLiveTests
             await SeedClockAsync(c);
             foreach (var dryRun in new[] { true, false })
             {
+                /* A PostgreSQL target is named by backend_id and pid; a session id and a login time alone name nothing there. */
                 var answer = await KillAsync(c, victim.SessionId, UtcText(victim, 0), dryRun, server: "srv-8");
                 var json = Parse(answer);
                 Assert.Equal("refused", (string?)json["status"]);
-                Assert.Equal("postgres_target", (string?)json["reason"]);
-                var message = (string?)json["message"];
-                Assert.Contains("PostgreSQL", message, StringComparison.Ordinal);
-                Assert.Contains("NOT built", message, StringComparison.Ordinal);
-                Assert.Contains("nothing was run", message, StringComparison.Ordinal);
+                Assert.Equal("bad_backend_id", (string?)json["reason"]);
+                Assert.Contains("Nothing was run", (string?)json["message"], StringComparison.Ordinal);
             }
 
             Assert.True(await SessionAliveAsync(c, victim));
             Assert.Equal(0, await JournalActionRowsAsync(c));
-            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'postgres_target'", c.Ct));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'bad_backend_id'", c.Ct));
         });
     }
 

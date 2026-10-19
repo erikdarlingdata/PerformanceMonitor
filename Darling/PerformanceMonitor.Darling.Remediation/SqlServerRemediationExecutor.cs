@@ -372,7 +372,43 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = sessionId });
             command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = DateTime.SpecifyKind(loginTime, DateTimeKind.Unspecified) });
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dryRun });
-            await using var reader = await command.ExecuteReaderAsync(ct);
+            try
+            {
+                return await ReadKillAnswerAsync(command, name, dryRun, sessionId, ct);
+            }
+            catch (Exception ex) when (!dryRun && IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested))
+            {
+                /* The batch was sent and its reply was lost: the server may have run the KILL. Never reported as failed (#5632). */
+                var detail = secret.Length == 0 ? ex.Message : ex.Message.Replace(secret, "***", StringComparison.Ordinal);
+                return RemediationResult.Unknown(name,
+                    $"The kill batch for session {sessionId} was sent, but its reply was lost ({ex.GetType().Name}: {detail}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again.");
+            }
+        }, ct);
+    }
+
+    /// <summary>
+    /// The test seam for the kill batch (#5632): null runs it with <c>ExecuteReaderAsync</c>. A test sets it, for its own async flow only, to run
+    /// the real batch and then lose the reply, the way a dropped connection would.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<SqlCommand, CancellationToken, Task<SqlDataReader>>?> KillBatchSeam = new();
+
+    /// <summary>
+    /// True for an error that came after the kill batch was sent and is not the server refusing a statement: a broken connection (the
+    /// connection is no longer open, or the error is severity 20 or higher), a timeout (-2), a cancel, or an error that is not a
+    /// <see cref="SqlException"/> at all. The server may have run the KILL. An error the server sent on a connection that is still open
+    /// means the batch stopped there.
+    /// </summary>
+    internal static bool IsOutcomeUnknown(Exception ex, bool connectionOpen, bool cancelled) => ex switch
+    {
+        OperationCanceledException => false,
+        SqlException sql => !connectionOpen || cancelled || sql.Number == -2 || sql.Class >= 20,
+        _ => true,
+    };
+
+    private static async Task<RemediationResult> ReadKillAnswerAsync(SqlCommand command, string name, bool dryRun, int sessionId, CancellationToken ct)
+    {
+        {
+            await using var reader = !dryRun && KillBatchSeam.Value is { } seam ? await seam(command, ct) : await command.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct))
                 return RemediationResult.Failed(name, dryRun, "The server returned no answer to the session check.");
             var outcome = reader.IsDBNull(0) ? null : reader.GetString(0);
@@ -394,7 +430,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
             double? percent = reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
             return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent);
-        }, ct);
+        }
     }
 
     /// <summary>
@@ -423,7 +459,8 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             _ => RemediationResult.Failed(name, dryRun, "The server returned an answer to the session check that this code does not know. Nothing is known to have run."),
         };
 
-        result = result with { Session = facts };
+        /* A reused id answers nothing about the session that has it now (#5632). */
+        result = result with { Session = outcome == KillOutcomes.SessionReused ? null : facts };
         if (outcome == KillOutcomes.Killed)
         {
             var inProgress = rollbackCommand is not null && rollbackCommand.StartsWith("KILLED/ROLLBACK", StringComparison.OrdinalIgnoreCase);
