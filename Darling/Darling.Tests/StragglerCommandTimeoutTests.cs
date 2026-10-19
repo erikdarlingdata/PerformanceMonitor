@@ -50,6 +50,7 @@ namespace Darling.Tests;
 /// <c>StatementSpanFrom(..., statements: 2)</c> is satisfiable by a neighbouring timed construction in a
 /// <c>using (...) { …; }</c> block, and two of the six HypoPG sites are written in exactly that shape.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StragglerCommandTimeoutTests
 {
     /// <summary>Which hop a file's commands address, so the deadline can be checked against the right one.</summary>

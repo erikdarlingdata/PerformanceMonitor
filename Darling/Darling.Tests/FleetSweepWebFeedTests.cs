@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// <see cref="AlertTrayStatusLoggedTests"/> idiom, including its strict object-literal parser so a
 /// shape the parser cannot read fails loudly rather than comparing less.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FleetSweepWebFeedTests
 {
     /* ---- span binding: validated, refusing, and the same authority as the MCP surface ---------------- */

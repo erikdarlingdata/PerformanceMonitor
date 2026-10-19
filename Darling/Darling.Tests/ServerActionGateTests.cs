@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// request keeps every Level 2 rule and adds one sentence, the credential slots are classified by prefix only, and darling.json cannot
 /// carry a route level or a switch into the config.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerActionLevelThreeTests
 {
     [Theory]
