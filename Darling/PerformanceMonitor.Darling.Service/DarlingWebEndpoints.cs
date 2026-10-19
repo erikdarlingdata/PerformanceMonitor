@@ -340,7 +340,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -650,7 +650,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapMuteRules(app, postgres, logger);
         MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapThresholdOverrides(app, postgres, logger);
-        MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger);
+        MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource);
         MapServerTags(app, postgres, logger);
         MapAdminServers(app, postgres);
         MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
@@ -1369,7 +1369,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// refusal ("changed since", name taken, already undone, no undo) and 400 for a bad body or login. Journal text goes through
     /// <c>InvestigationFieldMasking.JournalDetail</c> at the web's level (full, as the other web reads of the journal).
     /// </summary>
-    private static void MapAgentChanges(WebApplication app, AgentChangeUndo changes, ILogger logger)
+    private static void MapAgentChanges(WebApplication app, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource = null)
     {
         app.MapGet("/api/agent-changes", async (HttpContext context) =>
         {
@@ -1425,6 +1425,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var login = NoteDecider(DarlingWebSeat.FromContext(context));
             try
             {
+                /* #5632 step 9: a plan force or unforce is undone by the service's plan force code, which reads the server first. The first request
+                   (no confirm) answers the statement and the state and writes nothing; {"confirm": true, "statement": "<shown>"} writes. */
+                if ((await changes.GetAsync(id, context.RequestAborted))?.IsPlanChange == true)
+                {
+                    return await UndoPlanChangeAsync(context, changes, ownerSource, logger, id, login, stopwatch);
+                }
+
                 var result = await changes.UndoAsync(id, login, context.RequestAborted);
                 if (result.Undone)
                 {
@@ -1485,6 +1492,60 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
+    }
+
+    /// <summary>
+    /// A person's undo of a plan force or unforce (#5632, step 9). 200 <c>{status: "confirm", statement, state, message}</c> without a confirm
+    /// (nothing written); 200 <c>{status: "undone", ...}</c> with <c>{"confirm": true}</c>; a refusal is 409 <c>{error, code}</c> (404 for
+    /// <c>not_found</c>); a server that took no write is 502. A viewer-role store is 403 before anything else, as the store kinds' undo answers it.
+    /// </summary>
+    private static async Task<IResult> UndoPlanChangeAsync(HttpContext context, AgentChangeUndo changes, StoreOwnerSource? ownerSource, ILogger logger,
+        long id, string login, Stopwatch stopwatch)
+    {
+        const string route = "/api/agent-changes/{id}/undo";
+        if (!await changes.CanDecideAsync(context.RequestAborted))
+        {
+            return AgentChangeRefusedResult();
+        }
+
+        var confirm = false;
+        string? shown = null;
+        var raw = await ReadBodyAsync(context);
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            try
+            {
+                if (JsonNode.Parse(raw) is not JsonObject body)
+                {
+                    return ErrorResult("Send {} or {\"confirm\": true, \"statement\": \"<the statement shown>\"}.", StatusCodes.Status400BadRequest);
+                }
+
+                confirm = body["confirm"] is JsonValue flag && flag.TryGetValue(out bool yes) && yes;
+                shown = body["statement"] is JsonValue text && text.TryGetValue(out string? sentence) ? sentence : null;
+            }
+            catch (JsonException)
+            {
+                return ErrorResult("The request body is not valid JSON.", StatusCodes.Status400BadRequest);
+            }
+        }
+
+        var answer = await Mcp.DarlingMcpPlanForceTools.UndoPlanChangeAsync(changes, ownerSource?.Read(), logger, id, login, confirm, shown, context.RequestAborted);
+        if (answer.Succeeded)
+        {
+            return DarlingWebStatementSweep.JsonText(answer.ToJson(), route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+        }
+
+        var body2 = new JsonObject { ["error"] = answer.Message, ["code"] = answer.Code, ["status"] = answer.Status };
+        if (answer.State is not null)
+        {
+            body2["state"] = answer.State.DeepClone();
+        }
+
+        return DarlingWebStatementSweep.JsonText(body2, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted,
+            answer.Code == "not_found" ? StatusCodes.Status404NotFound
+            : answer.Code == "bad_login" ? StatusCodes.Status400BadRequest
+            : answer.Status == PlanUndoAnswer.Failed ? StatusCodes.Status502BadGateway
+            : StatusCodes.Status409Conflict);
     }
 
     /// <summary>The most calls and refusals the Agent changes list answers.</summary>

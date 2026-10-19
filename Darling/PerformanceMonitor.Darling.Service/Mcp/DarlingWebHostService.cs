@@ -153,8 +153,12 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>The live monitored-server registry, so the read tools scope an Azure master target's blocking and deadlock facts per call.</summary>
     private readonly MonitoredServerRegistryState? _registryState;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null)
+    /* #5632 step 9: the worker's store owner data source, for the plan undo route only (it reads one server's remediation slot). */
+    private readonly StoreOwnerSource? _ownerSource;
+
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null)
     {
+        _ownerSource = ownerSource;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _registryState = registryState;
@@ -1449,7 +1453,7 @@ public sealed class DarlingWebHostService : BackgroundService
             });
         }
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes
