@@ -1963,6 +1963,23 @@ BEGIN
    GRANT INSERT ON config.investigation_request_alerts TO admin;
 END $do$;
 
+-- 3j2. The per-server action switches (V196, #5632 step 5), mirroring managed provisioning's section 10e2. Every role reads them and
+--     NO role but the store owner (the service) writes them: REVOKE ALL ... CASCADE takes every privilege (the default privileges
+--     would give admin INSERT/UPDATE/DELETE on a table made after them), and SELECT goes back to all three. No MCP tool, web route or
+--     darling.json key can turn a switch on. The table is created by V196: on a store below it the block warns and skips, so the
+--     rest of the script still runs; re-run the script once the service has migrated the store to V196.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.config_server_actions') IS NULL THEN
+      RAISE WARNING 'The per-server action switch table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.config_server_actions FROM PUBLIC, admin, viewer, mcp CASCADE;
+   GRANT SELECT ON config.config_server_actions TO admin, viewer;
+   GRANT SELECT ON config.config_server_actions TO mcp;
+END $do$;
+
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
 --     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
 --     them), so mcp holds only DELETE on the map, which remove_server runs to clear a removed server's map rows (a server_id is

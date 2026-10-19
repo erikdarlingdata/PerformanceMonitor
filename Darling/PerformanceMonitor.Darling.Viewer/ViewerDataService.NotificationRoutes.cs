@@ -364,9 +364,9 @@ WHERE route_id = $1";
             return "A route cannot be its own fallback route.";
         }
 
-        if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct))
+        if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct))
         {
-            return "The agent channel is Inherit, Off, Investigate or Act.";
+            return "The agent channel is Inherit, Off, Investigate, Act or Act on servers.";
         }
 
         return ValidateAgentLimit("Requests per hour", row.AgentMaxPerHour, NotificationRoute.MinAgentMaxPerHour, NotificationRoute.MaxAgentMaxPerHour)
@@ -550,7 +550,7 @@ public sealed class NotificationRouteRow
             var channels = new List<string>(ConfiguredChannels);
             if (AgentLevel is { } level)
             {
-                channels.Add(level is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct ? "agent" : "agent off");
+                channels.Add(level is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct ? "agent" : "agent off");
             }
 
             return channels.Count == 0 ? "—" : string.Join(", ", channels);
@@ -563,6 +563,7 @@ public sealed class NotificationRouteRow
         null => "Inherit",
         NotificationRoute.AgentLevelInvestigate => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Investigate ({AgentMaxPerHour}/h, {AgentMaxPerDay}/day)"),
         NotificationRoute.AgentLevelAct => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Act ({AgentMaxPerHour}/h, {AgentMaxPerDay}/day)"),
+        NotificationRoute.AgentLevelServerAct => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Act on servers ({AgentMaxPerHour}/h, {AgentMaxPerDay}/day)"),
         _ => "Off",
     };
 

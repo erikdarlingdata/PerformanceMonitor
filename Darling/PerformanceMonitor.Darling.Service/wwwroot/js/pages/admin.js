@@ -283,6 +283,7 @@ export function routeAgentText(r) {
   if (!r || r.agent_level === null || r.agent_level === undefined) return "Inherit";
   if (r.agent_level === 1) return `Investigate (${r.agent_max_per_hour}/h, ${r.agent_max_per_day}/day)`;
   if (r.agent_level === 2) return `Act (${r.agent_max_per_hour}/h, ${r.agent_max_per_day}/day)`;
+  if (r.agent_level === 3) return `Act on servers (${r.agent_max_per_hour}/h, ${r.agent_max_per_day}/day)`;
   return "Off";
 }
 

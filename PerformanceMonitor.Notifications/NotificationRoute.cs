@@ -122,6 +122,13 @@ public sealed record NotificationRoute(
     /// takes the lowest level among them.</summary>
     public const int AgentLevelAct = 2;
 
+    /// <summary>The agent level that opens Level 3 requests (#5632, step 5): everything Level 2 allows, and, once a server action exists,
+    /// an action on the monitored server. A Level 3 route alone does not allow one: each action also needs that server's own switch
+    /// (off until a person turns it on), the server's remediation login given as an <c>env:</c> or <c>file:</c> reference, and the
+    /// service's <c>agent_actions_enabled</c>. No server action exists yet. A request opened by alerts from several routes takes the
+    /// lowest level among them.</summary>
+    public const int AgentLevelServerAct = 3;
+
     /// <summary>Default and bounds of <see cref="AgentMaxPerHour"/> (#5632, ruling R6). The store CHECK holds the same bounds.</summary>
     public const int DefaultAgentMaxPerHour = 20, MinAgentMaxPerHour = 1, MaxAgentMaxPerHour = 60;
 

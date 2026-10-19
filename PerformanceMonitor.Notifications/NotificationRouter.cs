@@ -241,7 +241,7 @@ public static class NotificationRouter
     /// The route whose agent channel answers for one firing (#5632), or null when no investigation is due. Reuses
     /// <see cref="Resolve"/>'s order (scope tier, metric level, deeper tag, route id): the FIRST matching route whose
     /// <see cref="NotificationRoute.AgentLevel"/> is set answers. Level <see cref="NotificationRoute.AgentLevelInvestigate"/>
-    /// or <see cref="NotificationRoute.AgentLevelAct"/> (#5912) returns that route (its limits, lease and expiry are the ones that apply); level
+    /// or <see cref="NotificationRoute.AgentLevelAct"/> (#5912) or <see cref="NotificationRoute.AgentLevelServerAct"/> (#5632, Level 3) returns that route (its limits, lease and expiry are the ones that apply); level
     /// <see cref="NotificationRoute.AgentLevelOff"/> stops the lookup and returns null, so a specific route can turn
     /// investigations off for metrics a broader route sends to agents. A route with no level is transparent, as a
     /// route with no destination is for a channel. There is no parent default: no route, no investigation.
@@ -260,7 +260,7 @@ public static class NotificationRouter
         {
             if (route.AgentLevel is { } level)
             {
-                return level is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct ? route : null;
+                return level is NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct ? route : null;
             }
         }
 

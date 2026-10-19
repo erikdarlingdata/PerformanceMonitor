@@ -291,6 +291,35 @@ public sealed record AgentAction(Guid RequestId, Guid ClaimId, string AgentId, s
 /// <summary>What a Level 2 change targets (#5912): the server, the object's id when it has one, and the database.</summary>
 public sealed record AgentActionTarget(int ServerId, string ServerName, string? Id, string? Database);
 
+/// <summary>
+/// The fixed list of server actions (#5632, step 5), the words of <c>config.config_server_actions.action</c>'s CHECK. Nothing
+/// implements one yet: step 7 (<c>force_plan</c>), step 10 (<c>evict_plan</c>) and step 12 (<c>kill_session</c>) will call the
+/// server-action gate with these names.
+/// </summary>
+public static class ServerActionNames
+{
+    public const string ForcePlan = "force_plan";
+    public const string EvictPlan = "evict_plan";
+    public const string KillSession = "kill_session";
+
+    /// <summary>Every server action, the table's CHECK list.</summary>
+    public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession };
+}
+
+/// <summary>What a server's remediation slots hold, as the server-action gate classifies them (#5632, step 5). The gate never
+/// resolves a secret: a reference is only recognised by its prefix.</summary>
+public enum ServerCredentialState
+{
+    /// <summary>No login name, or no secret slot (a login with no secret is half a credential, and counts as none).</summary>
+    Missing,
+
+    /// <summary>A login name and an <c>env:</c> or <c>file:</c> reference: the only form Erik allowed.</summary>
+    Reference,
+
+    /// <summary>A login name and a stored password (a sealed or DPAPI value): refused, the store holds references only.</summary>
+    StoredPassword,
+}
+
 /// <summary>A gate refusal (#5912): <c>{status: refused, reason, message}</c>.</summary>
 public sealed record AgentActionRefusal(string Reason, string Message);
 
@@ -320,6 +349,21 @@ public static class AgentActionCodes
 
     /// <summary>8: the request's agent journal is full.</summary>
     public const string JournalCapped = "journal_capped";
+
+    /// <summary>The server-action gate (#5632, step 5): the request is not Level 3. A Level 2 request is told Level 2 changes only the monitoring store.</summary>
+    public const string NotLevel3 = "not_level_3";
+
+    /// <summary>The server-action gate: that server's switch for that action is off, or has no row (no row means off).</summary>
+    public const string SwitchOff = "server_action_off";
+
+    /// <summary>The server-action gate: the server has no remediation login (a login name and a reference are both needed).</summary>
+    public const string NoCredential = "no_remediation_credential";
+
+    /// <summary>The server-action gate: the remediation slot holds a stored password, not an <c>env:</c> or <c>file:</c> reference.</summary>
+    public const string CredentialNotReference = "credential_not_reference";
+
+    /// <summary>The server-action gate: the action is not one of the fixed list.</summary>
+    public const string UnknownServerAction = "unknown_server_action";
 
     /// <summary>The one <see cref="ClaimNotLive"/> message.</summary>
     public const string ClaimNotLiveMessage =

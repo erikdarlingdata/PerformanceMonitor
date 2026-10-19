@@ -183,6 +183,7 @@ internal static class NotificationRouteUi
 
     /// <summary>The choice shown for a stored Level 2 route (#5912), which Lite reads but never writes.</summary>
     internal const string AgentActChoice = "Act (set in SQL)";
+    internal const string AgentServerActChoice = "Act on servers (set in SQL)";
 
     /// <summary>The agent-level combo's item for a stored level (#5912). A level the combo does not offer (a Level 2 row, set by raw
     /// SQL) gets a DISABLED item showing it, added to the combo and returned: the dialog neither throws on it (it used to
@@ -195,7 +196,7 @@ internal static class NotificationRouteUi
         {
             item = new System.Windows.Controls.ComboBoxItem
             {
-                Content = level == NotificationRoute.AgentLevelAct ? AgentActChoice : $"Level {level}",
+                Content = level == NotificationRoute.AgentLevelAct ? AgentActChoice : level == NotificationRoute.AgentLevelServerAct ? AgentServerActChoice : $"Level {level}",
                 Tag = level,
                 IsEnabled = false,
             };
@@ -212,6 +213,7 @@ internal static class NotificationRouteUi
         null => "Inherit",
         NotificationRoute.AgentLevelInvestigate => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Investigate ({route.AgentMaxPerHour}/h, {route.AgentMaxPerDay}/day)"),
         NotificationRoute.AgentLevelAct => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Act ({route.AgentMaxPerHour}/h, {route.AgentMaxPerDay}/day)"),
+        NotificationRoute.AgentLevelServerAct => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Act on servers ({route.AgentMaxPerHour}/h, {route.AgentMaxPerDay}/day)"),
         _ => "Off",
     };
 
