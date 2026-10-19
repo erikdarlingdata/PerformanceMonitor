@@ -115,13 +115,73 @@ public sealed class CollectorContext
     /// The schema of <paramref name="extensionName"/>, quoted as an identifier, for collector SQL to name the
     /// extension's objects with (#6143). Monitoring connections pin search_path to pg_catalog, so an extension object
     /// named without its schema would not resolve. An extension the host did not find (not created in this
-    /// database, or the lookup did not run) gives the unquoted <c>public</c> the SQL named before, so the query and
-    /// its "does not exist" error stay what they were.
+    /// database) gives <c>pg_catalog</c>, never <c>public</c>: only a superuser can create an object there, so a
+    /// same-named function or view another role put in <c>public</c> is never reached, and the query still fails
+    /// with the "does not exist" error (42883 / 42P01) the host classifies as a missing extension. The host does
+    /// not guess when the lookup itself fails: that run fails instead.
     /// </summary>
     public string PgExtensionSchema(string extensionName) =>
         PgExtensionSchemas is not null && PgExtensionSchemas.TryGetValue(extensionName, out var schema)
             ? PgIdentifier.Quote(schema)
-            : "public";
+            : "pg_catalog";
+
+    /// <summary>
+    /// The Aurora built-in functions collector SQL calls (#6143). <see cref="PgFunctionSchema"/> names each one by a
+    /// schema read from <c>pg_catalog.pg_proc</c> at run time.
+    /// </summary>
+    public static IReadOnlyList<string> AuroraFunctionNames { get; } = new[]
+    {
+        "aurora_version", "aurora_stat_statements", "aurora_stat_system_waits", "aurora_stat_wait_type",
+        "aurora_stat_wait_event",
+    };
+
+    /// <summary>
+    /// Function name to the schema it was found in (#6143), for the Aurora built-ins in
+    /// <see cref="AuroraFunctionNames"/>. The host fills it only from <see cref="ChoosePgFunctionSchemas"/>, so every
+    /// value is <c>pg_catalog</c> or the schema pg_stat_statements was created in. Null until the host has read it.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? PgFunctionSchemas { get; set; }
+
+    /// <summary>
+    /// The schema of an Aurora built-in function, quoted as an identifier (#6143). A function the host did not find
+    /// gives <c>pg_catalog</c>: on a server that is not Aurora the call fails there as it always did.
+    /// </summary>
+    public string PgFunctionSchema(string functionName) => QuotePgFunctionSchema(PgFunctionSchemas, functionName);
+
+    /// <summary><see cref="PgFunctionSchema"/> over a map from <see cref="ChoosePgFunctionSchemas"/>, for a host that
+    /// has no context at hand (the connect-time Aurora probe).</summary>
+    public static string QuotePgFunctionSchema(IReadOnlyDictionary<string, string>? schemas, string functionName) =>
+        schemas is not null && schemas.TryGetValue(functionName, out var schema)
+            ? PgIdentifier.Quote(schema)
+            : "pg_catalog";
+
+    /// <summary>
+    /// Picks the schema for each function from the (function, schema) rows <c>pg_catalog.pg_proc</c> returned
+    /// (#6143). Only <c>pg_catalog</c> and <paramref name="statementsExtensionSchema"/> (the schema
+    /// pg_stat_statements was created in, null when it is not created) are accepted, and <c>pg_catalog</c> wins
+    /// when a function is in both. A row in any other schema is ignored, whatever the query that produced it said.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> ChoosePgFunctionSchemas(
+        IEnumerable<(string Function, string Schema)> rows, string? statementsExtensionSchema)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        var chosen = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (function, schema) in rows)
+        {
+            if (string.Equals(schema, "pg_catalog", StringComparison.Ordinal))
+            {
+                chosen[function] = schema;
+            }
+            else if (statementsExtensionSchema is not null
+                     && string.Equals(schema, statementsExtensionSchema, StringComparison.Ordinal)
+                     && !chosen.ContainsKey(function))
+            {
+                chosen[function] = schema;
+            }
+        }
+
+        return chosen;
+    }
 
     /// <summary>
     /// The most recent already-collected value of the definition's <c>NumericWatermarkColumn</c>,

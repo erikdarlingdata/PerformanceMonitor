@@ -1793,23 +1793,38 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// #6143: every extension in the connected database and the schema it was created in. Run on the monitoring
-    /// connection, whose search_path is pinned to pg_catalog; the relations are named by schema all the same.
+    /// #6143: every extension in the connected database and the schema it was created in, then each Aurora built-in
+    /// function (<see cref="CollectorContext.AuroraFunctionNames"/>) found in pg_catalog or in the schema
+    /// pg_stat_statements was created in. No other schema is read, and <see cref="CollectorContext.ChoosePgFunctionSchemas"/>
+    /// checks the same rule again. Run on the monitoring connection, whose search_path is pinned to pg_catalog; every
+    /// relation and operator is named by schema all the same.
     /// </summary>
-    internal const string PgExtensionSchemasSql = @"SELECT e.extname::text, n.nspname::text
+    internal const string PgExtensionSchemasSql = @"SELECT 'extension'::text, e.extname::text, n.nspname::text
 FROM pg_catalog.pg_extension AS e
-JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) e.extnamespace";
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+UNION ALL
+SELECT 'function'::text, p.proname::text, n.nspname::text
+FROM pg_catalog.pg_proc AS p
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
+AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
+     OR n.oid OPERATOR(pg_catalog.=) ANY (
+         SELECT x.extnamespace FROM pg_catalog.pg_extension AS x
+         WHERE x.extname OPERATOR(pg_catalog.=) 'pg_stat_statements'))";
 
     /// <summary>#6143: a catalog read of a handful of rows; the other connection-time reads beside it use 5 s too.</summary>
     internal const int PgExtensionSchemasTimeoutSeconds = 5;
 
     /// <summary>
-    /// #6143: sets <see cref="CollectorContext.PgExtensionSchemas"/> from <paramref name="targetConnection"/>, for a
-    /// PostgreSQL collector that declares an extension it reads (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>),
-    /// so its SQL names the extension's objects by the schema they were created in. Clears it first, so a per-database
-    /// loop never carries one database's answer into the next. Returns whether it read the catalog.
-    /// <para>Best-effort, like the other connection-time reads beside it: a failure leaves the map empty, the SQL names
-    /// <c>public</c> as before, and the collector's own query reports whatever is wrong.</para>
+    /// #6143: sets <see cref="CollectorContext.PgExtensionSchemas"/> (and, on Aurora,
+    /// <see cref="CollectorContext.PgFunctionSchemas"/>) from <paramref name="targetConnection"/>, for a PostgreSQL
+    /// collector that declares an extension it reads (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>) or calls
+    /// Aurora built-ins (<see cref="ICollectorSchemaInfo.ReadsAuroraFunctions"/>), so its SQL names each object by the
+    /// schema it is in. Clears both first, so a per-database loop never carries one database's answer into the next.
+    /// Returns whether it read the catalog.
+    /// <para>Not best-effort: when the read itself fails or times out, this throws, and the run (on the per-database
+    /// path, that database) fails with a message that says so. Guessing a schema instead could send the collector's SQL
+    /// to a same-named object in the guessed schema.</para>
     /// </summary>
     internal static async ValueTask<bool> ResolvePgExtensionSchemasAsync(
         CollectorContext context,
@@ -1819,33 +1834,57 @@ JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
         CancellationToken cancellationToken)
     {
         context.PgExtensionSchemas = null;
-        if (definition.TargetEngine != CollectorTargetEngine.PostgreSql || definition.RequiredPgExtensions.Count == 0)
+        context.PgFunctionSchemas = null;
+        var readsFunctions = definition.ReadsAuroraFunctions && context.Target.IsAurora;
+        if (definition.TargetEngine != CollectorTargetEngine.PostgreSql
+            || (definition.RequiredPgExtensions.Count == 0 && !readsFunctions))
         {
             return false;
         }
 
+        var schemas = new Dictionary<string, string>(StringComparer.Ordinal);
+        var functions = new List<(string Function, string Schema)>();
         try
         {
             using var command = targetConnection.CreateCommand();
             command.CommandTimeout = PgExtensionSchemasTimeoutSeconds;
             command.CommandText = PgExtensionSchemasSql;
-            var schemas = new Dictionary<string, string>(StringComparer.Ordinal);
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "functions";
+            parameter.Value = readsFunctions ? CollectorContext.AuroraFunctionNames.ToArray() : Array.Empty<string>();
+            command.Parameters.Add(parameter);
             using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    schemas[reader.GetString(0)] = reader.GetString(1);
+                    if (string.Equals(reader.GetString(0), "extension", StringComparison.Ordinal))
+                    {
+                        schemas[reader.GetString(1)] = reader.GetString(2);
+                    }
+                    else
+                    {
+                        functions.Add((reader.GetString(1), reader.GetString(2)));
+                    }
                 }
             }
-
-            context.PgExtensionSchemas = schemas;
-            return true;
         }
         catch (DbException ex)
         {
-            logger?.LogDebug(ex, "Reading extension schemas for {Collector} did not succeed; its SQL names public (#6143)", definition.Name);
-            return false;
+            logger?.LogDebug(ex, "Reading extension schemas for {Collector} did not succeed (#6143)", definition.Name);
+            throw new InvalidOperationException(
+                $"{definition.Name} did not run: reading the schema of each extension it uses from pg_catalog.pg_extension "
+                + $"did not succeed, and the collector does not guess a schema. {ex.Message}",
+                ex);
         }
+
+        context.PgExtensionSchemas = schemas;
+        if (readsFunctions)
+        {
+            context.PgFunctionSchemas = CollectorContext.ChoosePgFunctionSchemas(
+                functions, schemas.TryGetValue("pg_stat_statements", out var statementsSchema) ? statementsSchema : null);
+        }
+
+        return true;
     }
 
     /// <summary>

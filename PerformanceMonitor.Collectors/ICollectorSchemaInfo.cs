@@ -186,4 +186,12 @@ public interface ICollectorSchemaInfo
     /// <c>query_store_forced_plans</c>, whose reader is a Darling MCP read; its Lite twin is a follow-up.
     /// </summary>
     bool IsDarlingOnly => false;
+
+    /// <summary>
+    /// True when this PostgreSQL collector calls Aurora built-in functions on an Aurora target (#6143), so the host
+    /// reads each one's schema from <c>pg_catalog.pg_proc</c> before it builds the query
+    /// (<see cref="CollectorContext.PgFunctionSchemas"/>). A default interface implementation, the choice
+    /// <see cref="StaysPlainTable"/> made.
+    /// </summary>
+    bool ReadsAuroraFunctions => false;
 }

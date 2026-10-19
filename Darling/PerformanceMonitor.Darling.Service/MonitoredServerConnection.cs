@@ -229,6 +229,10 @@ public static class MonitoredServerConnection
 
         builder.Options = PinSearchPath(builder.Options);
 
+        /* #6143: Npgsql's own Search Path keyword is sent as a separate startup parameter, which the server applies
+           after the -c options and so would replace the pin. Cleared explicitly, whatever the stored string said. */
+        builder.SearchPath = null;
+
         return builder.ConnectionString;
     }
 
@@ -243,28 +247,47 @@ public static class MonitoredServerConnection
     /// each unqualified function, operator and relation name in their SQL resolves. A setting sent at sign-in takes
     /// precedence over both, so collector SQL resolves against pg_catalog, with pg_temp last. Extension objects are
     /// named by the schema they were created in instead (<c>CollectorContext.PgExtensionSchema</c>).</para>
+    /// <para>The pin is always the LAST option: the server applies the options in order, so a later
+    /// <c>-c search_path=...</c> replaces an earlier one, and an option already present that merely contains the pin's
+    /// text (<c>-c search_path=pg_catalog,pg_temp,public</c>) is overridden rather than taken for the pin.</para>
     /// </summary>
-    public static string PinSearchPath(string? options) =>
-        string.IsNullOrWhiteSpace(options)
-            ? PinnedSearchPathOption
-            : options.Contains(PinnedSearchPathOption, StringComparison.Ordinal)
-                ? options
-                : options.TrimEnd() + " " + PinnedSearchPathOption;
-
-    /// <summary>
-    /// The same connection string without <see cref="PinnedSearchPathOption"/>, for the one target connection that must
-    /// resolve names the way the application does: the hypothetical-index experiment EXPLAINs an application statement,
-    /// whose unqualified table names resolve through the database's own search_path (#6143).
-    /// </summary>
-    public static string WithoutPinnedSearchPath(string connectionString)
+    public static string PinSearchPath(string? options)
     {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        if (builder.Options is { } options && options.Contains(PinnedSearchPathOption, StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(options))
         {
-            var rest = options.Replace(PinnedSearchPathOption, string.Empty, StringComparison.Ordinal).Trim();
-            builder.Options = rest.Length == 0 ? null : rest;
+            return PinnedSearchPathOption;
         }
 
-        return builder.ConnectionString;
+        var trimmed = options.TrimEnd();
+        return EndsWithPinOption(trimmed) ? trimmed : trimmed + " " + PinnedSearchPathOption;
+    }
+
+    /* True when the pin is the whole string or its last two tokens: preceded by whitespace that no backslash escapes
+       (the server splits options on unescaped whitespace, so an escaped space would join the pin to the token before). */
+    private static bool EndsWithPinOption(string options)
+    {
+        if (!options.EndsWith(PinnedSearchPathOption, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var start = options.Length - PinnedSearchPathOption.Length;
+        if (start == 0)
+        {
+            return true;
+        }
+
+        if (!char.IsWhiteSpace(options[start - 1]))
+        {
+            return false;
+        }
+
+        var backslashes = 0;
+        for (var i = start - 2; i >= 0 && options[i] == '\\'; i--)
+        {
+            backslashes++;
+        }
+
+        return backslashes % 2 == 0;
     }
 }

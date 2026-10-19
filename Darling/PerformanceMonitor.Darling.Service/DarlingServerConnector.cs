@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -257,12 +259,12 @@ SELECT /* PerformanceMonitorLite */
        here are read as-is and the store's convention is naive UTC either way. */
     public const string PostgresDetectionQueryText = @"
 SELECT
-    version() AS server_version_text,
-    current_setting('server_version_num')::int / 10000 AS major_version,
-    pg_is_in_recovery() AS is_in_recovery,
-    current_setting('server_version_num')::int AS server_version_num,
+    pg_catalog.version() AS server_version_text,
+    pg_catalog.current_setting('server_version_num')::int OPERATOR(pg_catalog./) 10000 AS major_version,
+    pg_catalog.pg_is_in_recovery() AS is_in_recovery,
+    pg_catalog.current_setting('server_version_num')::int AS server_version_num,
     -- #2228: which database this connection actually landed in. Appended; see the comment above.
-    current_database() AS connected_database,
+    pg_catalog.current_database() AS connected_database,
     -- #3830: the pg_stat_statements catalog version in THIS database, or NULL when pg_extension has no
     -- row for it. A column on the read that was already being made rather than a probe of its own: one
     -- scalar on one statement, and pg_extension is world-readable, so it adds no round trip and no grant.
@@ -270,7 +272,31 @@ SELECT
     -- the collector's own RequiredPgExtensions declaration, so the two cannot drift apart unnoticed.
     (SELECT e.extversion
      FROM pg_catalog.pg_extension AS e
-     WHERE e.extname = 'pg_stat_statements') AS pg_stat_statements_extversion";
+     WHERE e.extname OPERATOR(pg_catalog.=) 'pg_stat_statements') AS pg_stat_statements_extversion,
+    -- #6143: the search_path this session actually has. The service sends search_path=pg_catalog,pg_temp at
+    -- sign-in; a connection pooler can drop that startup option without an error, and then this differs.
+    pg_catalog.current_setting('search_path') AS search_path";
+
+    /// <summary>
+    /// #6143: refuses a PostgreSQL target whose monitoring session does not have the search_path the service sent at
+    /// sign-in (<see cref="MonitoredServerConnection.PinnedSearchPathOption"/>). The collectors' SQL relies on it, so a
+    /// session without it is not collected from at all. Whitespace is ignored; anything else must match.
+    /// </summary>
+    internal static void EnsureSearchPathPinned(string? observedSearchPath, string serverName)
+    {
+        var normalized = string.Concat((observedSearchPath ?? string.Empty).Where(c => !char.IsWhiteSpace(c)));
+        if (string.Equals(normalized, "pg_catalog,pg_temp", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"precondition: the monitoring session on PostgreSQL target '{serverName}' has search_path "
+            + $"'{observedSearchPath}', not the 'pg_catalog, pg_temp' this service sends when it signs in, so nothing "
+            + "is collected from it. The usual cause is a connection pooler that drops the startup 'options' "
+            + "parameter: in PgBouncer, remove 'options' from ignore_startup_parameters, or connect this server "
+            + "directly rather than through the pooler.");
+    }
 
     /// <summary>
     /// The Aurora probe (#2340), a SEPARATE statement because it decides by CALLING the marker function
@@ -290,7 +316,10 @@ SELECT
     /// <c>42883 undefined_function</c> be caught and read as "not Aurora" instead of failing the whole
     /// probe — the wrapping the old column comment claimed but a catalog subquery never actually needed.</para>
     /// </summary>
-    public const string PostgresAuroraProbeQueryText = @"SELECT aurora_version()";
+    /// <para>#6143: <c>{0}</c> is the schema, quoted: pg_catalog, or the schema pg_stat_statements was created in when
+    /// <c>pg_proc</c> shows the function there and not in pg_catalog (<see cref="CollectorContext.ChoosePgFunctionSchemas"/>).
+    /// The catalog only picks between those two; whether the target is Aurora is still decided by the call.</para>
+    public const string PostgresAuroraProbeQueryText = @"SELECT {0}.aurora_version()";
 
     /// <summary>
     /// Whether this target is Aurora, decided by CALLING <c>aurora_version()</c> (#2340). True when the call
@@ -312,7 +341,9 @@ SELECT
     {
         try
         {
-            using var command = new NpgsqlCommand(PostgresAuroraProbeQueryText, connection) { CommandTimeout = 15 };
+            var schema = await ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", cancellationToken);
+            using var command = new NpgsqlCommand(
+                string.Format(CultureInfo.InvariantCulture, PostgresAuroraProbeQueryText, schema), connection) { CommandTimeout = 15 };
             var version = await command.ExecuteScalarAsync(cancellationToken);
             return version is not null and not DBNull;
         }
@@ -321,6 +352,38 @@ SELECT
             logger?.LogDebug(ex, "aurora_version() probe did not succeed; treating the target as stock PostgreSQL");
             return false;
         }
+    }
+
+    /// <summary>
+    /// #6143: the quoted schema to call an Aurora built-in by, from <see cref="DarlingCollectorRunner.PgExtensionSchemasSql"/>
+    /// and <see cref="CollectorContext.ChoosePgFunctionSchemas"/>: pg_catalog, or the schema pg_stat_statements was
+    /// created in, never any other. pg_catalog when the catalog shows neither.
+    /// </summary>
+    internal static async Task<string> ResolveAuroraFunctionSchemaAsync(
+        NpgsqlConnection connection, string functionName, CancellationToken cancellationToken)
+    {
+        string? statementsSchema = null;
+        var functions = new List<(string Function, string Schema)>();
+        using (var command = new NpgsqlCommand(DarlingCollectorRunner.PgExtensionSchemasSql, connection)
+               { CommandTimeout = DarlingCollectorRunner.PgExtensionSchemasTimeoutSeconds })
+        {
+            command.Parameters.AddWithValue("functions", new[] { functionName });
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.GetString(0) == "function")
+                {
+                    functions.Add((reader.GetString(1), reader.GetString(2)));
+                }
+                else if (reader.GetString(1) == "pg_stat_statements")
+                {
+                    statementsSchema = reader.GetString(2);
+                }
+            }
+        }
+
+        return CollectorContext.QuotePgFunctionSchema(
+            CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema), functionName);
     }
 
     /// <summary>
@@ -442,6 +505,7 @@ SELECT
         string versionText = "";
         string? connectedDatabase = null;
         var statementsExtension = PgExtensionRowObservation.NotObserved;
+        string? observedSearchPath = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             versionText = reader.IsDBNull(0) ? "" : reader.GetString(0);
@@ -455,10 +519,14 @@ SELECT
                present in the result, never inferred from the value being null. */
             statementsExtension = PgExtensionRowObservation.From(
                 reader.IsDBNull(5) ? null : reader.GetString(5), connectedDatabase);
+            observedSearchPath = reader.IsDBNull(6) ? null : reader.GetString(6);   /* #6143 */
         }
 
         /* The reader must be closed before another command runs on this connection. */
         await reader.CloseAsync();
+
+        /* #6143: before any other read, and before the runtime exists, so no collector runs on this session. */
+        EnsureSearchPathPinned(observedSearchPath, config.DisplayName);
 
         var isAurora = await ProbeAuroraAsync(connection, cancellationToken, logger);
 
