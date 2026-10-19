@@ -2729,7 +2729,7 @@ public sealed class PgLogEventsLivePostgresTests
             Assert.DoesNotContain("\"bytes\":", locks, StringComparison.Ordinal);
 
             var none = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "connection", "PANIC", 100);
-            JsonAssert.Contains("\"status\": \"no_events\"", none);
+            JsonAssert.Contains("\"status\": \"empty\"", none);
             Assert.Contains("log_connections", none, StringComparison.Ordinal);
 
             /* The two closed-vocabulary refusals are the `invalid` envelope (#3739), each naming the parameter it

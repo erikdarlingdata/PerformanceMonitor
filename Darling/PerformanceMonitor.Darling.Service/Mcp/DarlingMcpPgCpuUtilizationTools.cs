@@ -63,7 +63,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
         ILogger? logger = null, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 65 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
@@ -84,7 +84,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                    PgCpuUtilizationCollector's doc comment), so that is the likelier and more actionable
                    answer than a bare "no data in window". */
                 var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_cpu_utilization", cancellationToken);
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_cpu_utilization", cancellationToken);
                 if (notCollected is not null)
                 {
                     return notCollected;
@@ -96,7 +96,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                 postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: true, logger, cancellationToken);
                 return McpHelpers.Status(
                     "empty",
-                    $"No CPU utilization data for {resolved.ServerName} in the last {hours_back} hour(s).",
+                    $"No CPU utilization data for {resolved.DisplayName} in the last {hours_back} hour(s).",
                     emptyNotice.AsHints());
             }
 
@@ -104,7 +104,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                 postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: false, logger, cancellationToken);
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor, right after hours_back. */
                 effective_start = notice.EffectiveStart,

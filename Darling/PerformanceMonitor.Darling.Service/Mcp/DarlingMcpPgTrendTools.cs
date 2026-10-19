@@ -36,7 +36,7 @@ public sealed class DarlingMcpPgTrendTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -56,10 +56,10 @@ public sealed class DarlingMcpPgTrendTools
             if (string.IsNullOrWhiteSpace(chosen))
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
-                        $"No wait event was sampled on {resolved.ServerName} in the last {hours_back} "
+                        $"No wait event was sampled on {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s), so there is nothing to follow. pg_wait_sampling needs the extension "
                         + "loaded; get_pg_extensions reports whether it is.");
             }
@@ -70,10 +70,10 @@ public sealed class DarlingMcpPgTrendTools
             if (points.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
-                        $"No samples for wait event '{chosen}' on {resolved.ServerName} in the last "
+                        $"No samples for wait event '{chosen}' on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). A trend needs at least TWO snapshots to difference, so a "
                         + "window holding one collection is legitimately empty here even when the event is "
                         + "being sampled. get_pg_wait_sampling lists the events this server does record.");
@@ -83,7 +83,7 @@ public sealed class DarlingMcpPgTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 wait_event = chosen,
                 /* Said plainly when it was not asked for, so a caller never reads this as an answer about
                    the event they had in mind. */
@@ -146,7 +146,7 @@ public sealed class DarlingMcpPgTrendTools
         NpgsqlDataSource postgres, string? server_name, string? queryid, int hours_back, string? as_of, int? bucket_minutes,
         TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -180,10 +180,10 @@ public sealed class DarlingMcpPgTrendTools
                 if (top is null)
                 {
                     return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
-                            $"No statement recorded execution time on {resolved.ServerName} in the last "
+                            $"No statement recorded execution time on {resolved.DisplayName} in the last "
                             + $"{hours_back} hour(s), so there is nothing to follow.");
                 }
 
@@ -200,10 +200,10 @@ public sealed class DarlingMcpPgTrendTools
             if (points.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
-                        $"No samples for queryid {parsedQueryId} on {resolved.ServerName} in the last "
+                        $"No samples for queryid {parsedQueryId} on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). pg_stat_statements evicts statements under memory "
                         + "pressure, so a queryid that was there yesterday can be gone rather than idle - "
                         + "get_pg_top_queries shows what the server currently tracks.");
@@ -213,7 +213,7 @@ public sealed class DarlingMcpPgTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 queryid = parsedQueryId.ToString(CultureInfo.InvariantCulture),
                 queryid_source = requested
                     ? "as requested"
@@ -277,7 +277,7 @@ public sealed class DarlingMcpPgTrendTools
         NpgsqlDataSource postgres, string? server_name, string? backend_type, string? context, int hours_back,
         string? as_of, int? bucket_minutes, TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 7.4 s at 30 days on a large store. The ceiling is the WebReadReach row. */
@@ -320,18 +320,18 @@ public sealed class DarlingMcpPgTrendTools
                 if (dominant is null)
                 {
                     return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats", cancellationToken)
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
                             (askedBackend ?? askedContext) is null
                                 ? $"No backend type recorded any I/O or buffer activity on "
-                                  + $"{resolved.ServerName} in the last {hours_back} hour(s), so there is "
+                                  + $"{resolved.DisplayName} in the last {hours_back} hour(s), so there is "
                                   + "nothing to follow. Buffer HITS count here, not only physical reads and "
                                   + "writes, so this is a genuinely idle window rather than a fully cached "
                                   + "one. pg_stat_io also needs PostgreSQL 16 or later - on an older major "
                                   + "the collector never runs, which get_collection_health reports."
                                 : $"Nothing matching {(askedBackend is not null ? $"backend type '{askedBackend}'" : $"context '{askedContext}'")} "
-                                  + $"recorded any I/O or buffer activity on {resolved.ServerName} in the "
+                                  + $"recorded any I/O or buffer activity on {resolved.DisplayName} in the "
                                   + $"last {hours_back} hour(s). get_pg_io_stats lists the combinations "
                                   + "this server reports; omit both parameters to follow whichever pair is "
                                   + "busiest.");
@@ -347,11 +347,11 @@ public sealed class DarlingMcpPgTrendTools
             if (points.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No I/O samples for '{chosenBackend}' in the '{chosenContext}' context on "
-                        + $"{resolved.ServerName} in the last {hours_back} hour(s). A trend needs at least "
+                        + $"{resolved.DisplayName} in the last {hours_back} hour(s). A trend needs at least "
                         + "TWO snapshots to difference, so a window holding one collection is legitimately "
                         + "empty here even while the combination is being collected. get_pg_io_stats lists "
                         + "the combinations this server actually reports.");
@@ -374,7 +374,7 @@ public sealed class DarlingMcpPgTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 backend_type = chosenBackend,
                 context = chosenContext,
                 /* Said plainly when it was not asked for, so a caller never reads this as an answer about
@@ -540,7 +540,7 @@ public sealed class DarlingMcpPgTrendTools
         NpgsqlDataSource postgres, string? server_name, string? database, int hours_back, string? as_of,
         int? bucket_minutes, TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* #5562: reaches the raw table's 30-day retention (720 h); 2.3 s at 30 days on a large store. The ceiling is the WebReadReach row. */
@@ -576,10 +576,10 @@ public sealed class DarlingMcpPgTrendTools
                 if (chosen is null)
                 {
                     return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_database_stats", cancellationToken)
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_database_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
-                            $"No database recorded block accesses or temp files on {resolved.ServerName} in "
+                            $"No database recorded block accesses or temp files on {resolved.DisplayName} in "
                             + $"the last {hours_back} hour(s), so there is nothing to follow.");
                 }
             }
@@ -592,7 +592,7 @@ public sealed class DarlingMcpPgTrendTools
             if (points.Count == 0)
             {
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_database_stats", cancellationToken);
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_database_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -608,7 +608,7 @@ public sealed class DarlingMcpPgTrendTools
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No differenced intervals for database '{label}' on {resolved.ServerName} in the last "
+                    $"No differenced intervals for database '{label}' on {resolved.DisplayName} in the last "
                     + $"{hours_back} hour(s). "
                     + (samplesInWindow >= 2
                         ? "The collector has samples in this window, so this database is either not one of "
@@ -645,7 +645,7 @@ public sealed class DarlingMcpPgTrendTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database = label,
                 is_shared_relations = chosen is null,
                 database_source = requested
