@@ -58,8 +58,8 @@ public sealed class PseudonymKeySource : IPseudonymKeySource, IDisposable
         PseudonymKey? known = _key;
         if (known is not null) return known;
 
-        NpgsqlDataSource? source = _owner.Read();
-        if (source is null || Environment.TickCount64 < Interlocked.Read(ref _nextAttemptAtTick)) return null;
+        NpgsqlDataSource? postgres = _owner.Read();
+        if (postgres is null || Environment.TickCount64 < Interlocked.Read(ref _nextAttemptAtTick)) return null;
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -69,7 +69,7 @@ public sealed class PseudonymKeySource : IPseudonymKeySource, IDisposable
 
             try
             {
-                await using var command = source.CreateCommand(ReadSql);
+                await using var command = postgres.CreateCommand(ReadSql);
                 command.CommandTimeout = ReadTimeoutSeconds;
                 object? value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
                 if (value is byte[] { Length: PseudonymKey.Length } bytes)
