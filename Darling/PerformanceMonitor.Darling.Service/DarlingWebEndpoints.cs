@@ -8350,7 +8350,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static readonly string[] IntegerQueryKeys =
     [
         "hours", "hours_back", "days_back", "trend_hours_back", "baseline_hours_back", "limit", "top",
-        "bucket_minutes", "min_dop", "worst_count"
+        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions"
     ];
 
     /// <summary>

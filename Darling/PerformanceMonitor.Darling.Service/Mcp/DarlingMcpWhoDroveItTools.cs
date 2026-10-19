@@ -40,9 +40,9 @@ public sealed class DarlingMcpWhoDroveItTools
 
     [McpServerTool(Name = "get_cpu_by_database"), Description(
         "Ranks databases by CPU over a window ending at as_of, each with its share of the server total and its heaviest statement. " +
-        "cpu_ms is the plan cache's per-statement CPU (query_stats deltas, the same figures get_top_queries_by_cpu sums), grouped by database; share is cpu_ms over server_cpu_ms, the total of EVERY database, not of the page. " +
-        "procedure_cpu_ms is the procedure stats' CPU for the same database and is NOT added to cpu_ms: a procedure's statements are already in cpu_ms, so adding the two would count that work twice. " +
-        "cpu_source and procedure_cpu_source name the table or rollup each figure came from; statements_window and procedures_window say how far each reached. <<GUIDE>> " +
+        "cpu_ms is the plan cache's per-statement CPU (query_stats deltas, as get_top_queries_by_cpu sums them) per database; share is of the CPU of EVERY database, not of the page. " +
+        "procedure_cpu_ms is the procedure stats' CPU, shown beside cpu_ms and NEVER added to it: a procedure's statements are already in cpu_ms. cpu_source and procedure_cpu_source name where each figure came from. <<GUIDE>> " +
+        "statements_window and procedures_window say how far each source reached. " +
         "Rows: database_name, cpu_ms, share, elapsed_ms, executions, statements, top_statement (query_hash, cpu_ms, share_of_database, executions, query_text preview masked by mcp.dataDetail; the text is raw-tier only, so a window older than raw retention has query_hash and no text), procedure_cpu_ms, top_procedure. " +
         "An empty answer says why: the plan cache was not collected, or the window held no statement CPU. databases_returned/truncated: top caps at 100 and truncated says more databases matched. Deltas only, so a plan evicted between samples loses its CPU, the same limit get_top_queries_by_cpu has.")]
     public static Task<string> GetCpuByDatabase(
@@ -151,9 +151,9 @@ public sealed class DarlingMcpWhoDroveItTools
     internal const int MaxStatements = 10;
 
     [McpServerTool(Name = "get_load_by_caller"), Description(
-        "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, each with its sample count, CPU and elapsed time, their shares of the server total, and its top statements. " +
-        "cpu_ms and elapsed_ms are sums over SAMPLES of the request's cumulative cpu_time_ms / total_elapsed_time_ms: a request seen in ten captures counts ten times, so they weigh how much and how long a caller was running, not completed work. Shares are of the window's total over every caller, not of the page. " +
-        "Sample counts are snapshots (one per running request per capture); captures counts the distinct capture times. login_name and host_name are masked by mcp.dataDetail under metadataOnly. <<GUIDE>> " +
+        "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, each with its samples, CPU and elapsed time, their shares of the window total, and its top statements. " +
+        "cpu_ms and elapsed_ms sum the cumulative figures of every snapshot, so a request seen in ten captures counts ten times: they weigh how much and how long a caller ran, not completed work. Shares are of every caller, not of the page. login_name and host_name are masked by mcp.dataDetail. <<GUIDE>> " +
+        "Samples are snapshots (one per running request per capture); captures counts the distinct capture times. " +
         "Rows: host_name, program_name, login_name (null = the snapshot carried none), samples, captures, cpu_ms, cpu_share, elapsed_ms, elapsed_share, sample_share, first_seen, last_seen, top_statements (query_hash, samples, cpu_ms, query_text preview masked by mcp.dataDetail). WAITFOR shells are dropped, as get_active_queries drops them. " +
         "An empty answer says why: query_snapshots was not collected, or the window held no active request. top caps at 100 groups and truncated says more matched; statements per group default 3, at most 10. Reads the snapshots the collector wrote; it does not see a request that finished between two captures.")]
     public static Task<string> GetLoadByCaller(
@@ -267,9 +267,10 @@ public sealed class DarlingMcpWhoDroveItTools
     internal const int BlockingToleranceSeconds = 60;
 
     [McpServerTool(Name = "get_query_pileups"), Description(
-        "Lists the capture times when min_sessions or more sessions ran the same query_hash at once, most sessions first, with the main wait types at that capture and the head blocker from the DMV blocking snapshot NEAREST that time. " +
-        "A session counts once per capture. head_blocker comes from collect.dmv_blocking_snapshots, a separate collector from the active-query snapshots, so it is the nearest snapshot within 60 seconds either side (blocking_snapshot_offset_seconds says how near, negative = earlier); that collector writes rows only while something is blocked, so head_blocker null with a note means no blocking was recorded near the capture, not that none could have existed. " +
-        "Waits are session counts per wait_type at the capture itself (none = running, no wait). <<GUIDE>> " +
+        "Lists the capture times when min_sessions or more sessions ran the same query_hash at once, most sessions first, with the wait types at that capture and the head blocker from the DMV blocking snapshot NEAREST that time. " +
+        "head_blocker comes from a separate collector, so it is the nearest snapshot within 60 seconds either side (blocking_snapshot_offset_seconds says how near); null with a note means no blocking was recorded near the capture. " +
+        "A session counts once per capture. <<GUIDE>> " +
+        "Waits are session counts per wait_type at the capture itself (none = running, no wait). That collector writes rows only while something is blocked. " +
         "Rows: collection_time, query_hash, sessions, blocked_sessions (sessions with blocking_session_id set at the capture), max_wait_ms, waits [{wait_type, sessions}], query_text preview masked by mcp.dataDetail, head_blocker {spid, blocked_sessions (everything behind it, directly or not), wait_time_ms, login_name, host_name, program_name, database_name, query_text} and blocking_snapshot_time. " +
         "min_sessions default 5, at least 2; top caps at 100. An empty answer says why: no capture in the window had that many sessions on one statement, or query_snapshots was not collected. WAITFOR shells are dropped, as get_active_queries drops them. The pile-up is seen only at captures, so a pile-up that came and went between two captures is not listed.")]
     public static Task<string> GetQueryPileups(
