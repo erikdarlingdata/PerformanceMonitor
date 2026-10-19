@@ -242,6 +242,14 @@ public sealed class RemediationLiveSqlTests
         return (hex!, marker);
     }
 
+    private static async Task<bool> HandleCachedAsync(string hex, CancellationToken ct)
+    {
+        await using var admin = await OpenAsync(Admin(), ct);
+        await using var command = new SqlCommand("SELECT COUNT_BIG(*) FROM sys.dm_exec_cached_plans WHERE plan_handle = CONVERT(varbinary(64), @hex, 1);", admin);
+        command.Parameters.Add(new SqlParameter("@hex", SqlDbType.VarChar, 130) { Value = hex });
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) > 0;
+    }
+
     private static async Task<string?> HandleAsync(string marker, CancellationToken ct)
     {
         await using var admin = await OpenAsync(Admin(), ct);
@@ -271,19 +279,19 @@ public sealed class RemediationLiveSqlTests
 
             var dry = await executor.EvictPlanAsync(permit, handleA, dryRun: true, ct);
             Assert.True(dry is { Outcome: RemediationOutcome.Done, Wrote: false }, dry.Message);
-            Assert.Equal(handleA, await HandleAsync(markerA, ct));
+            Assert.True(await HandleCachedAsync(handleA, ct));
 
             var evicted = await executor.EvictPlanAsync(permit, handleA, dryRun: false, ct);
             Assert.True(evicted is { Outcome: RemediationOutcome.Done, Wrote: true }, evicted.Message);
-            Assert.Null(await HandleAsync(markerA, ct));
-            Assert.Equal(handleB, await HandleAsync(markerB, ct));
+            Assert.False(await HandleCachedAsync(handleA, ct));
+            Assert.True(await HandleCachedAsync(handleB, ct));
 
             /* Gone now: a dry run and a real run both say so, and neither runs anything. */
             var dryGone = await executor.EvictPlanAsync(permit, handleA, dryRun: true, ct);
             var gone = await executor.EvictPlanAsync(permit, handleA, dryRun: false, ct);
             Assert.Equal(RemediationResult.Reasons.NotCached, dryGone.Reason);
             Assert.Equal(RemediationResult.Reasons.NotCached, gone.Reason);
-            Assert.Equal(handleB, await HandleAsync(markerB, ct));
+            Assert.True(await HandleCachedAsync(handleB, ct));
 
             AssertNoSecret(scratch, logger, dry, evicted, dryGone, gone);
         }
@@ -314,7 +322,7 @@ public sealed class RemediationLiveSqlTests
                 Assert.Equal(RemediationResult.Reasons.BadHandle, result.Reason);
             }
 
-            Assert.Equal(handle, await HandleAsync(marker, ct));
+            Assert.True(await HandleCachedAsync(handle, ct));
             Assert.Equal(before, Convert.ToInt64(await ScalarAsync(admin, $"SELECT COUNT_BIG(*) FROM sys.dm_exec_sessions WHERE program_name = N'{RemediationConnection.ApplicationName}';", ct), CultureInfo.InvariantCulture));
         }
         finally
@@ -371,11 +379,12 @@ public sealed class RemediationLiveSqlTests
 
             var killed = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
             Assert.True(killed is { Outcome: RemediationOutcome.Done, Wrote: true }, killed.Message);
-            /* The server removes a killed session a moment after the KILL returns. */
+            /* The victim can no longer use its connection. An idle killed session leaves sys.dm_exec_sessions when its client next
+               touches the connection, so that touch comes first and the catalog is read after it. */
+            await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync(victim, "SELECT 1;", ct));
             for (var i = 0; i < 50 && await SessionExistsAsync(sessionId, ct); i++)
                 await Task.Delay(100, ct);
             Assert.False(await SessionExistsAsync(sessionId, ct));
-            await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync(victim, "SELECT 1;", ct));
 
             /* The session is gone: the same kill is refused rather than failing. */
             var gone = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct);
