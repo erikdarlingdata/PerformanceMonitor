@@ -33,12 +33,12 @@ public sealed class ExcludedVolumesStoreTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public void TheRungIsTheLaddersTop_AndNamedForTheColumn()
+    public void TheRung_IsNamedForTheColumn_AndTheLadderIsOrdered()
     {
         var rung = PgMigrations.Scripts.Single(m => m.Version == 200);
 
         Assert.Equal("excluded-volumes", rung.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        Assert.True(StorageVersion.SchemaVersion >= 200); /* not the top any more: V201 (#6159) sits above this rung */
         Assert.Equal(PgMigrations.Scripts.Select(s => s.Version).OrderBy(v => v), PgMigrations.Scripts.Select(s => s.Version));
     }
 

@@ -193,7 +193,7 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
         var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
         var stat = Slice(panels, "function vizStat(", "function vizLine(");
         Assert.Contains("const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;", stat, StringComparison.Ordinal);
-        Assert.Contains("text: why != null && why !== \"\" ? String(why) : applyFormat(s.format, raw)", stat, StringComparison.Ordinal);
+        Assert.Contains("text: why != null && why !== \"\" ? String(why) : shownValue", stat, StringComparison.Ordinal); /* #6159: shownValue is applyFormat plus the optional appended field */
 
         Assert.DoesNotContain("memory-state source", tabs + templates + panels, StringComparison.Ordinal);
     }

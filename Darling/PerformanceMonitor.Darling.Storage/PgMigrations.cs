@@ -1860,6 +1860,21 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS excluded_volumes text[] NOT NULL DEFAULT '{}'::text[];";
 
     /// <summary>
+    /// V201 (#6159): <c>collect.ag_replica_states.primary_replica</c>, the name of the replica that was the primary when the row was
+    /// collected, read from <c>sys.dm_hadr_availability_group_states.primary_replica</c>. A secondary can read that DMV, so the Availability
+    /// Groups card built from a secondary's own view can say "Primary: NODE1" instead of leaving the reader to guess why the replica
+    /// list it was given has no PRIMARY row.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> (the V151 <c>group_id</c> shape): a row collected before this rung never asked
+    /// the engine, so NULL is the honest value, and a reader treats NULL as "primary not known". <b>Appended LAST</b>, after
+    /// <c>group_id</c>: the writer is a positional binary COPY, so a fresh store (the generated V1 table carries the column from the
+    /// collector's payload, and this ALTER no-ops there) and an upgraded store share one physical column order. The table has no
+    /// passthrough view, so the rung is one ALTER. An older build ignores the column.</para>
+    /// </summary>
+    private const string V201Sql = @"
+ALTER TABLE collect.ag_replica_states ADD COLUMN IF NOT EXISTS primary_replica text;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2234,6 +2249,7 @@ $rung$;";
         new Migration(198, "pseudonym-key", V198Sql),
         new Migration(199, "blocking-head-evidence", V199Sql),
         new Migration(200, "excluded-volumes", V200Sql),
+        new Migration(201, "ag-primary-replica", V201Sql),
     };
 
     /// <summary>

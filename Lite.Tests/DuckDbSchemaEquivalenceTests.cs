@@ -249,6 +249,8 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         "dmv_blocking_snapshots.blocking_last_request_end_time",
         "dmv_blocking_snapshots.blocking_open_transaction_count",
         "dmv_blocking_snapshots.blocking_tran_log_bytes_used",
+        /* v77 (#6159): the primary replica's name from sys.dm_hadr_availability_group_states. Appended, nullable VARCHAR. */
+        "ag_replica_states.primary_replica",
     };
 
     [Fact]

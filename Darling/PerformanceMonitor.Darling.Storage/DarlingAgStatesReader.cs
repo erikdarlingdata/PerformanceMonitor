@@ -144,7 +144,8 @@ public static class DarlingAgStatesReader
             r.availability_mode_desc,
             r.failover_mode_desc,
             r.endpoint_url,
-            r.group_id
+            r.group_id,
+            r.primary_replica
         FROM ag_replica_states AS r
         JOIN
         (
@@ -250,7 +251,8 @@ public static class DarlingAgStatesReader
         string? AvailabilityModeDesc,
         string? FailoverModeDesc,
         string? EndpointUrl,
-        string? GroupId);
+        string? GroupId,
+        string? PrimaryReplica = null);
 
     /// <summary>One database-grain row, exactly as <c>ag_database_replica_states</c> stores it. Queue sizes
     /// are KB and rates KB/s (the DMV's units), both instantaneous gauges rather than counters.</summary>
@@ -420,7 +422,8 @@ public static class DarlingAgStatesReader
                 Text(reader, 11),
                 Text(reader, 12),
                 Text(reader, 13),
-                Text(reader, 14)));
+                Text(reader, 14),
+                Text(reader, 15)));
         }
 
         return rows;

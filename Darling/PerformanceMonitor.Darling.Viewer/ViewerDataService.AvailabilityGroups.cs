@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -44,7 +45,18 @@ public sealed partial class ViewerDataService
             return new List<AgTopologyCard>();
         }
 
-        return AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken), nowUtc);
+        /* #6159: a primary learned from the stored column is shown by its display name when it is a monitored server. The server list is
+           read only when some row carries a stored primary, so a store not yet re-collected after the upgrade costs nothing extra. */
+        Func<int, string?>? displayNameOf = null;
+        if (replicas.Any(r => !string.IsNullOrWhiteSpace(r.PrimaryReplica)))
+        {
+            var byId = (await GetServersAsync(cancellationToken))
+                .GroupBy(sv => sv.ServerId)
+                .ToDictionary(g => g.Key, g => g.First().DisplayName);
+            displayNameOf = id => byId.TryGetValue(id, out var name) ? name : null;
+        }
+
+        return AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken), nowUtc, displayNameOf);
     }
 
     /// <summary>Maps <see cref="DarlingAgStatesReader"/>'s raw rows into <see cref="AgTopologyReplicaRow"/>,
@@ -73,6 +85,7 @@ public sealed partial class ViewerDataService
                 FailoverModeDesc = row.FailoverModeDesc,
                 EndpointUrl = row.EndpointUrl,
                 GroupId = row.GroupId,
+                PrimaryReplica = row.PrimaryReplica,
             });
         }
 
