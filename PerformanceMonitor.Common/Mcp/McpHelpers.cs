@@ -530,6 +530,36 @@ internal static class McpHelpers
         effectiveStart is DateTime instant ? FormatEffectiveStart(instant) : null;
 
     /// <summary>
+    /// #6127: the whole hours back from <paramref name="windowEnd"/> that reach <paramref name="newestMeasuredDeltaAt"/>,
+    /// rounded up, so a window of that many hours ending at the same anchor contains the snapshot.
+    /// </summary>
+    public static int SuggestedHoursBack(DateTime newestMeasuredDeltaAt, DateTime windowEnd) =>
+        Math.Max(1, (int)Math.Ceiling((windowEnd - newestMeasuredDeltaAt).TotalHours));
+
+    /// <summary>
+    /// #6127, one sentence for both products: the window stored query_stats snapshots, but none carries a measured delta, so
+    /// no CPU figure can be attributed. A CPU figure is the change in a plan's counters between two snapshots of it; a plan
+    /// sighted once (first sighting, a restart, a gap) or sighted again with unmoved counters stores zero deltas, which the
+    /// ranking leaves out. Says which window would answer, when the store holds one.
+    /// </summary>
+    public static string SnapshotsWithoutDeltaMessage(string serverName, int hoursBack, long snapshots, DateTime? newestMeasuredDeltaAt, DateTime windowEnd)
+    {
+        var message = $"{serverName} stored {snapshots} query_stats snapshot(s) in the last {hoursBack} hour(s), but none carries a measured delta, so no CPU can be attributed to a query in this window. "
+            + "A CPU figure is the change in a plan's counters between two snapshots of the same plan; a plan sighted once, or sighted again with unmoved counters, stores zero deltas and is left out of the ranking. "
+            + "This is not a collection gap, and collection health showing stored rows is consistent with it.";
+        if (newestMeasuredDeltaAt is { } newest)
+        {
+            message += $" The newest snapshot with a measured delta is at {FormatEffectiveStart(newest)}; a window that reaches it (hours_back {SuggestedHoursBack(newest, windowEnd)} or more with the same as_of) answers.";
+        }
+        else
+        {
+            message += " No snapshot in the raw tier up to the window's end carries a measured delta, so a wider raw window does not answer; a window the hourly rollup holds (a longer hours_back) may.";
+        }
+
+        return message;
+    }
+
+    /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
     ///
     /// <para>Not a grace period for asking about the future — it is the client-clock allowance. An agent that
