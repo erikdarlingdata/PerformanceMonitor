@@ -853,8 +853,8 @@ public partial class SettingsWindow : Window
         LrqExcludeCdcCheckBox.IsChecked = App.AlertLongRunningQueryExcludeCdc;
         AlertLrqExcludedProgramNamePrefixesBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedProgramNamePrefixes);
         AlertLrqExcludedLoginsBox.Text = string.Join(", ", App.AlertLongRunningQueryExcludedLogins);
-        AlertExcludedDatabasesBox.Text = string.Join(", ", App.AlertExcludedDatabases);
-        AlertExcludedVolumesBox.Text = string.Join(", ", App.AlertExcludedVolumes);
+        AlertExcludedDatabasesBox.Text = SettingsListText.Join(App.AlertExcludedDatabases);
+        AlertExcludedVolumesBox.Text = SettingsListText.Join(App.AlertExcludedVolumes);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
         AlertLowDiskCheckBox.IsChecked = App.AlertLowDiskEnabled;
@@ -1005,12 +1005,8 @@ public partial class SettingsWindow : Window
            operator's decision to evaluate that arm's sessions. */
         App.AlertLongRunningQueryExcludedProgramNamePrefixes = LongRunningQueryExclusions.Normalize(AlertLrqExcludedProgramNamePrefixesBox.Text.Split(',')).ToList();
         App.AlertLongRunningQueryExcludedLogins = LongRunningQueryExclusions.Normalize(AlertLrqExcludedLoginsBox.Text.Split(',')).ToList();
-        App.AlertExcludedDatabases = AlertExcludedDatabasesBox.Text
-            .Split(',')
-            .Select(s => s.Trim())
-            .Where(s => s.Length > 0)
-            .ToList();
-        App.AlertExcludedVolumes = VolumeExclusions.Normalize(AlertExcludedVolumesBox.Text.Split(',')).ToList();
+        App.AlertExcludedDatabases = SettingsListText.SplitLines(AlertExcludedDatabasesBox.Text);
+        App.AlertExcludedVolumes = VolumeExclusions.Normalize(SettingsListText.SplitLinesAndCommas(AlertExcludedVolumesBox.Text)).ToList();
         App.AlertTempDbSpaceEnabled =AlertTempDbSpaceCheckBox.IsChecked == true;
         if (int.TryParse(AlertTempDbSpaceThresholdBox.Text, out var tempDb) && tempDb > 0 && tempDb <= 100)
             App.AlertTempDbSpaceThresholdPercent = tempDb;

@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -41,8 +42,18 @@ internal sealed class InMemoryServerTagStore : IServerTagStore
         return id;
     }
 
-    public Task<ServerTagSnapshot> ReadSnapshotAsync(CancellationToken ct = default) =>
-        Task.FromResult(new ServerTagSnapshot(Tags.ToList(), Assignments.ToList(), Rules.ToList()));
+    /// <summary>Runs once, right after the next snapshot read captured its rows and before that read returns: a
+    /// second operator's write landing between the caller's check and its own write.</summary>
+    public Action? AfterSnapshotRead { get; set; }
+
+    public Task<ServerTagSnapshot> ReadSnapshotAsync(CancellationToken ct = default)
+    {
+        var snapshot = new ServerTagSnapshot(Tags.ToList(), Assignments.ToList(), Rules.ToList());
+        var hook = AfterSnapshotRead;
+        AfterSnapshotRead = null;
+        hook?.Invoke();
+        return Task.FromResult(snapshot);
+    }
 
     public Task<IReadOnlySet<int>> FindRegisteredServerIdsAsync(IReadOnlyCollection<int> serverIds, CancellationToken ct = default) =>
         Task.FromResult<IReadOnlySet<int>>(serverIds.Where(Servers.Contains).ToHashSet());
@@ -89,6 +100,29 @@ internal sealed class InMemoryServerTagStore : IServerTagStore
         Tags[index] = row;
         Landed();
         return Task.FromResult<ServerTagWriteResult>(new ServerTagWriteResult.Ok(row));
+    }
+
+    public Task<ServerTagWriteResult> MoveAsync(int tagId, TagMoveDirection direction, CancellationToken ct = default)
+    {
+        var refusal = ServerTagRules.CheckMove(Tags, tagId);
+        if (refusal is not null)
+        {
+            return Task.FromResult(refusal);
+        }
+
+        var moves = TagSiblingOrder.Move(ServerTagRules.SiblingsOf(Tags, tagId), tagId, direction);
+        foreach (var m in moves)
+        {
+            var i = Tags.FindIndex(t => t.Id == m.TagId);
+            Tags[i] = Tags[i] with { SortOrder = m.SortOrder };
+        }
+
+        if (moves.Count > 0)
+        {
+            Landed();
+        }
+
+        return Task.FromResult<ServerTagWriteResult>(new ServerTagWriteResult.Ok(Tags.Single(t => t.Id == tagId), Written: moves.Count > 0));
     }
 
     public Task<ServerTagWriteResult> DeleteAsync(int tagId, bool confirm, CancellationToken ct = default)
@@ -211,6 +245,108 @@ public sealed class DarlingMcpServerTagToolsTests
 
         var cased = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, tag, "{\"name\":\"PROD\"}"));
         Assert.Equal("updated", (string?)cased["status"]);
+    }
+
+    private static int[] Order(JsonObject result) =>
+        ((JsonArray)result["order"]!).Select(n => (int)n!).ToArray();
+
+    [Fact]
+    public async Task Update_Move_SwapsWithTheNeighbour_RenumbersTheSiblings_AndLeavesOtherParentsAlone()
+    {
+        var store = Store();
+        var a = store.Seed("A");
+        var b = store.Seed("B");
+        var c = store.Seed("C");
+        var child = store.Seed("Child", a);
+
+        var result = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, c, "{\"move\":\"up\"}"));
+
+        Assert.Equal("updated", (string?)result["status"]);
+        Assert.Equal("sort_order", (string?)result["updated_fields"]![0]);
+        Assert.Equal(new[] { a, c, b }, Order(result));
+        Assert.Equal(1, (int)result["tag"]!["sort_order"]!);
+        Assert.Equal(1, store.Writes);
+        Assert.Equal(0, store.Tags.Single(t => t.Id == child).SortOrder);
+
+        var down = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, a, "{\"move\":\" DOWN \"}"));
+        Assert.Equal("updated", (string?)down["status"]);
+        Assert.Equal(new[] { c, a, b }, Order(down));
+    }
+
+    [Fact]
+    public async Task Update_Move_PastAnEdge_IsUnchanged_AndWritesNothing()
+    {
+        var store = Store();
+        var a = store.Seed("A");
+        var b = store.Seed("B");
+
+        var top = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, a, "{\"move\":\"up\"}"));
+        var bottom = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, b, "{\"move\":\"down\"}"));
+
+        Assert.Equal("unchanged", (string?)top["status"]);
+        Assert.Equal("unchanged", (string?)bottom["status"]);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task Update_Move_WhenAnotherOperatorMovesFirst_AnswersUnchanged_NotUpdated()
+    {
+        var store = Store();
+        var a = store.Seed("A");
+        var b = store.Seed("B");
+
+        // B looks movable up in the snapshot; before this move reaches the store another operator moves B up
+        // already, so the store's re-read finds B first and writes nothing.
+        store.AfterSnapshotRead = () => store.MoveAsync(b, TagMoveDirection.Up).GetAwaiter().GetResult();
+
+        var result = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, b, "{\"move\":\"up\"}"));
+
+        Assert.Equal("unchanged", (string?)result["status"]);
+        Assert.Null(result["updated_fields"]);
+        Assert.Equal(new[] { b, a }, Order(result));
+        Assert.Equal(1, store.Writes);
+    }
+
+    [Theory]
+    [InlineData("{\"move\":\"sideways\"}")]
+    [InlineData("{\"move\":null}")]
+    [InlineData("{\"move\":1}")]
+    [InlineData("{\"move\":\"up\",\"name\":\"X\"}")]
+    public async Task Update_Move_RefusesABadValueOrACombination_AndWritesNothing(string json)
+    {
+        var store = Store();
+        var tag = store.Seed("A");
+        store.Seed("B");
+
+        var result = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, tag, json));
+
+        Assert.Equal("invalid", (string?)result["status"]);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task Update_Move_OfAnUnknownTag_IsNotFound()
+    {
+        var store = Store();
+        store.Seed("A");
+
+        var result = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, 999, "{\"move\":\"up\"}"));
+
+        Assert.Equal("not_found", (string?)result["status"]);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task Update_SortOrderField_IsStillRefused_AndPointsAtMove()
+    {
+        var store = Store();
+        var tag = store.Seed("A");
+
+        var result = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, tag, "{\"sort_order\":3}"));
+
+        Assert.Equal("unknown_field", (string?)result["refusal"]);
+        Assert.Contains("move", (string?)result["message"], StringComparison.Ordinal);
+        Assert.DoesNotContain("the Viewer orders siblings", (string?)result["message"], StringComparison.Ordinal);
     }
 
     [Theory]

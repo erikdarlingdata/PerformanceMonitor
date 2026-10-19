@@ -409,16 +409,16 @@
                                 <!-- Global Alert Filters -->
                                 <TextBlock Text="Global Alert Filters" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
-                                <TextBlock Text="Exclude databases from alerts (comma-separated):"
+                                <TextBlock Text="Exclude databases from alerts (one name per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
-                                <TextBox x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4"/>
-                                <TextBlock Text="e.g. DBAtools, msdb, tempdb — applies to blocking, deadlock, and long-running query alerts"
+                                <TextBox x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma — applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
-                                <TextBlock Text="Exclude volumes from the Volume Free Space alert (comma-separated):"
+                                <TextBlock Text="Exclude volumes from the Volume Free Space alert (one per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,10,0,4" FontSize="12"/>
-                                <TextBox x:Name="AlertExcludedVolumesBox" Margin="20,0,0,4"/>
-                                <TextBlock Text="e.g. S:\, T:\, /mnt/scratch — the whole mount point, any case, a trailing \ or / is ignored; applies to every server"
+                                <TextBox x:Name="AlertExcludedVolumesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                                <TextBlock Text="e.g. S:\, T:\ and /mnt/scratch on three lines (a comma-separated paste also works) — the whole mount point, any case, a trailing \ or / is ignored; applies to every server"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <!-- #5916: a threshold held for one server (or one database) that differs from the global value above. -->

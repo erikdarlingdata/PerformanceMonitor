@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -71,6 +72,43 @@ public sealed class ServerTagStoreLiveTests
         /* The lock makes the loser see the winner's committed row, so the in-memory duplicate check answers with
            the precise root message; without it the loser would only be caught by the unique index. */
         Assert.Equal("A tag named 'Twin' already exists at the root.", conflict.Message.Replace("'TWIN'", "'Twin'"));
+    }
+
+    [Fact]
+    public async Task Move_RenumbersTheSiblingsDensely_InOneTransaction_AndTwoConcurrentMovesStayConsistent()
+    {
+        var opened = await OpenAsync();
+        var (scratch, source, store) = opened!.Value;
+        await using var _ = scratch;
+        await using var __ = source;
+        var ct = TestContext.Current.CancellationToken;
+
+        var a = ((ServerTagWriteResult.Ok)await store.CreateAsync("A", null, null, ct)).Tag!.Id;
+        var b = ((ServerTagWriteResult.Ok)await store.CreateAsync("B", null, null, ct)).Tag!.Id;
+        var c = ((ServerTagWriteResult.Ok)await store.CreateAsync("C", null, null, ct)).Tag!.Id;
+        var child = ((ServerTagWriteResult.Ok)await store.CreateAsync("Child", a, null, ct)).Tag!.Id;
+
+        /* The all-zero start: moving C up must still change every sibling's sort order, densely. */
+        Assert.True(Assert.IsType<ServerTagWriteResult.Ok>(await store.MoveAsync(c, TagMoveDirection.Up, ct)).Written);
+        var tags = (await store.ReadSnapshotAsync(ct)).Tags;
+        Assert.Equal(new[] { a, c, b }, tags.Where(t => t.ParentId is null).OrderBy(t => t.SortOrder).Select(t => t.Id));
+        Assert.Equal(new[] { 0, 1, 2 }, tags.Where(t => t.ParentId is null).Select(t => t.SortOrder).OrderBy(i => i));
+        Assert.Equal(0, tags.Single(t => t.Id == child).SortOrder);
+
+        /* An edge move is an Ok that says it wrote nothing: the same result a move whose tag another operator
+           already moved to the edge gets from the re-read under the tree lock (#6094). */
+        Assert.False(Assert.IsType<ServerTagWriteResult.Ok>(await store.MoveAsync(a, TagMoveDirection.Up, ct)).Written);
+        Assert.Equal(new[] { a, c, b }, (await store.ReadSnapshotAsync(ct)).Tags.Where(t => t.ParentId is null).OrderBy(t => t.SortOrder).Select(t => t.Id));
+
+        /* Two operators moving different tags at once: each renumbers from a fresh read under the tree lock, so
+           the roots end as a dense permutation either way and never share an order. */
+        await Task.WhenAll(
+            store.MoveAsync(b, TagMoveDirection.Up, ct),
+            store.MoveAsync(a, TagMoveDirection.Down, ct));
+        var roots = (await store.ReadSnapshotAsync(ct)).Tags.Where(t => t.ParentId is null).ToList();
+        Assert.Equal(new[] { 0, 1, 2 }, roots.Select(t => t.SortOrder).OrderBy(i => i));
+
+        Assert.IsType<ServerTagWriteResult.NotFound>(await store.MoveAsync(99999, TagMoveDirection.Up, ct));
     }
 
     [Fact]
@@ -199,6 +237,8 @@ public sealed class ServerTagStoreLiveTests
         public Task<ServerTagWriteResult> CreateAsync(string name, int? parentId, string? colour, System.Threading.CancellationToken ct = default) => inner.CreateAsync(name, parentId, colour, ct);
 
         public Task<ServerTagWriteResult> UpdateAsync(int tagId, ServerTagEdit edit, System.Threading.CancellationToken ct = default) => inner.UpdateAsync(tagId, edit, ct);
+
+        public Task<ServerTagWriteResult> MoveAsync(int tagId, TagMoveDirection direction, System.Threading.CancellationToken ct = default) => inner.MoveAsync(tagId, direction, ct);
 
         public Task<ServerTagWriteResult> DeleteAsync(int tagId, bool confirm, System.Threading.CancellationToken ct = default) => inner.DeleteAsync(tagId, confirm, ct);
 

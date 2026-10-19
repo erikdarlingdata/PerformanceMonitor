@@ -131,6 +131,21 @@ try {
       await clickText(main, "Save");
       return { calls, text: paint() };
     },
+    move: async () => {
+      responder = (m) => m === "PATCH" ? { status: 200, body: { status: "updated", updated_fields: ["sort_order"], affected_rules: [] } } : { status: 200, body: {} };
+      await mountPage();
+      const disabledOf = () => ({ up: buttons(main, "Move up")[0].attrs.disabled === "", down: buttons(main, "Move down")[0].attrs.disabled === "" });
+      const states = {};
+      /* East (1) is first of the two roots, West (3) is last, Prod (2) is alone under East. */
+      await fire(nodeButton(main, 1), "click");
+      states.first = disabledOf();
+      await fire(nodeButton(main, 2), "click");
+      states.alone = disabledOf();
+      await fire(nodeButton(main, 3), "click");
+      states.last = disabledOf();
+      await clickText(main, "Move up");
+      return { calls, states, text: paint() };
+    },
     child: async () => {
       responder = () => ({ status: 201, body: { status: "created", tag: { tag_id: 9 }, affected_rules: [] } });
       await mountPage();
