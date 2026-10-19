@@ -151,7 +151,7 @@ public sealed class DarlingMcpInvestigationToolsTests
             new[]
             {
                 "create_custom_alert_rule", "create_mute_rule", "delete_custom_alert_rule", "delete_mute_rule",
-                "force_query_store_plan", "merge_deadlock_signatures", "set_alert_threshold_override", "set_mute_rule_enabled", "unforce_query_store_plan", "update_custom_alert_rule", "update_mute_rule",
+                "evict_cached_plan", "force_query_store_plan", "merge_deadlock_signatures", "set_alert_threshold_override", "set_mute_rule_enabled", "unforce_query_store_plan", "update_custom_alert_rule", "update_mute_rule",
             },
             servedWrites);
         /* Every other write stays unserved: alert settings, the finding mute, routes, Custom Views, server tags, server admin. */

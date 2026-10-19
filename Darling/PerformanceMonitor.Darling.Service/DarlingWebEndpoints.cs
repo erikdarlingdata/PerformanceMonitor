@@ -144,6 +144,10 @@ public static class DarlingWebEndpoints
         /* #5632 step 7: the plan force tools change a monitored SQL Server through the server action gate; the web has no route for them. */
         "force_query_store_plan",
         "unforce_query_store_plan",
+        /* #5632 step 10: an eviction changes a monitored SQL Server through the server action gate; the web has no route for it. */
+        "evict_cached_plan",
+        /* #5632 step 10: an agent's read of what compiled after its eviction, served over MCP by journal id; no page read mirrors it. */
+        "get_compiles_after_evict",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
         /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two

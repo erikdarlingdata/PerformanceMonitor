@@ -29,7 +29,7 @@ public enum RemediationOutcome
 public sealed record RemediationResult(
     RemediationOutcome Outcome, string Action, bool DryRun, bool Wrote, string? Reason, string Message)
 {
-    /// <summary>The exact statement a force or unforce runs (or would run, on a dry run), with the database name quoted the way <c>QUOTENAME</c> quotes it. Null when the result is not about one.</summary>
+    /// <summary>The exact statement a force, unforce or eviction runs (or would run, on a dry run). A force names the database quoted the way <c>QUOTENAME</c> quotes it; an eviction names the handle in its normal form. Null when the result is not about one.</summary>
     public string? Statement { get; init; }
 
     public static class Reasons

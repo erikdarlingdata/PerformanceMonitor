@@ -1516,6 +1516,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpSignatureMergeTools>()
             /* #5632 step 7: force_query_store_plan and unforce_query_store_plan, behind the server action gate; ship off. */
             .WithGeminiCompatibleTools<DarlingMcpPlanForceTools>()
+            /* #5632 step 10: get_compiles_after_evict, the store-only read that follows an eviction. */
+            .WithGeminiCompatibleTools<DarlingMcpCompilesAfterEvictTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
             .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
             /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central

@@ -45,6 +45,9 @@ public static class AgentChangeKinds
 
     /// <summary>A Query Store plan unforced on a monitored SQL Server (#5632, step 7). A person undoes it from the Agent changes list (step 9).</summary>
     public const string PlanUnforce = "plan_unforce";
+
+    /// <summary>One plan handle evicted from a monitored SQL Server's plan cache (#5632, step 10). It has no undo: an evicted plan cannot be put back, so the kind is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
+    public const string PlanEvict = "plan_evict";
 }
 
 /// <summary>A mute rule as <c>config.config_mute_rules</c> holds it. Also the wire shape of the mute tools' <c>mute_rule</c> object.</summary>

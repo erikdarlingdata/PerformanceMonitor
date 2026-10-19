@@ -42,6 +42,7 @@ public sealed class DarlingMcpPlanForceTools
 {
     internal const string ForceToolName = "force_query_store_plan";
     internal const string UnforceToolName = "unforce_query_store_plan";
+    internal const string EvictToolName = "evict_cached_plan";
 
     /// <summary>Refusal codes of this tool; the gate's codes are <see cref="AgentActionCodes"/> and the executor's are <see cref="RemediationResult.Reasons"/>.</summary>
     internal const string PostgresTarget = "postgres_target";
@@ -83,6 +84,24 @@ public sealed class DarlingMcpPlanForceTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         RunAsync(postgres, ownerSource?.Read(), logger, force: false, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken);
+
+    [McpServerTool(Name = "evict_cached_plan"), Description(
+        "Agent arm, SQL Server only: evicts ONE plan handle from the monitored server's plan cache, so the next run compiles a new plan. Dry run by default: returns the exact statement, what Darling collected for that handle and any warnings, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's evict_plan switch and remediation login (with ALTER SERVER STATE); ships off. " +
+        "<<GUIDE>>" +
+        "plan_handle is the 0x hex text that get_top_queries_by_cpu and get_procedure_stats return. It evicts every statement of the batch that handle covers; the answer says how many Darling collected. There is no undo: an evicted plan cannot be put back, and the next run compiles a new plan. " +
+        "This tool blocks only a call that cannot do anything: bad_plan_handle, evict_unsupported_on_platform (Azure SQL Database), evict_permission_denied (the login lacks ALTER SERVER STATE) or plan_not_cached. A batch of several statements, or a handle Darling never collected, is a warning, not a refusal. " +
+        "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_evict) with the statements Darling collected for the handle. " +
+        "After a write, wait for the next query_stats collection (about a minute), then call get_compiles_after_evict with the journal_id to see whether the next compile used the same plan shape. Answers status dry_run, done, refused (reason) or failed, with statement, before, warnings and journal_id.")]
+    public static Task<string> EvictCachedPlan(
+        NpgsqlDataSource postgres,
+        [Description("The plan_handle (0x and hex) from get_top_queries_by_cpu or get_procedure_stats.")] string plan_handle,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Required: the agent_action object (request_id, claim_id, agent_id, reason, evidence); see the tool guide. The reason is recorded with the change.")] string? agent_action = null,
+        [Description("Default true: return the exact statement and what Darling collected, write nothing. Pass false to write.")] bool dry_run = true,
+        StoreOwnerSource? ownerSource = null,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default) =>
+        RunEvictAsync(postgres, ownerSource?.Read(), logger, server_name, plan_handle, agent_action, dry_run, cancellationToken);
 
     private static string Answer(string status, string? reason, string message, object? extra = null)
     {
@@ -213,6 +232,129 @@ public sealed class DarlingMcpPlanForceTools
         {
             return McpHelpers.FormatError(tool, ex);
         }
+    }
+
+    /// <summary>The evict tool body (#5632, step 10), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
+    internal static async Task<string> RunEvictAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name,
+        string? plan_handle, string? agent_action, bool dry_run, CancellationToken ct)
+    {
+        const string tool = EvictToolName;
+        logger ??= NullLogger.Instance;
+        try
+        {
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct);
+            if (error is not null)
+                return error;
+
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+
+            /* 1: a handle that does not parse can do nothing. Refused before the gate, and journaled as a block is. */
+            if (!PlanEvictStatement.TryNormalize(plan_handle, out var handle))
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadHandle,
+                    "plan_handle must be 0x followed by hex digits in pairs, at most 64 bytes, as get_top_queries_by_cpu returns it. Nothing was run.", ct);
+            }
+
+            /* 2: SQL Server only. */
+            var (_, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
+                    $"{resolved.ServerName} is a PostgreSQL target. Evicting a plan is SQL Server only; there is no PostgreSQL eviction.", ct);
+            }
+
+            if (owner is null)
+            {
+                return DarlingAgentActionGate.RefusalAnswer(new AgentActionRefusal(NoOwnerSource,
+                    "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly."));
+            }
+
+            /* 3: the gate, for a dry run too. The permit's Id and the journal's target.id are the handle in its one normal form. */
+            var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, handle, null);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.EvictPlan, agent_action, target, ct);
+            if (decision.Refusal is { } gateRefusal)
+                return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
+            var permit = decision.Permit!;
+            _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
+
+            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
+            if (row is null)
+                return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
+            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+
+            /* 4: the before image comes from the store, not the server: what Darling collected for this handle in the last 24 hours. */
+            var (statements, objectName) = await DarlingPlanEvictStore.ReadBeforeAsync(postgres, resolved.ServerId, handle, DateTime.UtcNow, ct);
+            var warnings = EvictWarnings(statements.Count);
+            var before = new { plan_handle = handle, object_name = objectName, statements };
+            var statement = PlanEvictStatement.For(handle);
+
+            /* 5: the executor's own checks run on a dry run and before a write: edition, the grant, and that the handle is cached now. */
+            var dry = await executor.EvictPlanAsync(permit, handle, dryRun: true, ct);
+            if (dry.Outcome != RemediationOutcome.Done)
+            {
+                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
+                    new { dry_run, statement = dry.Statement ?? statement, before, warnings });
+            }
+
+            if (dry_run)
+                return Answer("dry_run", null, dry.Message + " An eviction has no undo.", new { dry_run = true, statement = dry.Statement ?? statement, before, warnings });
+
+            /* 6: the write, journaled. action_called holds the store's before image; action_done holds the statement and the message. */
+            try
+            {
+                var hooks = new AgentActionHooks
+                {
+                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
+                    Write = async (_, _, token) =>
+                    {
+                        var written = await executor.EvictPlanAsync(permit, handle, dryRun: false, token);
+                        if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
+                            throw new PlanForceWriteException(written.Message, Answer(written.Outcome == RemediationOutcome.Refused ? "refused" : "failed",
+                                written.Reason, written.Message, new { dry_run = false, statement, before, warnings }));
+                        return JsonSerializer.Serialize(new { statement = written.Statement ?? statement, message = written.Message }, McpHelpers.JsonOptions);
+                    },
+                };
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanEvict, action!, target), hooks, ct);
+                if (result.Refusal is { } refused)
+                    return DarlingAgentActionGate.RefusalAnswer(refused);
+                return Answer("done", null,
+                    "The plan was evicted from the plan cache. There is no undo; the next run compiles a new plan. Wait for the next query_stats collection (about a minute), then call get_compiles_after_evict with this journal_id.",
+                    new { dry_run = false, statement, before, warnings, journal_id = result.CalledId });
+            }
+            catch (PlanForceWriteException ex)
+            {
+                return ex.Answer;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError(tool, ex);
+        }
+    }
+
+    /// <summary>What a person should know before the eviction runs. A warning, never a refusal.</summary>
+    internal static string[] EvictWarnings(int statementCount) => statementCount switch
+    {
+        0 => ["Darling has not collected this handle in the last 24 hours, so get_compiles_after_evict cannot follow it. The eviction still runs."],
+        _ => [$"This handle covers {(statementCount >= DarlingPlanEvictStore.MaxStatements ? "at least " : "")}{statementCount} statement{(statementCount == 1 ? "" : "s")} Darling collected. Evicting it evicts every statement in that batch."],
+    };
+
+    /// <summary>A refusal that comes before the gate (a bad handle, a PostgreSQL target): journaled with the request when the argument parses, and without it when it does not.</summary>
+    private static async Task<string> RefuseBeforeGateAsync(InvestigationRequestStore store, string? agentAction, string tool, string code, string message, CancellationToken ct)
+    {
+        var problem = InvestigationToolCore.ParseAgentAction(agentAction, out var parsed);
+        if (problem is not null)
+        {
+            await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, ct);
+            return DarlingAgentActionGate.RefusalAnswer(problem);
+        }
+
+        var refusal = new AgentActionRefusal(code, message);
+        await store.RecordAgentActionRefusalAsync(parsed!.RequestId, parsed.AgentId, tool, refusal.Reason, ct);
+        return DarlingAgentActionGate.RefusalAnswer(refusal);
     }
 
     /// <summary>

@@ -126,6 +126,7 @@ public sealed class AgentChangeViewRow
     {
         AgentChangeKinds.PlanForce => "force plan",
         AgentChangeKinds.PlanUnforce => "unforce plan",
+        AgentChangeKinds.PlanEvict => "evict plan",
         var other => other ?? "",
     };
 

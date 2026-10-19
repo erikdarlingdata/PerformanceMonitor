@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -66,6 +67,22 @@ public sealed class SqlServerRemediationExecutor
 
     internal const string HandleCachedSql =
         "SELECT cached = COUNT_BIG(*) FROM sys.dm_exec_cached_plans WHERE plan_handle = @plan_handle OPTION(RECOMPILE);";
+
+    /// <summary><c>SERVERPROPERTY('EngineEdition')</c> of an Azure SQL Database.</summary>
+    internal const long AzureSqlDatabaseEdition = 5;
+
+    /// <summary>
+    /// The evict read batch (#5632, step 10): the engine edition, then whether the login holds <c>ALTER SERVER STATE</c>, then the cached-plan count
+    /// (the same count as <see cref="HandleCachedSql"/>). The count runs only on an engine that has the statement and for a login that holds the
+    /// grant, so a refusal for either reason never ends in a permission error from the view.
+    /// </summary>
+    internal const string EvictFactsSql = @"
+DECLARE @edition bigint = CONVERT(bigint, SERVERPROPERTY('EngineEdition'));
+DECLARE @granted bigint = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER SERVER STATE'), 0));
+DECLARE @cached bigint = NULL;
+IF @edition <> 5 AND @granted = 1
+    SELECT @cached = COUNT_BIG(*) FROM sys.dm_exec_cached_plans WHERE plan_handle = @plan_handle OPTION(RECOMPILE);
+SELECT edition = @edition, granted = @granted, cached = @cached;";
 
     /// <summary>The handle goes in as a typed parameter: the validated text is converted to bytes and never joins the batch text.</summary>
     internal const string EvictSql = "DBCC FREEPROCCACHE (@plan_handle);";
@@ -208,8 +225,13 @@ SELECT killed = @killed;";
         }, ct);
     }
 
-    /// <summary>Evicts ONE plan handle from the plan cache. <paramref name="planHandle"/> is <c>0x</c> and hex, at most 64 bytes; anything else is
-    /// refused before any connection opens.</summary>
+    /// <summary>
+    /// Evicts ONE plan handle from the plan cache. <paramref name="planHandle"/> is <c>0x</c> and hex, at most 64 bytes; anything else is
+    /// refused before any connection opens. One read batch gathers three facts, in this order, before any write: the engine edition (Azure SQL
+    /// Database has no plan-handle eviction, <c>evict_unsupported_on_platform</c>), whether the login holds <c>ALTER SERVER STATE</c>
+    /// (<c>evict_permission_denied</c>), and how many cached plans have the handle (none, <c>plan_not_cached</c>). Those are the only refusals.
+    /// The result's <see cref="RemediationResult.Statement"/> is the text a person would run, with the handle in its normal form.
+    /// </summary>
     public async Task<RemediationResult> EvictPlanAsync(ServerActionPermit permit, string planHandle, bool dryRun, CancellationToken ct)
     {
         const string name = "evict_plan";
@@ -218,26 +240,42 @@ SELECT killed = @killed;";
                 "A plan handle is 0x followed by hex digits in pairs, at most 64 bytes. Nothing was run."));
         if (PermitRefusal(permit, ServerActionNames.EvictPlan, planHandle, name, dryRun, ignoreCase: true) is { } mismatch)
             return mismatch;
+        var statement = PlanEvictStatement.For(PlanHandleText.Normal(bytes));
 
         return await RunAsync(name, dryRun, null, async (connection, secret) =>
         {
-            long cached;
-            await using (var read = Command(connection, HandleCachedSql))
+            long? edition;
+            bool granted;
+            long? cached;
+            await using (var read = Command(connection, EvictFactsSql))
             {
                 read.Parameters.Add(new SqlParameter("@plan_handle", SqlDbType.VarBinary, 64) { Value = bytes });
-                cached = Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                if (!await reader.ReadAsync(ct))
+                    return RemediationResult.Failed(name, dryRun, "The server returned no answer to the plan cache check.");
+                edition = reader.IsDBNull(0) ? null : Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+                granted = !reader.IsDBNull(1) && Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture) == 1;
+                cached = reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
             }
 
-            if (cached == 0)
+            if (edition == AzureSqlDatabaseEdition)
+                return RemediationResult.Refused(name, dryRun, EvictDegradeReasons.UnsupportedOnPlatform,
+                    "This server is an Azure SQL Database, which has no plan handle eviction. Nothing was run.") with { Statement = statement };
+            if (!granted)
+                return RemediationResult.Refused(name, dryRun, EvictDegradeReasons.PermissionDenied,
+                    "The remediation login does not hold ALTER SERVER STATE on this server, which evicting a plan needs. A person can grant it. Nothing was run.")
+                    with { Statement = statement };
+            if (cached is null or 0)
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotCached,
-                    "That plan handle is not in the plan cache (it may have aged out). Nothing was run.");
+                    "That plan handle is not in the plan cache (it may have aged out). Nothing was run.") with { Statement = statement };
             if (dryRun)
-                return RemediationResult.Done(name, dryRun, wrote: false, "Dry run: that plan handle is in the plan cache. Nothing was run.");
+                return RemediationResult.Done(name, dryRun, wrote: false, "Dry run: that plan handle is in the plan cache. Nothing was run.")
+                    with { Statement = statement };
 
             await using var evict = Command(connection, EvictSql);
             evict.Parameters.Add(new SqlParameter("@plan_handle", SqlDbType.VarBinary, 64) { Value = bytes });
             await evict.ExecuteNonQueryAsync(ct);
-            return RemediationResult.Done(name, dryRun, wrote: true, "That plan handle was evicted from the plan cache.");
+            return RemediationResult.Done(name, dryRun, wrote: true, "That plan handle was evicted from the plan cache.") with { Statement = statement };
         }, ct);
     }
 
@@ -381,6 +419,31 @@ internal static class PlanHandleText
 
         bytes = Convert.FromHexString(text.AsSpan(2));
         return true;
+    }
+
+    /// <summary>The one normal form of a handle: <c>0x</c> and upper-case hex.</summary>
+    internal static string Normal(byte[] bytes) => "0x" + Convert.ToHexString(bytes);
+}
+
+/// <summary>The one normal form of a plan handle, and the exact statement an eviction runs (#5632, step 10). The statement text lives in this assembly only.</summary>
+public static class PlanEvictStatement
+{
+    /// <summary>The handle as <c>0x</c> and upper-case hex, or false when it is not a plan handle (<c>0x</c>, whole bytes, 1 to 64 of them).</summary>
+    public static bool TryNormalize(string? handle, out string normal)
+    {
+        normal = "";
+        if (!PlanHandleText.TryParse(handle, out var bytes))
+            return false;
+        normal = PlanHandleText.Normal(bytes);
+        return true;
+    }
+
+    /// <summary>The statement a person would run. <paramref name="normalHandle"/> is the output of <see cref="TryNormalize"/>; the executor itself sends the handle as a typed parameter.</summary>
+    public static string For(string normalHandle)
+    {
+        if (!TryNormalize(normalHandle, out var normal))
+            throw new ArgumentException("Not a plan handle.", nameof(normalHandle));
+        return "DBCC FREEPROCCACHE (" + normal + ");";
     }
 }
 
