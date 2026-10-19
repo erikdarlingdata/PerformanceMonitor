@@ -91,6 +91,23 @@ public sealed class McpQueryTools
                         new { filter_applied = filterApplied });
                 }
 
+                /* #6127 (Darling's twin): a window that stored snapshots but none with a measured delta is not a collection miss. */
+                var (snapshots, newestMeasured) = await dataService.GetQueryStatsSnapshotProbeAsync(
+                    resolved.ServerId, hours_back, asOfUtc: windowEnd, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
+                if (snapshots > 0)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        McpHelpers.SnapshotsWithoutDeltaMessage(resolved.ServerName, hours_back, snapshots, newestMeasured, windowEnd),
+                        new
+                        {
+                            snapshots_in_window = snapshots,
+                            snapshots_with_measured_delta = 0,
+                            newest_measured_delta_at = McpHelpers.FormatEffectiveStart(newestMeasured),
+                            suggested_hours_back = newestMeasured is { } at ? McpHelpers.SuggestedHoursBack(at, windowEnd) : (int?)null
+                        });
+                }
+
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
