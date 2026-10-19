@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -378,7 +378,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
       points: mergeSeriesRows(drawn, "time", metric),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
-      formatValue: (v) => Math.round(v).toLocaleString(),
+      formatValue: (v, o) => fmtInt(v, o),
       unit: "ms/s",
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
@@ -709,7 +709,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
         { key: "avg_cpu_ms", label: "Avg CPU", color: SERIES_COLORS[0] },
         { key: "avg_elapsed_ms", label: "Avg Elapsed", color: SERIES_COLORS[1] },
       ],
-      formatValue: (v) => Math.round(v).toLocaleString() + " ms",
+      formatValue: (v, o) => fmtInt(v, o) + " ms",
       unit: "ms",
       /* #2802: axis spans the requested window (ctx.hours ending now). When the read is #2353-truncated the data
          starts later than the window and plots toward the right; the truncation notice above already says so.
@@ -953,7 +953,7 @@ export function fileIoPanel(server, ctx) {
        narrowed read spans the hours it answered for. */
     const draw = (title, data, id, empty) =>
       data.series.length
-        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v) => Math.round(v) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v, o) => fmtInt(v, o) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
         : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
@@ -2003,7 +2003,9 @@ export const SERVER_TABS = [
       "These are the system_health session and default trace, parsed on read. The desktop viewer additionally " +
       "charts the corruption and contention counters hour-by-hour; here they are the raw parsed rows.",
     build: (server, ctx) => [
-      ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, limit: 50 }, [
+      /* The CPU chart reads the whole window as time buckets (chart: true, #6158); a limit of 50 drew only the newest
+         few hours of a day. The entries table below keeps the newest-rows read. */
+      ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, chart: true }, [
         {
           title: "system_health CPU",
           subtitle: ctx.label,
@@ -2015,6 +2017,8 @@ export const SERVER_TABS = [
           unit: "%",
           emptyText: "No system_health entries in this window.",
         },
+      ]),
+      ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, limit: 50 }, [
         {
           title: "system_health Entries",
           subtitle: ctx.label,

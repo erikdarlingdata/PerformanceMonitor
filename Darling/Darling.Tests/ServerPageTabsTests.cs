@@ -1075,6 +1075,8 @@ public sealed class ServerPageTabsTests
         var parameterisedTwice = new Dictionary<string, (string Read, string Distinguisher)>(StringComparer.Ordinal)
         {
             ["POSTGRES_TABS/storage"] = ("get_pg_index_bloat", "answered_only: true"),
+            /* #6158: the system_health CPU chart reads the whole window as time buckets, the entries table the newest rows. */
+            ["SERVER_TABS/events"] = ("get_health_parser_system_health", "chart: true"),
         };
 
         var exemptionsUsed = new HashSet<string>(StringComparer.Ordinal);

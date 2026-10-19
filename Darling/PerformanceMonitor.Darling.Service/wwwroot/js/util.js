@@ -584,10 +584,35 @@ export function windowFromHours(hours) {
 
 /* ─────────────────────────── value formatters ─────────────────────────── */
 
-export function fmtInt(v) {
+/* Axis tick labels (#6158). A chart's tick step is a nice 1, 2 or 5 times a power of ten, so on a small range it is 0.2 or
+   0.5, and a formatter that rounds to whole numbers printed one label several times over ("1 ms, 1 ms, 0 ms, 0 ms").
+   The chart passes each formatter { step } as a second argument; a formatter that gets one prints enough decimals that two
+   ticks one step apart never read the same. Called without it (a tooltip, a table cell) a formatter reads as it always did.
+   The second argument is checked to be that object, so `array.map(fmtMs)` (which passes an index) is unaffected. */
+export function tickDecimals(step) {
+  const s = Number(step);
+  if (!isFinite(s) || s <= 0 || s >= 1) return 0;
+  return Math.min(8, Math.ceil(-Math.log10(s) - 1e-9));
+}
+function stepOf(o) {
+  return o && typeof o === "object" && isFinite(o.step) && o.step > 0 ? Number(o.step) : null;
+}
+/* The decimals a tick label needs: the step's own, in the unit the label is printed in (`per` source units to one shown unit). */
+function placesFor(o, min = 0, per = 1) {
+  const step = stepOf(o);
+  return Math.max(min, step == null ? 0 : tickDecimals(step / per));
+}
+function fixed(n, places) {
+  return n.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places });
+}
+const stepArg = (o) => (stepOf(o) == null ? null : { step: stepOf(o) });
+
+export function fmtInt(v, o) {
   if (v == null) return "—";
   const n = Number(v);
-  return isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—";
+  if (!isFinite(n)) return "—";
+  const places = placesFor(o);
+  return places > 0 ? fixed(n, places) : n.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 export function fmtNum(v, d = 1) {
   if (v == null) return "—";
@@ -605,26 +630,49 @@ export function fmtRate(v) {
     ? n.toLocaleString(undefined, { maximumFractionDigits: 2 })
     : n.toLocaleString(undefined, { maximumSignificantDigits: 2 });
 }
-export function fmtPct(v) {
+export function fmtPct(v, o) {
   if (v == null) return "—";
   const n = Number(v);
-  return isFinite(n) ? Math.round(n) + "%" : "—";
+  if (!isFinite(n)) return "—";
+  const places = placesFor(o);
+  return places > 0 ? fixed(n, places) + "%" : Math.round(n) + "%";
 }
-export function fmtMs(v) {
+export function fmtMs(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
   const abs = Math.abs(n);
-  if (abs < 1000) return fmtInt(n) + " ms";
-  if (abs < 60000) return fmtNum(n / 1000, 1) + " s";
-  if (abs < 3600000) return fmtNum(n / 60000, 1) + " min";
-  return fmtNum(n / 3600000, 1) + " h";
+  if (abs < 1000) return fmtInt(n, stepArg(o)) + " ms";
+  if (abs < 60000) return fmtNum(n / 1000, placesFor(o, 1, 1000)) + " s";
+  if (abs < 3600000) return fmtNum(n / 60000, placesFor(o, 1, 60000)) + " min";
+  return fmtNum(n / 3600000, placesFor(o, 1, 3600000)) + " h";
 }
-export function fmtMb(v) {
+export function fmtMb(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  return n >= 1024 ? fmtNum(n / 1024, 1) + " GB" : fmtInt(n) + " MB";
+  return n >= 1024 ? fmtNum(n / 1024, placesFor(o, 1, 1024)) + " GB" : fmtInt(n, stepArg(o)) + " MB";
+}
+/* A size in `unit` (kb, mb, gb or tb, any case) stepped up to the unit that keeps it under 1,024, written "MB", "GB": the
+   same rule fmtMb applies, so 80,000 MB reads "78.1 GB" and never a cut-off "80,000.0 mb". Null when `unit` is not a size. */
+const SIZE_UNITS = ["KB", "MB", "GB", "TB"];
+export function fmtSize(v, unit, o) {
+  const at = SIZE_UNITS.indexOf(String(unit == null ? "" : unit).toUpperCase());
+  if (at < 0) return null;
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  let value = n;
+  let i = at;
+  let per = 1;
+  while (Math.abs(value) >= 1024 && i < SIZE_UNITS.length - 1) {
+    value /= 1024;
+    per *= 1024;
+    i++;
+  }
+  /* A tooltip or table cell keeps one decimal, as every composed value does; an axis tick prints as many as its step needs. */
+  const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? 1 : 0, per);
+  return fixed(value, places) + " " + SIZE_UNITS[i];
 }
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
@@ -636,8 +684,8 @@ export function fmtBool(v) {
 /** Named formatters a panel descriptor can reference (the #1563-friendly, string-keyed registry). */
 export const FORMATTERS = {
   int: fmtInt,
-  num1: (v) => fmtNum(v, 1),
-  num2: (v) => fmtNum(v, 2),
+  num1: (v, o) => fmtNum(v, placesFor(o, 1)),
+  num2: (v, o) => fmtNum(v, placesFor(o, 2)),
   rate: fmtRate,
   pct: fmtPct,
   ms: fmtMs,
@@ -648,9 +696,9 @@ export const FORMATTERS = {
   text: fmtText,
 };
 
-export function applyFormat(name, value) {
+export function applyFormat(name, value, opts) {
   const f = (name && FORMATTERS[name]) || FORMATTERS.text;
-  return f(value);
+  return f(value, opts);
 }
 
 /* ─────────────────────────── band / severity classes ─────────────────────────── */

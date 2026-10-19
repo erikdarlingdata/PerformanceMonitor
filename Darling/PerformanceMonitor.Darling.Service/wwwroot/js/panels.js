@@ -38,6 +38,7 @@ import {
   getPath,
   parseUtc,
   applyFormat,
+  tickDecimals,
   bandClass,
   sevClass,
   windowFromHours,
@@ -1393,7 +1394,8 @@ function vizLine(data, desc) {
     label: s.label,
     color: s.color || SERIES_COLORS[i % SERIES_COLORS.length],
   }));
-  const formatValue = desc.format ? (v) => applyFormat(desc.format, v) : (v) => String(Math.round(v));
+  /* The second argument is the axis tick step the chart passes (#6158), so a small range prints enough decimals that no two ticks read alike. */
+  const formatValue = desc.format ? (v, o) => applyFormat(desc.format, v, o) : (v, o) => (o && o.step > 0 && tickDecimals(o.step) ? Number(v).toFixed(tickDecimals(o.step)) : String(Math.round(v)));
   /* Percentage charts cap the y-domain at 100 so a 96% reading never rounds the axis up past 100% (B3). */
   const clampMax = desc.clampMax ?? (desc.format === "pct" ? 100 : null);
   /* #2802: span the x-axis over the REQUESTED window ("last N hours" ending now), not the data's own extent, so a
