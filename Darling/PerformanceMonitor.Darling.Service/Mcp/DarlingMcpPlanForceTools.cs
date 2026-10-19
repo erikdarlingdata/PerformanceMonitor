@@ -223,8 +223,9 @@ public sealed class DarlingMcpPlanForceTools
     /// forced before; an undo of an unforce of N forces N again when no plan of the query is forced. Anything else is refused,
     /// <c>changed_since</c> when another change was made since, <c>nothing_to_undo</c> when the server shows the change never took effect.</para>
     /// <para><b>Show, then confirm.</b> Without <paramref name="confirm"/> it returns the exact statement and the state it read, and writes and
-    /// journals nothing. With it, and with <paramref name="shownStatement"/> (when given) equal to the statement it would run now, it writes and
-    /// journals <c>action_undone</c> under the same advisory lock the store kinds' undo takes.</para>
+    /// journals nothing. With it, and with <paramref name="shownStatement"/> equal to the statement it would run now, it writes and journals
+    /// <c>action_undone</c> under the same advisory lock the store kinds' undo takes. A confirm without the shown statement writes nothing and
+    /// answers the confirm step again, so no caller can write a statement a person was not shown.</para>
     /// <para><b>Gate.</b> The two server-side conditions only (that server's <c>force_plan</c> switch and an <c>env:</c> or <c>file:</c> remediation login),
     /// through <see cref="AgentChangeUndo.PlanUndoSession.AuthorizeAsync"/>; the agent-only conditions are not asked of a person. A refusal is journaled
     /// with the person as the actor.</para>
@@ -323,9 +324,11 @@ public sealed class DarlingMcpPlanForceTools
         }
 
         statement = dry.Statement ?? statement;
-        if (!confirm || (shownStatement is not null && !string.Equals(shownStatement, statement, StringComparison.Ordinal)))
+        if (!confirm || shownStatement is null || !string.Equals(shownStatement, statement, StringComparison.Ordinal))
         {
-            var lead = confirm ? "The server's state changed since the statement was shown, so nothing was written. Review the new statement and confirm again. " : "";
+            var lead = !confirm ? ""
+                : shownStatement is null ? "A confirm must carry the statement that was shown, so nothing was written. Review this statement and confirm it. "
+                : "The server's state changed since the statement was shown, so nothing was written. Review the new statement and confirm again. ";
             return new PlanUndoAnswer(PlanUndoAnswer.Confirm, null, lead + step.Words, statement, stateNode, null, step.RestoredAs);
         }
 

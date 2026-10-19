@@ -25,7 +25,22 @@ namespace Darling.Tests;
    private setup is shared). Each test makes its own scratch store and SQL Server database. */
 public sealed partial class PlanForceToolLiveTests
 {
-    private static Task<PlanUndoAnswer> UndoAsync(Ctx c, long calledId, bool confirm, string login = "alice", string? shown = null) =>
+    /* A write needs the statement that was shown. A confirm here without one shows it first, as the page and the Viewer do, then confirms
+       that statement. A refusal at the first step is the answer. RawUndoAsync sends exactly what it is given. */
+    private static async Task<PlanUndoAnswer> UndoAsync(Ctx c, long calledId, bool confirm, string login = "alice", string? shown = null)
+    {
+        if (confirm && shown is null)
+        {
+            var first = await RawUndoAsync(c, calledId, confirm: false, login, shown: null);
+            if (first.Status != PlanUndoAnswer.Confirm)
+                return first;
+            shown = first.Statement;
+        }
+
+        return await RawUndoAsync(c, calledId, confirm, login, shown);
+    }
+
+    private static Task<PlanUndoAnswer> RawUndoAsync(Ctx c, long calledId, bool confirm, string login, string? shown) =>
         DarlingMcpPlanForceTools.UndoPlanChangeAsync(new AgentChangeUndo(c.Source, 30), c.Source, c.Log, calledId, login, confirm, shown, c.Ct);
 
     private static async Task<long> LastCalledIdAsync(Ctx c) =>
@@ -90,6 +105,13 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("confirm", shown.Status);
             Assert.Equal($"EXEC [{c.Sql.Database}].sys.sp_query_store_unforce_plan @query_id = {query}, @plan_id = {planA};", shown.Statement);
             Assert.Equal(planA, (long)shown.State!["forced_plan"]!["plan_id"]!);
+            Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
+            Assert.Empty(await RowsAsync(c, "action_undone"));
+
+            /* A confirm without the shown statement writes nothing: it answers the confirm step again. */
+            var bare = await RawUndoAsync(c, called, confirm: true, "alice", shown: null);
+            Assert.Equal("confirm", bare.Status);
+            Assert.Equal(shown.Statement, bare.Statement);
             Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
             Assert.Empty(await RowsAsync(c, "action_undone"));
 
