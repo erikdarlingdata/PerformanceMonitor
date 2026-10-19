@@ -249,9 +249,9 @@ public sealed class McpWhoDroveItTools
 
     [McpServerTool(Name = "get_query_pileups"), Description(
         "Lists the capture times when min_sessions or more sessions ran the same query_hash at once, most sessions first, with the wait types at that capture and the head blocker from the DMV blocking snapshot NEAREST that time. " +
-        "head_blocker comes from a separate collector (dmv_blocking_snapshots, the always-on blocking snapshot), so it is the nearest snapshot within 60 seconds either side (blocking_snapshot_offset_seconds says how near); null with a note means no blocking was recorded near the capture. " +
+        "head_blocker comes from a separate collector, so it is the nearest snapshot within 60 seconds either side (blocking_snapshot_offset_seconds says how near); null with a note means no blocking was recorded near the capture. " +
         "A session counts once per capture. <<GUIDE>> " +
-        "Waits are session counts per wait_type at the capture itself (none = running, no wait). That collector writes rows only while something is blocked. " +
+        "Waits are session counts per wait_type at the capture itself (none = running, no wait). That collector (dmv_blocking_snapshots, the always-on blocking snapshot) writes rows only while something is blocked. " +
         "Rows: collection_time, query_hash, sessions, blocked_sessions (sessions with blocking_session_id set at the capture), max_wait_ms, waits [{wait_type, sessions}], query_text preview masked by mcp.dataDetail, head_blocker {spid, blocked_sessions (everything behind it, directly or not), wait_time_ms, login_name, host_name, program_name, database_name, query_text} and blocking_snapshot_time. " +
         "min_sessions default 5, at least 2; top caps at 100. An empty answer says why: no capture in the window had that many sessions on one statement, or query_snapshots was not collected. WAITFOR shells are dropped, as get_active_queries drops them. The pile-up is seen only at captures, so a pile-up that came and went between two captures is not listed.")]
     public static async Task<string> GetQueryPileups(
