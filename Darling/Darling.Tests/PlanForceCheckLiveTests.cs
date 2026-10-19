@@ -488,6 +488,31 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
     }
 
     [Fact]
+    public async Task TheBriefSourceReader_FillsTheForceCheck_ForACheckRequest_AndNullForAnyOther()
+    {
+        await RunAsync(async (dataSource, connection, at, ct) =>
+        {
+            var force = await ForceAsync(at(T), connection, T, ct);
+            await PassAsync(connection, T.AddMinutes(5), ct);
+            Assert.Equal(1, (await at(T.AddMinutes(6)).SweepAsync(ct)).FollowUps);
+            var check = Assert.Single(await ChecksAsync(connection, force.CalledId, ct)).Id;
+            var reader = new PerformanceMonitor.Darling.Service.Investigations.PgInvestigationBriefSourceReader(dataSource, utcNow: () => T.AddMinutes(7));
+
+            var forCheck = (await reader.ReadAsync(check, ct))!.Request.ForceCheck;
+            Assert.NotNull(forCheck);
+            Assert.Equal(force.CalledId, forCheck!.CalledId);
+            Assert.Equal(1, forCheck.CheckNo);
+            Assert.Equal(Database, forCheck.Database);
+            Assert.Equal(QueryId, forCheck.QueryId);
+            Assert.Equal(NewPlan, forCheck.PlanId);
+            Assert.Equal(force.Request, forCheck.ForceRequestId);
+            Assert.Equal(T, forCheck.ForcedAtUtc);
+
+            Assert.Null((await reader.ReadAsync(force.Request, ct))!.Request.ForceCheck);
+        });
+    }
+
+    [Fact]
     public void TheCheckSchedule_FollowsTheRules()
     {
         var t = new DateTime(2026, 10, 18, 10, 0, 0, DateTimeKind.Utc);

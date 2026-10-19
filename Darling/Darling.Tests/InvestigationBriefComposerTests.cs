@@ -108,6 +108,33 @@ public sealed class InvestigationBriefComposerTests
             Assert.Contains(rules, r => r.Contains("Compiled parameter values are hidden", StringComparison.Ordinal) && r.Contains("say so in your report", StringComparison.Ordinal));
     }
 
+    /* #5632 step 8: the plan-force check section is in a check request's brief only, so every other brief (and Lite's golden brief) is as before. */
+    [Fact]
+    public void TheForceCheckSection_IsInACheckRequestsBrief_AndInNoOther()
+    {
+        Assert.False(Brief(Sources()).ContainsKey("plan_force_check"));
+        var check = new InvestigationBriefForceCheck(41, 3, 26, "SalesDb", 5, 22, Now.AddHours(-2), Guid.NewGuid());
+        var request = Request() with { ForceCheck = check };
+        var brief = Brief(Sources(request: request));
+        var section = brief["plan_force_check"]!.AsObject();
+        Assert.Equal(3, section["check_no"]!.GetValue<int>());
+        Assert.Equal(26, section["of"]!.GetValue<int>());
+        Assert.Equal("plan_force_check", section["evidence_section"]!.GetValue<string>());
+        Assert.Equal(22, section["force"]!["plan_id"]!.GetValue<long>());
+        Assert.Equal("SalesDb", section["force"]!["database"]!.GetValue<string>());
+        Assert.Contains("check 3 of up to 26", section["what_this_is"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("Darling never removes a force on its own", section["decision"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("unforce_query_store_plan", section["decision"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("another agent", section["second_opinion"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("argue against", section["second_opinion"]!.GetValue<string>(), StringComparison.Ordinal);
+
+        /* Nothing else in the brief moves: the check's brief is the plain one plus the section. */
+        var plain = Brief(Sources());
+        brief.Remove("plan_force_check");
+        Assert.Equal(plain.ToJsonString().Replace(plain["request"]!["id"]!.GetValue<string>(), "x", StringComparison.Ordinal),
+            brief.ToJsonString().Replace(brief["request"]!["id"]!.GetValue<string>(), "x", StringComparison.Ordinal));
+    }
+
     /* #5632: a brief stored at full and served under a masked level gains the same line. */
     [Fact]
     public void AStoredFullBrief_ServedMasked_GainsTheParameterValuesLine_OnceOnly()

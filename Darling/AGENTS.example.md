@@ -43,4 +43,6 @@ Everything above stays true until a person turns it on, server by server: Darlin
 - Run the tool with its default `dry_run` first. It returns the exact statement and what is forced now, and writes nothing.
 - Before a force, ask another agent or a person for a second opinion, and write what they said in the `agent_action` reason. Record why you are doing this in that reason too: it is the reason the Agent changes list shows.
 - A force replaces any other forced plan of that query, including one that automatic plan correction or a person placed. The change record keeps the plan that was forced before and how, so you can put it back.
+- Darling opens a check request for you about 5 and 10 minutes after a force, then every hour for 24 hours. It never removes a force on its own: at each check you keep it or remove it.
+- At each check, ask another agent or a person to argue against your conclusion from the same numbers before you keep or remove the force, and write what they said in your report.
 - After a write, call `get_forced_plans` to check that the force works. Nothing in Darling unforces for you: if it goes wrong, `unforce_query_store_plan` is the way back.

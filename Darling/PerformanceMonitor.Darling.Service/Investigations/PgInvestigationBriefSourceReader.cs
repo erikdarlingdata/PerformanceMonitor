@@ -42,10 +42,22 @@ public sealed class PgInvestigationBriefSourceReader : IInvestigationBriefSource
     internal static readonly string RequestSql = $@"
 SELECT r.server_id, r.server_name, r.family, r.state, r.expires_at, r.lease_until, r.alert_count, r.first_metric,
        r.story_path_hash, s.engine_kind, r.first_alert_at, r.first_dedup_key, r.autonomy_level, r.practice_of,
-       {InvestigationRequestStore.RegistryNamesSelect("r", "s")}
+       {InvestigationRequestStore.RegistryNamesSelect("r", "s")}, r.force_check_of, r.force_check_no
 FROM config.investigation_requests AS r
 LEFT JOIN collect.servers AS s ON s.server_id = r.server_id
 WHERE r.request_id = $1";
+
+    /* #5632 step 8: the force a check request is about: the force's action_called row, the request that placed it and the time of its
+       action_done row. $1 the journal id. */
+    internal const string ForceCheckForceSql = @"
+SELECT c.request_id, COALESCE(c.detail->'before'->>'database', c.detail->'target'->>'database'), c.detail->'before'->>'query_id',
+       COALESCE(c.detail->'before'->>'plan_id', c.detail->'target'->>'id'), d.event_time
+FROM config.investigation_journal AS c
+LEFT JOIN LATERAL (
+    SELECT x.event_time FROM config.investigation_journal AS x
+    WHERE x.request_id = c.request_id AND x.event = 'action_done' AND x.detail->>'called_id' = c.journal_id::text
+    ORDER BY x.journal_id DESC LIMIT 1) AS d ON true
+WHERE c.journal_id = $1 AND c.event = 'action_called'";
 
     /* The first alert and the latest three. A request holds a row per alert and per dedup key, so the alerts are made
        distinct first. config_alert_log.alert_time is naive UTC; the link allows five seconds either side and takes the
@@ -251,6 +263,7 @@ ORDER BY m.metric_name, f.day DESC";
         InvestigationBriefRequest? request = null;
         string? requestUrl = null;
         Guid? practiceOf = null;
+        InvestigationBriefForceCheck? forceCheck = null;
         await using (var command = Command(connection, RequestSql, requestId))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -274,7 +287,31 @@ ORDER BY m.metric_name, f.day DESC";
                 requestUrl = reader.IsDBNull(10) ? null : TriageLink.Build(_publicBaseUrl, request.ServerName, request.FirstMetric,
                     DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(10), DateTimeKind.Utc), reader.IsDBNull(11) ? null : reader.GetString(11));
                 practiceOf = reader.IsDBNull(13) ? null : reader.GetGuid(13);
+                if (!reader.IsDBNull(16) && !reader.IsDBNull(17))
+                    forceCheck = new InvestigationBriefForceCheck(reader.GetInt64(16), reader.GetInt16(17), InvestigationRequestStore.MaxForceChecks,
+                        null, null, null, null, null);
             }
+        }
+
+        /* #5632 step 8: a check request names its force. A force whose journal rows are gone still leaves the check number. */
+        if (request is not null && forceCheck is not null)
+        {
+            await using var command = new NpgsqlCommand(ForceCheckForceSql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
+            command.Parameters.AddWithValue(forceCheck.CalledId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                forceCheck = forceCheck with
+                {
+                    ForceRequestId = reader.IsDBNull(0) ? null : reader.GetGuid(0),
+                    Database = reader.IsDBNull(1) ? null : reader.GetString(1),
+                    QueryId = !reader.IsDBNull(2) && long.TryParse(reader.GetString(2), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var q) ? q : null,
+                    PlanId = !reader.IsDBNull(3) && long.TryParse(reader.GetString(3), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var p) ? p : null,
+                    ForcedAtUtc = reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
+                };
+            }
+
+            request = request with { ForceCheck = forceCheck };
         }
 
         if (request is null) return null;

@@ -18,7 +18,23 @@ public sealed record InvestigationBriefRequest(
     string? StoryPathHash,
     int AutonomyLevel = 1,
     string? DisplayName = null,
-    string? InstanceName = null);
+    string? InstanceName = null,
+    InvestigationBriefForceCheck? ForceCheck = null);
+
+/// <summary>
+/// The plan force a check request is about (#5632, step 8): set only on a request Darling opened to check an agent's plan force,
+/// null on every other request (and always on Lite, which never forces a plan), so every other brief is byte for byte as before.
+/// </summary>
+/// <param name="CalledId">The journal id of the force's <c>action_called</c> row.</param>
+/// <param name="CheckNo">This check's number, 1 to <see cref="Of"/>.</param>
+/// <param name="Of">How many checks a force gets at most.</param>
+/// <param name="Database">The Query Store database of the force; null when the journal row is gone.</param>
+/// <param name="QueryId">The query; null when unknown.</param>
+/// <param name="PlanId">The plan that was forced; null when unknown.</param>
+/// <param name="ForcedAtUtc">When the force was done; null when unknown.</param>
+/// <param name="ForceRequestId">The request that placed the force.</param>
+public sealed record InvestigationBriefForceCheck(
+    long CalledId, int CheckNo, int Of, string? Database, long? QueryId, long? PlanId, DateTime? ForcedAtUtc, Guid? ForceRequestId);
 
 /// <summary>One alert linked to the request, with its stored text and context (<c>config_alert_log</c>).</summary>
 public sealed record InvestigationBriefAlert(

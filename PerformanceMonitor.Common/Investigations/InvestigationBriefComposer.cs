@@ -102,6 +102,41 @@ public sealed class InvestigationBriefComposer
         return sources is null ? null : Compose(sources, _tools, _dataDetail.Mode, _utcNow());
     }
 
+    /// <summary>The evidence section a check request's numbers are in (<c>InvestigationRequestStore.ForceCheckEvidenceSection</c>).</summary>
+    internal const string ForceCheckEvidenceName = "plan_force_check";
+
+    /// <summary>
+    /// The <c>plan_force_check</c> block of a check request (#5632, step 8): which check this is, which force, and the decision that is the
+    /// agent's. Darling never removes a force on its own. Erik's rule: get a second opinion before deciding.
+    /// </summary>
+    private static void AddForceCheck(JsonObject root, InvestigationBriefForceCheck check, string server)
+    {
+        var force = new JsonObject
+        {
+            ["server"] = server,
+            ["database"] = check.Database,
+            ["query_id"] = check.QueryId,
+            ["plan_id"] = check.PlanId,
+            ["forced_at"] = check.ForcedAtUtc is { } at ? Time(at) : null,
+            ["placed_by_request"] = check.ForceRequestId?.ToString(),
+        };
+        root["plan_force_check"] = new JsonObject
+        {
+            ["check_no"] = check.CheckNo,
+            ["of"] = check.Of,
+            ["force"] = force,
+            ["evidence_section"] = ForceCheckEvidenceName,
+            ["what_this_is"] = "This request is check " + check.CheckNo.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " of up to " + check.Of.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " after a plan force. The numbers are in the " + ForceCheckEvidenceName + " evidence: executions, CPU and duration per plan since the force against the 24 hours before it, force failures, and whether another plan ran (the force is being ignored).",
+            ["decision"] = "Darling never removes a force on its own. You decide: keep it, or remove it with unforce_query_store_plan (run its dry run first). "
+                + "If you do not answer, the force stays and the Agent changes list shows it as not reviewed.",
+            ["second_opinion"] = "Before you decide, ask another agent, a sub-agent or a peer, to argue against your conclusion from the same numbers. "
+                + "Write what it said, and what you decided, in your report.",
+            ["unforce_needs"] = "An unforce needs agent actions on, a live claim on this request, a Level 3 request, this server, the server's force_plan switch on, and an env: or file: remediation credential: the same four conditions as the force.",
+        };
+    }
+
     /// <summary>The read rule a brief carries under mcp.dataDetail maskLiterals or metadataOnly (#5632): the compiled parameter
     /// values are hidden at those levels, and they explain most plan flips.</summary>
     internal const string ParameterValuesHiddenRule =
@@ -204,6 +239,11 @@ public sealed class InvestigationBriefComposer
             ((JsonArray)root["read_rules"]!).Add(
                 "This is a practice request: an earlier case replayed. Nothing you report changes anything, and the answer to the case is not in this brief. Report what you find as you would for a live request.");
         }
+
+        /* #5632 step 8: a check request names the force it checks and what the agent decides. Absent for every other request, so no other
+           brief (and not Lite's golden brief) moves a byte. */
+        if (request.ForceCheck is { } check)
+            AddForceCheck(root, check, request.ServerName);
 
         foreach (var (section, _, _) in Sections)
             root[section] = new JsonArray();
