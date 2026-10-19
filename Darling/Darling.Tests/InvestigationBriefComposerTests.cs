@@ -112,10 +112,10 @@ public sealed class InvestigationBriefComposerTests
     [Fact]
     public void TheForceCheckSection_IsInACheckRequestsBrief_AndInNoOther()
     {
-        Assert.False(Brief(Sources()).ContainsKey("plan_force_check"));
+        var baseSources = Sources();
+        Assert.False(Brief(baseSources).ContainsKey("plan_force_check"));
         var check = new InvestigationBriefForceCheck(41, 3, 26, "SalesDb", 5, 22, Now.AddHours(-2), Guid.NewGuid());
-        var request = Request() with { ForceCheck = check };
-        var brief = Brief(Sources(request: request));
+        var brief = Brief(baseSources with { Request = baseSources.Request with { ForceCheck = check } });
         var section = brief["plan_force_check"]!.AsObject();
         Assert.Equal(3, section["check_no"]!.GetValue<int>());
         Assert.Equal(26, section["of"]!.GetValue<int>());
@@ -129,10 +129,9 @@ public sealed class InvestigationBriefComposerTests
         Assert.Contains("argue against", section["second_opinion"]!.GetValue<string>(), StringComparison.Ordinal);
 
         /* Nothing else in the brief moves: the check's brief is the plain one plus the section. */
-        var plain = Brief(Sources());
+        var plain = Brief(baseSources);
         brief.Remove("plan_force_check");
-        Assert.Equal(plain.ToJsonString().Replace(plain["request"]!["id"]!.GetValue<string>(), "x", StringComparison.Ordinal),
-            brief.ToJsonString().Replace(brief["request"]!["id"]!.GetValue<string>(), "x", StringComparison.Ordinal));
+        Assert.Equal(plain.ToJsonString(), brief.ToJsonString());
     }
 
     /* #5632: a brief stored at full and served under a masked level gains the same line. */
