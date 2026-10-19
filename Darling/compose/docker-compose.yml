@@ -109,8 +109,9 @@ services:
       retries: 12
 
   darling:
-    # The newest release image (#5629: not :nightly, which is the newest dev build). Substitute a version tag
-    # for something pinned, or build from a checkout:
+    # In a source checkout this is the newest release image (#5629: not :nightly, which is the newest dev build).
+    # The copy in a release's PerformanceMonitorDarling-compose-<version>.tar.gz names that release's own tag
+    # instead (#6123). Substitute a version tag for something pinned, or build from a checkout:
     #   build: { context: ../.., dockerfile: Darling/Dockerfile }
     image: ghcr.io/erikdarlingdata/performancemonitor-darling:latest
     restart: unless-stopped
