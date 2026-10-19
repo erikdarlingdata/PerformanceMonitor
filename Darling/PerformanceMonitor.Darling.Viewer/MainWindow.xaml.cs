@@ -1247,6 +1247,10 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>#6136: the status bar names the tab that was just refreshed. Alert History, Job History and the other tabs that set no
+    /// text of their own kept reading "overview - refreshed ..." from the last Overview load.</summary>
+    private void StampRefreshed(string tabName) => StatusText.Text = $"{tabName} — refreshed {DateTime.Now:HH:mm:ss}";
+
     private async Task LoadVisibleTabAsync()
     {
         try
@@ -1264,12 +1268,15 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, AlertsTab):
                     await AlertsHistoryContent.RefreshAlertsAsync();
+                    StampRefreshed("alert history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
+                    StampRefreshed("job history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();
+                    StampRefreshed("availability groups");
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     /* The picker lists the servers known when LoadServersAsync last ran; a server added since
@@ -1290,6 +1297,7 @@ public partial class MainWindow : Window
                         }
                     }
                     await FinOpsContent.RefreshActiveSubTabAsync();
+                    StampRefreshed("finops");
                     break;
             }
         }

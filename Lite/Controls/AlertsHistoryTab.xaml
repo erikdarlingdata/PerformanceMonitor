@@ -73,7 +73,7 @@
         </Grid.RowDefinitions>
 
         <!-- Header Controls -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" MinHeight="36">
             <TextBlock Text="Alert History" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
@@ -98,7 +98,7 @@
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <TextBlock x:Name="ArchivalWarning" Text="" Margin="8,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="#FFCC6600" FontWeight="SemiBold" Visibility="Collapsed"/>
-        </StackPanel>
+        </WrapPanel>
 
         <!-- DataGrid -->
         <Grid Grid.Row="1" Margin="10,0,10,10">

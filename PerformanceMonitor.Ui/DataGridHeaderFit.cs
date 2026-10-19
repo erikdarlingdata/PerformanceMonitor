@@ -12,7 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 
-namespace PerformanceMonitor.Darling.Viewer;
+namespace PerformanceMonitor.Ui;
 
 /// <summary>
 /// Gives every column of every grid under a root at least the width its own header needs, so a header is never cut mid-word
@@ -37,6 +37,11 @@ internal static class DataGridHeaderFit
                 if (text > 0)
                 {
                     column.MinWidth = Math.Max(column.MinWidth, NeededWidth(text));
+                    /* A column already laid out keeps its fixed width when only MinWidth rises (a header whose title grows after the tab opens). */
+                    if (column.Width.IsAbsolute && column.Width.Value < column.MinWidth)
+                    {
+                        column.Width = new DataGridLength(column.MinWidth);
+                    }
                 }
             }
         }
@@ -61,6 +66,8 @@ internal static class DataGridHeaderFit
                     grid.FontSize, Brushes.Black, VisualTreeHelper.GetDpi(grid).PixelsPerDip);
                 return formatted.WidthIncludingTrailingWhitespace;
             case UIElement element:
+                /* Invalidated first: a title changed since the last layout pass would otherwise be skipped as already measured. */
+                element.InvalidateMeasure();
                 element.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
                 return element.DesiredSize.Width;
             default:
