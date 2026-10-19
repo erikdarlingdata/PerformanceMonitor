@@ -73,6 +73,7 @@ public sealed class InvestigationBriefComposer
 
     private readonly IInvestigationBriefSourceReader _reader;
     private readonly McpDataDetailSetting _dataDetail;
+    private readonly IPseudonymKeySource? _keys;
     private readonly InvestigationBriefTools _tools;
     private readonly Func<DateTime> _utcNow;
 
@@ -81,8 +82,10 @@ public sealed class InvestigationBriefComposer
     /// naming only <paramref name="tools"/>' tools in <c>next_calls</c>.
     /// </summary>
     public InvestigationBriefComposer(
-        IInvestigationBriefSourceReader reader, McpDataDetailSetting dataDetail, InvestigationBriefTools tools, Func<DateTime>? utcNow = null)
+        IInvestigationBriefSourceReader reader, McpDataDetailSetting dataDetail, InvestigationBriefTools tools, Func<DateTime>? utcNow = null,
+        IPseudonymKeySource? keys = null)
     {
+        _keys = keys;
         _reader = reader ?? throw new ArgumentNullException(nameof(reader));
         _dataDetail = dataDetail ?? throw new ArgumentNullException(nameof(dataDetail));
         _tools = tools ?? throw new ArgumentNullException(nameof(tools));
@@ -92,6 +95,12 @@ public sealed class InvestigationBriefComposer
     /// <summary>The <c>mcp.dataDetail</c> level the host serves now: what <c>get_investigation_reports</c> masks at.</summary>
     public McpDataDetail Mode => _dataDetail.Mode;
 
+    /// <summary>The store's pseudonym key for the level the host serves now (#6066): null at any level but
+    /// <c>metadataOnly</c>, and null while the key is not available, when the masker numbers per answer. A tool that masks
+    /// with <see cref="Mode"/> takes its key here, so no tool method takes the key source itself.</summary>
+    public ValueTask<PseudonymKey?> KeyAsync(CancellationToken cancellationToken = default) =>
+        PseudonymKeySources.KeyForAsync(_keys, Mode, cancellationToken);
+
     /// <summary>
     /// The brief for <paramref name="requestId"/> as JSON (<see cref="InvestigationFormats.BriefFormat"/>), or null when no
     /// request has that id. The caller stores it with <c>InvestigationRequestStore.SetBriefAsync</c>.
@@ -99,7 +108,10 @@ public sealed class InvestigationBriefComposer
     public async Task<string?> ComposeAsync(Guid requestId, CancellationToken cancellationToken = default)
     {
         var sources = await _reader.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
-        return sources is null ? null : Compose(sources, _tools, _dataDetail.Mode, _utcNow());
+        if (sources is null) return null;
+        var mode = _dataDetail.Mode;
+        return Compose(sources, _tools, mode, _utcNow(),
+            await PseudonymKeySources.KeyForAsync(_keys, mode, cancellationToken).ConfigureAwait(false));
     }
 
     /// <summary>The evidence section a check request's numbers are in (<c>InvestigationRequestStore.ForceCheckEvidenceSection</c>).</summary>
@@ -147,14 +159,15 @@ public sealed class InvestigationBriefComposer
     /// Composes the brief for <paramref name="sources"/> at <paramref name="mode"/>, naming only <paramref name="tools"/>' tools.
     /// Pure: no store, no clock.
     /// </summary>
-    public static string Compose(InvestigationBriefSources sources, InvestigationBriefTools tools, McpDataDetail mode, DateTime composedAtUtc)
+    public static string Compose(InvestigationBriefSources sources, InvestigationBriefTools tools, McpDataDetail mode, DateTime composedAtUtc,
+        PseudonymKey? key = null)
     {
         ArgumentNullException.ThrowIfNull(sources);
         ArgumentNullException.ThrowIfNull(tools);
         var request = sources.Request;
         var cut = new CutCounter();
-        // One masker for the whole brief: one login#n and host#n numbering across every alert, note and field.
-        var masker = McpDataDetailMasker.ForAnswer(mode);
+        // One masker for the whole brief: one pseudonym per login and host across every alert, note and field (#6066).
+        var masker = McpDataDetailMasker.ForAnswer(mode, key);
 
         var hints = PlanHints(request, sources.Evidence);
         var items = new Dictionary<string, List<JsonObject>>(StringComparer.Ordinal)
@@ -566,10 +579,10 @@ public sealed class InvestigationBriefComposer
     /// <see cref="EvidenceNode"/> through the brief's masker and cut at <paramref name="mode"/>, with the section's state named
     /// <c>status</c>. A <c>pending</c> section carries no content, whatever is stored.
     /// </summary>
-    internal static JsonObject EvidenceSection(InvestigationBriefEvidence evidence, McpDataDetail mode)
+    internal static JsonObject EvidenceSection(InvestigationBriefEvidence evidence, McpDataDetail mode, PseudonymKey? key = null)
     {
         var source = string.Equals(evidence.State, "pending", StringComparison.Ordinal) ? evidence with { ContentJson = null } : evidence;
-        var node = EvidenceNode(source, McpDataDetailMasker.ForAnswer(mode), new CutCounter());
+        var node = EvidenceNode(source, McpDataDetailMasker.ForAnswer(mode, key), new CutCounter());
         return new JsonObject
         {
             ["section"] = node["section"]?.DeepClone(),

@@ -624,6 +624,26 @@ public sealed class InvestigationBriefComposerTests
         Assert.Equal(canary, (string?)brief["notes"]![0]!["author"]);
     }
 
+    /// <summary>#6066: with the store's key, one login reads as the same keyed pseudonym in two different briefs, and two logins still differ.</summary>
+    [Fact]
+    public void MetadataOnly_WithTheKey_GivesALoginTheSamePseudonym_InEveryBrief()
+    {
+        var other = new InvestigationBriefAlert(Now.AddMinutes(-10), "Blocking", 12.5, 5, false, "Blocking detected", null,
+            new[] { new InvestigationBriefContextItem("Blocked", new[] { new KeyValuePair<string, string>("Login", "other_login_5632") }) });
+        var one = JsonNode.Parse(InvestigationBriefComposer.Compose(
+            Sources(alerts: new[] { Alert(Now.AddMinutes(-20)) }), DarlingInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, Now, PseudonymTestKey.Key))!.AsObject();
+        var two = JsonNode.Parse(InvestigationBriefComposer.Compose(
+            Sources(alerts: new[] { other, Alert(Now.AddMinutes(-20)) }), DarlingInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, Now, PseudonymTestKey.Key))!.AsObject();
+
+        var canaryInOne = (string?)one["alerts"]![0]!["context"]![0]!["fields"]!["Login"];
+        var canaryInTwo = (string?)two["alerts"]![1]!["context"]![0]!["fields"]!["Login"];
+        var otherInTwo = (string?)two["alerts"]![0]!["context"]![0]!["fields"]!["Login"];
+        Assert.Equal(PseudonymTestKey.Login(LoginCanary), canaryInOne);
+        Assert.Equal(canaryInOne, canaryInTwo);
+        Assert.Equal(PseudonymTestKey.Login("other_login_5632"), otherInTwo);
+        Assert.NotEqual(canaryInTwo, otherInTwo);
+    }
+
     /* ---- the async entry ---- */
 
     [Fact]

@@ -39,27 +39,35 @@ public static class McpDataDetailFilter
                 ?? McpDataDetail.Full;
             if (mode == McpDataDetail.Full) return await next(request, cancellationToken).ConfigureAwait(false);
 
+            /* #6066: the store's pseudonym key, read when the answer is masked (never before the tool runs, and never for a level that
+               does not use it). None registered, or none available: the masker numbers per answer. */
+            var keySource = request.Services?.GetService(typeof(IPseudonymKeySource)) as IPseudonymKeySource;
             try
             {
-                return Mask(await next(request, cancellationToken).ConfigureAwait(false), mode);
+                CallToolResult result = await next(request, cancellationToken).ConfigureAwait(false);
+                return Mask(result, mode, await PseudonymKeySources.KeyForAsync(keySource, mode, cancellationToken).ConfigureAwait(false));
             }
             catch (McpException ex)
             {
-                throw WithMaskedMessage(ex, mode);
+                throw WithMaskedMessage(ex, mode, await PseudonymKeySources.KeyForAsync(keySource, mode, cancellationToken).ConfigureAwait(false));
             }
         };
 
     /// <summary><paramref name="result"/> masked at <paramref name="mode"/>; the SAME instance when nothing
     /// changed.</summary>
-    public static CallToolResult Mask(CallToolResult result, McpDataDetail mode)
+    public static CallToolResult Mask(CallToolResult result, McpDataDetail mode) => Mask(result, mode, null);
+
+    /// <summary><paramref name="result"/> masked at <paramref name="mode"/> with the store's pseudonym <paramref name="key"/>
+    /// (#6066); null numbers logins and hosts per answer.</summary>
+    public static CallToolResult Mask(CallToolResult result, McpDataDetail mode, PseudonymKey? key)
     {
         if (result is null || mode == McpDataDetail.Full) return result!;
 
         try
         {
-            // One masker for the whole answer (#5632): every block and the structured content share one login#n and
-            // host#n numbering, so one login is one number throughout the answer.
-            McpDataDetailMasker masker = McpDataDetailMasker.ForAnswer(mode);
+            // One masker for the whole answer (#5632): every block and the structured content share one set of
+            // pseudonyms, so one login reads the same throughout the answer.
+            McpDataDetailMasker masker = McpDataDetailMasker.ForAnswer(mode, key);
             bool changed = false;
             List<ContentBlock>? content = null;
             if (result.Content is { Count: > 0 } blocks)
@@ -150,12 +158,12 @@ public static class McpDataDetailFilter
             ? throw new InvalidOperationException(McpDataDetailMasker.Refusal)
             : masked;
 
-    private static McpException WithMaskedMessage(McpException ex, McpDataDetail mode)
+    private static McpException WithMaskedMessage(McpException ex, McpDataDetail mode, PseudonymKey? key)
     {
         string masked;
         try
         {
-            masked = McpDataDetailMasker.MaskErrorText(ex.Message, mode);
+            masked = McpDataDetailMasker.MaskErrorText(ex.Message, mode, key);
         }
 #pragma warning disable CA1031 // fail closed
         catch (Exception)

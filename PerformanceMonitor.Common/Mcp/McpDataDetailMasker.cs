@@ -33,8 +33,9 @@ namespace PerformanceMonitor.Common;
 /// keeps its shape, with its input buffers and frames masked as statements and its logins and hosts masked as
 /// identities.</item>
 /// <item>A whole answer that is not JSON is error text.</item>
-/// <item>Under <see cref="McpDataDetail.MetadataOnly"/> a login or host becomes <c>login#n</c> or <c>host#n</c>,
-/// numbered per answer (one <see cref="ForAnswer"/> instance), so one answer still shows which rows share one.</item>
+/// <item>Under <see cref="McpDataDetail.MetadataOnly"/> a login or host becomes <c>login#</c> or <c>host#</c> plus 8 hex
+/// characters of a keyed hash of its name (<see cref="PseudonymKey"/>), the same in every answer from one store (#6066). With no
+/// key it is numbered per answer (<c>login#1</c>), which hides every name too.</item>
 /// <item>It fails closed: any exception returns <see cref="Refusal"/>, never the input.</item>
 /// </list>
 /// </summary>
@@ -52,19 +53,37 @@ public sealed class McpDataDetailMasker
     private readonly McpDataDetail _mode;
     private readonly Dictionary<string, string> _logins = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _hosts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _loginsTaken = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _hostsTaken = new(StringComparer.Ordinal);
+    private readonly PseudonymKey? _key;
 
-    private McpDataDetailMasker(McpDataDetail mode)
+    private McpDataDetailMasker(McpDataDetail mode, PseudonymKey? key)
     {
         _mode = mode;
+        _key = key;
     }
 
     /// <summary>
-    /// One answer's masker at <paramref name="mode"/>: every field, JSON document and free text it masks shares one
-    /// <c>login#n</c> and <c>host#n</c> numbering, so one login reads as one number everywhere in that answer and two
-    /// logins never share a number (#5632). Make one per answer (a tool's result, a brief); never share one across
-    /// answers.
+    /// One answer's masker at <paramref name="mode"/>, with no pseudonym key: under <c>metadataOnly</c> a login or host is
+    /// numbered per answer (<c>login#1</c>), the numbering used when a store's key is not available (#6066). For
+    /// <c>full</c> and <c>maskLiterals</c>, which keep logins and hosts, this is the whole API; every <c>metadataOnly</c>
+    /// call site passes the store's key through <see cref="ForAnswer(McpDataDetail, PseudonymKey?)"/>.
     /// </summary>
-    public static McpDataDetailMasker ForAnswer(McpDataDetail mode) => new(mode);
+    public static McpDataDetailMasker ForAnswer(McpDataDetail mode) => ForAnswer(mode, null);
+
+    /// <summary>
+    /// One answer's masker at <paramref name="mode"/> (#5632, #6066): every field, JSON document and free text it masks shares
+    /// one set of pseudonyms. Under <c>metadataOnly</c> with a <paramref name="key"/>, a login is
+    /// <c>login#</c> plus 8 hex from the key's keyed hash of its name, the same in every answer from one store; two different
+    /// names that hash to one pseudonym in this answer get a <c>-2</c>, <c>-3</c> suffix, so they never share one. With no
+    /// key (not read yet, or the read failed) the numbering is per answer, <c>login#1</c>, which hides every name too.
+    /// Make one per answer (a tool's result, a brief); never share one across answers.
+    /// </summary>
+    public static McpDataDetailMasker ForAnswer(McpDataDetail mode, PseudonymKey? key)
+    {
+        if (mode == McpDataDetail.MetadataOnly && key is null) PseudonymKeyNotice.NoKey();
+        return new(mode, key);
+    }
 
     /// <summary>
     /// Masks <paramref name="output"/> (a tool's answer, a brief, or an earlier report) at <paramref name="mode"/>.
@@ -72,16 +91,16 @@ public sealed class McpDataDetailMasker
     /// <paramref name="freeText"/> is for text a person or an agent wrote (an earlier report composed into a later
     /// brief): every string the table does not list has its literals replaced too, under both masked levels.
     /// </summary>
-    public static string MaskJson(string output, McpDataDetail mode, bool freeText = false) =>
-        ForAnswer(mode).Json(output, freeText);
+    public static string MaskJson(string output, McpDataDetail mode, bool freeText = false, PseudonymKey? key = null) =>
+        ForAnswer(mode, key).Json(output, freeText);
 
     /// <summary>Masks one field's text (<paramref name="name"/> is its key or context label) at
     /// <paramref name="mode"/>. Logins and hosts are numbered within this one call only: an answer that masks several
     /// fields uses one <see cref="ForAnswer"/> instance instead.</summary>
-    public static string? MaskField(string? name, string? value, McpDataDetail mode) => ForAnswer(mode).Field(name, value);
+    public static string? MaskField(string? name, string? value, McpDataDetail mode, PseudonymKey? key = null) => ForAnswer(mode, key).Field(name, value);
 
     /// <summary>Error text (an exception's message) at <paramref name="mode"/>.</summary>
-    public static string MaskErrorText(string message, McpDataDetail mode) => ForAnswer(mode).ErrorText(message);
+    public static string MaskErrorText(string message, McpDataDetail mode, PseudonymKey? key = null) => ForAnswer(mode, key).ErrorText(message);
 
     /// <summary>This answer's JSON <paramref name="output"/>, as <see cref="MaskJson(string, McpDataDetail, bool)"/>
     /// masks it, numbering logins and hosts with every other field of this answer.</summary>
@@ -120,8 +139,8 @@ public sealed class McpDataDetailMasker
     }
 
     /// <summary>
-    /// Under <c>metadataOnly</c>, the logins and client hosts a status sentence quotes, numbered with this answer's
-    /// <c>login#n</c> and <c>host#n</c> (#5632 review L5). <see cref="MaskLiterals"/> keeps double-quoted and bracketed
+    /// Under <c>metadataOnly</c>, the logins and client hosts a status sentence quotes, pseudonymised like every
+    /// other login and host of this answer (#5632 review L5, #6066). <see cref="MaskLiterals"/> keeps double-quoted and bracketed
     /// text as identifiers, and a <c>precondition</c> sentence appends the monitored server's own words (SQL Server 916:
     /// <c>The server principal "DOMAIN\login" is not able to access the database "db"</c>; PostgreSQL:
     /// <c>... for user "monitor"</c>), so the double-quoted name after <c>principal</c>, <c>user</c>, <c>login</c> or
@@ -137,10 +156,10 @@ public sealed class McpDataDetailMasker
             string name = m.Groups["name"].Value.Replace("\"\"", "\"", StringComparison.Ordinal);
             return name.StartsWith("pg_", StringComparison.Ordinal)
                 ? m.Value
-                : m.Groups["lead"].Value + "\"" + Numbered(_logins, "login#", name) + "\"";
+                : m.Groups["lead"].Value + "\"" + Pseudonym(Login, name) + "\"";
         });
         return s_envelopeClient.Replace(text, m =>
-            m.Groups["lead"].Value + Numbered(_hosts, "host#", m.Groups["host"].Value.Trim()) + "]");
+            m.Groups["lead"].Value + Pseudonym(Host, m.Groups["host"].Value.Trim()) + "]");
     }
 
     private static readonly Regex s_envelopeQuotedLogin = new(
@@ -213,28 +232,61 @@ public sealed class McpDataDetailMasker
     {
         McpDataDetailClass.Statement => _mode == McpDataDetail.MetadataOnly ? WithheldText : MaskLiterals(value),
         McpDataDetailClass.ParameterValue => _mode == McpDataDetail.MetadataOnly ? WithheldText : ReplacedValue,
-        McpDataDetailClass.Login => _mode == McpDataDetail.MetadataOnly ? Numbered(_logins, "login#", value) : value,
-        McpDataDetailClass.Host => _mode == McpDataDetail.MetadataOnly ? Numbered(_hosts, "host#", value) : value,
+        McpDataDetailClass.Login => _mode == McpDataDetail.MetadataOnly ? Pseudonym(Login, value) : value,
+        McpDataDetailClass.Host => _mode == McpDataDetail.MetadataOnly ? Pseudonym(Host, value) : value,
         _ => value,
     };
 
     /// <summary>The statement filter's own placeholders and this masker's own words hold no collected data, and
-    /// masking their issue numbers or comment dashes would only garble them.</summary>
+    /// masking their issue numbers or comment dashes would only garble them. A pseudonym this masker (or an earlier one on
+    /// the same store) made is one too, and is never masked again (#6066): <c>login#</c> or <c>host#</c> plus 8 lowercase
+    /// hex with an optional <c>-n</c>, and the per-answer <c>login#1</c> form a stored brief may carry.</summary>
     private static bool IsOwnPlaceholder(string value) =>
         string.Equals(value, SensitiveStatements.PlaceholderText, StringComparison.Ordinal)
         || string.Equals(value, SensitiveStatements.JsonRefusal, StringComparison.Ordinal)
         || string.Equals(value, SensitiveStatements.WithheldPlanSentence, StringComparison.Ordinal)
         || string.Equals(value, WithheldText, StringComparison.Ordinal)
-        || string.Equals(value, Refusal, StringComparison.Ordinal);
+        || string.Equals(value, Refusal, StringComparison.Ordinal)
+        || s_pseudonym.IsMatch(value);
 
-    private static string Numbered(Dictionary<string, string> seen, string prefix, string value)
+    private static readonly Regex s_pseudonym = new(
+        @"\A(?:login|host)#(?:[0-9a-f]{8}(?:-[0-9]+)?|[0-9]+)\z",
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+
+    private const string Login = "login";
+    private const string Host = "host";
+
+    /// <summary>
+    /// The pseudonym of <paramref name="value"/> as a <paramref name="kind"/> in this answer. With the store's key it is the
+    /// keyed hash (<see cref="PseudonymKey.Hex8"/>), the same name in every answer; a different name that lands on a pseudonym
+    /// this answer already gave another name takes the next free <c>-n</c> suffix. With no key it is the per-answer number
+    /// <c>login#1</c> (#6066): still no name, never the real one.
+    /// </summary>
+    private string Pseudonym(string kind, string value)
     {
-        if (!seen.TryGetValue(value, out string? label))
+        Dictionary<string, string> seen = kind == Login ? _logins : _hosts;
+        Dictionary<string, string> taken = kind == Login ? _loginsTaken : _hostsTaken;
+        string prefix = kind + "#";
+        if (_key is null)
         {
-            label = prefix + (seen.Count + 1).ToString(CultureInfo.InvariantCulture);
-            seen[value] = label;
+            if (!seen.TryGetValue(value, out string? numbered))
+            {
+                numbered = prefix + (seen.Count + 1).ToString(CultureInfo.InvariantCulture);
+                seen[value] = numbered;
+            }
+
+            return numbered;
         }
 
+        string name = value.Trim().ToLowerInvariant();
+        if (seen.TryGetValue(name, out string? label)) return label;
+
+        string basis = _key.Pseudonym(kind, name);
+        label = basis;
+        for (int suffix = 2; taken.ContainsKey(label); suffix++)
+            label = basis + "-" + suffix.ToString(CultureInfo.InvariantCulture);
+        seen[name] = label;
+        taken[label] = name;
         return label;
     }
 

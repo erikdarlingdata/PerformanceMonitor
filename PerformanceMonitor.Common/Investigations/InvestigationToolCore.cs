@@ -343,9 +343,9 @@ internal static class InvestigationToolCore
     /// a weaker level is re-masked at <paramref name="mode"/>. Reports are stored as submitted, so the level that applies
     /// is the one the host serves now.
     /// </summary>
-    internal static string ReportsAnswer(InvestigationReportsRead read, int? hoursBack, McpDataDetail mode)
+    internal static string ReportsAnswer(InvestigationReportsRead read, int? hoursBack, McpDataDetail mode, PseudonymKey? key = null)
     {
-        var masker = McpDataDetailMasker.ForAnswer(mode);
+        var masker = McpDataDetailMasker.ForAnswer(mode, key);
         var reports = new JsonArray();
         foreach (var r in read.Reports)
         {

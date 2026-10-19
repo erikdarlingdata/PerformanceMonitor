@@ -33,6 +33,10 @@ public sealed class McpDataDetailMaskerTests
     private static JsonObject Masked(string json, McpDataDetail mode) =>
         JsonNode.Parse(McpDataDetailMasker.MaskJson(json, mode))!.AsObject();
 
+    /* #6066: the same, with the store's key (the fixed test key), as every metadataOnly call site passes it. */
+    private static JsonObject MaskedKeyed(string json) =>
+        JsonNode.Parse(McpDataDetailMasker.MaskJson(json, McpDataDetail.MetadataOnly, key: PseudonymTestKey.Key))!.AsObject();
+
     /* ---- the setting ---- */
 
     [Theory]
@@ -238,13 +242,13 @@ public sealed class McpDataDetailMaskerTests
         Assert.Contains("canlogin", masked, StringComparison.Ordinal);
         Assert.Contains("CANHOST", masked, StringComparison.Ordinal);
 
-        string meta = Masked(json, McpDataDetail.MetadataOnly)["deadlock_graph"]!.GetValue<string>();
+        string meta = MaskedKeyed(json)["deadlock_graph"]!.GetValue<string>();
         Assert.DoesNotContain("secret", meta, StringComparison.Ordinal);
         Assert.DoesNotContain("canlogin", meta, StringComparison.Ordinal);
         Assert.DoesNotContain("CANHOST", meta, StringComparison.Ordinal);
         Assert.Contains("<inputbuf>" + Withheld + "</inputbuf>", meta, StringComparison.Ordinal);
-        Assert.Contains("loginname=\"login#1\"", meta, StringComparison.Ordinal);
-        Assert.Contains("hostname=\"host#1\"", meta, StringComparison.Ordinal);
+        Assert.Contains("loginname=\"" + PseudonymTestKey.Login("canlogin") + "\"", meta, StringComparison.Ordinal);
+        Assert.Contains("hostname=\"" + PseudonymTestKey.Host("CANHOST") + "\"", meta, StringComparison.Ordinal);
         Assert.Contains("clientapp=\"App 1\"", meta, StringComparison.Ordinal);
         Assert.Contains("objectname=\"db.dbo.t\"", meta, StringComparison.Ordinal);
     }
@@ -279,7 +283,7 @@ public sealed class McpDataDetailMaskerTests
     /* ---- row 5: logins and host names ---- */
 
     [Fact]
-    public void LoginsAndHosts_Kept_ThenMaskedAndNumberedPerAnswer()
+    public void LoginsAndHosts_Kept_ThenMasked_NumberedPerAnswerWhenThereIsNoKey()
     {
         const string json = "{\"rows\":[{\"login_name\":\"sa\",\"host_name\":\"APP01\"},"
             + "{\"login_name\":\"svc\",\"host_name\":\"APP01\"},{\"login_name\":\"sa\",\"client_addr\":\"10.1.2.3\"}]}";
@@ -292,6 +296,25 @@ public sealed class McpDataDetailMaskerTests
         Assert.Equal("host#1", rows[1]!["host_name"]!.GetValue<string>());
         Assert.Equal("login#1", rows[2]!["login_name"]!.GetValue<string>());
         Assert.Equal("host#2", rows[2]!["client_addr"]!.GetValue<string>());
+    }
+
+    /// <summary>#6066: with the store's key the same rows carry a keyed pseudonym, the same name the same text in every row.</summary>
+    [Fact]
+    public void LoginsAndHosts_WithTheKey_AreKeyedPseudonyms()
+    {
+        const string json = "{\"rows\":[{\"login_name\":\"sa\",\"host_name\":\"APP01\"},"
+            + "{\"login_name\":\"svc\",\"host_name\":\"APP01\"},{\"login_name\":\"SA\",\"client_addr\":\"10.1.2.3\"}]}";
+        var rows = JsonNode.Parse(McpDataDetailMasker.MaskJson(json, McpDataDetail.MetadataOnly, key: PseudonymTestKey.Key))!["rows"]!.AsArray();
+        Assert.Equal(PseudonymTestKey.Login("sa"), rows[0]!["login_name"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Host("app01"), rows[0]!["host_name"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Login("svc"), rows[1]!["login_name"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Host("app01"), rows[1]!["host_name"]!.GetValue<string>());
+        /* SQL Server compares logins without regard to case: SA and sa are one login. */
+        Assert.Equal(PseudonymTestKey.Login("sa"), rows[2]!["login_name"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Host("10.1.2.3"), rows[2]!["client_addr"]!.GetValue<string>());
+        Assert.Matches("^login#[0-9a-f]{8}$", rows[0]!["login_name"]!.GetValue<string>());
+        /* maskLiterals keeps logins and hosts, key or no key. */
+        Assert.Same(json, McpDataDetailMasker.MaskJson(json, McpDataDetail.MaskLiterals, key: PseudonymTestKey.Key));
     }
 
     /* ---- row 6: object and database names, counts, durations, waits, times, program names ---- */
@@ -325,6 +348,7 @@ public sealed class McpDataDetailMaskerTests
     {
         Assert.Equal("SELECT ?", McpDataDetailMasker.MaskField("Query", "SELECT 1", McpDataDetail.MaskLiterals));
         Assert.Equal("login#1", McpDataDetailMasker.MaskField("login_name", "sa", McpDataDetail.MetadataOnly));
+        Assert.Equal(PseudonymTestKey.Login("sa"), McpDataDetailMasker.MaskField("login_name", "sa", McpDataDetail.MetadataOnly, PseudonymTestKey.Key));
         Assert.Equal("Sales", McpDataDetailMasker.MaskField("Database", "Sales", McpDataDetail.MetadataOnly));
         Assert.Equal("SELECT 1", McpDataDetailMasker.MaskField("Query", "SELECT 1", McpDataDetail.Full));
     }
@@ -509,20 +533,20 @@ public sealed class McpDataDetailMaskerTests
     {
         string json = "{\"" + key + "\":\"CORP\\\\alice\"}";
         Assert.Same(json, McpDataDetailMasker.MaskJson(json, McpDataDetail.MaskLiterals));
-        Assert.Equal("login#1", Masked(json, McpDataDetail.MetadataOnly)[key]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Login("CORP\\alice"), MaskedKeyed(json)[key]!.GetValue<string>());
     }
 
     [Fact]
     public void ExcludedLogins_ArrayAndContextLabel_MaskedNameByName()
     {
         const string array = "{\"excluded_logins\":[\"sa\",\"svc\"]}";
-        var masked = Masked(array, McpDataDetail.MetadataOnly)["excluded_logins"]!.AsArray();
-        Assert.Equal(new[] { "login#1", "login#2" }, masked.Select(n => n!.GetValue<string>()));
+        var masked = MaskedKeyed(array)["excluded_logins"]!.AsArray();
+        Assert.Equal(new[] { PseudonymTestKey.Login("sa"), PseudonymTestKey.Login("svc") }, masked.Select(n => n!.GetValue<string>()));
 
         const string label = "{\"fields\":[{\"label\":\"Excluded Logins\",\"value\":\"sa, svc\"},{\"label\":\"Excluded Count\",\"value\":\"3\"}]}";
         Assert.Same(label, McpDataDetailMasker.MaskJson(label, McpDataDetail.MaskLiterals));
-        var fields = Masked(label, McpDataDetail.MetadataOnly)["fields"]!.AsArray();
-        Assert.Equal("login#1, login#2", fields[0]!["value"]!.GetValue<string>());
+        var fields = MaskedKeyed(label)["fields"]!.AsArray();
+        Assert.Equal(PseudonymTestKey.Login("sa") + ", " + PseudonymTestKey.Login("svc"), fields[0]!["value"]!.GetValue<string>());
         Assert.Equal("3", fields[1]!["value"]!.GetValue<string>());
 
         Assert.Equal(McpDataDetailClass.Login, McpDataDetailKeys.Classify("Excluded Logins"));
@@ -530,21 +554,23 @@ public sealed class McpDataDetailMaskerTests
         Assert.False(McpDataDetailKeys.IsCommaList("login_name"));
     }
 
-    /* ---- review round 1 (L1): one numbering per answer ---- */
+    /* ---- review round 1 (L1): one set of pseudonyms per answer; #6066: the same one in every answer ---- */
 
     [Fact]
-    public void ForAnswer_NumbersLoginsAndHostsAcrossEveryFieldOfOneAnswer()
+    public void ForAnswer_GivesEveryFieldOfOneAnswerTheSamePseudonym_AndTheNextAnswerTheSameOnesAgain()
     {
-        var masker = McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly);
-        Assert.Equal("login#1", masker.Field("blocked_login_name", "alice"));
-        Assert.Equal("login#2", masker.Field("blocking_login_name", "bob"));
-        Assert.Equal("login#1", masker.Field("login_name", "alice"));
-        Assert.Equal("login#2, login#3", masker.Field("Excluded Logins", "bob, carol"));
-        Assert.Equal("host#1", masker.Field("host_name", "APP01"));
-        Assert.Equal("{\"login_name\":\"login#3\"}", masker.Json("{\"login_name\":\"carol\"}"));
+        var masker = McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly, PseudonymTestKey.Key);
+        string alice = PseudonymTestKey.Login("alice");
+        string bob = PseudonymTestKey.Login("bob");
+        Assert.Equal(alice, masker.Field("blocked_login_name", "alice"));
+        Assert.Equal(bob, masker.Field("blocking_login_name", "bob"));
+        Assert.Equal(alice, masker.Field("login_name", "alice"));
+        Assert.Equal(bob + ", " + PseudonymTestKey.Login("carol"), masker.Field("Excluded Logins", "bob, carol"));
+        Assert.Equal(PseudonymTestKey.Host("APP01"), masker.Field("host_name", "APP01"));
+        Assert.Equal("{\"login_name\":\"" + PseudonymTestKey.Login("carol") + "\"}", masker.Json("{\"login_name\":\"carol\"}"));
 
-        // A new answer starts over.
-        Assert.Equal("login#1", McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Field("login_name", "bob"));
+        /* #6066: a NEW answer, from a NEW masker with the same key, gives bob the same pseudonym (it used to start over at login#1). */
+        Assert.Equal(bob, McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly, PseudonymTestKey.Key).Field("login_name", "bob"));
 
         var full = McpDataDetailMasker.ForAnswer(McpDataDetail.Full);
         Assert.Equal("alice", full.Field("login_name", "alice"));
@@ -562,10 +588,10 @@ public sealed class McpDataDetailMaskerTests
             StructuredContent = JsonDocument.Parse(structured).RootElement.Clone(),
         };
 
-        var masked = McpDataDetailFilter.Mask(result, McpDataDetail.MetadataOnly);
+        var masked = McpDataDetailFilter.Mask(result, McpDataDetail.MetadataOnly, PseudonymTestKey.Key);
         var rows = JsonNode.Parse(((TextContentBlock)masked.Content[0]).Text)!["rows"]!.AsArray();
-        Assert.Equal("login#2", rows[1]!["login_name"]!.GetValue<string>());
-        Assert.Equal("login#2", masked.StructuredContent!.Value.GetProperty("login_name").GetString());
+        Assert.Equal(PseudonymTestKey.Login("bob"), rows[1]!["login_name"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Login("bob"), masked.StructuredContent!.Value.GetProperty("login_name").GetString());
     }
 
     /* ---- the host filter ---- */
@@ -609,11 +635,11 @@ public sealed class McpDataDetailMaskerTests
         var answer = new JsonObject { ["status"] = "ok", ["requests"] = new JsonArray(payload) };
         var result = new CallToolResult { Content = new List<ContentBlock> { new TextContentBlock { Text = answer.ToJsonString() } } };
 
-        var masked = JsonNode.Parse(((TextContentBlock)McpDataDetailFilter.Mask(result, McpDataDetail.MetadataOnly).Content[0]).Text)!;
+        var masked = JsonNode.Parse(((TextContentBlock)McpDataDetailFilter.Mask(result, McpDataDetail.MetadataOnly, PseudonymTestKey.Key).Content[0]).Text)!;
         var request = masked["requests"]![0]!;
         Assert.Equal("SQLPROD01\\INST1", (string?)request["instance_name"]);
         Assert.Equal("Prod OLTP", (string?)request["display_name"]);
-        Assert.Equal("host#1", (string?)request["host_name"]);
+        Assert.Equal(PseudonymTestKey.Host("CLIENT-PC-7"), (string?)request["host_name"]);
     }
 
     [Fact]
@@ -712,16 +738,16 @@ public sealed class McpDataDetailMaskerTests
         string answer = EnvelopeWith("The Query Store read was refused. The server said: The server principal \"CORP\\svc_pm\" "
             + "is not able to access the database \"Sales\" under the current security context. [CLIENT: 10.20.30.40]");
 
-        var masked = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Answer(answer))!.AsObject();
+        var masked = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly, PseudonymTestKey.Key).Answer(answer))!.AsObject();
         string envelope = masked["message"]!.GetValue<string>();
 
         Assert.NotEqual(Withheld, envelope);
-        Assert.Contains("The server principal \"login#1\" is not able to access the database \"Sales\"", envelope, StringComparison.Ordinal);
-        Assert.EndsWith("[CLIENT: host#1]", envelope, StringComparison.Ordinal);
+        Assert.Contains("The server principal \"" + PseudonymTestKey.Login("CORP\\svc_pm") + "\" is not able to access the database \"Sales\"", envelope, StringComparison.Ordinal);
+        Assert.EndsWith("[CLIENT: " + PseudonymTestKey.Host("10.20.30.40") + "]", envelope, StringComparison.Ordinal);
         Assert.DoesNotContain("svc_pm", envelope, StringComparison.Ordinal);
         Assert.DoesNotContain("10.20.30.40", envelope, StringComparison.Ordinal);
-        Assert.Equal("login#1", masked["rows"]![0]!["login_name"]!.GetValue<string>());
-        Assert.Equal("host#1", masked["rows"]![0]!["host_name"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Login("CORP\\svc_pm"), masked["rows"]![0]!["login_name"]!.GetValue<string>());
+        Assert.Equal(PseudonymTestKey.Host("10.20.30.40"), masked["rows"]![0]!["host_name"]!.GetValue<string>());
 
         var kept = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MaskLiterals).Answer(answer))!["message"]!.GetValue<string>();
         Assert.Contains("\"CORP\\svc_pm\"", kept, StringComparison.Ordinal);
@@ -734,12 +760,12 @@ public sealed class McpDataDetailMaskerTests
         string answer = EnvelopeWith("pg_stat_statements is unreadable. The server said: password authentication failed for "
             + "user \"monitor\"; permission denied: must be a member of ROLE \"pg_read_all_stats\" or role \"ops_admin\".");
 
-        string envelope = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly).Answer(answer))!["message"]!
+        string envelope = JsonNode.Parse(McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly, PseudonymTestKey.Key).Answer(answer))!["message"]!
             .GetValue<string>();
 
-        /* login#1 is the row's CORP\svc_pm, masked first; the sentence's names follow in order. */
-        Assert.Contains("for user \"login#2\";", envelope, StringComparison.Ordinal);
-        Assert.Contains("ROLE \"pg_read_all_stats\" or role \"login#3\".", envelope, StringComparison.Ordinal);
+        /* Each name reads as its own keyed pseudonym wherever it appears; a predefined role is kept. */
+        Assert.Contains("for user \"" + PseudonymTestKey.Login("monitor") + "\";", envelope, StringComparison.Ordinal);
+        Assert.Contains("ROLE \"pg_read_all_stats\" or role \"" + PseudonymTestKey.Login("ops_admin") + "\".", envelope, StringComparison.Ordinal);
         Assert.DoesNotContain("monitor", envelope, StringComparison.Ordinal);
         Assert.DoesNotContain("ops_admin", envelope, StringComparison.Ordinal);
     }

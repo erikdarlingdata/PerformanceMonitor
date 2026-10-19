@@ -32,7 +32,8 @@ public static class InvestigationWebhookToken
     /// The token's JSON for <paramref name="requestId"/>. <paramref name="row"/> is null when the request could not be read
     /// back: the object then carries the id, the outcome and the tool names only, which is still enough to claim it.
     /// </summary>
-    public static string Render(Guid requestId, bool opened, InvestigationRequestRow? row, string? brief, McpDataDetail mode)
+    public static string Render(Guid requestId, bool opened, InvestigationRequestRow? row, string? brief, McpDataDetail mode,
+        PseudonymKey? key = null)
     {
         var node = row is not null
             ? JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(row), McpHelpers.JsonOptions) as JsonObject
@@ -42,7 +43,7 @@ public static class InvestigationWebhookToken
         node["outcome"] = opened ? "opened" : "joined";
         node["brief"] = brief is null
             ? null
-            : InvestigationFieldMasking.StoredBrief(brief, mode, McpDataDetailMasker.ForAnswer(mode));
+            : InvestigationFieldMasking.StoredBrief(brief, mode, McpDataDetailMasker.ForAnswer(mode, key));
         node["claim_tool"] = ClaimTool;
         node["report_tool"] = ReportTool;
         return node.ToJsonString(McpHelpers.JsonOptions);
