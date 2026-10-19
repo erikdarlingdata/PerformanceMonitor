@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;

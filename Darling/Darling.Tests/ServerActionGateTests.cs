@@ -57,7 +57,7 @@ public sealed class ServerActionLevelThreeTests
         Array.Empty<InvestigationRecentChange>(), Array.Empty<InvestigationBriefNote>(), Array.Empty<InvestigationProfileText>());
 
     [Fact]
-    public void ALevelThreeBrief_KeepsEveryLevelTwoRule_AndSaysServerActionsAreNotBuiltYet()
+    public void ALevelThreeBrief_KeepsEveryLevelTwoRule_AndNamesThePlanForceTools()
     {
         var two = JsonNode.Parse(InvestigationBriefComposer.Compose(Sources(2), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, DateTime.UtcNow))!.AsObject();
         var three = JsonNode.Parse(InvestigationBriefComposer.Compose(Sources(3), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, DateTime.UtcNow))!.AsObject();
@@ -71,8 +71,9 @@ public sealed class ServerActionLevelThreeTests
         Assert.Equal(twoRules.Count, threeRules.Count);
         Assert.Contains(threeRules, r => r.Contains("writes refuse after submit", StringComparison.Ordinal));
         var sentence = Assert.Single(threeRules, r => r.Contains("Level 3", StringComparison.Ordinal));
-        Assert.Contains("server actions are not built yet", sentence, StringComparison.Ordinal);
+        Assert.Contains("force_query_store_plan and unforce_query_store_plan can change the monitored server", sentence, StringComparison.Ordinal);
         Assert.Contains("switch and remediation credential", sentence, StringComparison.Ordinal);
+        Assert.DoesNotContain("not built yet", sentence, StringComparison.Ordinal);
         Assert.DoesNotContain(twoRules, r => r.Contains("Level 3", StringComparison.Ordinal));
     }
 

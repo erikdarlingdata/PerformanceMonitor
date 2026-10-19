@@ -27,7 +27,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 110 tools (94 by default); **Darling** exposes 212 on request (175 by default; the write switches serve the rest); the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 110 tools (94 by default); **Darling** exposes 214 on request (175 by default; the write switches serve the rest); the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Core tools are shared.
 
 By default Lite serves its 93 read tools only. Its twelve write tools are served when `mcp_allow_writes` is `true` in `settings.json`. They are `mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled`, `delete_notification_route`, and the eight query tag tools (`create_query_tag`, `update_query_tag`, `delete_query_tag`, `assign_query_tag`, `unassign_query_tag`, `create_query_tag_rule`, `update_query_tag_rule` and `delete_query_tag_rule`). Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. Lite's MCP endpoint has no token or caller check, so with the setting on, any program on this computer that can reach the port can mute or unmute findings, disable or delete notification routes, and change query tags and their rules. Leave it off unless you trust every program that runs on this computer.
 

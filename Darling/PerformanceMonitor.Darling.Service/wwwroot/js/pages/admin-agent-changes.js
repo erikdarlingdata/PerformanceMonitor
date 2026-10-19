@@ -36,6 +36,13 @@ const CAN_DECIDE =
   "Agent changes, newest first. Undo restores what the setting was before the agent's change, but only if nobody has changed it since; " +
   "otherwise it says so and leaves the setting alone. Undo works for 365 days.";
 
+/** The Kind column's words. The Level 2 kinds read as the journal names them; a plan force on a monitored server (#5632) says so in plain words. */
+export function agentKindText(kind) {
+  if (kind === "plan_force") return "force plan";
+  if (kind === "plan_unforce") return "unforce plan";
+  return kind || null;
+}
+
 /** What the Result column says. A call with no done or failed row is "result unknown": the change may or may not have happened. */
 export function agentResultText(change) {
   if (change.undone_at_utc) return "undone by " + (change.undone_by || "a person");
@@ -54,7 +61,7 @@ export function agentChangeRows(data) {
     called_id: c.called_id,
     when: c.called_at_utc,
     server: Number.isInteger(c.server_id) ? "Server " + c.server_id : "",
-    kind: c.kind || null,
+    kind: agentKindText(c.kind),
     tool: c.tool || null,
     actor: c.actor,
     reason: c.reason || null,

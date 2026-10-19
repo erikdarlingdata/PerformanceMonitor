@@ -73,7 +73,13 @@ public sealed class AgentChangeViewRow
 
     public string Server => Row.ServerId is int id ? "Server " + id.ToString(CultureInfo.InvariantCulture) : "";
 
-    public string Kind => Row.Kind ?? "";
+    /// <summary>The kind word, in plain words for the two plan force kinds (#5632) and as journaled for the rest.</summary>
+    public string Kind => Row.Kind switch
+    {
+        AgentChangeKinds.PlanForce => "force plan",
+        AgentChangeKinds.PlanUnforce => "unforce plan",
+        var other => other ?? "",
+    };
 
     public string Tool => Row.Tool ?? "";
 
