@@ -869,7 +869,8 @@ SELECT
     blocked_sql_text, blocking_sql_text,
     blocked_login_name, blocked_host_name, blocked_client_app,
     blocked_last_tran_started, blocking_last_tran_started, monitor_loop,
-    blocking_login_name, blocking_host_name, blocking_client_app
+    blocking_login_name, blocking_host_name, blocking_client_app,
+    blocking_login_time, blocking_last_request_end_time, blocking_open_transaction_count, blocking_tran_log_bytes_used
 FROM v_dmv_blocking_snapshots
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
 ORDER BY event_time DESC
@@ -910,6 +911,11 @@ LIMIT $4";
                     BlockingLoginName = reader.IsDBNull(19) ? "" : reader.GetString(19),
                     BlockingHostName = reader.IsDBNull(20) ? "" : reader.GetString(20),
                     BlockingClientApp = reader.IsDBNull(21) ? "" : reader.GetString(21),
+                    /* #5632: the head blocker's evidence (the two stamps are the monitored server's local clock, stored raw). */
+                    BlockingLoginTime = reader.IsDBNull(22) ? null : reader.GetDateTime(22),
+                    BlockingLastRequestEndTime = reader.IsDBNull(23) ? null : reader.GetDateTime(23),
+                    BlockingOpenTransactionCount = reader.IsDBNull(24) ? null : reader.GetInt32(24),
+                    BlockingTranLogBytesUsed = reader.IsDBNull(25) ? null : reader.GetInt64(25),
                     Source = BlockedProcessAlertRow.DmvSnapshotSource
                 });
             }
@@ -1621,6 +1627,12 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public DateTime? BlockingLastBatchCompleted { get; set; }
     public int BlockedPriority { get; set; }
     public int BlockingPriority { get; set; }
+
+    /* #5632, DMV-snapshot rows only: the head blocker's evidence. The two stamps are the monitored server's local clock, stored raw. */
+    public DateTime? BlockingLoginTime { get; set; }
+    public DateTime? BlockingLastRequestEndTime { get; set; }
+    public int? BlockingOpenTransactionCount { get; set; }
+    public long? BlockingTranLogBytesUsed { get; set; }
 
     public string EventTimeLocal => ServerTimeHelper.FormatServerTime(EventTime);
     public string WaitTimeFormatted => WaitTimeMs < 1000 ? $"{WaitTimeMs} ms" : $"{WaitTimeMs / 1000.0:F1} sec";

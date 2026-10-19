@@ -140,9 +140,12 @@ public sealed class McpPayloadClockFrameDisciplineTests
             + "five populated columns measure -240.2 to -242.1 against the UTC event_time on the same row, "
             + "and de-skewing them takes (event_time - blocked_last_batch_started) - wait_time_ms from an "
             + "impossible +240.0 minutes to 0.0"),
-        ("DmvBlockingSnapshotsSql", [new("blocked_last_tran_started"), new("blocking_last_tran_started")],
+        ("DmvBlockingSnapshotsSql",
+            [new("blocked_last_tran_started"), new("blocking_last_tran_started"),
+             new("blocking_login_time"), new("blocking_last_request_end_time")],
             "DmvBlockingSnapshotCollector ships sys.dm_tran_active_transactions.transaction_begin_time "
-            + "verbatim, and both columns measure -239.9 to -240.1 against collection_time on two stores"),
+            + "verbatim, and both columns measure -239.9 to -240.1 against collection_time on two stores; "
+            + "blocking_login_time and blocking_last_request_end_time (#5632) ship sys.dm_exec_sessions' own local-clock values verbatim, stored raw"),
         /* The one DERIVED column in the set: the alias is last_user_access, but the expression projected is
            the GREATEST of the four stored DMV columns, so its source has to be named explicitly. The reader
            converts that one value in C#, which equals converting the four first except inside the hour a fall

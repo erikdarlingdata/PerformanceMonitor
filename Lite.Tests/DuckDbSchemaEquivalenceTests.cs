@@ -244,6 +244,11 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         /* v65 (#4475): the AG's group_id from sys.availability_groups, so same-named AGs can be told apart. Appended, nullable VARCHAR. */
         "ag_replica_states.group_id",
         "ag_database_replica_states.group_id",
+        /* v76 (#5632): the head blocker's sign-in time, last request end time, open transaction count and log bytes. Appended, nullable. */
+        "dmv_blocking_snapshots.blocking_login_time",
+        "dmv_blocking_snapshots.blocking_last_request_end_time",
+        "dmv_blocking_snapshots.blocking_open_transaction_count",
+        "dmv_blocking_snapshots.blocking_tran_log_bytes_used",
     };
 
     [Fact]

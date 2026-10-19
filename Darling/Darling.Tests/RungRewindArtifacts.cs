@@ -341,6 +341,19 @@ ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS force_
         new(198, "hasPseudonymKey",
             @"
 DROP TABLE IF EXISTS config.pseudonym_key;"),
+
+        // /// V199 (#5632): the head-blocker evidence columns on the blocking snapshots. The last column is the probe's newest sentinel. The
+        // rewind drops all four (dropping a column on a compressed hypertable is allowed for a nullable, default-less one), so a re-run of V199 adds
+        // them again. The view is re-expanded so it no longer names them. Safe on a store that never had them.
+        new(199, "hasBlockingHeadEvidence",
+            @"
+DROP VIEW IF EXISTS collect.v_dmv_blocking_snapshots;
+ALTER TABLE IF EXISTS collect.dmv_blocking_snapshots
+    DROP COLUMN IF EXISTS blocking_login_time,
+    DROP COLUMN IF EXISTS blocking_last_request_end_time,
+    DROP COLUMN IF EXISTS blocking_open_transaction_count,
+    DROP COLUMN IF EXISTS blocking_tran_log_bytes_used;
+CREATE OR REPLACE VIEW collect.v_dmv_blocking_snapshots AS SELECT * FROM collect.dmv_blocking_snapshots;"),
     ];
 
     /// <summary>

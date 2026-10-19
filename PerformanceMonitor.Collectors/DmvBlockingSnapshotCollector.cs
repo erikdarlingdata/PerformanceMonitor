@@ -51,7 +51,11 @@ public sealed class DmvBlockingSnapshotCollector : CollectorDefinitionBase<DmvBl
         string? BlockedClientApp,
         string? BlockingLoginName,
         string? BlockingHostName,
-        string? BlockingClientApp);
+        string? BlockingClientApp,
+        DateTime? BlockingLoginTime,
+        DateTime? BlockingLastRequestEndTime,
+        int? BlockingOpenTransactionCount,
+        long? BlockingTranLogBytesUsed);
 
     private static readonly DateTime s_monitorLoopEpoch = new(2020, 1, 1);
 
@@ -102,7 +106,15 @@ SELECT /* PerformanceMonitorLite */
     blocked_client_app = ses_b.program_name,
     blocking_login_name = ses_k.login_name,
     blocking_host_name = ses_k.host_name,
-    blocking_client_app = ses_k.program_name
+    blocking_client_app = ses_k.program_name,
+    /* #5632: what a person needs to judge a head blocker. login_time and last_request_end_time are the
+       server's own local-clock values, stored raw (a later kill step compares login_time with the server's
+       value, so it must not be shifted). A sleeping head blocker has no request, so blocking_status above
+       already reads ses_k.status for it. */
+    blocking_login_time = ses_k.login_time,
+    blocking_last_request_end_time = ses_k.last_request_end_time,
+    blocking_open_transaction_count = ses_k.open_transaction_count,
+    blocking_tran_log_bytes_used = tlb_k.log_bytes_used
 FROM sys.dm_os_waiting_tasks AS wt
 JOIN sys.dm_exec_sessions AS ses_b
   ON ses_b.session_id = wt.session_id
@@ -134,6 +146,16 @@ OUTER APPLY
     WHERE stx.session_id = wt.blocking_session_id
     ORDER BY tat.transaction_begin_time ASC
 ) AS tat_k
+/* #5632: exact bytes (not MB) so a person can tell a transaction that wrote no log from one that did. One
+   session can have a row per database, so the session's total is the SUM; NULL when it has no transaction row. */
+OUTER APPLY
+(
+    SELECT log_bytes_used = SUM(CONVERT(bigint, ddt.database_transaction_log_bytes_used))
+    FROM sys.dm_tran_session_transactions AS stx
+    JOIN sys.dm_tran_database_transactions AS ddt
+      ON ddt.transaction_id = stx.transaction_id
+    WHERE stx.session_id = wt.blocking_session_id
+) AS tlb_k
 OUTER APPLY
 (
     SELECT
@@ -232,6 +254,10 @@ OPTION(RECOMPILE);";
         new CollectorColumn("blocking_login_name", CollectorColumnType.Varchar),
         new CollectorColumn("blocking_host_name", CollectorColumnType.Varchar),
         new CollectorColumn("blocking_client_app", CollectorColumnType.Varchar),
+        new CollectorColumn("blocking_login_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("blocking_last_request_end_time", CollectorColumnType.Timestamp),
+        new CollectorColumn("blocking_open_transaction_count", CollectorColumnType.Integer),
+        new CollectorColumn("blocking_tran_log_bytes_used", CollectorColumnType.BigInt),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -261,7 +287,11 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(15) ? null : reader.GetString(15),
                 reader.IsDBNull(16) ? null : reader.GetString(16),
                 reader.IsDBNull(17) ? null : reader.GetString(17),
-                reader.IsDBNull(18) ? null : reader.GetString(18)));
+                reader.IsDBNull(18) ? null : reader.GetString(18),
+                reader.IsDBNull(19) ? null : reader.GetDateTime(19),
+                reader.IsDBNull(20) ? null : reader.GetDateTime(20),
+                reader.IsDBNull(21) ? null : reader.GetInt32(21),
+                reader.IsDBNull(22) ? null : reader.GetInt64(22)));
         }
 
         return rows;
@@ -290,7 +320,11 @@ OPTION(RECOMPILE);";
             .Value(row.BlockedClientApp)
             .Value(row.BlockingLoginName)
             .Value(row.BlockingHostName)
-            .Value(row.BlockingClientApp);
+            .Value(row.BlockingClientApp)
+            .Value(row.BlockingLoginTime)
+            .Value(row.BlockingLastRequestEndTime)
+            .Value(row.BlockingOpenTransactionCount)
+            .Value(row.BlockingTranLogBytesUsed);
     }
 
     /// <summary>

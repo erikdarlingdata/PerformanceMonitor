@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 75;
+    internal const int CurrentSchemaVersion = 76;
 
     private readonly string _archivePath;
 
@@ -3068,6 +3068,14 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v75: adding investigation_requests.follow_up_of and follow_up_at, notification_routes.generic_signing_set and generic_signing_until");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(75));
         }
+
+        if (fromVersion < 76)
+        {
+            /* v76 (#5632): the head blocker's sign-in time, last request end time, open transaction count and transaction log bytes on dmv_blocking_snapshots
+               (Darling's V199 columns; the shared added-columns list). The view over the table is rebuilt on every start (CreateArchiveViewsAsync). */
+            _logger?.LogInformation("Running migration to v76: adding the head blocker's evidence columns to dmv_blocking_snapshots");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(76));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3138,6 +3146,12 @@ public partial class DuckDbInitializer : IDisposable
         /* #6012: a route's generic signing key flag and the end of its rotation overlap (non-secret; the keys are in Credential Manager). NULL reads as no key. */
         (75, "notification_routes", "generic_signing_set", "BOOLEAN"),
         (75, "notification_routes", "generic_signing_until", "TIMESTAMP"),
+        /* #5632: the head blocker's evidence (Darling's V199 columns). login_time and last_request_end_time are the monitored server's local clock,
+           stored raw; the log bytes are exact bytes, not MB. NULL on a snapshot stored before v76. */
+        (76, "dmv_blocking_snapshots", "blocking_login_time", "TIMESTAMP"),
+        (76, "dmv_blocking_snapshots", "blocking_last_request_end_time", "TIMESTAMP"),
+        (76, "dmv_blocking_snapshots", "blocking_open_transaction_count", "INTEGER"),
+        (76, "dmv_blocking_snapshots", "blocking_tran_log_bytes_used", "BIGINT"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

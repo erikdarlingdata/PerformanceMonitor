@@ -177,13 +177,17 @@ public sealed class DmvBlockingSnapshotCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_21Columns()
+    public void PayloadColumns_MatchSchemaOrder_25Columns()
     {
         var names = DmvBlockingSnapshotCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(21, names.Length);
+        Assert.Equal(25, names.Length);
         Assert.Equal("monitor_loop", names[0]);
         Assert.Equal("event_time", names[1]);
         Assert.Equal("blocking_client_app", names[20]);
+        /* #5632: the head-blocker evidence is appended LAST so a fresh store and an upgraded store share one column order. */
+        Assert.Equal(
+            new[] { "blocking_login_time", "blocking_last_request_end_time", "blocking_open_transaction_count", "blocking_tran_log_bytes_used" },
+            names.Skip(21).ToArray());
     }
 
     [Fact]
@@ -196,16 +200,54 @@ public sealed class DmvBlockingSnapshotCollectorDefinitionTests
                 "StackOverflow", 71, 0, DBNull.Value, 55, 0, DBNull.Value, 4500L,
                 "X", "sleeping", "[dbo].[Orders]", "UPDATE ...", "BEGIN TRAN ...",
                 "app_user", "web01", "MyApp", "admin", "jump01", "SSMS",
+                new DateTime(2026, 10, 19, 8, 0, 0), new DateTime(2026, 10, 19, 9, 30, 0), 1, 0L,
             });
 
         var rows = await DmvBlockingSnapshotCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
         var writer = new RecordingCollectorRowWriter();
         DmvBlockingSnapshotCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(21, writer.Values.Count);
+        Assert.Equal(25, writer.Values.Count);
         Assert.Equal(DmvBlockingSnapshotCollector.SyntheticMonitorLoop(context.CollectionTime), writer.Values[0]);
         Assert.Equal(context.CollectionTime, writer.Values[1]);
         Assert.Equal("[dbo].[Orders]", writer.Values[12]);
         Assert.Equal("SSMS", writer.Values[20]);
+        Assert.Equal(new DateTime(2026, 10, 19, 8, 0, 0), writer.Values[21]);
+        Assert.Equal(new DateTime(2026, 10, 19, 9, 30, 0), writer.Values[22]);
+        Assert.Equal(1, writer.Values[23]);
+        Assert.Equal(0L, writer.Values[24]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_KeepsNullEvidenceNull_NotZero()
+    {
+        /* #5632: a head blocker with no transaction row has NULL log bytes. NULL is "no transaction", 0 is "a transaction that
+           wrote no log"; the second is the case a person reads as safe to kill, so the first must never collapse into it. */
+        var context = CollectorTestContext.Make(s_deltas);
+        using var reader = new FakeCollectorDataReader(
+            new object[]
+            {
+                "StackOverflow", 71, 0, DBNull.Value, 55, 0, DBNull.Value, 4500L,
+                "X", "sleeping", "[dbo].[Orders]", "UPDATE ...", "BEGIN TRAN ...",
+                "app_user", "web01", "MyApp", "admin", "jump01", "SSMS",
+                DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+            });
+
+        var row = Assert.Single(await DmvBlockingSnapshotCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+        Assert.Null(row.BlockingLoginTime);
+        Assert.Null(row.BlockingLastRequestEndTime);
+        Assert.Null(row.BlockingOpenTransactionCount);
+        Assert.Null(row.BlockingTranLogBytesUsed);
+    }
+
+    [Fact]
+    public void Query_ReadsTheEvidenceFromTheBlockersSession_AsExactBytes()
+    {
+        var query = DmvBlockingSnapshotCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text;
+        Assert.Contains("blocking_login_time = ses_k.login_time", query, StringComparison.Ordinal);
+        Assert.Contains("blocking_last_request_end_time = ses_k.last_request_end_time", query, StringComparison.Ordinal);
+        Assert.Contains("blocking_open_transaction_count = ses_k.open_transaction_count", query, StringComparison.Ordinal);
+        Assert.Contains("SUM(CONVERT(bigint, ddt.database_transaction_log_bytes_used))", query, StringComparison.Ordinal);
+        Assert.DoesNotContain("1048576", query, StringComparison.Ordinal);
     }
 }

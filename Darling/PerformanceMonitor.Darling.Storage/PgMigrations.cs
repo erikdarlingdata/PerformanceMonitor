@@ -1811,6 +1811,32 @@ VALUES (1, pg_catalog.sha256(pg_catalog.decode(
 ON CONFLICT (id) DO NOTHING;";
 
     /// <summary>
+    /// V199 (#5632, step 11): what a person needs to judge a head blocker. Four nullable columns on the blocker side of
+    /// <c>collect.dmv_blocking_snapshots</c>, from the blocker's own session: <c>blocking_login_time</c>
+    /// (<c>sys.dm_exec_sessions.login_time</c>), <c>blocking_last_request_end_time</c> (<c>last_request_end_time</c>),
+    /// <c>blocking_open_transaction_count</c> (<c>open_transaction_count</c>) and <c>blocking_tran_log_bytes_used</c> (the SUM of
+    /// <c>database_transaction_log_bytes_used</c> over every transaction of the session, exact bytes, not MB). The two times are the
+    /// monitored server's local clock, stored raw: a later kill step compares <c>login_time</c> with the server's own value, so the
+    /// stored value must be the server's value, unchanged. A reader converts them to UTC with the server's offset.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> (the V155 and V193 shape): a row collected before this rung never asked the
+    /// engine, and nothing can reconstruct the values, so NULL is the honest value. A nullable, default-less <c>ADD COLUMN</c> is
+    /// catalog-only in PostgreSQL and TimescaleDB accepts it on a compressed hypertable.</para>
+    ///
+    /// <para><b>Appended LAST</b>, after <c>blocking_client_app</c>: the writer is a positional binary COPY, so a fresh store (the
+    /// generated V1 table carries the columns from the collector's payload, and these ALTERs no-op there) and an upgraded store share
+    /// one physical column order. The trailing <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_dmv_blocking_snapshots</c>' pinned
+    /// <c>SELECT *</c>, which PostgreSQL freezes at CREATE (unqualified, like V155's, so it resolves through the migrate session's
+    /// <c>search_path</c>).</para>
+    /// </summary>
+    private const string V199Sql = @"
+ALTER TABLE collect.dmv_blocking_snapshots ADD COLUMN IF NOT EXISTS blocking_login_time timestamp;
+ALTER TABLE collect.dmv_blocking_snapshots ADD COLUMN IF NOT EXISTS blocking_last_request_end_time timestamp;
+ALTER TABLE collect.dmv_blocking_snapshots ADD COLUMN IF NOT EXISTS blocking_open_transaction_count integer;
+ALTER TABLE collect.dmv_blocking_snapshots ADD COLUMN IF NOT EXISTS blocking_tran_log_bytes_used bigint;
+CREATE OR REPLACE VIEW v_dmv_blocking_snapshots AS SELECT * FROM dmv_blocking_snapshots;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2183,6 +2209,7 @@ $rung$;";
         new Migration(196, "level-3-server-action-switches", V196Sql),
         new Migration(197, "plan-force-checks", V197Sql),
         new Migration(198, "pseudonym-key", V198Sql),
+        new Migration(199, "blocking-head-evidence", V199Sql),
     };
 
     /// <summary>

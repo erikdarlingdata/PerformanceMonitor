@@ -194,7 +194,7 @@ VALUES ('{id}', 1, 7, 'srv-7', 'blocking', 'Blocking', TIMESTAMP '{opened:yyyy-M
     {
         const string ColumnsSql = "SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns WHERE table_name = 'investigation_requests' AND column_name IN ('follow_up_of', 'follow_up_at')";
         Assert.Equal("follow_up_at,follow_up_of", Scalar(ColumnsSql));
-        Assert.Equal("75", Scalar("SELECT max(version) FROM schema_version"));
+        Assert.Equal("76", Scalar("SELECT max(version) FROM schema_version"));
 
         var path = Path.Combine(_tempDir, "old.duckdb");
         using (var old = new DuckDbInitializer(path))
@@ -208,11 +208,11 @@ VALUES ('{id}', 1, 7, 'srv-7', 'blocking', 'Blocking', TIMESTAMP '{opened:yyyy-M
         using var upgraded = new DuckDbInitializer(path);
         await upgraded.InitializeAsync();
         Assert.Equal("follow_up_at,follow_up_of", Scalar(ColumnsSql, upgraded));
-        Assert.Equal("75", Scalar("SELECT max(version) FROM schema_version", upgraded));
+        Assert.Equal("76", Scalar("SELECT max(version) FROM schema_version", upgraded));
 
         using var again = new DuckDbInitializer(path);
         await again.InitializeAsync();
         Assert.Equal("follow_up_at,follow_up_of", Scalar(ColumnsSql, again));
-        Assert.Equal("75", Scalar("SELECT max(version) FROM schema_version", again));
+        Assert.Equal("76", Scalar("SELECT max(version) FROM schema_version", again));
     }
 }

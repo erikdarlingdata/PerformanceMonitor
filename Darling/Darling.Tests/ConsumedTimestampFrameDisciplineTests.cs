@@ -190,6 +190,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "a dm_exec_* stats DMV shipped verbatim"),
         ("sys.dm_tran_active_transactions", ["transaction_begin_time"], ClockFrame.ServerLocal,
             "a dm_tran_* DMV shipped verbatim"),
+        /* #5632: the head blocker's sign-in time and the end of its last request, shipped verbatim off its session row. */
+        ("sys.dm_exec_sessions", ["login_time", "last_request_end_time"], ClockFrame.ServerLocal,
+            "a dm_exec_* session DMV shipped verbatim, and stored raw so a kill can compare login_time with the server's own"),
         ("sys.dm_tran_persistent_version_store_stats",
             ["aborted_version_cleaner_start_time", "aborted_version_cleaner_end_time",
              "offrow_version_cleaner_start_time", "offrow_version_cleaner_end_time"],
@@ -267,7 +270,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     ];
 
     private const int NonTsqlProvenanceCount = 9;
-    private const int TsqlServerLocalCount = 28;
+    private const int TsqlServerLocalCount = 30;
     /* 12 until V134 (#3653 item 13): cpu_utilization_stats.sample_time_utc is read as Utc off its own
        SYSUTCDATETIME() — the first SqlServer table to carry BOTH frames as two columns, and the reason
        the sibling sample_time stays ServerLocal beside it rather than flipping. */
@@ -313,7 +316,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         "default_trace_events.end_time=ServerLocal",
         "default_trace_events.event_time=ServerLocal",
         "dmv_blocking_snapshots.blocked_last_tran_started=ServerLocal",
+        "dmv_blocking_snapshots.blocking_last_request_end_time=ServerLocal",
         "dmv_blocking_snapshots.blocking_last_tran_started=ServerLocal",
+        "dmv_blocking_snapshots.blocking_login_time=ServerLocal",
         "index_object_stats.last_user_lookup=ServerLocal",
         "index_object_stats.last_user_scan=ServerLocal",
         "index_object_stats.last_user_seek=ServerLocal",
@@ -945,6 +950,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "blocked_last_batch_completed", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
             "blocking_last_batch_completed", "blocked_process_reports", 1, "get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+            "blocking_login_time", "dmv_blocking_snapshots", 1, "get_blocking (#5632); de-skewed at the read"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpBlockingTools.cs",
+            "blocking_last_request_end_time", "dmv_blocking_snapshots", 1, "get_blocking (#5632); de-skewed at the read"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs",
             "start_time", "running_jobs", 1,
             "get_running_jobs; captured_at (collection_time before #3653) in the same object is UTC, so a job started seconds ago "
@@ -981,6 +990,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "blocked_last_batch_completed", "blocked_process_reports", 1, "Lite get_blocking; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
             "blocking_last_batch_completed", "blocked_process_reports", 1, "Lite get_blocking; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocking_login_time", "dmv_blocking_snapshots", 1, "Lite get_blocking (#5632); de-skewed at the read"),
+        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
+            "blocking_last_request_end_time", "dmv_blocking_snapshots", 1, "Lite get_blocking (#5632); de-skewed at the read"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpJobTools.cs", "start_time", "running_jobs", 1,
             "Lite get_running_jobs; de-skewed at the read by #3206"),
         (SiteLabel.McpPayloadUnmarked, "Lite/Mcp/McpPlanCacheSchedulerTools.cs", "oldest_plan_create_time",
@@ -1045,7 +1058,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        TrendPayloads.CpuUtilization builder. */
     private const int McpPayloadUnmarkedSites = 1;
     private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 27;
+    private const int DeSkewedAtReadSites = 31;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
@@ -1872,6 +1885,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 "BlockedLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 29),"),
             ("blocking_last_batch_completed", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
                 "BlockingLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 30),"),
+            ("blocking_login_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "BlockingLoginTimeUtc = DarlingServerClockReader.ToUtc(clock, reader, 20),"),
+            ("blocking_last_request_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
+                "BlockingLastRequestEndTimeUtc = DarlingServerClockReader.ToUtc(clock, reader, 21),"),
             ("start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingJobReader.cs",
                 "clock.ToUtc(reader.GetDateTime(4))"),
             ("last_user_access", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs",
@@ -1888,6 +1905,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 "DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);"),
             ("cached_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
                 "DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);"),
+            ("blocking_login_time", "Lite/Mcp/McpBlockingTools.cs",
+                "UtcOrNull(r.BlockingLoginTime)"),
+            ("blocking_last_request_end_time", "Lite/Mcp/McpBlockingTools.cs",
+                "UtcOrNull(r.BlockingLastRequestEndTime)"),
             ("blocked_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
                 "UtcOrNull(r.BlockedLastTranStarted)"),
             ("blocking_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",

@@ -210,8 +210,9 @@ public sealed class DarlingDmvResourceDatabaseSentinelTests
     [Fact]
     public void The_Change_Is_Query_Text_Only_And_Stores_No_New_Column()
     {
-        /* No schema moved, so no upgrade-folder work and no store migration: the collector writes the same
-           19 columns it always did, with a better value in one of them. */
+        /* #1893 changed the query text only, so it added no column of its own (the collector wrote 19 columns then,
+           and carries more since, because later issues appended theirs; #5632's four head-blocker columns are pinned in
+           PerfmonAndDmvBlockingCollectorDefinitionTests). It is the contentious_object value that got better. */
         var names = DmvBlockingSnapshotCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
 
         Assert.Contains("contentious_object", names);

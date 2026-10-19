@@ -127,6 +127,20 @@ internal static class DarlingBlockingReader
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
 
+        /// <summary>#5632, DMV-snapshot rows only (the report XML carries none of the four): when the head blocker's session signed in,
+        /// converted from the monitored server's clock to UTC at the read. A later kill step compares it with the server's own value.</summary>
+        public DateTime? BlockingLoginTimeUtc { get; set; }
+
+        /// <summary>#5632: when the head blocker's last request ended, in UTC. For an idle (<c>sleeping</c>) head it is how long it has been idle.</summary>
+        public DateTime? BlockingLastRequestEndTimeUtc { get; set; }
+
+        /// <summary>#5632: the head blocker's open transaction count (<c>sys.dm_exec_sessions.open_transaction_count</c>).</summary>
+        public int? BlockingOpenTransactionCount { get; set; }
+
+        /// <summary>#5632: exact bytes of transaction log the head blocker's open transactions have used, summed over every database.
+        /// 0 is a transaction that has written no log (a kill rolls back nothing); null is a session with no transaction row.</summary>
+        public long? BlockingTranLogBytesUsed { get; set; }
+
         /// <summary>The report's own <c>collection_time</c> (#5236): half of the store key that
         /// <see cref="ReadBlockedPlanFlagsAsync"/> re-reads a page's rows by. Null on a DMV-snapshot row, which has no key.</summary>
         public DateTime? CollectionTime { get; set; }
@@ -323,7 +337,11 @@ internal static class DarlingBlockingReader
             blocking_host_name,
             blocking_client_app,
             blocked_last_tran_started,
-            blocking_last_tran_started
+            blocking_last_tran_started,
+            blocking_login_time,
+            blocking_last_request_end_time,
+            blocking_open_transaction_count,
+            blocking_tran_log_bytes_used
         FROM v_dmv_blocking_snapshots
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -547,7 +565,7 @@ internal static class DarlingBlockingReader
         }
     }
 
-    /// <summary>Maps one row of <see cref="DmvBlockingSnapshotsSql"/> (20 columns, in the SELECT's order).</summary>
+    /// <summary>Maps one row of <see cref="DmvBlockingSnapshotsSql"/> (24 columns, in the SELECT's order).</summary>
     internal static BlockedProcessReadRow MapDmvRow(DbDataReader reader, ServerClock clock)
     {
         return new BlockedProcessReadRow
@@ -572,6 +590,11 @@ internal static class DarlingBlockingReader
             BlockingClientApp = reader.IsDBNull(17) ? null : reader.GetString(17),
             BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 18),
             BlockingLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 19),
+            /* #5632: the head blocker's evidence. The two stamps are the server's local clock, like the transaction stamps above. */
+            BlockingLoginTimeUtc = DarlingServerClockReader.ToUtc(clock, reader, 20),
+            BlockingLastRequestEndTimeUtc = DarlingServerClockReader.ToUtc(clock, reader, 21),
+            BlockingOpenTransactionCount = reader.IsDBNull(22) ? null : reader.GetInt32(22),
+            BlockingTranLogBytesUsed = reader.IsDBNull(23) ? null : reader.GetInt64(23),
             Source = BlockedProcessAlertRow.DmvSnapshotSource,
         };
     }
