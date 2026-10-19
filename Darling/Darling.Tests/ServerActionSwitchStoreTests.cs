@@ -39,8 +39,9 @@ public sealed class ServerActionSwitchStoreTests
     public void TheRungIsRegistered_AndTheViewerGateRequiresTheLadderTop()
     {
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(PgMigrations.Scripts[^1].Version, Rung.Version);
+        /* Not the top any more: V197 (the plan-force check link) sits above it. */
+        Assert.Equal(196, Rung.Version);
+        Assert.Equal(PgMigrations.Scripts[^1].Version, StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
     }
 

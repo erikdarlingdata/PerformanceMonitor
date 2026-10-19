@@ -47,8 +47,8 @@ public sealed class PlanForceCheckLiveTests
 
     private sealed record Force(Guid Request, Guid Claim, long CalledId);
 
-    private static InvestigationAlert Alert(DateTime at, string family = "plan-regression") =>
-        new(1, ServerId, "srv-7", family, "Blocking", at, [], null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 600) { AutonomyLevel = 3 };
+    private static InvestigationAlert Alert(DateTime at, string family = "query_performance", string metric = "Blocking") =>
+        new(1, ServerId, "srv-7", family, metric, at, [], null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 600) { AutonomyLevel = 3 };
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params object?[] values)
     {
@@ -95,7 +95,17 @@ public sealed class PlanForceCheckLiveTests
     private static async Task<Force> ForceAsync(InvestigationRequestStore store, NpgsqlConnection connection, DateTime at, CancellationToken ct,
         string kind = "plan_force", long planId = NewPlan, long? forcedBefore = null, bool done = true, string actor = "agent:agent-a")
     {
-        var opened = await store.OpenOrJoinAsync(Alert(at, "force-" + Guid.NewGuid().ToString("N")), ct);
+        /* One request per force: an alert joins a live request of its server and family, so each force takes a family no request holds yet. */
+        var families = new[] { "blocking", "query_performance", "resources", "availability", "jobs", "self_monitor", "other" };
+        var taken = new HashSet<string>();
+        await using (var used = new NpgsqlCommand("SELECT DISTINCT family FROM config.investigation_requests WHERE force_check_of IS NULL", connection))
+        await using (var rows = await used.ExecuteReaderAsync(ct))
+        {
+            while (await rows.ReadAsync(ct))
+                taken.Add(rows.GetString(0));
+        }
+
+        var opened = await store.OpenOrJoinAsync(Alert(at, families.First(f => !taken.Contains(f))), ct);
         var request = opened.RequestId!.Value;
         var claim = (await store.ClaimAsync(request, "agent-a", ct)).ClaimId!.Value;
         var called = await JournalAsync(connection, "action_called", request, at, CalledDetail(kind, QueryId, planId, forcedBefore), ct, actor);
