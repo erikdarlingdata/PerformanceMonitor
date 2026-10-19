@@ -7673,19 +7673,7 @@ AND   j.hypertable_name = '{relation}'";
            could hold a slot Short against a row its own rollup will never materialize. Both #4423 consumers
            are themselves sourced FROM collect.{relation} (query_stats), so this filter's columns are always
            columns relation actually carries. */
-        string SlotSourceFilterFor(string coverageRelation)
-        {
-            if (relation is not ("query_stats" or "procedure_stats"))
-            {
-                return string.Empty;
-            }
-
-            var createSql = HourlyAggregates.Concat(DailyAggregates).Concat(FrozenRollupAggregates).Concat(BaselineAggregates)
-                .FirstOrDefault(a => string.Equals(a.View, coverageRelation, StringComparison.Ordinal)).CreateSql;
-
-            var filter = createSql is null ? string.Empty : MaterializationHoleSourceFilterFor(createSql);
-            return filter.Length == 0 ? IntervalHonestSourceFilter : filter;
-        }
+        string SlotSourceFilterFor(string coverageRelation) => CoverageSlotSourceFilter(relation, coverageRelation);
 
         /* Coverage SQL: for a coverage relation that is an interval-honest successor, stitch it with
            its frozen legacy so an empty successor on an upgrading store falls back to the legacy's
@@ -7749,6 +7737,26 @@ AND   j.hypertable_name = '{relation}'";
 
         return $"SELECT{Environment.NewLine}    {sourceOldest},{Environment.NewLine}"
             + string.Join("," + Environment.NewLine, columns);
+    }
+
+    /// <summary>
+    /// The source filter one coverage slot judges its raw relation by (#4300, #4423): the consumer's own CREATE
+    /// filter for <c>query_stats</c> and <c>procedure_stats</c>, none for any other raw relation. Shared by the
+    /// gate (<see cref="RetentionArmSafetySql"/>) and the bounded floor-gap fill
+    /// (<see cref="FillSmallFloorGapsAsync"/>) so the two can never disagree about which raw rows a consumer owes a bucket for.
+    /// </summary>
+    private static string CoverageSlotSourceFilter(string relation, string coverageRelation)
+    {
+        if (relation is not ("query_stats" or "procedure_stats"))
+        {
+            return string.Empty;
+        }
+
+        var createSql = HourlyAggregates.Concat(DailyAggregates).Concat(FrozenRollupAggregates).Concat(BaselineAggregates)
+            .FirstOrDefault(a => string.Equals(a.View, coverageRelation, StringComparison.Ordinal)).CreateSql;
+
+        var filter = createSql is null ? string.Empty : MaterializationHoleSourceFilterFor(createSql);
+        return filter.Length == 0 ? IntervalHonestSourceFilter : filter;
     }
 
     /// <summary>
@@ -7980,14 +7988,14 @@ AND   j.hypertable_name = '{relation}'";
     /// How far <paramref name="relation"/>'s consumers reach relative to what it holds (#1680): <c>Covered</c>
     /// when the source is empty or EVERY relation in <paramref name="coverageRelations"/> reaches at least as far
     /// back as the source does, <c>Short</c> when one of them is measurably behind, <c>Unknown</c> when the
-    /// probe could not answer at all. Also returns the first consumer found short, so the operator warning can
-    /// name the tier to backfill rather than the whole list.
+    /// probe could not answer at all. Also returns EVERY consumer found short (#6081), so the operator warning
+    /// names each tier to backfill and the bounded fill (<see cref="FillSmallFloorGapsAsync"/>) can judge each.
     ///
-    /// <para>The verdict is an AND across consumers (#1849), and the loop below is short-circuiting in the SAFE
-    /// direction only: one empty or shallow consumer holds the policy even if every other consumer is complete.
+    /// <para>The verdict is an AND across consumers (#1849): one empty or shallow consumer holds the policy even
+    /// if every other consumer is complete.
     /// A raw table with two rollup families is covered when the LEAST-covering of them covers it.</para>
     /// </summary>
-    private static async Task<(RetentionCoverage Verdict, string? ShortConsumer)> MeasureRetentionCoverageAsync(
+    private static async Task<(RetentionCoverage Verdict, IReadOnlyList<string> ShortConsumers)> MeasureRetentionCoverageAsync(
         NpgsqlConnection connection, string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations, CancellationToken cancellationToken)
     {
         try
@@ -8006,14 +8014,20 @@ AND   j.hypertable_name = '{relation}'";
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
-                return (RetentionCoverage.Unknown, null);
+                return (RetentionCoverage.Unknown, Array.Empty<string>());
             }
 
             /* Nothing in the source - a fresh store. No history to lose, so arm. */
             if (await reader.IsDBNullAsync(0, cancellationToken))
             {
-                return (RetentionCoverage.Covered, null);
+                return (RetentionCoverage.Covered, Array.Empty<string>());
             }
+
+            /* #6081: EVERY short consumer, in the order the coverage list names them (dependency order), not
+               the first one found. The verdict is still an AND, so the safe direction is unchanged; what changed
+               is that the operator line and the bounded fill can see the second short consumer in the same
+               pass instead of one round later. */
+            var shortConsumers = new List<string>();
 
             /* Column 0 is the shared, unfiltered source_oldest (the empty-store check above). From column
                1 the shape is pairs — (source_oldest_i, coverage_oldest_i) — one pair per coverage relation,
@@ -8039,23 +8053,26 @@ AND   j.hypertable_name = '{relation}'";
                    newly-added consumer is born in on an upgrading store (#1877). */
                 if (await reader.IsDBNullAsync(coverageOldestColumn, cancellationToken))
                 {
-                    return (RetentionCoverage.Short, coverageRelations[i]);
+                    shortConsumers.Add(coverageRelations[i]);
+                    continue;
                 }
 
                 if (reader.GetDateTime(coverageOldestColumn) > slotSourceOldest)
                 {
-                    return (RetentionCoverage.Short, coverageRelations[i]);
+                    shortConsumers.Add(coverageRelations[i]);
                 }
             }
 
-            return (RetentionCoverage.Covered, null);
+            return shortConsumers.Count > 0
+                ? (RetentionCoverage.Short, shortConsumers)
+                : (RetentionCoverage.Covered, Array.Empty<string>());
         }
         catch (Exception)
         {
             /* Fail closed: if coverage cannot be established the policy is not armed — and, since #1877, not
                re-held either. Both directions read the same way here: an unmeasurable store is left exactly as
                it was, because nothing was learned about it. */
-            return (RetentionCoverage.Unknown, null);
+            return (RetentionCoverage.Unknown, Array.Empty<string>());
         }
     }
 
@@ -8202,8 +8219,18 @@ AND   j.hypertable_name = '{relation}'";
     /// what is said, never what is done: both passes run the identical create / converge / measure / flip
     /// sequence over <see cref="RetentionPolicies"/>, and both return the same tally.
     /// </summary>
-    public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(
+    public static Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(
         NpgsqlConnection connection, ILogger? logger, RetentionSweepPass pass, CancellationToken cancellationToken = default)
+        => EnsureRetentionPoliciesAsync(connection, logger, pass, otherRepairRunning: null, cancellationToken);
+
+    /// <summary>
+    /// The sweep with the service's own "another repair is running" signal (#6081): the hourly pass's bounded floor
+    /// fill (<see cref="FillSmallFloorGapsAsync"/>) skips while it answers true, so two refreshes never touch the same
+    /// aggregate at once. A caller with no repair of its own passes <c>null</c>.
+    /// </summary>
+    public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(
+        NpgsqlConnection connection, ILogger? logger, RetentionSweepPass pass, Func<bool>? otherRepairRunning,
+        CancellationToken cancellationToken)
     {
         if (connection is null)
         {
@@ -8313,7 +8340,7 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
-                var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
+                var (verdict, shortConsumers) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
                 {
                     if (isRawRelation)
@@ -8380,6 +8407,11 @@ AND   j.hypertable_name = '{relation}'";
                     }
                     held++;
 
+                    /* #6081: every short consumer, each with its own remedy, not the first one only. */
+                    var fills = await FillSmallFloorGapsAsync(
+                        connection, logger, relation, timeColumn, shortConsumers, fill: pass == RetentionSweepPass.Periodic, otherRepairRunning, cancellationToken);
+                    var (shortNames, remedies) = DescribeShortConsumers(shortConsumers, fills);
+
                     if (wasScheduled == true)
                     {
                         /* The #1877 event itself: this policy WAS purging and its coverage is now measurably
@@ -8389,8 +8421,8 @@ AND   j.hypertable_name = '{relation}'";
                            hour, which is what the runbook's "do not arm by hand" already asks for. */
                         reHeld++;
                         logger?.LogWarning(
-                            "Retention policy for {Relation} RE-HELD - it was armed, and {ShortConsumer} no longer covers everything it holds, so the {DropAfter} purge is stopped before it drops history that consumer has never materialized. Backfill that consumer past the source's oldest row (run {BackfillCommand}) and the policy arms itself on the next evaluation (hourly on the running service, and at every start).",
-                            relation, shortConsumer, dropAfter, OperatorVerbForm.CommandHere("--backfill-rollups"));
+                            "Retention policy for {Relation} RE-HELD - it was armed, and its short consumers ({ShortConsumers}) no longer cover everything it holds, so the {DropAfter} purge is stopped before it drops history they have never materialized. The remedy for each: {Remedies}. The policy arms itself on the next evaluation once every consumer covers everything it holds (hourly on the running service, and at every start).",
+                            relation, shortNames, dropAfter, remedies);
                     }
                     else
                     {
@@ -8401,8 +8433,8 @@ AND   j.hypertable_name = '{relation}'";
                            hour, and the Retention Held self-alert judges its cost on the same tick. */
                         logger?.Log(
                             pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,
-                            "Retention policy for {Relation} HELD PAUSED - {ShortConsumer} does not yet cover everything it holds, so arming could drop history that rollup has never materialized. Backfill past the {DropAfter} horizon (run {BackfillCommand}) and the policy arms itself on the next evaluation - the running service re-judges every held policy hourly (#3812), and at every start.",
-                            relation, shortConsumer, dropAfter, OperatorVerbForm.CommandHere("--backfill-rollups"));
+                            "Retention policy for {Relation} HELD PAUSED - {ShortConsumers} do not yet cover everything it holds, so arming the {DropAfter} purge could drop history those rollups have never materialized. The remedy for each: {Remedies}. The policy arms itself on the next evaluation once every consumer covers everything it holds - the running service re-judges every held policy hourly (#3812), and at every start.",
+                            relation, shortNames, dropAfter, remedies);
                     }
                 }
                 else
