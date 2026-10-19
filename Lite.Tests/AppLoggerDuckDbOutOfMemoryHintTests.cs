@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Services;
@@ -27,6 +28,15 @@ public sealed class AppLoggerDuckDbOutOfMemoryHintTests : IDisposable
         "Out of Memory Error: failed to pin block of size 256.0 KiB (1.8 GiB/1.8 GiB used)";
 
     private static readonly string s_hintStart = DuckDbMemoryLimitSetting.HintMarker;
+
+    /* #6113: AppLogger's buffer is one static queue for the whole process, and a collection only keeps its own classes
+       apart, so a test in another collection can log between this test's drain and its count. Every line these tests write
+       carries a source of its own (xunit builds a new instance per test), and they count only the lines with that source. */
+    private readonly string _source = "oom-hint-" + Guid.NewGuid().ToString("N")[..12];
+
+    /// <summary>This test's own lines out of the buffer: the lines logged under its unique source, whatever else was logged meanwhile.</summary>
+    private List<string> Drain() =>
+        AppLogger.DrainBufferedLines().Where(l => l.Contains($"[{_source}]", StringComparison.Ordinal)).ToList();
 
     public AppLoggerDuckDbOutOfMemoryHintTests()
     {
@@ -53,9 +63,9 @@ public sealed class AppLoggerDuckDbOutOfMemoryHintTests : IDisposable
     {
         var ex = new InvalidOperationException("outer", new InvalidOperationException(DuckDbMessage));
 
-        AppLogger.Error("JobHistory", "Failed to load job history", ex);
+        AppLogger.Error(_source, "Failed to load job history", ex);
 
-        var all = string.Join("\n", AppLogger.DrainBufferedLines());
+        var all = string.Join("\n", Drain());
         Assert.Equal(1, HintCount(all));
         Assert.Contains("Raise \"DuckDB memory limit\"", all);
     }
@@ -65,25 +75,25 @@ public sealed class AppLoggerDuckDbOutOfMemoryHintTests : IDisposable
     {
         var ex = new AggregateException(new InvalidOperationException("x"), new InvalidOperationException(DuckDbMessage));
 
-        AppLogger.Error("Collector", "Failed", ex);
+        AppLogger.Error(_source, "Failed", ex);
 
-        Assert.Equal(1, HintCount(string.Join("\n", AppLogger.DrainBufferedLines())));
+        Assert.Equal(1, HintCount(string.Join("\n", Drain())));
     }
 
     [Fact]
     public void Error_without_an_exception_whose_text_carries_the_prefix_gets_the_hint()
     {
-        AppLogger.Error("JobHistory", $"Failed to load job history: {DuckDbMessage}");
+        AppLogger.Error(_source, $"Failed to load job history: {DuckDbMessage}");
 
-        Assert.Equal(1, HintCount(string.Join("\n", AppLogger.DrainBufferedLines())));
+        Assert.Equal(1, HintCount(string.Join("\n", Drain())));
     }
 
     [Fact]
     public void Warn_whose_text_carries_the_prefix_gets_the_hint()
     {
-        AppLogger.Warn("JobHistory", $"Failed to load job history: {DuckDbMessage}");
+        AppLogger.Warn(_source, $"Failed to load job history: {DuckDbMessage}");
 
-        var lines = AppLogger.DrainBufferedLines();
+        var lines = Drain();
         Assert.Single(lines);
         Assert.EndsWith("takes effect after Lite restarts.", lines[0]);
         Assert.Equal(1, HintCount(lines[0]));
@@ -96,23 +106,23 @@ public sealed class AppLoggerDuckDbOutOfMemoryHintTests : IDisposable
     [InlineData("could not free up enough memory")]
     public void SQL_Server_style_memory_messages_get_no_hint(string text)
     {
-        AppLogger.Warn("Collector", text);
-        AppLogger.Error("Collector", text);
-        AppLogger.Error("Collector", "Failed", new InvalidOperationException(text));
+        AppLogger.Warn(_source, text);
+        AppLogger.Error(_source, text);
+        AppLogger.Error(_source, "Failed", new InvalidOperationException(text));
 
-        Assert.Equal(0, HintCount(string.Join("\n", AppLogger.DrainBufferedLines())));
+        Assert.Equal(0, HintCount(string.Join("\n", Drain())));
     }
 
     [Fact]
     public void A_line_that_already_holds_the_hint_is_not_hinted_twice()
     {
-        var described = DuckDbMemoryLimitSetting.Describe(new InvalidOperationException(DuckDbMessage));
+        var described = DuckDbMemoryLimitSetting.Describe(new InvalidOperationException(DuckDbMessage), _source);
 
-        AppLogger.Warn("JobHistory", $"Failed to load job history: {described}");
-        AppLogger.Error("JobHistory", $"Failed to load job history: {described}");
-        AppLogger.Error("JobHistory", "Failed", new InvalidOperationException(described));
+        AppLogger.Warn(_source, $"Failed to load job history: {described}");
+        AppLogger.Error(_source, $"Failed to load job history: {described}");
+        AppLogger.Error(_source, "Failed", new InvalidOperationException(described));
 
-        var lines = AppLogger.DrainBufferedLines();
+        var lines = Drain();
         /* Describe's own Warn line carries the hint once; each of the three logged lines carries it once more. */
         Assert.All(lines, l => Assert.True(HintCount(l) <= 1, l));
         Assert.Equal(4, lines.Count(l => HintCount(l) == 1));
@@ -121,9 +131,9 @@ public sealed class AppLoggerDuckDbOutOfMemoryHintTests : IDisposable
     [Fact]
     public void The_hint_line_itself_does_not_recurse()
     {
-        AppLogger.Warn("DuckDB", DuckDbMemoryLimitSetting.OutOfMemoryHint(2));
+        AppLogger.Warn(_source, DuckDbMemoryLimitSetting.OutOfMemoryHint(2));
 
-        var lines = AppLogger.DrainBufferedLines();
+        var lines = Drain();
         Assert.Single(lines);
         Assert.Equal(1, HintCount(lines[0]));
     }
@@ -132,9 +142,9 @@ public sealed class AppLoggerDuckDbOutOfMemoryHintTests : IDisposable
     public void Info_and_Debug_lines_are_left_alone()
     {
         AppLogger.SetMinimumLevel(LogLevel.Debug);
-        AppLogger.Info("Collector", DuckDbMessage);
-        AppLogger.Debug("Collector", DuckDbMessage);
+        AppLogger.Info(_source, DuckDbMessage);
+        AppLogger.Debug(_source, DuckDbMessage);
 
-        Assert.Equal(0, HintCount(string.Join("\n", AppLogger.DrainBufferedLines())));
+        Assert.Equal(0, HintCount(string.Join("\n", Drain())));
     }
 }

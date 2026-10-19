@@ -74,7 +74,12 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
         await _store.ListAsync();
         await _store.ListAsync();
         await _store.GetAsync(id);
-        var lines = AppLogger.DrainBufferedLines().Where(l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal) && l.Contains("could not be read from Credential Manager", StringComparison.Ordinal)).ToList();
+        /* #6113: this test loses Teams and PagerDuty only. A route-store test in another collection that loses the generic channel
+           logs the same sentence for its own route 1, so the count takes the two channels' lines and no other channel's. */
+        var lines = AppLogger.DrainBufferedLines().Where(l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal)
+            && l.Contains("could not be read from Credential Manager", StringComparison.Ordinal)
+            && (l.Contains($" {NotificationRouter.TeamsChannel} destination", StringComparison.Ordinal)
+                || l.Contains($" {NotificationRouter.PagerDutyChannel} destination", StringComparison.Ordinal))).ToList();
 
         /* Two channels, three reloads: two warnings, one each. */
         Assert.Equal(2, lines.Count);
