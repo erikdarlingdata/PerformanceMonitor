@@ -358,7 +358,7 @@ function Step-Jobs {
         Write-Host "No file at $ServiceLog."
     }
     else {
-        $pattern = '^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[\w+\] \[[^\]]*\] ' +
+        $pattern = '^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[\w+\s*\] \[[^\]]*\] ' +
             '(?<job>PLAN_REGRESSION daily totals|Query Store top daily summary|Query Store compose rollup|Store object convergence): ' +
             '(?<summary>.*), (?<ms>\d+) ms\s*$'
         $since = (Get-Date).AddHours(-$Hours)
