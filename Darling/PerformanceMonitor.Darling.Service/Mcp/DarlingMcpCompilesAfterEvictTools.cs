@@ -132,7 +132,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called' AND c.detail->>'kind' = '"
     }
 
     private static DateTime? ParseTime(string? text) =>
-        DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var value) ? value : null;
+        DateTime.TryParseExact(text, "yyyy-MM-ddTHH:mm:ss.FFFFFFF", CultureInfo.InvariantCulture, DateTimeStyles.None, out var value) ? value : null;
 
     /// <summary>The state of one statement of the before image, given every collected row after the eviction. Pure, so a test needs no store.</summary>
     internal static object Judge(PlanEvictStatementImage before, IReadOnlyList<DarlingPlanEvictStore.Row> rows)
