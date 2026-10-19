@@ -79,6 +79,8 @@ public sealed class PgClusterObjectCensusTests
             "lifts the shipped mcp query-tag GRANT statements out of the provisioning text and runs them retargeted at a per-run role",
         ["ServerTagViewerRoleLiveTests"] =
             "lifts the shipped viewer GRANT statements out of the provisioning text and runs them retargeted at a per-run role",
+        ["PlanForceToolLiveTests"] =
+            "its ALTER ROLE and ALTER DATABASE text is T-SQL run against the local test SQL Server, on a per-run database and login; the store side is a per-run scratch database",
         ["ComposeTempFileLimitLiveTests"] =
             "renders the shipped compose-store role statements and retargets them at a per-run role; the fixed roles are not written",
     };
