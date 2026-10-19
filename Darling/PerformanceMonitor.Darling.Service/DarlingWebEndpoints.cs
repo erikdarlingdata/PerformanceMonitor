@@ -1536,15 +1536,35 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return (answer.ToJson(), StatusCodes.Status200OK);
         }
 
-        var refused = new JsonObject { ["error"] = answer.Message, ["code"] = answer.Code, ["status"] = answer.Status };
-        if (answer.State is not null)
+        return UndoRefusalBody(answer);
+    }
+
+    /// <summary>The words the browser gets when a plan undo does not succeed.</summary>
+    internal const string UndoFailedWords =
+        "The undo did not complete on the server. The Darling service log has the server's own words.";
+
+    /// <summary>
+    /// The body and status of a plan undo that was refused or failed (#5632, step 9). A refusal carries this code's own sentence. A failure
+    /// carries the monitored server's exception text (the executor scrubs the secret from it, but it can still name hosts and addresses), so
+    /// the browser gets <see cref="UndoFailedWords"/> and the code instead (#4283). The executor already logged the server's words.
+    /// </summary>
+    internal static (JsonObject Body, int Status) UndoRefusalBody(PlanUndoAnswer undoRefusal)
+    {
+        var failed = undoRefusal.Status == PlanUndoAnswer.Failed;
+        var refused = new JsonObject
         {
-            refused["state"] = answer.State.DeepClone();
+            ["error"] = failed ? UndoFailedWords : undoRefusal.Message,
+            ["code"] = undoRefusal.Code,
+            ["status"] = undoRefusal.Status,
+        };
+        if (undoRefusal.State is not null)
+        {
+            refused["state"] = undoRefusal.State.DeepClone();
         }
 
-        return (refused, answer.Code == "not_found" ? StatusCodes.Status404NotFound
-            : answer.Code == "bad_login" ? StatusCodes.Status400BadRequest
-            : answer.Status == PlanUndoAnswer.Failed ? StatusCodes.Status502BadGateway
+        return (refused, undoRefusal.Code == "not_found" ? StatusCodes.Status404NotFound
+            : undoRefusal.Code == "bad_login" ? StatusCodes.Status400BadRequest
+            : failed ? StatusCodes.Status502BadGateway
             : StatusCodes.Status409Conflict);
     }
 

@@ -136,6 +136,13 @@ public sealed class WebExceptionTextCensusTests
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "undoRefusal.Message",
+            "#5632 step 9: UndoRefusalBody puts a plan undo's message on the wire ONLY for a refusal, whose words are " +
+            "the gate's and the decision's own sentences. A failed answer carries the monitored server's exception text, " +
+            "so it gets the fixed UndoFailedWords instead (pinned by PlanUndoWebBodyTests)."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "snapshot.Detail",
             "CollectorRuntimeState's own startup-step detail string (the /ping surface) — #4316 (round-1 H4) " +
             "replaced the raw ex.Message here with a fixed sentence per startup step (FailureDetailFor), the " +
