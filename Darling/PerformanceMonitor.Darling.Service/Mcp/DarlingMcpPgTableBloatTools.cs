@@ -154,7 +154,7 @@ public sealed class DarlingMcpPgTableBloatTools
 
         var pct = Math.Round((double)deadTuples / total * 100, 2);
         return pct.ToString("0.##", CultureInfo.InvariantCulture) + "% of this table's tuples are dead. "
-             + "This is MEASURED rather than estimated - it comes from the server's own counters and needs "
+             + "This is measured rather than estimated - it comes from the server's own counters and needs "
              + "no width model, so it is the number to trust when the bloat estimate is suppressed. It is "
              + "also NARROWER than bloat: it counts dead tuples awaiting vacuum, and NOT the free space a "
              + "completed vacuum already left behind and did not return to the operating system, which is "
