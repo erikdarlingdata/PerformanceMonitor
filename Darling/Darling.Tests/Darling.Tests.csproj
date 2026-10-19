@@ -151,5 +151,7 @@
          managed Windows store, and compose's command: line cannot call into the product. -->
     <None Include="..\compose\docker-compose.yml" Link="Fixtures\docker-compose.yml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\compose\darling.sample.json" Link="Fixtures\compose.darling.sample.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #6140: the one-step compose setup script, run by ComposeSetupScriptTests in a temp folder. -->
+    <None Include="..\compose\setup.sh" Link="Fixtures\compose.setup.sh" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

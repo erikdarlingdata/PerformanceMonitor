@@ -606,7 +606,7 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
                     <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. -->
                     <TextBlock Grid.Column="1" x:Name="LocalDatabaseStatusText" Text="" Visibility="Collapsed" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
                     <TextBlock Grid.Column="2" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
