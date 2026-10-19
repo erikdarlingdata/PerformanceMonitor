@@ -3867,6 +3867,11 @@ const BLOCKING_COLUMNS = [
   { key: "blocking_login_name", label: "Blocking Login", group: "Sessions" },
   { key: "blocking_host_name", label: "Blocking Host", group: "Sessions" },
   { key: "blocking_client_app", label: "Blocking App", wrap: true, group: "Sessions" },
+  /* #5632 part 4: the head blocker's session, from the DMV snapshot rows only (get_blocking sends the two times as UTC). */
+  { key: "blocking_login_time", label: "Head login time", format: "time", group: "Sessions", hint: "The head blocker's session at capture. Empty when the row was captured before this was collected, or came from a blocked process report." },
+  { key: "blocking_last_request_end_time", label: "Head last request ended", format: "time", group: "Sessions", hint: "The head blocker's session at capture. Empty when the row was captured before this was collected, or came from a blocked process report." },
+  { key: "blocking_open_transaction_count", label: "Head open transactions", format: "int", group: "Sessions", hint: "The head blocker's session at capture. Empty when the row was captured before this was collected, or came from a blocked process report." },
+  { key: "blocking_tran_log_bytes_used", label: "Head log used", format: "bytes", group: "Sessions", hint: "The head blocker's session at capture. Empty when the row was captured before this was collected, or came from a blocked process report." },
   { key: "contentious_object", label: "Object" },
 ];
 
