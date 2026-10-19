@@ -144,14 +144,14 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
     private sealed record Timeline(DateTime B0, DateTime B1, DateTime End);
 
     private static async Task<Timeline> SeedAsync(
-        NpgsqlConnection connection, int lateRows, TimeSpan? intervalRefreshOffset, CancellationToken ct)
+        NpgsqlConnection connection, int lateRows, TimeSpan? intervalRefreshOffset, CancellationToken ct, int hours = 30)
     {
-        const int Hours = 30;
+        var totalHours = hours;
         var end = TimescaleSupport.AlignDown(DateTime.UtcNow, TimeSpan.FromHours(1)) - TimeSpan.FromHours(1);
-        var b0 = end - TimeSpan.FromHours(Hours);
+        var b0 = end - TimeSpan.FromHours(totalHours);
         var b1 = b0 + TimeSpan.FromHours(1);
 
-        await SeedRawAsync(connection, b1, Hours, TimeSpan.FromHours(1), RowsPerHour, ct);
+        await SeedRawAsync(connection, b1, totalHours, TimeSpan.FromHours(1), RowsPerHour, ct);
         await RefreshAsync(connection, Hourly, b1, end + TimeSpan.FromHours(1), ct);
         await RefreshAsync(connection, IntervalHourly, b1 + (intervalRefreshOffset ?? TimeSpan.Zero), end + TimeSpan.FromHours(1), ct);
 
@@ -304,7 +304,7 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         var (connection, scratch) = await OpenAsync(ct);
         try
         {
-            var t = await SeedAsync(connection, LateRows, null, ct);
+            var t = await SeedAsync(connection, LateRows, null, ct, hours: 96);
             var chunks = (long)(await ScalarAsync(connection,
                 "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'", ct))!;
             Assert.True(chunks >= 3, $"the seed must span several chunks or this pin proves nothing (got {chunks})");
