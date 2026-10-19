@@ -49,7 +49,7 @@ public sealed class DarlingMcpPgLoggingAuditTools
         [Description("Server name or display name.")] string? server_name = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
@@ -62,10 +62,10 @@ public sealed class DarlingMcpPgLoggingAuditTools
                    collector this reads never ran here (engine gate), or has not run YET. Neither is an audit
                    result, and an audit of an empty snapshot would say 'unknown' seven times and look like one. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken)
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
-                        $"No configuration snapshot has been collected for {resolved.ServerName} yet, so there "
+                        $"No configuration snapshot has been collected for {resolved.DisplayName} yet, so there "
                         + "is nothing to audit. pg_server_config runs hourly; a server registered in the last "
                         + "hour has not reached its first collection. This is not a verdict about the "
                         + "server's logging - it is the absence of the evidence.");
@@ -77,11 +77,11 @@ public sealed class DarlingMcpPgLoggingAuditTools
                grants this caveat asks for fix nothing on a non-Windows target. */
             var fileSettingsUnreadable =
                 PgFileSettingsCapability.TryGetCachedVerdict(
-                    resolved.ServerName, out var fileSettingsReadable, out var fileSettingsIsWindows)
+                    resolved.DisplayName, out var fileSettingsReadable, out var fileSettingsIsWindows)
                 && fileSettingsIsWindows
                 && !fileSettingsReadable;
 
-            return BuildAuditJson(resolved.ServerName, DarlingPgLoggingAudit.Audit(snapshot), fileSettingsUnreadable);
+            return BuildAuditJson(resolved.DisplayName, DarlingPgLoggingAudit.Audit(snapshot), fileSettingsUnreadable);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -89,7 +89,7 @@ public sealed class DarlingMcpPgLoggingAuditTools
                store where this collector never runs should still answer not_collected rather than a raw
                error, because the gate is the more specific fact and the exception is its symptom. */
             var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken);
+                postgres, resolved.ServerId, resolved.DisplayName, "pg_server_config", cancellationToken);
             if (gated != null)
             {
                 return gated;
