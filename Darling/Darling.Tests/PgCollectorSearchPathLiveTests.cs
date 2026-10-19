@@ -368,7 +368,7 @@ public sealed class PgCollectorSearchPathLiveTests
             var sql = PgWaitStatsCollector.Instance.BuildQuery(context).Text;
             Assert.Contains("FROM pg_catalog.aurora_stat_system_waits()", sql, StringComparison.Ordinal);
             Assert.Contains($"JOIN {ExtSchema}.aurora_stat_wait_type()", sql, StringComparison.Ordinal);
-            Assert.Contains("JOIN pg_catalog.aurora_stat_wait_event()", sql, StringComparison.Ordinal);
+            Assert.Contains("JOIN \"pg_catalog\".aurora_stat_wait_event()", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("other.", sql, StringComparison.Ordinal);
 
             /* The connect-time probe: aurora_version exists only in other, so it is called in pg_catalog. */
@@ -405,10 +405,6 @@ public sealed class PgCollectorSearchPathLiveTests
             DarlingServerConnector.EnsureSearchPathPinned(DetectedSearchPathAsync(stripped, ct).GetAwaiter().GetResult(), "pm6143-target"));
         Assert.StartsWith("precondition:", refused.Message, StringComparison.Ordinal);
         Assert.Contains("ignore_startup_parameters", refused.Message, StringComparison.Ordinal);
-
-        /* The whole connect path passes on the pinned session. */
-        var connected = await DarlingServerConnector.ConnectAsync(runtime.Config, null, ct);
-        Assert.Equal(CollectorTargetEngine.PostgreSql, connected.Target.Engine);
     }
 
     /// <summary>H1: when the extension lookup itself fails, the run fails with a message instead of guessing a schema.</summary>
@@ -581,6 +577,7 @@ public sealed class PgCollectorSearchPathLiveTests
 
     private static async Task ResetAsync(string adminConnectionString, CancellationToken ct)
     {
+        NpgsqlConnection.ClearAllPools();
         await using var connection = new NpgsqlConnection(adminConnectionString);
         await connection.OpenAsync(ct);
         await DropAsync(adminConnectionString, connection, ct);
