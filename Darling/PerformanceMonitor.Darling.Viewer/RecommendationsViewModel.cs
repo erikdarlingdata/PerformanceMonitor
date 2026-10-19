@@ -724,7 +724,7 @@ public sealed class RecommendationsViewModel
 
     /// <summary>
     /// The Recommendations tab's status line: when the newest analysis batch ran, in the display mode the user
-    /// picked and followed by that mode's zone, so "10:00:00 (UTC-4:00)", "14:00:00 (UTC)" and a local time
+    /// picked and followed by that mode's zone, so "10:00:00 (UTC-04:00)", "14:00:00 (UTC)" and a local time
     /// with the machine's zone name cannot be read as one another (#4766). It used to end in a fixed "(local)",
     /// which was wrong in Server and UTC modes. The time is converted on <paramref name="serverClock"/>, the
     /// selected server's own clock, not the process-wide clock the last server tab set (another server's, when
