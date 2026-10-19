@@ -129,7 +129,7 @@ public partial class AlertsHistoryTab : UserControl
 
             var displayCount = AlertsDataGrid.Items.Count;
             NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
             /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
             _lastReadRowCount = alerts.Count;
             AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");

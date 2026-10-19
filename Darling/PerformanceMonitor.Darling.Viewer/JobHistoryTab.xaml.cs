@@ -191,7 +191,7 @@ public partial class JobHistoryTab : UserControl
 
             var displayCount = JobHistoryDataGrid.Items.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+            RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode, all.Any(r => r.MixedServers)); // D5: the column names its clock
 
             /* The cap applies to the read (all.Count), not the display count after the per-column filter popups: a column filter
                narrowing the grid must not make the "newest 2,000" label disappear when the underlying read still hit the cap.
