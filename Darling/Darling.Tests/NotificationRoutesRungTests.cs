@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// What stays here is the one-rung-behind half: a store carrying this and not V132 maps to 131, which is the
 /// honest answer for it and what makes the upgrade banner correct in both directions.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class NotificationRoutesRungTests
 {
     private const int RungVersion = 131;

@@ -69,6 +69,7 @@ namespace Darling.Tests;
 /// separate statement would allow.
 /// </para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StartupCommandTimeoutTests
 {
     /// <summary>

@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// arm depends on (the connector's probe, the worker's detach, the connection names it excludes) agree with
 /// the collector's declarations.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgWaitInstrumentDisclosureTests
 {
     private static readonly DateTime T0 = new(2026, 9, 18, 12, 0, 0, DateTimeKind.Utc);

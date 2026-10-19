@@ -71,6 +71,7 @@ namespace Darling.Tests;
 /// <see cref="TheAboveTheReturnCheck_SeesARelocatedFanOut_OnlyThroughTheWalker"/> runs that case both
 /// ways, so the claim is a test rather than a sentence.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerFleetTimerFanOutPositionTests
 {
     /// <summary>

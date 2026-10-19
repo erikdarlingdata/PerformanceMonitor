@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// the family count, the sentence, the block, and above all the rule that a CLEAN pass's payload is the
 /// same object through the same serializer call, so its bytes cannot have moved.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectionCaveatsTests
 {
     [Theory]

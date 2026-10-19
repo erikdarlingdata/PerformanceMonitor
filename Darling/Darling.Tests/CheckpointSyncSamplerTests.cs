@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// minute's sync delta is one checkpoint's sync, or the sum of two that finished inside the same minute, which
 /// can only over-report.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CheckpointSyncSamplerTests
 {
     private static readonly DateTime T0 = new(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);

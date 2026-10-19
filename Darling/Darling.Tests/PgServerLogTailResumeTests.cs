@@ -8,6 +8,7 @@ using Xunit;
 
 namespace Darling.Tests;
 
+[Trait("Stage", "Guard")]
 public sealed class PgServerLogTailResumeTests
 {
     private static CollectorContext Context(string? state = null) => new()

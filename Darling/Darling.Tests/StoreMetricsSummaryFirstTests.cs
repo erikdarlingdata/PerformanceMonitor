@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// (<see cref="StoreMetricsSummaryFirstLivePostgresTests"/>) runs the tool, the web mirror and the triage
 /// section against a store seeded to production's shape, which is where the payload budget is measured.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StoreMetricsSummaryFirstTests
 {
     private static readonly DateTime Sweep = new(2026, 9, 22, 22, 0, 0, DateTimeKind.Unspecified);

@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// to publish is invisible on every automated surface and silently restores the exact defect this closes.
 /// The compiler cannot catch that, so it is asserted structurally over the source.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorRuntimeStateTests
 {
     // ── The seam ──────────────────────────────────────────────────────────────────────────

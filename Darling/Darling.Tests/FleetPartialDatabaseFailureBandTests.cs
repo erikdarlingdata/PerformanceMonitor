@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /// note per hour, both raw fleet reads select it, the composer re-aggregates it, and both fleet mappers carry
 /// it into the banding.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class FleetPartialDatabaseFailureBandTests
 {
     private static string RepoRoot([CallerFilePath] string thisFile = "")

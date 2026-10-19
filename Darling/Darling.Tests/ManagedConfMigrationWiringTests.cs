@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// <c>DarlingManagedPostgres.EnsureRunningAsync</c>'s own source says, since none of this is otherwise
 /// reachable from a unit test without a real PostgreSQL bootstrap.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ManagedConfMigrationWiringTests
 {
     private static string ReadManagedSource() =>

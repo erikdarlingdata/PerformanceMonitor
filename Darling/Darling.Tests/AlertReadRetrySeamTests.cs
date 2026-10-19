@@ -71,6 +71,7 @@ namespace Darling.Tests;
 /// <see cref="TheSeamIsFedTheShapesTheRigMeasured"/> asserts the chains are the ones documented above
 /// rather than whatever a later edit finds convenient.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertReadRetrySeamTests
 {
     /// <summary>

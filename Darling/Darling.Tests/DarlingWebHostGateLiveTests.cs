@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// <see cref="TestServer.SendAsync"/> (which allows setting it) rather than through
 /// <c>TestServer.CreateClient</c> (which does not expose it).</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingWebHostGateLiveTests
 {
     private const string ListenIp = "192.168.1.205";

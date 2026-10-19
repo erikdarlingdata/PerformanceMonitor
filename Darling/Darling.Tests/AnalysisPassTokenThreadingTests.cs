@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /// So the pin is on the CALL, not the signature — a no-argument <c>ExecuteReaderAsync()</c> is what
 /// goes red, and no default can hide it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AnalysisPassTokenThreadingTests
 {
     /// <summary>

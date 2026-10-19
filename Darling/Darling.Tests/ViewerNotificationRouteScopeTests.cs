@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// the shape of the SQL and the two windows' source, and a live round trip of both scope columns through the viewer's write
 /// and read paths, with orphan status worked out on the same three inputs the service's loader reads.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerNotificationRouteScopeTests
 {
     private static NotificationRouteRow Row(string match, int? server = null, int? tag = null, bool enabled = true, int id = 1) => new()

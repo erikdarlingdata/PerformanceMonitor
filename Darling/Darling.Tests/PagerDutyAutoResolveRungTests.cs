@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// <see cref="QueryStatsHourLedgerTests"/> (V164) when this rung landed; they moved on to
 /// <see cref="PlanRegressionDailyRungTests"/> (V168) when that rung landed above it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PagerDutyAutoResolveRungTests
 {
     private const int RungVersion = 166;

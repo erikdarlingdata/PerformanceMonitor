@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// store log carries real role and database names in the <c>%u@%d</c> position, and this repository is
 /// public.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class StoreLogClassifierTests
 {
     /// <summary>PostgreSQL's own default prefix, rendering as <c>%m [%p] </c>.</summary>

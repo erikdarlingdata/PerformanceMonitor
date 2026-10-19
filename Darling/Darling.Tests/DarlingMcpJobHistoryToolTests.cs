@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// Pins <c>get_job_history</c>: the tool surface, its refusals (which run before any store read), and, on a seeded
 /// store with fixed anchors, that the tool, the Storage reader, the WPF viewer's read and <c>/api/read</c> agree.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpJobHistoryToolSurfaceTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpJobTools)

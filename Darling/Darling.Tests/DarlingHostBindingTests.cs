@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// <c>DarlingMcpHostTests</c> stay unmodified and prove the refactor kept its adapter byte-for-byte (the
 /// nested-enum parity pin at the bottom guards the numeric cast that adapter relies on).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingHostBindingTests
 {
     /* ---- ResolveBind: NetworkAndLoopback only when exposed + managed + token + valid, family-matched allowFrom ---- */

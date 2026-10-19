@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// desktop viewer sends keep the driver's text, because their reader is the person administering the service.</para>
 /// </summary>
 [Collection("darling-owned-secrets")]
+[Trait("Stage", "Guard")]
 public sealed class ConnectionTestReplyTests : IDisposable
 {
     private const string DriverText = "Distinctive-Driver-Text: login failed for user 'svc_probe' from 10.9.8.7 (certificate CN=hidden-name)";

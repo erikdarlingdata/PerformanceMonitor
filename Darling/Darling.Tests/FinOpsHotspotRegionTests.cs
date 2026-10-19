@@ -16,6 +16,7 @@ namespace Darling.Tests;
 /// <summary>Source pins for the marked append-only regions in the FinOps web parity (#4843) lists: the MCP
 /// tool registration, the read dispatch and the read catalog (#5833 removed Lite's allow-list of Darling-only tools). Each
 /// list carries two regions, set A and set B, so two series of changes append to separate git hunks.</summary>
+[Trait("Stage", "Guard")]
 public sealed class FinOpsHotspotRegionTests
 {
     private const string Prefix = "// FinOps web parity (#4843), set ";

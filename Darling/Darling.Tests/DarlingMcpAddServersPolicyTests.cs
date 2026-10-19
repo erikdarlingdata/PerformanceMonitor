@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// Everything runs without a store: a refused entry is reported before the store is opened or a server probed,
 /// which the dead data source and the throwing probe prove, and the acceptance cases run on the pure screen.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpAddServersPolicyTests
 {
     /// <summary>A data source nothing listens behind: a refused batch must return without ever using it.</summary>

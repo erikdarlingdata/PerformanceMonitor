@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// The shape of <c>get_server_trend</c> (#4843): one tool, a closed <c>metric</c> switch, the standard trend
 /// parameters, a hand-registered web read, and one shared SQL text for the viewer's chart reads and the tool.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpServerTrendToolsTests
 {
     [Fact]

@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// the second while the first was already correct, which is why a pin on the sentences could not see
 /// it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PostgresCancelOriginTests
 {
     /// <summary>A server-side error carrying a SQLSTATE, spelled the way the driver hands one over.</summary>

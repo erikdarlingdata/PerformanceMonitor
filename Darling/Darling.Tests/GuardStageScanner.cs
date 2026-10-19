@@ -56,6 +56,9 @@ internal static class GuardStageScanner
         ["ConsumedTimestampFrameDisciplineTests"] = "slow: 188 s in the nightly map of 2026-10-13",
         ["QueryStatsWriterCensusPins"] = "slow: 56 s in the nightly map of 2026-10-13",
         ["WebDataStartNoteTests"] = "slow: 257 s in the nightly map of 2026-10-13",
+        ["AlertNotebookEndpointTests"] = "slow: 12 s in darling-shard-weights.json (#5669), a source scan (R5)",
+        ["ReadAdmissionWebTests"] = "slow: 8 s in darling-shard-weights.json (#5669), a source scan (R5)",
+        ["ViewerShortWindowDataStartTests"] = "slow: 22 s in darling-shard-weights.json (#5669), a source scan (R5)",
     };
 
     /// <summary>The name shapes the census treats as guard-style (ruling 2, R1).</summary>
@@ -65,7 +68,7 @@ internal static class GuardStageScanner
 
     /* Indented as well as column 0, so a class inside a block namespace or nested in another class is seen. */
     private static readonly Regex s_classDeclaration = new(
-        @"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*class\s+(?<name>\w+)",
+        @"^[ \t]*(?<mods>(?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*)class\s+(?<name>\w+)",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex s_enumerationCall = new(
@@ -94,6 +97,12 @@ internal static class GuardStageScanner
         @"^typeof\s*\(\s*(?:[\w.]+\.)?\w+Tests\s*\)\s*\.\s*Assembly$|GetExecutingAssembly",
         RegexOptions.CultureInvariant);
 
+    /* R5 (#6099): a read of a repository file. The shared readers (RepoFile, ParitySource) and any call that answers the
+       repo root. Text a test builds in memory and hands to CSharpSourceWalker is not a read of the repository. */
+    private static readonly Regex s_repoSourceRead = new(
+        @"\bRepoFile\s*\.\s*(?:ReadRepoFile|ReadRepoFileLf|PathTo|Root)\b|\bParitySource\s*\.\s*(?:ReadFile|EnumerateCsFiles|RepoRoot)\b|\b\w*(?:RepoRoot|FindRoot|ResolveRoot)\w*\s*\(",
+        RegexOptions.CultureInvariant);
+
     private static readonly Regex s_testAttribute = new(@"\[(?:Fact|Theory)\b", RegexOptions.CultureInvariant);
 
     private static readonly Regex s_testVariable = new(@"^DARLING_TEST_\w+$", RegexOptions.CultureInvariant);
@@ -108,16 +117,25 @@ internal static class GuardStageScanner
         bool EnumeratesRepoRoot,
         bool ReadsTestVariable,
         bool UsesStoreHelper,
-        bool ReachesACatalog = false)
+        bool ReachesACatalog = false,
+        bool ReadsRepoSource = false)
     {
         /// <summary>Whether the class is guard-style by name (R1).</summary>
         internal bool GuardStyleByName => GuardStyleName.IsMatch(Name);
 
         /// <summary>Whether the class is a guard candidate by any rule (R1, R2 or R4).</summary>
-        internal bool Candidate => IsTest && (GuardStyleByName || EnumeratesRepoRoot || ReachesACatalog);
+        internal bool Candidate => IsTest && (GuardStyleByName || EnumeratesRepoRoot || ReachesACatalog || SourceScan);
 
-        /// <summary>Whether rule R4 alone makes the class a candidate, so it may sit on <see cref="SlowCatalogClasses"/>.</summary>
-        internal bool CatalogOnly => IsTest && ReachesACatalog && !GuardStyleByName && !EnumeratesRepoRoot;
+        /// <summary>
+        /// Rule R5 (#6099): the class reads repository source files and needs no store. Such a test is a source pin whatever
+        /// its name says and however it finds the file (a named read, not only a walk of the whole tree), and it runs fast
+        /// and alone, so the guard stage is where its failure belongs. A class that needs a store is not a candidate: it
+        /// cannot go in (R3), so it is not asked to.
+        /// </summary>
+        internal bool SourceScan => IsTest && ReadsRepoSource && !NeedsAStore;
+
+        /// <summary>Whether rule R4 or R5 alone (not R1 or R2) makes the class a candidate, so it may sit on <see cref="SlowCatalogClasses"/>.</summary>
+        internal bool CatalogOnly => IsTest && (ReachesACatalog || SourceScan) && !GuardStyleByName && !EnumeratesRepoRoot;
 
         /// <summary>Whether tagging the class would break rule R3: the guard job has no store.</summary>
         internal bool NeedsAStore => LiveCollection || ReadsTestVariable || UsesStoreHelper;
@@ -142,7 +160,9 @@ internal static class GuardStageScanner
         bool EnumeratesRepoRoot,
         bool ReadsTestVariable,
         string OwnCode,
-        bool ReachesACatalog);
+        bool ReachesACatalog,
+        bool ReadsRepoSource,
+        bool IsPrivate);
 
     /// <summary>
     /// Every test class under <paramref name="testsRoot"/>, one row per class name. When <paramref name="projectFile"/>
@@ -173,17 +193,36 @@ internal static class GuardStageScanner
         }
 
         /* A type that is not a test class but names a DARLING_TEST_ variable is a store helper, and so is a type
-           that refers to one: a test reaching the store through a helper never writes the variable itself. */
+           that refers to one: a test reaching the store through a helper never writes the variable itself. A PRIVATE
+           nested type cannot be reached from another class, so it is no helper to one (#6099: a private class named
+           Store in a live file had marked every class that wrote the word as needing a store). */
         var helpers = new HashSet<string>(
-            decls.Where(d => !d.IsTest && d.ReadsTestVariable).Select(d => d.Name), StringComparer.Ordinal);
+            decls.Where(d => !d.IsTest && !d.IsPrivate && d.ReadsTestVariable).Select(d => d.Name), StringComparer.Ordinal);
         for (var grew = true; grew;)
         {
             grew = false;
-            foreach (var d in decls.Where(d => !d.IsTest && !helpers.Contains(d.Name)))
+            foreach (var d in decls.Where(d => !d.IsTest && !d.IsPrivate && !helpers.Contains(d.Name)))
             {
-                if (helpers.Any(h => Regex.IsMatch(d.OwnCode, @"\b" + Regex.Escape(h) + @"\b")))
+                if (helpers.Any(h => HelperReference(h).IsMatch(d.OwnCode)))
                 {
                     helpers.Add(d.Name);
+                    grew = true;
+                }
+            }
+        }
+
+        /* The same for source: a type that is not a test class and reads a repository file is a source helper, and a test
+           class that refers to one reads source through it. */
+        var sourceHelpers = new HashSet<string>(
+            decls.Where(d => !d.IsTest && !d.IsPrivate && d.ReadsRepoSource).Select(d => d.Name), StringComparer.Ordinal);
+        for (var grew = true; grew;)
+        {
+            grew = false;
+            foreach (var d in decls.Where(d => !d.IsTest && !d.IsPrivate && !sourceHelpers.Contains(d.Name)))
+            {
+                if (sourceHelpers.Any(h => HelperReference(h).IsMatch(d.OwnCode)))
+                {
+                    sourceHelpers.Add(d.Name);
                     grew = true;
                 }
             }
@@ -193,7 +232,9 @@ internal static class GuardStageScanner
         foreach (var group in decls.Where(d => d.IsTest).GroupBy(d => d.Name, StringComparer.Ordinal))
         {
             var usesHelper = group.Any(
-                d => helpers.Any(h => h != d.Name && Regex.IsMatch(d.OwnCode, @"\b" + Regex.Escape(h) + @"\b")));
+                d => helpers.Any(h => h != d.Name && HelperReference(h).IsMatch(d.OwnCode)));
+            var readsSource = group.Any(d => d.ReadsRepoSource)
+                || group.Any(d => sourceHelpers.Any(h => h != d.Name && HelperReference(h).IsMatch(d.OwnCode)));
             rows.Add(new Row(
                 group.Key,
                 group.First().File,
@@ -203,7 +244,8 @@ internal static class GuardStageScanner
                 EnumeratesRepoRoot: group.Any(d => d.EnumeratesRepoRoot),
                 ReadsTestVariable: group.Any(d => d.ReadsTestVariable),
                 UsesStoreHelper: usesHelper,
-                ReachesACatalog: group.Any(d => d.ReachesACatalog)));
+                ReachesACatalog: group.Any(d => d.ReachesACatalog),
+                ReadsRepoSource: readsSource));
         }
 
         return rows;
@@ -214,7 +256,8 @@ internal static class GuardStageScanner
     /// guard candidate carries Stage=Guard or is exempt. Rule R4 (#5776): a catalog-wide class carries Stage=Guard,
     /// is exempt, or is on <paramref name="slow"/> (a class that rule R4 alone flags, 50 s or more in the nightly map).
     /// Rule R3: a tagged class needs no store. And an exemption must still be one: it names a candidate that is
-    /// untagged, with a reason. Lite.Tests passes no slow list: <see cref="SlowCatalogClasses"/> names Darling.Tests classes.
+    /// untagged, with a reason. Rule R5 (#6099): a class that reads repository source files and needs no store carries the
+    /// trait or is exempt, however it is named and however it finds the file. Lite.Tests passes no slow list: <see cref="SlowCatalogClasses"/> names Darling.Tests classes.
     /// </summary>
     internal static List<string> Problems(
         IReadOnlyList<Row> rows, IReadOnlyDictionary<string, string> exempt, IReadOnlyDictionary<string, string>? slow = null)
@@ -229,6 +272,7 @@ internal static class GuardStageScanner
         {
             var why = r.GuardStyleByName ? "guard-style name"
                 : r.EnumeratesRepoRoot ? "enumerates the repo root recursively"
+                : r.SourceScan ? "reads repository source files and needs no store (R5)"
                 : "reaches a whole catalog: the MCP tools, a product assembly's types or every collector (R4)";
             problems.Add($"MISSING {r.File}: {r.Name} ({why}; store: {(r.NeedsAStore ? r.StoreReasons : "none")})");
         }
@@ -278,7 +322,7 @@ internal static class GuardStageScanner
     private static IEnumerable<Decl> Declarations(string text, string relativeFile)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(text);
-        var found = new List<(string Name, int Index, int Open, int End)>();
+        var found = new List<(string Name, int Index, int Open, int End, bool IsPrivate)>();
 
         foreach (Match m in s_classDeclaration.Matches(code))
         {
@@ -288,7 +332,12 @@ internal static class GuardStageScanner
                 continue;
             }
 
-            found.Add((m.Groups["name"].Value, m.Index, open, open + CSharpSourceWalker.BraceBalanced(code, open).Length));
+            found.Add((
+                m.Groups["name"].Value,
+                m.Index,
+                open,
+                open + CSharpSourceWalker.BraceBalanced(code, open).Length,
+                Regex.IsMatch(m.Groups["mods"].Value, @"\bprivate\b", RegexOptions.CultureInvariant)));
         }
 
         if (found.Count == 0)
@@ -328,7 +377,9 @@ internal static class GuardStageScanner
                 EnumeratesRepoRootRecursively(ownCode, rootVariables, recursiveOptions),
                 readsVariable,
                 ownCode,
-                ReachesACatalog(ownCode));
+                ReachesACatalog(ownCode),
+                s_repoSourceRead.IsMatch(ownCode),
+                d.IsPrivate);
         }
     }
 
@@ -361,6 +412,14 @@ internal static class GuardStageScanner
     /// <summary>The R4 question over one source text, comments and strings blanked first, for the detector tests.</summary>
     internal static bool ReachesACatalogInText(string text) =>
         ReachesACatalog(CSharpSourceWalker.StripCommentsAndStrings(text));
+
+    /// <summary>
+    /// A reference to a helper type by its simple name. A member access (<c>Hop.Store</c>, <c>StartupStep.Store</c>) is not a
+    /// reference to a helper class that happens to share the member's name, so the name must not follow a dot (#6099: a nested
+    /// helper class named <c>Store</c> in a live file marked every class that wrote <c>Hop.Store</c> as needing a store).
+    /// </summary>
+    private static Regex HelperReference(string name) =>
+        new(@"(?<![\w.])" + Regex.Escape(name) + @"\b", RegexOptions.CultureInvariant);
 
     private static string Squash(string s) => s.Replace(" ", string.Empty, StringComparison.Ordinal);
 
@@ -444,7 +503,7 @@ internal static class GuardStageScanner
         return decls
             .Select(d => new Row(
                 d.Name, d.File, true, d.Tagged, d.LiveCollection, d.EnumeratesRepoRoot, d.ReadsTestVariable, false,
-                d.ReachesACatalog))
+                d.ReachesACatalog, d.ReadsRepoSource))
             .ToList();
     }
 

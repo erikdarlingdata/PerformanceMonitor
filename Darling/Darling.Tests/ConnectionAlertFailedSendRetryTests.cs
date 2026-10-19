@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// Driven through the real arms of <see cref="DarlingSelfAlertEvaluator"/> with a scripted deliverer and a clock
 /// the test moves.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ConnectionAlertFailedSendRetryTests
 {
     private const int ServerId = 515151;

@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// host is otherwise needed to exercise behaviourally. <see cref="RepoFile.ReadRepoFileLf"/> normalises CRLF
 /// (this checkout's line ending) to LF so the anchors below do not have to embed <c>\r</c>.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RawPurgeNowWiringTests
 {
     private static string WorkerText() => RepoFile.ReadRepoFileLf(

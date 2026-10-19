@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// is the source's own retention. Each is a function of the registry or of its arguments and nothing else, so
 /// each is walked without a store.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class MaterializationHoleRepairTests
 {
     private static readonly DateTime Hour = new(2026, 9, 18, 10, 0, 0, DateTimeKind.Unspecified);

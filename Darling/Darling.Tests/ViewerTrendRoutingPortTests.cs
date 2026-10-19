@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// materialization watermark rather than this ladder — its own disclosure, in the same title idiom, off the
 /// floor the route already carried; those pins are here too, beside the siblings'.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerTrendRoutingPortTests
 {
     private static readonly DateTime Now = new(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);

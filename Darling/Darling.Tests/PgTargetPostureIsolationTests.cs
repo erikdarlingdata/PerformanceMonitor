@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// are not advice. Everything else in the file — code, strings, doc comments — is in scope, on purpose: the rule
 /// is that nobody explains a durability setting in optimisation terms anywhere near the advice.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgTargetPostureIsolationTests
 {
     private static readonly string[] s_postureKeyTokens =

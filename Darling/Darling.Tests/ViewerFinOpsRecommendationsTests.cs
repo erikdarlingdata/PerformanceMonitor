@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// dropped check (sp_IndexCleanup existence — superseded by native Index Analysis), the AG-nuance deferral, and the
 /// collected time-series reads' SQL contract (a representative case, per the port brief — not the ported arithmetic).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerFinOpsRecommendationsTests
 {
     // ── Check 1: Edition / license audit branching (reproduced from collected server_properties) ──

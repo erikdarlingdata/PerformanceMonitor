@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// <para><b>#4756.</b> A fleet-level store alert has no collector: the process that evaluates it also serves the
 /// page, so "Unknown (not collected since ...)" (which says an instrument is down) cannot be true of it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertNotebookResolutionReadTests
 {
     private static readonly DateTime Anchor = new(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);

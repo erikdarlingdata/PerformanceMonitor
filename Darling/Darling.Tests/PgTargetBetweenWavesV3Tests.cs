@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// boolean cast — pinned in <c>Lite.Tests</c> and the live spelling class. (9) The vacuum / bloat advice says
 /// "samples", not "hourly samples": the cadence is the schedule's, not the prose's.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgTargetBetweenWavesV3Tests
 {
     /* ───────────────────────── item 2: memory on the served CPU read, not on the gate ───────────────────────── */

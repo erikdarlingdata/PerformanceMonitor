@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// The collector half of the lane (the honest fraction on the wait facts) is pinned in <c>PgTargetWaitTests</c>; the
 /// live half (31 days of sampler rows, the real <c>analyze_server</c>) in <c>PgTargetSampledWaitLiveTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgTargetSampledWaitTests
 {
     /* ── the baseline arm ── */

@@ -53,6 +53,7 @@ namespace Darling.Tests;
 /// the pass budget times the number of sequential reads, and it is deliberately set BELOW what it
 /// inherited rather than above.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertPassCommandTimeoutTests
 {
     /// <summary>

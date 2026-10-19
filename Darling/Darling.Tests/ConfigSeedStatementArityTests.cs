@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// and reaching them needs a live store, which is exactly why this went unpinned. Arity is a property of
 /// the text, so the text is what gets read.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ConfigSeedStatementArityTests
 {
     private static readonly Regex Insert = new(

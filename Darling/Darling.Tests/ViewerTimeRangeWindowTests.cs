@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// window a held range reads, the whole hours the few integer readers take, the legacy preference index, what Apply to
 /// All sends, and the cadence note. (A ViewerServerTab needs the app's resources, so the rules are pinned here.)
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerTimeRangeWindowTests
 {
     private static readonly DateTime Now = new(2026, 10, 8, 15, 0, 0, DateTimeKind.Unspecified);

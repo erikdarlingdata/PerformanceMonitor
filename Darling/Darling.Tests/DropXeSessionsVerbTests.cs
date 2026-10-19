@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// the operator's explicit way to drop the shared ones and what a removal could not drop. The pure halves (the grammar, the statements, the plan) pin as text; the executor runs over a
 /// fake target so the find-print-drop path needs no SQL Server.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DropXeSessionsVerbTests
 {
     private const string Deadlock = "PerformanceMonitor_Deadlock";

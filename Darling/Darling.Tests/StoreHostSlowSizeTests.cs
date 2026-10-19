@@ -243,6 +243,7 @@ public sealed class StoreHostSlowSizeLiveTests
 }
 
 /// <summary>#5718, no database needed: the error text, the timeout classifier and the call-site pins.</summary>
+[Trait("Stage", "Guard")]
 public sealed class StoreHostSlowSizeTests
 {
     private static string RepoRoot([CallerFilePath] string thisFile = "")

@@ -16,6 +16,7 @@ namespace Darling.Tests;
 /// start or a busy runner has outlasted a 60 s wait with no output, so both helpers wait on a named
 /// 180 s limit. These pins read the helpers' source: the probes themselves only run on Windows.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DeployPowerShellProbeLimitTests
 {
     [Theory]

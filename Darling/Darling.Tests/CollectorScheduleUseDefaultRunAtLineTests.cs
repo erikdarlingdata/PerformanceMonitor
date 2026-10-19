@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// time the server had of its own. It now says the server uses the fleet-wide run time, the same sentence as for a server row set to
 /// "Use default". All of it is pure, so it is tested without a window.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorScheduleUseDefaultRunAtLineTests
 {
     private const string Daily = "index_object_stats";

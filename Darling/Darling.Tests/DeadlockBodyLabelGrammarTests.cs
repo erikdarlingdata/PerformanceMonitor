@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// <c>Lite.Tests.AlertBodyClockFrameDisciplineTests</c> maintains, and a second copy of that census is the
 /// thing this file's own argument says not to make.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class DeadlockBodyLabelGrammarTests
 {
     private const string Server = "SQL2022";

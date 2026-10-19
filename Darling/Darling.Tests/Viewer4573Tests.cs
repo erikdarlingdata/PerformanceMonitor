@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// Pins for the Plan Insights card system (issue #4573): the quiet/non-quiet state helper values,
 /// and a census that the insight-card markup carries no inline hex colours.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class Viewer4573Tests
 {
     [Fact]

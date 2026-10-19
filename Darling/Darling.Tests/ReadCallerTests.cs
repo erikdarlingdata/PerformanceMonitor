@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// session share, two sessions do not, and that is neither the key nor a prefix of it), the accumulator's distinct-caller
 /// count and its cap, and a name scan that fails if any recorder input or stored column is named like personal data.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ReadCallerTests
 {
     [Fact]

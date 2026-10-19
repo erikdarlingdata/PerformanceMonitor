@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// (Phase 1); the live round-trip (a token+CIDR client reaches the tools, off-CIDR/bad-token is refused) is
 /// validated on DARLING01.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpHostTests
 {
     private static McpConfig Mcp(

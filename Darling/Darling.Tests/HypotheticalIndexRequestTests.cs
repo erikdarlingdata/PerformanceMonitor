@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// escaping is the thing that gets one case wrong three years later.
 /// </para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class HypotheticalIndexRequestTests
 {
     private const string Valid =

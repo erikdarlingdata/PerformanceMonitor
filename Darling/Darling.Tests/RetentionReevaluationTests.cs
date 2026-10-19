@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// <c>(1 held, 0 armed)</c> → <c>(0 held, 1 armed)</c> → <c>(0 held, 0 armed, all unchanged)</c> with no
 /// restart anywhere in the sequence.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RetentionReevaluationTests
 {
     /// <summary>One relation to render the statements for; the shapes pinned are not relation-specific.</summary>

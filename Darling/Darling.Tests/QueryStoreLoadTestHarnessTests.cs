@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// clone every Query Store interval table that a migration creates. A new interval table that the script leaves out
 /// would make the load test measure a store with fewer rows than the inflated one it claims to be.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed partial class QueryStoreLoadTestHarnessTests
 {
     private const string ScriptPath = "Darling/loadtest/inflate-query-store.sql";

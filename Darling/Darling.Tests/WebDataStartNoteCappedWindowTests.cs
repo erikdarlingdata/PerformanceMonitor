@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// page whose oldest row falls between the read's start and a later clock reading still gets its note. A request that sends
 /// its own anchor is read and judged as it always was.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class WebDataStartNoteCappedWindowTests
 {
     private const int Hours = 48;

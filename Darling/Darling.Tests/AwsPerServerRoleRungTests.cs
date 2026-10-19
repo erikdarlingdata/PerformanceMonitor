@@ -24,6 +24,7 @@ namespace Darling.Tests;
 ///
 /// <para>This file carries the "I am the top rung" claims, which move to the next rung's tests when one lands above it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AwsPerServerRoleRungTests
 {
     internal const int RungVersion = 169;

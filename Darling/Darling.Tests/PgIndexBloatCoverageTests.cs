@@ -69,6 +69,7 @@ namespace Darling.Tests;
 /// arms — reading branches finds a wrong assertion, only sweeping regions finds a missing one.</item>
 /// </list>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgIndexBloatCoverageTests
 {
     private const long Kib = 1024L;

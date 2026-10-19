@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// (<see cref="DarlingManagedPostgres.ResolveNetworkExposure"/> / <see cref="Host.ResolveMcpBind"/>)
 /// accept or reject it exactly as the running service would.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingNetworkConfigEditorTests
 {
     /* Space-free cert/key paths so the store resolver's whitespace-degrade never fires here (that path is

@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// cases that must NOT fire — a predictor that cries wolf gets muted, and a muted outage predictor is worse
 /// than none.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class PostgresAlertEvaluatorTests
 {
     private const long StockFreezeMaxAge = 200_000_000;

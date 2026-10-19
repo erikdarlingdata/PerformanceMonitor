@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// database (<c>LongQueryCompletionsCollector.RunsPerDatabase</c>), so the banner says so for that target and keeps
 /// the server wording for every other one. The README's sentence about the session says the same.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LongQueryBannerSessionScopeTests
 {
     [Fact]

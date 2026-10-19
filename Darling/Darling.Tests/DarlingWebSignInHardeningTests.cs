@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// configured proxy only — which is what gives a proxied HTTPS request a Secure cookie and an https OIDC
 /// redirect URI.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingWebSignInHardeningTests
 {
     private const string ListenIp = "192.168.1.205";

@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// from the alert was dropped on save; this pins the metric item, both visibility gates and the save path in both,
 /// and the web page's side of the same click.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class MuteDialogClientTimeoutsParityTests
 {
     private static readonly DateTime Now = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
@@ -109,6 +110,7 @@ public sealed class MuteDialogClientTimeoutsParityTests
 /// the same label wording and the same per-box tooltips. Ground-truth wording, the unit said once, no "attentions"
 /// jargon in visible text (the tooltip is where the sqlserver.attention event is named).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SettingsRowParityTests
 {
     private static readonly string[] Lite = { "Lite", "Windows", "SettingsWindow.xaml" };

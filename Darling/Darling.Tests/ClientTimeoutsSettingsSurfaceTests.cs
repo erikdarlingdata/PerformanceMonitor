@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// this class owns the settings row's total width (76). The viewer needs no per-version gate for the columns: it refuses a
 /// store below <c>StorageVersion.SchemaVersion</c> at connect, as it did for V177's.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ClientTimeoutsSettingsSurfaceTests
 {
     private static readonly string[] Expected =

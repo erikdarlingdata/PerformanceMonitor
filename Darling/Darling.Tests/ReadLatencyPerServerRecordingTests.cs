@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// exercised here answer before any read (the dispatch entry throws, and the composed-panel body fails its
 /// validation), so the pool over a dummy connection string is never opened.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ReadLatencyPerServerRecordingTests
 {
     private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency)

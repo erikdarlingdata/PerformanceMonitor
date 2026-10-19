@@ -65,6 +65,7 @@ namespace Darling.Tests;
 /// groups C and E are writing pins in this directory concurrently, and a shared extraction now would
 /// collide with whichever of them reached it second.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CommandPlaneCommandTimeoutTests
 {
     /// <summary>

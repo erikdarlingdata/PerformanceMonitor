@@ -163,6 +163,7 @@ public sealed class CycleSkipAccumulatorTests
 }
 
 /// <summary>#5735: the places that step over a slot feed the server's tally, and a held or slept host writes nothing it should not.</summary>
+[Trait("Stage", "Guard")]
 public sealed class CycleSkipFeedTests
 {
     /// <summary>CountHeldSlots feeds each server's own tally, per collector, and never writes (it runs on the sweep thread).</summary>

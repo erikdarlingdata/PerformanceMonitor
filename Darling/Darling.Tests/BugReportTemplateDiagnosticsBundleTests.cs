@@ -13,6 +13,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>#5097: the bug-report template asks for the bundle, with the verb spelled as the product spells it.</summary>
+[Trait("Stage", "Guard")]
 public sealed class BugReportTemplateDiagnosticsBundleTests
 {
     private static string Template() =>

@@ -75,6 +75,7 @@ namespace Darling.Tests;
 /// WRITER in this rung, so the sweep names none of the three checkpointer columns — a writer pin on one file,
 /// owned by exactly one lane (#3783), which retires it when it lands the row.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QsCaptureModeRouteKnobToastRungTests
 {
     private const int RungVersion = 137;

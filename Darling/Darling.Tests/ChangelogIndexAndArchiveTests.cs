@@ -44,6 +44,7 @@ namespace Darling.Tests;
 /// and ordering, which versions must have an archive, and the size ceilings are all read off the index.
 /// Regenerating the census after <c>split</c> is the one step the release process owns.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ChangelogIndexAndArchiveTests
 {
     /* Under the ~1 MB where GitHub stops rendering, with room for the release that has not been cut yet.

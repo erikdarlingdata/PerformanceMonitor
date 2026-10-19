@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// Keeping a copy of those would assert this rung is still the top, which is how the NEXT rung's build
 /// goes red — the note V120's file left for V121's and V121's left for this one.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgAlertCountKnobRungTests
 {
     private const int RungVersion = 122;

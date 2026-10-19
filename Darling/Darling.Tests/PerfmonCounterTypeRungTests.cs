@@ -44,6 +44,7 @@ namespace Darling.Tests;
 /// <c>Lite.Tests/PerfmonStatsCollectorDefinitionTests</c>, and the shaping helper's type rule in
 /// <c>Lite.Tests/DeltaSeriesShapingTests</c> — both run off Windows. What is here is the PostgreSQL side.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PerfmonCounterTypeRungTests
 {
     private const int RungVersion = 132;

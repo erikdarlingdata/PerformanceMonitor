@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// and <see cref="ServerPageTabsTests"/> already pin this page's other behaviour: there is no browser/DOM test
 /// runner in this project, so a source-shape pin is what stands guard against either regressing.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertHistoryLazyRenderTests
 {
     private static string AlertsJs => RepoFile.ReadRepoFileLf(

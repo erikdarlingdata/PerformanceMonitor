@@ -181,6 +181,7 @@ public sealed class DarlingAnalysisBudgetTests
 /// a token that is linked but never armed, a budget the sweep does not actually wait out, a skip branch
 /// that returns in silence. Every one of those compiles, and every one of them puts the defect back.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingWedgedServerReportingTests
 {
     private static string PassBody() =>

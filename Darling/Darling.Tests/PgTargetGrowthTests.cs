@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// value-stated headline and its stated limits, the routing and census rows this lane moved); the planted fortnight
 /// through the real collector and <c>analyze_server</c> is <see cref="PgTargetGrowthLiveTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgTargetGrowthTests
 {
     private const long MiB = 1024L * 1024;

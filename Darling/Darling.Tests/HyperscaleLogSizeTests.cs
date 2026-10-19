@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// stays out of every allocated total. The data file keeps its real size. SQL Server, Managed Instance and
 /// non-Hyperscale Azure SQL Database are unchanged. Lite's <c>HyperscaleLogSize*Tests</c> are the twins.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class HyperscaleLogSizeTests
 {
     private static CollectorContext Context(bool azure) => new()

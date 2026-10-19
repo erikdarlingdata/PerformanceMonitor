@@ -122,6 +122,7 @@ public sealed class ViewerCollectionCaveatsLivePostgresTests
 /// The connect-time schema gate for #3691 part a2: below V141, <see cref="ViewerDataService.GetCollectionCaveatsAsync"/>
 /// returns an empty list rather than querying a table that does not exist yet on a lagging store.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerCollectionCaveatsGateTests
 {
     [Fact]

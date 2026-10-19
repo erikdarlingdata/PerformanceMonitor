@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// probe is shared with the <c>test_connect</c> command (<see cref="DarlingServerConnector.ProbeAsync"/>), so
 /// what validates from the CLI connects identically under the running service.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingCliCommandsTests
 {
     [Theory]
@@ -957,6 +958,7 @@ public sealed class DarlingPrintViewerConnectionTests
 /// exactly once with the save-this warning on STDERR. The comment-surgery internals are pinned separately by
 /// <see cref="DarlingNetworkConfigEditorTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingConfigureNetworkTests
 {
     private const string CertPath = @"C:\ProgramData\PerformanceMonitorDarling\server.crt";
@@ -2115,6 +2117,7 @@ public sealed class DarlingMissingCredentialMessageTests
 /// <para>The store half — the write landing, the override columns surviving, the rows reading back — is
 /// <see cref="DarlingCollectorToggleVerbLivePostgresTests"/>.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingCollectorToggleVerbTests
 {
     [Theory]

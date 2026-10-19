@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// <para>Every fact finds the rung by NAME, so a renumber is one edit to the registration, the constant and the viewer's
 /// <c>return</c>.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class MuteRuleServerIdRungTests
 {
     public const string RungName = "mute-rule-server-id";
@@ -149,6 +150,7 @@ public sealed class MuteRuleServerIdLivePostgresTests
 
 /// <summary>The MCP surface of the id-keyed mute rule: the payload carries <c>server_id</c>, create takes an optional
 /// one that must be a monitored server's id, and update can move it.</summary>
+[Trait("Stage", "Guard")]
 public sealed class MuteRuleServerIdMcpTests
 {
     private static Task<string?> Known(int id) => Task.FromResult<string?>(id == 7 ? "Display Seven" : null);

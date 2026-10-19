@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// of the month. These pins hold the fixed shapes. Results are identical by construction, and the live half proves
 /// that against the old text as an oracle, row for row, on every tier.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DailySummaryReadShapeSqlTests
 {
     private static readonly (RetentionTier Tier, string Relation)[] EveryForm =

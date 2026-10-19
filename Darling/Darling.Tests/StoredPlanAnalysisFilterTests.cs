@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// so the statement filter has to judge the stored XML before the analysis reads it, as <c>analyze_plan_xml</c> does.
 /// A plan the filter withholds whole is answered with one plain sentence, not a parse error.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StoredPlanAnalysisFilterTests
 {
     [Theory]

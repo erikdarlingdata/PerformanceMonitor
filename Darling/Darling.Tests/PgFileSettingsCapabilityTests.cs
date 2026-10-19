@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// verdict), and M1's stale-verdict forgetting on a revoked grant.
 /// </summary>
 [Collection("pg-file-settings-statics")]
+[Trait("Stage", "Guard")]
 public sealed class PgFileSettingsCapabilityTests : IDisposable
 {
     public PgFileSettingsCapabilityTests()

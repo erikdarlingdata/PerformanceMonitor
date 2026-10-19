@@ -476,6 +476,7 @@ public sealed class ServerDatabasesEndpointLiveTests
 /// <c>v_database_size_stats</c> rows) the bare <c>UNION</c> shape sorted every row and took a 4.4 s median; hashing each
 /// arm down first took 0.26 s with the same rows. A pin, because the shape is invisible in the result.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectedDatabasesSqlTests
 {
     [Fact]

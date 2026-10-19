@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// The Manage Servers version lines (#5655): the service's version once above the grid, host name included, beside the viewer's
 /// own; and the grid no longer carries a per-row "Installed Version" column that repeated the viewer's version.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServiceVersionTextTests
 {
     private static ServiceVersionRow Row(string host, string version) => Row(host, version, new DateTime(2026, 10, 1, 8, 0, 0, DateTimeKind.Utc));

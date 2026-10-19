@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// reports the collided count). The insert-then-read against a real store runs in
 /// <see cref="ViewerImportServerIdCollisionLiveTests"/> in the PostgreSQL CI job.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerImportServerIdCollisionTests
 {
     /* The synthetic pair the add tests use: two hosts whose storage names hash to ONE server_id. */

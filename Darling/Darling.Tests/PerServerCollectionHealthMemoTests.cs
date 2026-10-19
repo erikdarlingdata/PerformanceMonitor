@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /// the SAME object the reader routes through, so a count here IS the number of statements the store would have
 /// seen.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PerServerCollectionHealthMemoTests
 {
     private static readonly DateTime T0 = new(2026, 9, 21, 21, 34, 17, DateTimeKind.Utc);

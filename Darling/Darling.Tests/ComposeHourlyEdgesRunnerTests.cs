@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// put back before the panel statement, the guard's scope is bound only from the normalized server scope, and any fault
 /// returns no verdict.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class ComposeHourlyEdgesRunnerTests
 {
     private static string Source(params string[] relative) =>

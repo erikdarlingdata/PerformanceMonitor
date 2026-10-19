@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// a blank password box keeps the saved value only while those four stay the same, and the service opens what the Viewer
 /// stored. The sentences never carry a password.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerSmtpSealTests : IDisposable
 {
     private const string Plain = "p@ss-not-real";

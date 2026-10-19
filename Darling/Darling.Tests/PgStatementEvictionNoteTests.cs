@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #4677: the eviction caveat is worded in one place and every surface reads it. Null passes means unknown, never 0.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgStatementEvictionNoteTests
 {
     [Fact]

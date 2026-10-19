@@ -16,6 +16,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>Store-free pins for the get_finops index_analysis view: text cap, ordering, rounding, notes, payload shape and refusals.</summary>
+[Trait("Stage", "Guard")]
 public sealed class FinOpsIndexAnalysisViewTests
 {
     private static IndexCleanupRecommendation Rec(string index, decimal gb = 1m, string db = "d", int id = 2,

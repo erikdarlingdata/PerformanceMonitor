@@ -17,6 +17,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>#5097: the <c>--diagnostics-bundle</c> verb's recognition, usage and argument errors.</summary>
+[Trait("Stage", "Guard")]
 public sealed class DiagnosticsBundleVerbTests
 {
     [Theory]

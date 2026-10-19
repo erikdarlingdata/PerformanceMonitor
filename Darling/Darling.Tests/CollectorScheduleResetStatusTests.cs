@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// call removed are counted apart and each named, singular or plural, so a reset of run times alone no longer reads as a reset of
 /// schedule overrides. The store's own counts are checked in <see cref="CollectorRunTimeViewerLiveTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorScheduleResetStatusTests
 {
     private const string ResetTail = " — every server now follows the fleet default.";

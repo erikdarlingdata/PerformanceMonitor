@@ -58,6 +58,7 @@ namespace Darling.Tests;
 /// after the writer has stored a twin, and after the post-rung rows are gone again); the dedup is pinned in
 /// <c>Lite.Tests/CpuUtilizationCollectorDefinitionTests</c>.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TimeHonestyRungTests
 {
     private const int RungVersion = 134;

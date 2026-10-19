@@ -186,6 +186,7 @@ public sealed class McpToolGuideHeadsPgDatabaseTests
 /// <see cref="McpToolGuideHeadsPgDatabaseTests"/>. Follows the pattern in
 /// <see cref="McpToolGuideHeadsHealthParserTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpToolGuideHeadsPgPlanTests
 {
     private static readonly string[] ConvertedTools =

@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// today) or the issue's named arms (engine + port through Test Connection, registration, and an edit
 /// round-trip).</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PostgresAddServerDialogTests
 {
     /* ─────────────────────────────── ParsePortText (pure) ─────────────────────────────── */

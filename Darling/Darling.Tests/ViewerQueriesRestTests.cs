@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// <c>ARG_MAX → ROW_NUMBER</c> rewrites. Ordinal correctness + PG execution are covered by the gated live
 /// round-trips below.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerQueryTrendsSqlTests
 {
     /// <summary>

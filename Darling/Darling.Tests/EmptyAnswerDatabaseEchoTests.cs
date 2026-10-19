@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// that a filter emptied no longer sends the reader to the opt-in switch. The behaviour of the shared helper is run; the
 /// tools' empty paths need a store, so their wiring is pinned from source, and Lite's twin tests run the same paths for real.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class EmptyAnswerDatabaseEchoTests
 {
     private static string Tool(string file) =>

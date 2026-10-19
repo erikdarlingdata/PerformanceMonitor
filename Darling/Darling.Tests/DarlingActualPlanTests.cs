@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// (the identifier-only payload — NEVER SQL text — and the data-modification detection that gates it) plus the
 /// shared executor's plan-capture loop and the command's wire contract at both ends.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ActualPlanRequestTests
 {
     [Fact]

@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// headers cut off at the default width ("Configured Valu", "Dynami", "Compat Le"), and two Blocking charts that looked
 /// broken because they hold points only where a collection found a waiting task.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerTabEmptyStatesAndHeadersTests
 {
     private static string LiteXaml() => RepoFile.ReadRepoFile("Lite", "Controls", "ServerTab.xaml");

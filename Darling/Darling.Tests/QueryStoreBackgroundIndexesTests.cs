@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// the raw hypertable), the build-or-skip decision, the DDL each ensure runs, that the btree's shape is the shape of
 /// the read it serves, and that the worker's one delayed task makes one in-order attempt at each of them.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreBackgroundIndexesTests
 {
     private static readonly QueryStoreBackgroundIndexes.IndexSpec Wide = QueryStoreBackgroundIndexes.WideServerFirstExec;

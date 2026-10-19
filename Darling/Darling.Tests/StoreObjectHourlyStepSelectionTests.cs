@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// <c>EnsureAsync</c> otherwise; the start path always runs <c>EnsureAsync</c>. Each call runs its own
 /// delegate and not the other.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StoreObjectHourlyStepSelectionTests
 {
     private static DarlingWorker.StoreObjectConvergenceStep Step(List<string> ran, bool withHourly) =>

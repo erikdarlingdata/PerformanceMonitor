@@ -16,6 +16,7 @@ namespace Darling.Tests;
 /// optional root key on both stored definition kinds, validated by the one server authority the web CRUD and
 /// the MCP custom-view tools share. The remaining pins read the shipped modules (no JS runner in the repo).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class WebAutoRefreshPolicyTests
 {
     private static readonly string s_wwwroot = Path.Combine(

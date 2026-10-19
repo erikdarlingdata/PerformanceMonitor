@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// <para>The live half (the writer's transaction, the probe) is <c>FleetSweepStoreLivePostgresTests</c>'
 /// job; the knob plumbing and the worker wiring pins are <c>FleetSweepCadenceKnobRungTests</c>'.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FleetSweepEngineTests
 {
     /* A fixed clock, and a service start comfortably OUTSIDE the settle window — every test that wants

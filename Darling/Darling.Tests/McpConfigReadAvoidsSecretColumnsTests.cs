@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /// next denied column — so #2298 removed the host's own config-view read entirely: the plan-fetch resolver
 /// serves the worker-published registry state. These pins hold that agreement so it cannot drift back.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpConfigReadAvoidsSecretColumnsTests
 {
     /// <summary>

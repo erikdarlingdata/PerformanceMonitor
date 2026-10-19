@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// the over-cap pairing, the case-insensitive eviction of the digests the store reports absent, the one-hour
 /// prune, the knob, and the split of an oversized fetch.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PlanDigestCacheTests
 {
     private static readonly DateTime Now = new(2031, 5, 1, 12, 0, 0, DateTimeKind.Utc);

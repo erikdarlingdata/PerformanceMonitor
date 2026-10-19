@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// <see cref="FactScorer.ScoreAll"/>, storied through the real <see cref="InferenceEngine"/>, reconciled
 /// through the real reconciler. Source pins only for what reflection cannot see.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgTargetSharedSwitchRoutingTests
 {
     /* ── the vocabulary ── */

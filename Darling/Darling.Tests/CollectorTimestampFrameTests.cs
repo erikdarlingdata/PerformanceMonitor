@@ -55,6 +55,7 @@ namespace Darling.Tests;
 /// compares each row on the same column. Neither clock function moved for it — the pins above hold — and
 /// <see cref="CpuUtilization_DedupsInTheWatermarksFrame_NotOnTheLocalStampAlone"/> holds the comparison.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorTimestampFrameTests
 {
     /// <summary>

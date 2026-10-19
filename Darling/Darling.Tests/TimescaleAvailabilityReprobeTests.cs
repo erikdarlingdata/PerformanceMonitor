@@ -45,6 +45,7 @@ namespace Darling.Tests;
 /// rather than assumed — the compression read, which IS behind the flag, is the positive control, and a walk
 /// that found nothing would fail there instead of passing everywhere.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TimescaleAvailabilityReprobeTests
 {
     private const string ReprobeCall = "await ReprobeTimescaleAvailabilityAsync(stoppingToken);";

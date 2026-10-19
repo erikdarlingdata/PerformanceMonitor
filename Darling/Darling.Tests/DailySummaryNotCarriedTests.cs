@@ -49,6 +49,7 @@ namespace Darling.Tests;
 /// <c>long?</c> and the shared <see cref="DailyHealthBandCalculator.BuildKeyMetricsLine"/> takes <c>long?</c>;
 /// Lite's callers hand a <c>long</c> and compile unchanged — a no-op field widening, stated here.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DailySummaryNotCarriedTests
 {
     private static readonly (RetentionTier Tier, string Relation)[] RoutedForms =

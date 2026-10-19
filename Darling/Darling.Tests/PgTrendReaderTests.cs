@@ -14,6 +14,7 @@ namespace Darling.Tests;
 /// PostgreSQL target, so every PostgreSQL answer described one window and none answered "is this getting
 /// worse".
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgTrendReaderTests
 {
     /// <summary>

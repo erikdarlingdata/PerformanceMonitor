@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// 18, the buffer clause renamed one, the WAL clause gained one and reached the analyze line for the first
 /// time. A parser that pins only the version the fleet runs today reads the next major's log as null.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgLogEventMetricsParserTests
 {
     private const string P = "2026-09-18 03:07:12.345 UTC ";

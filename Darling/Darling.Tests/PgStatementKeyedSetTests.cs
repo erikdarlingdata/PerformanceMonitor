@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// per-member wrapper being the scaffold verbatim. <see cref="PgStatementKeyedSetLiveTests"/> holds the set arms to the
 /// per-statement arms they replaced, row for row, and counts the statements a detector pass issues.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgStatementKeyedSetTests
 {
     [Fact]

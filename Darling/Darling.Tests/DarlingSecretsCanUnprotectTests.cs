@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// <see cref="DarlingSecrets.CanUnprotect"/> answers whether this machine opens a saved old-format value without
 /// returning it (#5456), and throws what <see cref="DarlingSecrets.Unprotect"/> throws for anything else.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingSecretsCanUnprotectTests
 {
     [Fact]

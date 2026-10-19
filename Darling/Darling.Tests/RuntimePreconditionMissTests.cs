@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// only property that matters: that a state somebody can fix is never reported as one they cannot, and the
 /// reverse.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorRuntimePreconditionTests
 {
     private const string Server = "precondition-probe";

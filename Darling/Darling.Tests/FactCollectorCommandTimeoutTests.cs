@@ -42,6 +42,7 @@ namespace Darling.Tests;
 /// slowest query takes — a detail that is easy to lose and expensive to relearn, because a timeout
 /// raised past the pass budget converts "one fact is missing" into "every fact is missing".</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FactCollectorCommandTimeoutTests
 {
     /// <summary>

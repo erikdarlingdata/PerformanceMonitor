@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// re-group, budget, no-op second pass) needs a TimescaleDB 2.14.1+ store and is the part still to be written as a
 /// live class beside <c>CollectionLogSegmentByLiveTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PerfmonRegroupGateTests
 {
     private const string Wanted = "server_id, counter_name";

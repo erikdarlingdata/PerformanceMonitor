@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// which reaches the monitored server does not belong on all of them.
 /// </para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class HypotheticalIndexIsReachableTests
 {
     private const string CommandType = "test_hypothetical_index";

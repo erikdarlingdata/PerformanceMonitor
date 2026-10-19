@@ -55,6 +55,7 @@ namespace Darling.Tests;
 /// </list>
 /// </para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ManagedConfRehearsalTests
 {
     private const string FixturePath = "Darling.Tests/Fixtures/ManagedConf/rehearsal-postgresql.conf";

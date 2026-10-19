@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// that V153 has landed; this file's own rung/probe facts below keep asserting what stays true forever
 /// (present, in-order, gated behind the arm above it) rather than "is exactly the top".</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CaggGroupIndexDropRungTests
 {
     private const int RungVersion = 152;

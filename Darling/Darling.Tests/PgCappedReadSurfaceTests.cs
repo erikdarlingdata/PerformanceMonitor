@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// route, not to demote that order. A default of true would silently invert the surface every prior reader
 /// relies on.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgCappedReadSurfaceTests
 {
     private const string IndexTool =

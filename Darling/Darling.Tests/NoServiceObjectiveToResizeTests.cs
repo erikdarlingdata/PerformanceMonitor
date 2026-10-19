@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// An Azure SQL Database logical server's <c>master</c> has no service objective to resize, so FinOps gives it no
 /// right-sizing advice and no provisioning verdict.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class NoServiceObjectiveToResizeTests
 {
     [Theory]

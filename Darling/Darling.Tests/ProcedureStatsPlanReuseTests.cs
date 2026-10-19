@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// oversized plans) and the collector's identity-column shapes. The end-to-end behaviour against a real server is
 /// in <see cref="ProcedureStatsDeferredPlanFetchLiveTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ProcedureStatsPlanReuseTests
 {
     private static readonly DateTime s_now = new(2026, 10, 5, 12, 0, 0, DateTimeKind.Utc);

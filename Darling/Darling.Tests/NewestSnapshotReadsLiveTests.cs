@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// newest per key (49.0 M and 42.4 M blocks over 13 days on the audited store). They now stop inside the newest
 /// snapshot. Text pins on the new shape.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class NewestSnapshotReadsTextTests
 {
     [Fact]

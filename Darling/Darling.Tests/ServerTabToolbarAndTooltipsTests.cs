@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// disabled control, the Running Jobs tab with no running job was an empty grid with no words, the plan viewer's operator tooltips
 /// could not be read by a screen reader, and two FinOps column headers had no tooltip while their cells did.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerTabToolbarAndTooltipsTests
 {
     private static string Xaml(string app) => app == "Lite"

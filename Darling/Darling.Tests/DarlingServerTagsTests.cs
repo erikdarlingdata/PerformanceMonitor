@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// <summary>
 /// Pins the V32 fleet-tag schema and the viewer's tag SQL. Ungated — pure shape assertions.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingServerTagsTests
 {
     private static string V32Sql =>

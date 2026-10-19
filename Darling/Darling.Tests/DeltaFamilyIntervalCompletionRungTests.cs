@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// one-rung-behind half: a store carrying this and not V129 maps to 128, which is the honest answer for it
 /// and what makes the upgrade banner correct in both directions.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DeltaFamilyIntervalCompletionRungTests
 {
     private const int RungVersion = 128;

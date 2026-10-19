@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #4732: the skipped-slot count and the backward-clock clamp, both pure and both on <see cref="CollectorCadence"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorCadenceSkippedSlotsTests
 {
     private static readonly DateTime T0 = new(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);

@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// default only - not what the viewer should show. This pins the web row's <c>full_graph</c> default at
 /// <c>true</c>, independent of (and opposite to) the MCP signature's own default.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DeadlockDetailWebDefaultTests
 {
     private const string WebEndpoints =

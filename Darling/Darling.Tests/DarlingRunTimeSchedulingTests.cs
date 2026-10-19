@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// count, and a schedule reload, with no store. A collector with no run time keeps every rule it had, which the existing
 /// schedule tests (unchanged) pin.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingRunTimeSchedulingTests
 {
     private const int TwoAm = 120;

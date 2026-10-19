@@ -387,6 +387,7 @@ public sealed class CollectionCaveatLedgerTests
 /// </description></item>
 /// </list>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectionCaveatLedgerParityTests
 {
     private const string Attach = "CollectionCaveatLedger.Shared.Attach(";

@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// send that keeps its result and reports it cannot be quietly turned back into one that discards it. The
 /// source pins are sliced per arm so one arm's wiring cannot vouch for another's.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgAlertFailedSendRetryTests
 {
     private static readonly DateTime FireTime = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);

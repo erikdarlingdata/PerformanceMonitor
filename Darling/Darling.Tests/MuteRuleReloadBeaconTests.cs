@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// arm, which must keep mapping a store migrated to EXACTLY 117 to 117 rather than letting it fall
 /// through.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class MuteRuleReloadBeaconTests
 {
     private const int RungVersion = 117;

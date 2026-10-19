@@ -43,6 +43,7 @@ namespace Darling.Tests;
 /// go through the one shared request. <see cref="FleetReadsAreBoundedLivePostgresTests"/> carries what a string
 /// cannot: the rows, and the plan.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FleetReadsAreBoundedByTheFleetTests
 {
     /// <summary>The statements over the small registry and control-plane tables — servers, tags, the tag forest,
