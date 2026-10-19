@@ -383,14 +383,15 @@ SELECT
     /// </summary>
     public static async Task<DateTime?> RunSliceAsync(
         NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc,
-        RefreshDisclosure disclosure, CancellationToken cancellationToken)
+        RefreshDisclosure disclosure, CancellationToken cancellationToken,
+        int concurrentRefreshAttempts = ConcurrentRefreshAttempts)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
-        await RefreshAsync(connection, view, fromUtc, toUtc, force: false, disclosure, cancellationToken);
+        await RefreshAsync(connection, view, fromUtc, toUtc, force: false, disclosure, cancellationToken, concurrentRefreshAttempts);
         return await ReadCoverageFloorAsync(connection, view, cancellationToken);
     }
 
@@ -446,7 +447,8 @@ SELECT
 
     private static async Task RefreshAsync(
         NpgsqlConnection connection, string view, DateTime fromUtc, DateTime toUtc, bool force,
-        RefreshDisclosure disclosure, CancellationToken cancellationToken)
+        RefreshDisclosure disclosure, CancellationToken cancellationToken,
+        int concurrentRefreshAttempts = ConcurrentRefreshAttempts)
     {
         ArgumentNullException.ThrowIfNull(disclosure);
 
@@ -477,7 +479,7 @@ SELECT
                     "rather than on anything this tool asked for.");
             }
             catch (PostgresException ex)
-                when (attempt < ConcurrentRefreshAttempts && ex.SqlState == ConcurrentRefreshSqlState)
+                when (attempt < concurrentRefreshAttempts && ex.SqlState == ConcurrentRefreshSqlState)
             {
                 await Task.Delay(ConcurrentRefreshDelay, cancellationToken);
             }

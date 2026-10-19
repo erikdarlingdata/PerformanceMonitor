@@ -240,14 +240,14 @@ public sealed class RetentionReevaluationTests
         var sweep = MethodBody(ReadStorageSource(), "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
 
         /* The steady-state hold: level by pass. */
-        var heldAt = sweep.IndexOf("HELD PAUSED - {ShortConsumer} does not yet cover everything it holds", StringComparison.Ordinal);
+        var heldAt = sweep.IndexOf("HELD PAUSED - {ShortConsumers} do not yet cover everything it holds", StringComparison.Ordinal);
         Assert.True(heldAt > 0);
         var heldStatement = sweep[sweep.LastIndexOf("logger?.Log(", heldAt, StringComparison.Ordinal)..heldAt];
         Assert.Contains("pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,", heldStatement, StringComparison.Ordinal);
 
         /* The transitions: unconditional levels. The statement each template sits in is found by walking back
            to its `logger?.Log` and reading which method it is. */
-        var reHeldAt = sweep.IndexOf("RE-HELD - it was armed, and {ShortConsumer} no longer covers", StringComparison.Ordinal);
+        var reHeldAt = sweep.IndexOf("RE-HELD - it was armed, and its short consumers ({ShortConsumers}) no longer cover", StringComparison.Ordinal);
         Assert.True(reHeldAt > 0);
         Assert.StartsWith("logger?.LogWarning(", sweep[sweep.LastIndexOf("logger?.Log", reHeldAt, StringComparison.Ordinal)..], StringComparison.Ordinal);
 
@@ -363,7 +363,10 @@ public sealed class RetentionReevaluationTests
         Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);", body, StringComparison.Ordinal);
 
         /* The Periodic pass, named explicitly, on the budget token. */
-        Assert.Contains("TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);", body, StringComparison.Ordinal);
+        Assert.Contains("TimescaleSupport.RetentionSweepPass.Periodic,", body, StringComparison.Ordinal);
+        /* #6081: the same call hands the pass the worker's own "a repair is running" flag, so the bounded floor fill
+           never refreshes an aggregate the hole repair holds. The budget token still closes the argument list. */
+        Assert.Contains("otherRepairRunning: () => _materializationHoleRepairRunning, budget.Token);", body, StringComparison.Ordinal);
         Assert.DoesNotContain("RetentionSweepPass.Startup", body, StringComparison.Ordinal);
 
         /* One linked budget for the whole pass. */
