@@ -1,0 +1,421 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Data;
+using System.Globalization;
+using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
+using Npgsql;
+using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Service.Targets;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* The kill half of the plan force live tests (#5632, step 12): the same store and SQL Server setup (a partial class, so the private setup is
+   shared). Each test makes its own scratch store and SQL Server database, and opens its own victim session as the scratch login. */
+public sealed partial class PlanForceToolLiveTests
+{
+    private const string KillKind = "session_kill";
+
+    /// <summary>A second session on the test SQL Server, with the id and login time the server itself holds for it.</summary>
+    private sealed record Victim(SqlConnection Connection, int SessionId, DateTime LoginLocal);
+
+    private static async Task<Victim> OpenVictimAsync(Ctx c)
+    {
+        /* No connection resiliency: with it the driver quietly reconnects after a kill, and the test could not see the session end. */
+        var builder = new SqlConnectionStringBuilder(c.Sql.Admin(c.Sql.Database).ConnectionString)
+        {
+            UserID = c.Sql.Login,
+            Password = c.Sql.Password,
+            ConnectRetryCount = 0,
+            ApplicationName = "PerformanceMonitorDarling-KillVictim",
+        };
+        var connection = await OpenAsync(builder, c.Ct);
+        var id = Convert.ToInt32(await ScalarAsync(connection, "SELECT @@SPID;", c.Ct), CultureInfo.InvariantCulture);
+        await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
+        var login = (DateTime)(await ScalarAsync(admin, $"SELECT login_time FROM sys.dm_exec_sessions WHERE session_id = {id};", c.Ct))!;
+        return new Victim(connection, id, login);
+    }
+
+    /// <summary>The minutes the test SQL Server's clock is ahead of UTC, as the server says it now; the store's clock row is seeded with it.</summary>
+    private static async Task<int> SeedClockAsync(Ctx c)
+    {
+        await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
+        var offset = Convert.ToInt32(await ScalarAsync(admin, "SELECT DATEDIFF(MINUTE, SYSUTCDATETIME(), SYSDATETIME());", c.Ct), CultureInfo.InvariantCulture);
+        await using var insert = new NpgsqlCommand(
+            "INSERT INTO collect.server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes) VALUES ($1, $2, 7, 'srv-7', $3)", c.Connection) { CommandTimeout = 60 };
+        insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DateTime.UtcNow.Ticks, NpgsqlDbType = NpgsqlDbType.Bigint });
+        insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlDbType.Timestamp });
+        insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = offset, NpgsqlDbType = NpgsqlDbType.Integer });
+        await insert.ExecuteNonQueryAsync(c.Ct);
+        return offset;
+    }
+
+    /// <summary>The login time as <c>get_blocking</c> would hand it back: UTC, ISO 8601.</summary>
+    private static string UtcText(Victim v, int offsetMinutes) => v.LoginLocal.AddMinutes(-offsetMinutes).ToString("o", CultureInfo.InvariantCulture);
+
+    private static async Task<bool> SessionAliveAsync(Ctx c, Victim v)
+    {
+        await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
+        await using var command = new SqlCommand("SELECT COUNT_BIG(*) FROM sys.dm_exec_sessions WHERE session_id = @id AND login_time = @login;", admin);
+        command.Parameters.Add(new SqlParameter("@id", SqlDbType.Int) { Value = v.SessionId });
+        command.Parameters.Add(new SqlParameter("@login", SqlDbType.DateTime) { Value = v.LoginLocal });
+        return Convert.ToInt64(await command.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture) > 0;
+    }
+
+    private static Task<string> KillAsync(Ctx c, int session, string? loginTime, bool dryRun, string server = "srv-7") =>
+        DarlingMcpPlanForceTools.RunKillAsync(c.Source, c.Source, c.Log, server, session, loginTime, c.Arg, dryRun, c.Ct);
+
+    [Fact]
+    public async Task ADryRunKill_ShowsTheSessionsFacts_KillsNothing_AndJournalsNothing_AndTheKillIsDryByDefault()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            var answer = await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: true);
+            var json = Parse(answer);
+            Assert.Equal("dry_run", (string?)json["status"]);
+            Assert.Equal(c.Sql.Login, (string?)json["session"]!["login_name"]);
+            Assert.Equal("PerformanceMonitorDarling-KillVictim", (string?)json["session"]!["program_name"]);
+            Assert.Equal(victim.LoginLocal.AddMinutes(-offset).ToString("o", CultureInfo.InvariantCulture), (string?)json["session"]!["login_time"]);
+            Assert.Empty(json["warnings"]!.AsArray());
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            var parameter = typeof(DarlingMcpPlanForceTools).GetMethod(nameof(DarlingMcpPlanForceTools.KillSession))!.GetParameters().Single(p => p.Name == "dry_run");
+            Assert.True((bool)parameter.DefaultValue!);
+            AssertNoSecret(c, answer);
+        });
+    }
+
+    [Fact]
+    public async Task ARealKill_EndsTheSession_WarnsOfTheRollbackItCost_JournalsCalledAndDone_AndHasNoUndo()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            /* An open transaction that wrote: it has used log, so the kill rolls work back. */
+            await ExecAsync(victim.Connection, "BEGIN TRANSACTION; UPDATE dbo.t SET b = b + 1 WHERE a = 1;", c.Ct);
+
+            var dry = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: true));
+            Assert.Equal("dry_run", (string?)dry["status"]);
+            Assert.True((long)dry["session"]!["log_bytes_used"]! > 0);
+            Assert.Equal(1, (int)dry["session"]!["open_transaction_count"]!);
+            Assert.Contains("rolls that work back", (string?)Assert.Single(dry["warnings"]!.AsArray()), StringComparison.Ordinal);
+
+            var answer = await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: false);
+            var json = Parse(answer);
+            Assert.Equal("done", (string?)json["status"]);
+            Assert.NotNull(json["rollback"]);
+            Assert.NotNull(json["rollback"]!["in_progress"]);
+            Assert.Contains("There is no undo", (string?)json["message"], StringComparison.Ordinal);
+
+            /* The victim can no longer use its connection; the catalog is read after that touch. */
+            await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync(victim.Connection, "SELECT 1;", c.Ct));
+            for (var i = 0; i < 50 && await SessionAliveAsync(c, victim); i++)
+                await Task.Delay(100, c.Ct);
+            Assert.False(await SessionAliveAsync(c, victim));
+
+            var called = Assert.Single(await RowsAsync(c, "action_called"));
+            Assert.Equal(KillKind, (string?)called["kind"]);
+            Assert.Equal("kill_session", (string?)called["tool"]);
+            Assert.Equal(victim.SessionId.ToString(CultureInfo.InvariantCulture), (string?)called["target"]!["id"]);
+            Assert.Equal(7, (int)called["target"]!["server_id"]!);
+            Assert.Equal(c.Sql.Login, (string?)called["before"]!["session"]!["login_name"]);
+            Assert.True((long)called["before"]!["session"]!["log_bytes_used"]! > 0);
+            var done = Assert.Single(await RowsAsync(c, "action_done"));
+            Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);
+            Assert.NotNull(done["after"]!["rollback"]);
+
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var change = Assert.Single(list.Changes);
+            Assert.Equal(KillKind, change.Kind);
+            Assert.False(change.CanTryUndo(DateTime.UtcNow), "a kill has no undo");
+            AssertNoSecret(c, answer, await JournalTextAsync(c));
+        });
+    }
+
+    [Fact]
+    public async Task AReusedSessionId_IsRefusedSessionReused_OnADryRunAndARealCall_AndTheSessionLives()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            /* The same id with another login time: the shape of an id the server gave to a new session. */
+            var other = victim with { LoginLocal = victim.LoginLocal.AddSeconds(5) };
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = Parse(await KillAsync(c, victim.SessionId, UtcText(other, offset), dryRun));
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal("session_reused", (string?)json["reason"]);
+                Assert.Equal(UtcText(victim, offset), (string?)json["actual_login_time"]);
+            }
+
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(1, await ScalarAsync(victim.Connection, "SELECT 1;", c.Ct) is int one ? one : 0);
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("2", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'session_reused'", c.Ct));
+        });
+    }
+
+    [Fact]
+    public async Task ASessionThatIsGone_IsRefusedSessionGone_NotSessionReused()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            var login = UtcText(victim, offset);
+            victim.Connection.Dispose();
+            for (var i = 0; i < 50 && await SessionAliveAsync(c, victim); i++)
+                await Task.Delay(100, c.Ct);
+            var json = Parse(await KillAsync(c, victim.SessionId, login, dryRun: false));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal("session_gone", (string?)json["reason"]);
+        });
+    }
+
+    [Fact]
+    public async Task WithoutAServerClock_TheKillIsRefusedServerClockUnknown_AndNothingIsKilled()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, 0), dryRun));
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal("server_clock_unknown", (string?)json["reason"]);
+            }
+
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
+
+    [Fact]
+    public async Task ALoginTimeThatIsNotATime_AndABadSessionId_AreRefusedBeforeTheGate()
+    {
+        await RunAsync(Without.KillSwitch, async c =>
+        {
+            /* The switch is off, yet the answer is the argument's own refusal: a call that cannot do anything is refused before the gate. */
+            var json = Parse(await KillAsync(c, 55, "last tuesday", dryRun: false));
+            Assert.Equal("bad_login_time", (string?)json["reason"]);
+            var bad = Parse(await KillAsync(c, 0, "2026-10-19T12:00:00Z", dryRun: false));
+            Assert.Equal("bad_session_id", (string?)bad["reason"]);
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
+
+    [Fact]
+    public async Task AKillOnAPostgreSqlTarget_IsRefusedPostgresTarget_NamesPostgreSql_AndNothingReachesAnyTarget()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            await SeedClockAsync(c);
+            foreach (var dryRun in new[] { true, false })
+            {
+                var answer = await KillAsync(c, victim.SessionId, UtcText(victim, 0), dryRun, server: "srv-8");
+                var json = Parse(answer);
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal("postgres_target", (string?)json["reason"]);
+                var message = (string?)json["message"];
+                Assert.Contains("PostgreSQL", message, StringComparison.Ordinal);
+                Assert.Contains("NOT built", message, StringComparison.Ordinal);
+                Assert.Contains("nothing was run", message, StringComparison.Ordinal);
+            }
+
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("2", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'postgres_target'", c.Ct));
+        });
+    }
+
+    private static async Task AssertKillRefusedAsync(Without without, string reason)
+    {
+        await RunAsync(without, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            foreach (var dryRun in new[] { true, false })
+            {
+                var answer = await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun);
+                var json = Parse(answer);
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal(reason, (string?)json["reason"]);
+                AssertNoSecret(c, answer);
+            }
+
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
+
+    [Fact]
+    public Task WithoutTheKillSwitch_TheCallIsRefused_AndTheSessionLives() => AssertKillRefusedAsync(Without.KillSwitch, "server_action_off");
+
+    [Fact]
+    public Task WithoutALevelThreeRoute_TheKillIsRefused_AndTheSessionLives() => AssertKillRefusedAsync(Without.Level, "not_level_3");
+
+    [Fact]
+    public Task WithoutTheCredentialSlot_TheKillIsRefused_AndTheSessionLives() => AssertKillRefusedAsync(Without.CredentialSlot, "no_remediation_credential");
+
+    [Fact]
+    public async Task AKillByALoginWithoutAlterAnyConnection_IsRefusedKillPermissionDenied_AndTheSessionLives()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            await using (var admin = await OpenAsync(c.Sql.Admin(), c.Ct))
+                await ExecAsync(admin, $"REVOKE ALTER ANY CONNECTION FROM [{c.Sql.Login}];", c.Ct);
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun));
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal("kill_permission_denied", (string?)json["reason"]);
+            }
+
+            Assert.True(await SessionAliveAsync(c, victim));
+        });
+    }
+
+    /// <summary>
+    /// The round trip the login time takes: a head blocker is captured by the REAL blocking capture, stored, read back by the REAL
+    /// <c>get_blocking</c>, and the UTC <c>blocking_login_time</c> it returns is what the kill takes. A sign-in time that did not survive any step
+    /// (the zone shift, the engine's <c>datetime</c> steps) would come back <c>session_reused</c>.
+    /// </summary>
+    [Fact]
+    public async Task TheLoginTimeGetBlockingReturns_KillsTheHeadBlocker_ItWasReadFrom()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var head = await OpenVictimAsync(c);
+            using var _ = head.Connection;
+            await ExecAsync(head.Connection, "BEGIN TRANSACTION; SELECT b FROM dbo.t WITH (HOLDLOCK, ROWLOCK) WHERE a = 1;", c.Ct);
+            await using var waiter = await OpenAsync(c.Sql.Admin(c.Sql.Database), c.Ct);
+            var waiting = ExecAsync(waiter, "UPDATE dbo.t SET b = 9 WHERE a = 1;", c.Ct);
+            try
+            {
+                var context = new CollectorContext { ServerId = 7, ServerName = "srv-7", CollectionTime = DateTime.UtcNow, Deltas = null!, State = CollectorContext.NoState };
+                var query = DmvBlockingSnapshotCollector.Instance.BuildQuery(context);
+                DmvBlockingSnapshotCollector.Row? captured = null;
+                for (var i = 0; i < 60 && captured is null; i++)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), c.Ct);
+                    await using var connection = await OpenAsync(c.Sql.Admin(), c.Ct);
+                    await using var command = SqlServerTargetProvider.Instance.CreateCommand(query, connection, 60);
+                    await using var reader = await command.ExecuteReaderAsync(c.Ct);
+                    var rows = await DmvBlockingSnapshotCollector.Instance.ReadAsync(reader, context, c.Ct);
+                    var match = rows.Where(r => r.BlockingSpid == head.SessionId).ToList();
+                    if (match.Count > 0)
+                        captured = match[0];
+                }
+
+                Assert.True(captured is not null, "the capture never saw the head blocker");
+                Assert.Equal(head.LoginLocal, captured!.Value.BlockingLoginTime);
+
+                var seenAt = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified);
+                await using (var insert = new NpgsqlCommand(
+                    "INSERT INTO collect.dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, "
+                    + "wait_time_ms, lock_mode, blocking_status, blocked_sql_text, blocking_sql_text, contentious_object, blocking_login_time) "
+                    + "VALUES ($1, $2, 7, 'srv-7', $2, $3, $4, $5, $6, '', 'sleeping', '', '', '', $7)", c.Connection) { CommandTimeout = 60 })
+                {
+                    insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DateTime.UtcNow.Ticks, NpgsqlDbType = NpgsqlDbType.Bigint });
+                    insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = seenAt, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = captured.Value.DatabaseName ?? c.Sql.Database, NpgsqlDbType = NpgsqlDbType.Text });
+                    insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = captured.Value.BlockedSpid, NpgsqlDbType = NpgsqlDbType.Integer });
+                    insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = captured.Value.BlockingSpid, NpgsqlDbType = NpgsqlDbType.Integer });
+                    insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = captured.Value.WaitTimeMs, NpgsqlDbType = NpgsqlDbType.Bigint });
+                    insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(captured.Value.BlockingLoginTime!.Value, DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    await insert.ExecuteNonQueryAsync(c.Ct);
+                }
+
+                using var blocking = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlocking(c.Source, "srv-7", 1, 50, null, false, null, DatabaseFilter.All, 150, cancellationToken: c.Ct));
+                var read = blocking.RootElement.GetProperty("events").EnumerateArray()
+                    .Select(e => e.GetProperty("blocking_login_time").GetString()).First(t => t is not null)!;
+                Assert.Equal(UtcText(head, offset), read);
+
+                var dry = Parse(await KillAsync(c, head.SessionId, read, dryRun: true));
+                Assert.Equal("dry_run", (string?)dry["status"]);
+                var killed = Parse(await KillAsync(c, head.SessionId, read, dryRun: false));
+                Assert.Equal("done", (string?)killed["status"]);
+                await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync(head.Connection, "SELECT 1;", c.Ct));
+            }
+            finally
+            {
+                try
+                {
+                    await waiting;
+                }
+                catch (SqlException)
+                {
+                    /* The waiter's update ends when the head's lock goes, or when its own connection closes at the end of the test. */
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// The 120-byte question (#5632, step 12): a read-only transaction that holds a lock (<c>HOLDLOCK</c>) and writes nothing. The first transaction to
+    /// touch a database just created records 120 bytes of log even for a read; once warmed, a read-only transaction records none, in the scratch database
+    /// and in an existing one (<c>msdb</c>, read only, no object created). The kill sets no threshold, so a session with 0 bytes is the one with no work to
+    /// roll back, and this holds that the answer's <c>log_bytes_used</c> reads exactly that.
+    /// </summary>
+    [Fact]
+    public async Task AReadOnlyTransactionThatHoldsALock_ReadsZeroLogBytes_AfterTheDatabaseIsWarm_InTheScratchDatabaseAndInMsdb()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            /* Warm the scratch database: the first transaction there is the one that records the 120 bytes. */
+            await using (var warm = await OpenAsync(c.Sql.Admin(c.Sql.Database), c.Ct))
+                await ExecAsync(warm, "BEGIN TRANSACTION; SELECT b FROM dbo.t WITH (HOLDLOCK, ROWLOCK) WHERE a = 1; ROLLBACK;", c.Ct);
+
+            foreach (var (database, sql) in new[]
+            {
+                (c.Sql.Database, "BEGIN TRANSACTION; SELECT b FROM dbo.t WITH (HOLDLOCK, ROWLOCK) WHERE a = 1;"),
+                ("msdb", "BEGIN TRANSACTION; SELECT TOP (1) job_id FROM dbo.sysjobs WITH (HOLDLOCK);"),
+            })
+            {
+                var builder = new SqlConnectionStringBuilder(c.Sql.Admin(database).ConnectionString) { ConnectRetryCount = 0 };
+                await using var session = await OpenAsync(builder, c.Ct);
+                await ExecAsync(session, sql, c.Ct);
+                var id = Convert.ToInt32(await ScalarAsync(session, "SELECT @@SPID;", c.Ct), CultureInfo.InvariantCulture);
+                await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
+                var login = (DateTime)(await ScalarAsync(admin, $"SELECT login_time FROM sys.dm_exec_sessions WHERE session_id = {id};", c.Ct))!;
+                var answer = Parse(await KillAsync(c, id, login.AddMinutes(-offset).ToString("o", CultureInfo.InvariantCulture), dryRun: true));
+                Assert.Equal("dry_run", (string?)answer["status"]);
+                Assert.Equal(1, (int)answer["session"]!["open_transaction_count"]!);
+                var bytes = answer["session"]!["log_bytes_used"];
+                Assert.True(bytes is null || (long)bytes == 0, $"a warmed read-only transaction in {database} reported {bytes} log bytes");
+                Assert.Empty(answer["warnings"]!.AsArray());
+            }
+        });
+    }
+}
