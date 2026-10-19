@@ -147,6 +147,47 @@ public sealed class ViewerAutomationInvokeAndNamesTests
         Assert.Equal(new[] { "Example SQL 07", "Example SQL 08" }, names);
     }
 
+    [Fact]
+    public void InvokingANeedsAttentionRow_ReportsThatRowsServer()
+    {
+        var invoked = StaTestThread.Run(() =>
+        {
+            var rows = new InvokableItemsControl
+            {
+                ItemsSource = new[]
+                {
+                    new FleetRankedServer { ServerId = 4, DisplayName = "Example SQL 04", Reason = "CPU 97%" },
+                    new FleetRankedServer { ServerId = 5, DisplayName = "Example SQL 05", Reason = "Offline" }
+                }
+            };
+            var invoked = new List<int>();
+            rows.ItemInvoked += (_, e) => invoked.Add(((FleetRankedServer)e.Item).ServerId);
+
+            var window = new Window { Content = rows, Width = 300, Height = 300 };
+            window.Show();
+            Pump(window.Dispatcher);
+            var peers = new List<AutomationPeer>();
+            Walk(UIElementAutomationPeer.CreatePeerForElement(rows), peers);
+            var invokable = peers.Where(p => p.GetPattern(PatternInterface.Invoke) is not null).ToList();
+            ((IInvokeProvider)invokable[0].GetPattern(PatternInterface.Invoke)!).Invoke();
+            Pump(window.Dispatcher);
+            window.Close();
+            return invoked;
+        });
+
+        Assert.Equal(new[] { 4 }, invoked);
+    }
+
+    [Theory]
+    [InlineData("CPU 97%, Blocking 6", "Example SQL 04, needs attention: CPU 97%, Blocking 6")]
+    [InlineData("", "Example SQL 04, needs attention")]
+    public void ANeedsAttentionRow_IsNamedForTheServerAndWhyItNeedsAttention(string reason, string expected)
+    {
+        var row = new FleetRankedServer { DisplayName = "Example SQL 04", Reason = reason };
+
+        Assert.Equal(expected, row.AutomationName);
+    }
+
     [Theory]
     [InlineData(0, "")]
     [InlineData(1, "1 unread alert")]

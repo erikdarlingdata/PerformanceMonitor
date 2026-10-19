@@ -942,17 +942,30 @@
                                      when the fleet is healthy (toggled in code-behind). -->
                                 <TextBlock Text="Needs Attention" FontSize="12" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-                                <ItemsControl x:Name="FleetWorstServersList" ItemsSource="{Binding WorstServers}">
+                                <!-- #6138: each row answers Invoke (an automation client opens the tab as a click does), takes
+                                     the keyboard (Enter opens it) and is named for the server and why it needs attention. -->
+                                <ui:InvokableItemsControl x:Name="FleetWorstServersList" ItemsSource="{Binding WorstServers}"
+                                                          ItemInvoked="FleetWorstServersList_ItemInvoked">
+                                    <ItemsControl.ItemContainerStyle>
+                                        <Style TargetType="ContentPresenter">
+                                            <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName, Mode=OneTime}"/>
+                                        </Style>
+                                    </ItemsControl.ItemContainerStyle>
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
                                             <Border Cursor="Hand" Padding="2,3" Margin="0,1"
                                                     ToolTip="Open this server's tab"
-                                                    MouseLeftButtonUp="FleetWorstServer_Click">
+                                                    Focusable="True"
+                                                    MouseLeftButtonUp="FleetWorstServer_Click"
+                                                    KeyDown="FleetWorstServer_KeyDown">
                                                 <Border.Style>
                                                     <Style TargetType="Border">
                                                         <Setter Property="Background" Value="Transparent"/>
                                                         <Style.Triggers>
                                                             <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter Property="Background" Value="{DynamicResource ViewerHoverBrush}"/>
+                                                            </Trigger>
+                                                            <Trigger Property="IsKeyboardFocused" Value="True">
                                                                 <Setter Property="Background" Value="{DynamicResource ViewerHoverBrush}"/>
                                                             </Trigger>
                                                         </Style.Triggers>
@@ -973,7 +986,7 @@
                                             </Border>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                </ui:InvokableItemsControl>
                                 <!-- #2424: the overflow line is the way TO the overflow, not a report that it
                                      exists. It was a bare TextBlock: on a 57-server fleet it read "+52 more need
                                      attention" and the reporter's question was literally "where do I find these?".

@@ -1856,11 +1856,37 @@ public partial class MainWindow : Window
     {
         if (sender is FrameworkElement { DataContext: FleetRankedServer ranked })
         {
-            var server = _fleet.Find(ranked.ServerId);
-            if (server is not null)
-            {
-                OpenServerTab(server);
-            }
+            OpenWorstServer(ranked);
+        }
+    }
+
+    /// <summary>#6138: Enter on a focused Needs Attention row opens its server's tab, as the click does.</summary>
+    private void FleetWorstServer_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: FleetRankedServer ranked })
+        {
+            ServerListKeyboard.HandleKeyDown(e, () => OpenWorstServer(ranked));
+        }
+    }
+
+    /// <summary>#6138: the Invoke (default action) an automation client sends a Needs Attention row runs the same
+    /// <see cref="OpenWorstServer"/> the click and Enter run.</summary>
+    private void FleetWorstServersList_ItemInvoked(object? sender, ItemInvokedEventArgs e)
+    {
+        if (e.Item is FleetRankedServer ranked)
+        {
+            OpenWorstServer(ranked);
+        }
+    }
+
+    /// <summary>Opens (or focuses) the tab of the server a Needs Attention row ranks: the one body behind the row's click,
+    /// its Enter key and its Invoke.</summary>
+    private void OpenWorstServer(FleetRankedServer ranked)
+    {
+        var server = _fleet.Find(ranked.ServerId);
+        if (server is not null)
+        {
+            OpenServerTab(server);
         }
     }
 
