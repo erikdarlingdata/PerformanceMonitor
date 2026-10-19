@@ -70,8 +70,8 @@
                             <DataGridTextColumn Header="State" Binding="{Binding State}" Width="70"/>
                             <DataGridTextColumn Header="Alerts" Binding="{Binding AlertCount}" Width="50"/>
                             <DataGridTextColumn Header="Claimed by" Binding="{Binding ClaimedBy}" Width="100"/>
-                            <DataGridTextColumn Header="Lease" Binding="{Binding LeaseDisplay}" Width="50"/>
-                            <DataGridTextColumn Header="Claims" Binding="{Binding ClaimsDisplay}" Width="55"/>
+                            <DataGridTextColumn Header="Lease" Binding="{Binding LeaseDisplay}" SortMemberPath="LeaseUntilUtc" Width="50"/>
+                            <DataGridTextColumn Header="Claims" Binding="{Binding ClaimsDisplay}" SortMemberPath="ClaimCount" Width="55"/>
                             <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="120" SortMemberPath="ExpiresAtUtc"/>
                             <DataGridTextColumn Header="Verdict" Binding="{Binding Verdict}" Width="90"/>
                             <DataGridTextColumn Header="Practice" Binding="{Binding PracticeDisplay}" Width="60"/>

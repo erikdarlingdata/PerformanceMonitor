@@ -157,7 +157,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding StepDisplay}" Width="150">
+                    <DataGridTextColumn Binding="{Binding StepDisplay}" SortMemberPath="StepId" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StepDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -173,7 +173,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="90">
+                    <DataGridTextColumn Binding="{Binding DurationFormatted}" SortMemberPath="RunDurationSeconds" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -181,7 +181,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding RetriesDisplay}" Width="65">
+                    <DataGridTextColumn Binding="{Binding RetriesDisplay}" SortMemberPath="RetriesAttempted" Width="65">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RetriesDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -198,6 +198,13 @@
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding Message}" Width="*" MinWidth="200">
+                        <!-- #6086: the cell trims long text; the tooltip carries the whole message. -->
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                <Setter Property="ToolTip" Value="{Binding Message}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Message" Click="FilterButton_Click" Margin="0,0,4,0"/>

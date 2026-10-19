@@ -63,7 +63,7 @@
                 <DataGridTextColumn Header="Cases" Binding="{Binding Cases}" Width="60"/>
                 <DataGridTextColumn Header="Scored" Binding="{Binding Scored}" Width="60"/>
                 <DataGridTextColumn Header="Matched" Binding="{Binding Matched}" Width="70"/>
-                <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" Width="130"/>
+                <DataGridTextColumn Header="Score" Binding="{Binding ScoreDisplay}" SortMemberPath="Score.Percent" Width="130"/>
                 <DataGridTextColumn Header="No answer" Binding="{Binding Unscored}" Width="80"/>
                 <DataGridTextColumn Header="Missed step noted" Binding="{Binding MissedStepCases}" Width="120"/>
             </DataGrid.Columns>

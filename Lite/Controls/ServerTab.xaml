@@ -728,7 +728,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Execs" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" SortMemberPath="ExecutionDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Exec &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
@@ -745,7 +745,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" SortMemberPath="DurationDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Dur &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
@@ -762,7 +762,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><TextBlock Text="Base CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" SortMemberPath="CpuDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="CPU &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
@@ -779,7 +779,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Reads" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" SortMemberPath="ReadsDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Reads &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
@@ -967,7 +967,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Execs" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" SortMemberPath="ExecutionDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Exec &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ExecutionDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -977,7 +977,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Dur (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" SortMemberPath="DurationDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Dur &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding DurationDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -987,7 +987,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><TextBlock Text="Base CPU (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" SortMemberPath="CpuDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="CPU &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding CpuDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -997,7 +997,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Reads" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" SortMemberPath="ReadsDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Reads &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ReadsDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -1263,7 +1263,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Execs" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" SortMemberPath="ExecutionDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Exec &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ExecutionDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -1273,7 +1273,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Dur (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" SortMemberPath="DurationDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Dur &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding DurationDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -1283,7 +1283,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><TextBlock Text="Base CPU (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" SortMemberPath="CpuDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="CPU &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding CpuDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -1293,7 +1293,7 @@
                                     <DataGridTextColumn Binding="{Binding BaselineAvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
                                         <DataGridTextColumn.Header><TextBlock Text="Base Reads" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" SortMemberPath="ReadsDeltaPct" Width="80">
                                         <DataGridTextColumn.Header><TextBlock Text="Reads &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ReadsDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -2363,7 +2363,7 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Cap MB" Binding="{Binding MaxStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="% of Cap" Binding="{Binding PercentOfCapDisplay}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="% of Cap" Binding="{Binding PercentOfCapDisplay}" SortMemberPath="PercentOfCap" Width="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Binding="{Binding SizeBasedCleanupMode}" Width="130">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeBasedCleanupMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size Cleanup" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -2507,7 +2507,7 @@
                                 <DataGridTextColumn Binding="{Binding DeltaWaitingRequestsCount, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaWaitingRequestsCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="&#x0394; Waiting Reqs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding IntervalDisplay}" Width="150">
+                                <DataGridTextColumn Binding="{Binding IntervalDisplay}" SortMemberPath="SampleIntervalSeconds" Width="150">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IntervalDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Interval (sec)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding WaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
@@ -2546,7 +2546,7 @@
                                 <DataGridTextColumn Binding="{Binding DeltaSpins, StringFormat=N0, TargetNullValue=—}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaSpins" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="&#x0394; Spins" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding IntervalDisplay}" Width="150">
+                                <DataGridTextColumn Binding="{Binding IntervalDisplay}" SortMemberPath="SampleIntervalSeconds" Width="150">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IntervalDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Interval (sec)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding SpinsPerCollision, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120">

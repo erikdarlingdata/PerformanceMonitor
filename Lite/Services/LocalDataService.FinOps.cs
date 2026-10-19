@@ -390,6 +390,10 @@ public class ServerPropertyRow
     public int? IdleDbCount { get; set; }
     public string? ProvisioningStatus { get; set; }
 
+    /// <summary>The uptime in seconds, the sort key of the Uptime column (#6086): <see cref="UptimeDisplay"/> is text, which sorts
+    /// "10d" before "2d". Null when the start time is unknown.</summary>
+    public double? UptimeSeconds => SqlServerStartTime is { } start ? (DateTime.Now - start).TotalSeconds : null;
+
     public string UptimeDisplay
     {
         get

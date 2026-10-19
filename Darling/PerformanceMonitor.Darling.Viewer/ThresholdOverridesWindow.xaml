@@ -43,11 +43,11 @@
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseText}" Width="130"/>
                     <DataGridTextColumn Header="Key" Binding="{Binding Key}" Width="*"/>
-                    <DataGridTextColumn Header="Value" Binding="{Binding ValueText}" Width="70"/>
-                    <DataGridTextColumn Header="Global value" Binding="{Binding GlobalValueText}" Width="90"/>
+                    <DataGridTextColumn Header="Value" Binding="{Binding ValueText}" SortMemberPath="Row.Value" Width="70"/>
+                    <DataGridTextColumn Header="Global value" Binding="{Binding GlobalValueText}" SortMemberPath="Row.GlobalValue" Width="90"/>
                     <DataGridTextColumn Header="Set by" Binding="{Binding SetBy}" Width="120"/>
                     <DataGridTextColumn Header="Request" Binding="{Binding RequestText}" Width="80"/>
-                    <DataGridTextColumn Header="Updated" Binding="{Binding UpdatedText}" Width="140"/>
+                    <DataGridTextColumn Header="Updated" Binding="{Binding UpdatedText}" SortMemberPath="Row.UpdatedAt" Width="140"/>
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="NoOverridesMessage"
