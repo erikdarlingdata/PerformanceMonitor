@@ -11,6 +11,8 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -107,17 +109,42 @@ public sealed partial class QueryStoreLoadTestHarnessTests
             ("Darling/PerformanceMonitor.Darling.Storage/QueryStoreComposeStamp.cs", "Query Store compose rollup"),
             ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "Store object convergence"),
         ];
-        foreach (var (file, job) in sources)
+        /* The line each template becomes is the one the service's own file logger writes, read back from the log file.
+           A hand-built line had a "[INF]" level the logger never writes: the real one is padded to five characters
+           ("[INFO ]"), which a \[\w+\] pattern refuses. */
+        var logDirectory = Path.Combine(Path.GetTempPath(), "darling-5794-jobs-" + Guid.NewGuid().ToString("N"));
+        try
         {
-            var source = File.ReadAllText(Path.Combine(RepoRoot(), file));
-            var templates = Regex.Matches(source, @"LogInformation\(\s*""(?<t>" + Regex.Escape(job) + @": [^""]*\{ElapsedMs\} ms)""");
-            Assert.True(templates.Count == 1, $"{file}: expected one LogInformation(\"{job}: ... {{ElapsedMs}} ms\"), found {templates.Count}.");
+            string logFile;
+            using (var provider = new DarlingFileLoggerProvider(logDirectory))
+            {
+                var logger = provider.CreateLogger("PerformanceMonitor.Darling.Test");
+                foreach (var (file, job) in sources)
+                {
+                    var source = File.ReadAllText(Path.Combine(RepoRoot(), file));
+                    var templates = Regex.Matches(source, @"LogInformation\(\s*""(?<t>" + Regex.Escape(job) + @": [^""]*\{ElapsedMs\} ms)""");
+                    Assert.True(templates.Count == 1, $"{file}: expected one LogInformation(\"{job}: ... {{ElapsedMs}} ms\"), found {templates.Count}.");
+                    logger.Log(LogLevel.Information, "{Line}", Regex.Replace(templates[0].Groups["t"].Value, @"\{\w+\}", "1"));
+                }
 
-            var line = "2026-10-14 09:00:00.000 [INF] [X] " + Regex.Replace(templates[0].Groups["t"].Value, @"\{\w+\}", "1");
-            var match = pattern.Match(line);
-            Assert.True(match.Success, $"measure.ps1's Jobs pattern does not match the {job} line: {line}");
-            Assert.Equal(job, match.Groups["job"].Value);
-            Assert.Equal("1", match.Groups["ms"].Value);
+                provider.Flush();
+                logFile = provider.CurrentLogFile();
+            }
+
+            var written = File.ReadAllLines(logFile);
+            foreach (var (_, job) in sources)
+            {
+                var line = Assert.Single(written, l => l.Contains(job, StringComparison.Ordinal));
+                Assert.Contains("[INFO ]", line, StringComparison.Ordinal);
+                var match = pattern.Match(line);
+                Assert.True(match.Success, $"measure.ps1's Jobs pattern does not match the {job} line the service's logger wrote: {line}");
+                Assert.Equal(job, match.Groups["job"].Value);
+                Assert.Equal("1", match.Groups["ms"].Value);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(logDirectory, recursive: true); } catch (IOException) { /* best-effort */ } catch (UnauthorizedAccessException) { /* best-effort */ }
         }
     }
 
