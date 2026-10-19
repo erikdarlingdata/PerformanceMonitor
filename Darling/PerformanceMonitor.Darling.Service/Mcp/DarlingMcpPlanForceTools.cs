@@ -110,7 +110,7 @@ public sealed class DarlingMcpPlanForceTools
     [McpServerTool(Name = "kill_session"), Description(
         "SQL Server only. PostgreSQL kill is NOT built. Agent arm: kills ONE session on the monitored SQL Server, after checking in the same batch that it is still the session you named (the same session_id and the same login_time). Dry run by default: runs that check, returns what the server says about the session, and kills nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's kill_session switch and remediation login (with ALTER ANY CONNECTION, which can kill any session on that server); ships off. " +
         "<<GUIDE>>" +
-        "Take session_id and login_time from get_blocking (blocking_session_id and blocking_login_time, UTC, pass it back as read). SQL Server reuses a session id after a disconnect, so a kill without the login_time check could hit a new, unrelated session. The check and the KILL run in one batch but are not atomic: a session can end and its id be reused between them. " +
+        "Take session_id and login_time from get_blocking (blocking_session_id and blocking_login_time, UTC, pass it back unchanged). SQL Server reuses a session id after a disconnect, so a kill without the login_time check could hit a new, unrelated session. The check and the KILL run in one batch but are not atomic: a session can end and its id be reused between them. " +
         "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
         "The answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. There is no undo. " +
         "Refusals: own_session, session_gone, session_reused (the id now belongs to another session; its login_time is returned), not_user_session, kill_permission_denied (the login lacks ALTER ANY CONNECTION), bad_session_id, bad_login_time, server_clock_unknown (no clock collected for the server yet), kill_not_built_on_platform (Azure SQL Database) and postgres_target. " +
@@ -383,7 +383,7 @@ public sealed class DarlingMcpPlanForceTools
             if (!TryReadLoginTime(login_time, out var loginUtc))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, BadLoginTime,
-                    "login_time is the blocking_login_time get_blocking returns (ISO 8601, UTC), passed back as it was read. Nothing was run.", ct);
+                    "login_time is the blocking_login_time get_blocking returns (ISO 8601, UTC), passed back unchanged. Nothing was run.", ct);
             }
 
             /* 2: SQL Server only. PostgreSQL kill (pg_terminate_backend) is NOT built. */
