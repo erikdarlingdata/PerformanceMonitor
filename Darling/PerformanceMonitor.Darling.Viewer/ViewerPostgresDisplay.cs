@@ -46,6 +46,24 @@ internal static class PgDisplay
     /// reads as "nothing here yet" and 0 reads as a measurement.</summary>
     internal const string NotApplicableText = "—";
 
+    /* #6104: the sort keys. Every size, duration, age, count and percent column of the PostgreSQL grids is
+       text ("9 MB", "1.2 GB", "1,204"), and a header click on text orders by characters. Each display row
+       therefore carries the number its text was made from, under the text member's name plus "Sort", and the
+       column's SortMemberPath points at it. The store's -1 not-applicable sentinel and every blank / "not
+       tracked" / "unknown" cell become null, in exactly the cases the text shows the dash or words, so a
+       missing measurement never sorts as a zero or as a negative number. */
+
+    /// <summary>The number behind a <see cref="Count"/> / <see cref="Bytes"/> / <see cref="Milliseconds"/> /
+    /// <see cref="Blocks"/> cell: the value itself, or null for the not-applicable sentinel.</summary>
+    internal static long? Raw(long value) => value <= NotApplicable ? null : value;
+
+    /// <summary>The number behind a <see cref="Percent"/> cell, or null where the cell shows the dash.</summary>
+    internal static double? PercentValue(long part, long total) => total <= 0 ? null : part * 100.0 / total;
+
+    /// <summary>The number behind a <see cref="ByteDelta"/> cell (signed), or null where the cell shows the dash.</summary>
+    internal static long? ByteDeltaRaw(long from, long to) =>
+        from <= NotApplicable || to <= NotApplicable ? null : to - from;
+
     internal static string Bytes(long value)
     {
         if (value <= NotApplicable)
@@ -145,6 +163,12 @@ internal static class PgDisplay
         public DateTime? MeasuredAtUtc { get; init; }
         public string Holder { get; init; } = "";
         public string Detail { get; init; } = "";
+        /// <summary>The number <see cref="XminAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? XminAgeSort { get; init; }
+        /// <summary>The number <see cref="PeakXminAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakXminAgeSort { get; init; }
+        /// <summary>The number <see cref="WinnerShare"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? WinnerShareSort { get; init; }
     }
 
     internal static XminRow Xmin(DarlingPgXminReader.PgXminRow row) => new()
@@ -163,6 +187,9 @@ internal static class PgDisplay
         MeasuredAtUtc = row.MeasuredAt,
         Holder = row.Holder ?? "",
         Detail = row.Detail ?? "",
+        XminAgeSort = Raw(row.XminAge),
+        PeakXminAgeSort = Raw(row.PeakXminAge),
+        WinnerShareSort = row.Samples <= 0 ? null : row.SamplesAsWinner / (double)row.Samples,
     };
 
     internal sealed class AutovacuumRow
@@ -199,6 +226,30 @@ internal static class PgDisplay
         public string MeasuredAt { get; init; } = "";
         /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
         public DateTime? MeasuredAtUtc { get; init; }
+        /// <summary>The number <see cref="DeadTuples"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? DeadTuplesSort { get; init; }
+        /// <summary>The number <see cref="VacuumThreshold"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? VacuumThresholdSort { get; init; }
+        /// <summary>The number <see cref="ThresholdRatio"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? ThresholdRatioSort { get; init; }
+        /// <summary>The number <see cref="DeadTupleTrend"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? DeadTupleTrendSort { get; init; }
+        /// <summary>The number <see cref="InsertsSinceVacuum"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? InsertsSinceVacuumSort { get; init; }
+        /// <summary>The number <see cref="InsertVacuumThreshold"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? InsertVacuumThresholdSort { get; init; }
+        /// <summary>The number <see cref="AutovacuumCount"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? AutovacuumCountSort { get; init; }
+        /// <summary>The number <see cref="LiveTuples"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? LiveTuplesSort { get; init; }
+        /// <summary>The number <see cref="DeadTuplePct"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? DeadTuplePctSort { get; init; }
+        /// <summary>The number <see cref="ModsSinceAnalyze"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? ModsSinceAnalyzeSort { get; init; }
+        /// <summary>The number <see cref="AnalyzeThreshold"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? AnalyzeThresholdSort { get; init; }
+        /// <summary>The number <see cref="TotalSize"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TotalSizeSort { get; init; }
     }
 
     internal static AutovacuumRow Autovacuum(DarlingPgAutovacuumReader.PgAutovacuumRow row) => new()
@@ -250,6 +301,18 @@ internal static class PgDisplay
         TotalSize = Bytes(row.TotalBytes),
         MeasuredAt = Timestamp(row.MeasuredAt),
         MeasuredAtUtc = row.MeasuredAt,
+        DeadTuplesSort = Raw(row.DeadTuples),
+        VacuumThresholdSort = Raw(row.VacuumThreshold),
+        ThresholdRatioSort = row.VacuumThreshold <= 0 ? null : row.DeadTuples / (double)row.VacuumThreshold,
+        DeadTupleTrendSort = row.DeadTuples - row.FirstDeadTuples,
+        InsertsSinceVacuumSort = Raw(row.InsertsSinceVacuum),
+        InsertVacuumThresholdSort = Raw(row.InsertVacuumThreshold),
+        AutovacuumCountSort = Raw(row.AutovacuumCount),
+        LiveTuplesSort = Raw(row.LiveTuples),
+        DeadTuplePctSort = PercentValue(row.DeadTuples, row.LiveTuples + row.DeadTuples),
+        ModsSinceAnalyzeSort = Raw(row.ModsSinceAnalyze),
+        AnalyzeThresholdSort = Raw(row.AnalyzeThreshold),
+        TotalSizeSort = Raw(row.TotalBytes),
     };
 
     internal sealed class WraparoundRow
@@ -271,6 +334,22 @@ internal static class PgDisplay
         public string MeasuredAt { get; init; } = "";
         /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
         public DateTime? MeasuredAtUtc { get; init; }
+        /// <summary>The number <see cref="FrozenXidAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? FrozenXidAgeSort { get; init; }
+        /// <summary>The number <see cref="XidsRemaining"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? XidsRemainingSort { get; init; }
+        /// <summary>The number <see cref="MinMultiXidAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? MinMultiXidAgeSort { get; init; }
+        /// <summary>The number <see cref="MultiXidsRemaining"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? MultiXidsRemainingSort { get; init; }
+        /// <summary>The number <see cref="FreezeMaxAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? FreezeMaxAgeSort { get; init; }
+        /// <summary>The number <see cref="MultixactFreezeMaxAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? MultixactFreezeMaxAgeSort { get; init; }
+        /// <summary>The number <see cref="WindowPeakFrozenXidAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? WindowPeakFrozenXidAgeSort { get; init; }
+        /// <summary>The number <see cref="WindowPeakMinMultiXidAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? WindowPeakMinMultiXidAgeSort { get; init; }
     }
 
     internal static WraparoundRow Wraparound(DarlingPgWraparoundReader.PgWraparoundRow row) => new()
@@ -299,6 +378,14 @@ internal static class PgDisplay
         ConnectionsAllowed = row.AllowsConnections ? "allowed" : "NOT ALLOWED",
         MeasuredAt = SnapshotTime(row.MeasuredAt),
         MeasuredAtUtc = row.MeasuredAt,
+        FrozenXidAgeSort = Raw(row.FrozenXidAge),
+        XidsRemainingSort = Raw(row.XidsRemaining),
+        MinMultiXidAgeSort = Raw(row.MinMultiXidAge),
+        MultiXidsRemainingSort = Raw(row.MultiXidsRemaining),
+        FreezeMaxAgeSort = Raw(row.AutovacuumFreezeMaxAge),
+        MultixactFreezeMaxAgeSort = Raw(row.AutovacuumMultixactFreezeMaxAge),
+        WindowPeakFrozenXidAgeSort = Raw(row.WindowPeakFrozenXidAge),
+        WindowPeakMinMultiXidAgeSort = Raw(row.WindowPeakMinMultiXidAge),
     };
 
     // ── Waits, I/O, replication ──────────────────────────────────────────────────────────────────
@@ -310,6 +397,8 @@ internal static class PgDisplay
         public string TotalWaits { get; init; } = "";
         public double TotalWaitTimeMs { get; init; }
         public double AvgWaitTimeMs { get; init; }
+        /// <summary>The number <see cref="TotalWaits"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TotalWaitsSort { get; init; }
     }
 
     internal static WaitRow Wait(DarlingPgWaitReader.PgWaitRow row) => new()
@@ -319,6 +408,7 @@ internal static class PgDisplay
         TotalWaits = Count(row.TotalWaits),
         TotalWaitTimeMs = Math.Round(row.TotalWaitTimeMs, 1),
         AvgWaitTimeMs = Math.Round(row.AvgWaitTimeMs, 3),
+        TotalWaitsSort = Raw(row.TotalWaits),
     };
 
     internal sealed class IoRow
@@ -372,6 +462,34 @@ internal static class PgDisplay
         public string StatsReset { get; init; } = "";
         /// <summary>The UTC instant <see cref="StatsReset"/> is formatted from. The column sorts by it, not by that text.</summary>
         public DateTime? StatsResetUtc { get; init; }
+        /// <summary>The number <see cref="Reads"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? ReadsSort { get; init; }
+        /// <summary>The number <see cref="AvgReadMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? AvgReadMsSort { get; init; }
+        /// <summary>The number <see cref="Hits"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? HitsSort { get; init; }
+        /// <summary>The number <see cref="HitPct"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? HitPctSort { get; init; }
+        /// <summary>The number <see cref="PctOfTotalReadTime"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? PctOfTotalReadTimeSort { get; init; }
+        /// <summary>The number <see cref="Extends"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? ExtendsSort { get; init; }
+        /// <summary>The number <see cref="ExtendTimeMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? ExtendTimeMsSort { get; init; }
+        /// <summary>The number <see cref="Evictions"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? EvictionsSort { get; init; }
+        /// <summary>The number <see cref="Reuses"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? ReusesSort { get; init; }
+        /// <summary>The number <see cref="Writes"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? WritesSort { get; init; }
+        /// <summary>The number <see cref="WriteTimeMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? WriteTimeMsSort { get; init; }
+        /// <summary>The number <see cref="OpSize"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? OpSizeSort { get; init; }
+        /// <summary>The number <see cref="ReadVolume"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? ReadVolumeSort { get; init; }
+        /// <summary>The number <see cref="WriteVolume"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? WriteVolumeSort { get; init; }
     }
 
     /// <summary>
@@ -428,6 +546,20 @@ internal static class PgDisplay
                 : "not measured"),
         StatsReset = Timestamp(row.StatsReset),
         StatsResetUtc = row.StatsReset,
+        ReadsSort = Raw(row.Reads),
+        AvgReadMsSort = row.Reads > 0 ? row.ReadTimeMs / row.Reads : null,
+        HitsSort = Raw(row.Hits),
+        HitPctSort = PercentValue(row.Hits, row.Hits + row.Reads),
+        PctOfTotalReadTimeSort = totalReadTimeMs > 0 ? row.ReadTimeMs / totalReadTimeMs * 100 : null,
+        ExtendsSort = Raw(row.Extends),
+        ExtendTimeMsSort = Math.Round(row.ExtendTimeMs, 1),
+        EvictionsSort = Raw(row.Evictions),
+        ReusesSort = Raw(row.Reuses),
+        WritesSort = row.WriteCountersTracked ? Raw(row.Writes) : null,
+        WriteTimeMsSort = row.WriteCountersTracked ? Math.Round(row.WriteTimeMs, 1) : null,
+        OpSizeSort = row.ByteCountersTracked ? null : Raw(row.OpBytes),
+        ReadVolumeSort = row.ByteCountersTracked ? Raw((long)row.ReadBytes) : (row.OpBytes > 0 ? Raw(row.Reads * row.OpBytes) : null),
+        WriteVolumeSort = row.ByteCountersTracked ? Raw((long)row.WriteBytes) : (row.OpBytes > 0 && row.WriteCountersTracked ? Raw(row.Writes * row.OpBytes) : null),
     };
 
     internal sealed class SlotRow
@@ -460,6 +592,16 @@ internal static class PgDisplay
         public DateTime? MeasuredAtUtc { get; init; }
         public bool IsInvalidated { get; init; }
         public bool IsInactive { get; init; }
+        /// <summary>The number <see cref="RetainedWal"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? RetainedWalSort { get; init; }
+        /// <summary>The number <see cref="RetainedWalTrend"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? RetainedWalTrendSort { get; init; }
+        /// <summary>The number <see cref="SafeWalSize"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? SafeWalSizeSort { get; init; }
+        /// <summary>The number <see cref="XminAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? XminAgeSort { get; init; }
+        /// <summary>The number <see cref="CatalogXminAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? CatalogXminAgeSort { get; init; }
     }
 
     internal static SlotRow Slot(DarlingPgSlotReader.PgSlotRow row) => new()
@@ -489,6 +631,11 @@ internal static class PgDisplay
                         || row.Conflicting
                         || string.Equals(row.WalStatus, "lost", StringComparison.OrdinalIgnoreCase),
         IsInactive = !row.IsActive,
+        RetainedWalSort = Raw(row.RetainedWalBytes),
+        RetainedWalTrendSort = ByteDeltaRaw(row.FirstRetainedWalBytes, row.RetainedWalBytes),
+        SafeWalSizeSort = Raw(row.SafeWalSizeBytes),
+        XminAgeSort = Raw(row.XminAge),
+        CatalogXminAgeSort = Raw(row.CatalogXminAge),
     };
 
     // ── Activity ─────────────────────────────────────────────────────────────────────────────────
@@ -518,6 +665,16 @@ internal static class PgDisplay
         public string RootQuery { get; init; } = "";
         public string WorstVictimQuery { get; init; } = "";
         public string Caveats { get; init; } = "";
+        /// <summary>The number <see cref="RootBackendId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? RootBackendIdSort { get; init; }
+        /// <summary>The number <see cref="Depth"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? DepthSort { get; init; }
+        /// <summary>The number <see cref="WorstVictimWait"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? WorstVictimWaitSort { get; init; }
+        /// <summary>The number <see cref="RootXactDuration"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? RootXactDurationSort { get; init; }
+        /// <summary>The number <see cref="SamplesAsRoot"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? SamplesAsRootSort { get; init; }
     }
 
     internal static ChainRow Chain(DarlingPgBlockingReader.PgBlockingChainRow row)
@@ -559,6 +716,11 @@ internal static class PgDisplay
             RootQuery = row.RootQuery ?? "",
             WorstVictimQuery = row.WorstVictimQuery ?? "",
             Caveats = string.Join("; ", caveats),
+            RootBackendIdSort = row.RootBackendId == 0 ? null : row.RootBackendId,
+            DepthSort = row.MaxDepth,
+            WorstVictimWaitSort = Raw(row.WorstVictimWaitMs),
+            RootXactDurationSort = Raw(row.RootXactDurationMs),
+            SamplesAsRootSort = row.SamplesAsRoot,
         };
     }
 
@@ -614,6 +776,28 @@ internal static class PgDisplay
         public string PeakMemory { get; init; } = "";
         public string WalWritten { get; init; } = "";
         public string QueryText { get; init; } = "";
+        /// <summary>The number <see cref="QueryId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? QueryIdSort { get; init; }
+        /// <summary>The number <see cref="DatabaseId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? DatabaseIdSort { get; init; }
+        /// <summary>The number <see cref="Calls"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? CallsSort { get; init; }
+        /// <summary>The number <see cref="TotalExecTimeMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TotalExecTimeMsSort { get; init; }
+        /// <summary>The number <see cref="AvgExecTimeMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? AvgExecTimeMsSort { get; init; }
+        /// <summary>The number <see cref="RowsReturned"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? RowsReturnedSort { get; init; }
+        /// <summary>The number <see cref="CacheHitPct"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? CacheHitPctSort { get; init; }
+        /// <summary>The number <see cref="TempRead"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TempReadSort { get; init; }
+        /// <summary>The number <see cref="TempWritten"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TempWrittenSort { get; init; }
+        /// <summary>The number <see cref="PeakMemory"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakMemorySort { get; init; }
+        /// <summary>The number <see cref="WalWritten"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? WalWrittenSort { get; init; }
     }
 
     internal static StatementRow Statement(DarlingPgStatementReader.PgStatementRow row) => new()
@@ -650,6 +834,17 @@ internal static class PgDisplay
         /* Null is "no text captured for this queryid yet" — text refreshes hourly, and a major-version
            upgrade re-keys every queryid — which is a different statement from an empty query. */
         QueryText = row.QueryText ?? "(statement text not captured yet)",
+        QueryIdSort = row.QueryId,
+        DatabaseIdSort = row.DatabaseId,
+        CallsSort = Raw(row.Calls),
+        TotalExecTimeMsSort = Raw(row.TotalExecTimeMs),
+        AvgExecTimeMsSort = row.Calls <= 0 ? null : row.TotalExecTimeMs / (double)row.Calls,
+        RowsReturnedSort = Raw(row.RowsReturned),
+        CacheHitPctSort = row.OrcacheBlocksHit is { } orcacheSort && row.StorageBlocksRead is { } storageSort ? PercentValue(row.SharedBlocksHit + orcacheSort, row.SharedBlocksHit + orcacheSort + row.SharedBlocksRead + storageSort) : null,
+        TempReadSort = Raw(row.TempBlocksRead),
+        TempWrittenSort = Raw(row.TempBlocksWritten),
+        PeakMemorySort = row.MaxPeakMemBytes is { } peakSort ? Raw(peakSort) : null,
+        WalWrittenSort = Raw(row.WalBytes),
     };
 
     internal sealed class DatabaseRow
@@ -676,6 +871,22 @@ internal static class PgDisplay
         public DateTime? StatsResetUtc { get; init; }
 
         public string Caveats { get; init; } = "";
+        /// <summary>The number <see cref="TempFiles"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TempFilesSort { get; init; }
+        /// <summary>The number <see cref="TempBytes"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TempBytesSort { get; init; }
+        /// <summary>The number <see cref="Deadlocks"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? DeadlocksSort { get; init; }
+        /// <summary>The number <see cref="CacheHitPct"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? CacheHitPctSort { get; init; }
+        /// <summary>The number <see cref="XactCommit"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? XactCommitSort { get; init; }
+        /// <summary>The number <see cref="XactRollback"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? XactRollbackSort { get; init; }
+        /// <summary>The number <see cref="RollbackPct"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? RollbackPctSort { get; init; }
+        /// <summary>The number <see cref="PeakNumbackends"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakNumbackendsSort { get; init; }
     }
 
     internal static DatabaseRow Database(DarlingPgDatabaseReader.PgDatabaseRow row)
@@ -707,6 +918,14 @@ internal static class PgDisplay
             StatsReset = Timestamp(row.StatsReset),
             StatsResetUtc = row.StatsReset,
             Caveats = string.Join("; ", caveats),
+            TempFilesSort = Raw(row.TempFiles),
+            TempBytesSort = Raw(row.TempBytes),
+            DeadlocksSort = Raw(row.Deadlocks),
+            CacheHitPctSort = PercentValue(row.BlksHit, row.BlksHit + row.BlksRead),
+            XactCommitSort = Raw(row.XactCommit),
+            XactRollbackSort = Raw(row.XactRollback),
+            RollbackPctSort = PercentValue(row.XactRollback, row.XactCommit + row.XactRollback),
+            PeakNumbackendsSort = row.PeakNumbackends is { } backendsSort ? Raw(backendsSort) : null,
         };
     }
 
@@ -746,6 +965,20 @@ internal static class PgDisplay
         /// <summary>Only ever true for an estimate that was PUBLISHED - a suppressed row has no percentage
         /// to be high, and painting it red would assert the very thing the suppression denies.</summary>
         public bool IsHighBloat { get; init; }
+        /// <summary>The number <see cref="HeapSize"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? HeapSizeSort { get; init; }
+        /// <summary>The number <see cref="BloatEstimate"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? BloatEstimateSort { get; init; }
+        /// <summary>The number <see cref="BloatPctEstimate"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? BloatPctEstimateSort { get; init; }
+        /// <summary>The number <see cref="DeadTuplePct"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? DeadTuplePctSort { get; init; }
+        /// <summary>The number <see cref="ToastSize"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? ToastSizeSort { get; init; }
+        /// <summary>The number <see cref="IndexSize"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? IndexSizeSort { get; init; }
+        /// <summary>The number <see cref="HeapGrowth"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? HeapGrowthSort { get; init; }
     }
 
     /// <summary>
@@ -790,6 +1023,13 @@ internal static class PgDisplay
             Confidence = confidence,
             EstimateSuppressed = suppressed,
             IsHighBloat = !suppressed && row.BloatPctEstimate >= 50m,
+            HeapSizeSort = Raw(row.HeapBytes),
+            BloatEstimateSort = suppressed ? null : Raw(row.BloatBytesEstimate),
+            BloatPctEstimateSort = suppressed ? null : (double)row.BloatPctEstimate,
+            DeadTuplePctSort = row.LiveTuples < 0 ? null : PercentValue(row.DeadTuples, row.LiveTuples + row.DeadTuples),
+            ToastSizeSort = Raw(row.ToastBytes),
+            IndexSizeSort = Raw(row.IndexBytes),
+            HeapGrowthSort = ByteDeltaRaw(row.FirstHeapBytes, row.HeapBytes),
         };
     }
 
@@ -835,6 +1075,14 @@ internal static class PgDisplay
         /// <summary>Unscanned AND unblocked AND watched long enough - all three, so the amber never lands
         /// on a constraint index or on one we have only just met.</summary>
         public bool IsUnscanned { get; init; }
+        /// <summary>The number <see cref="IndexSize"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? IndexSizeSort { get; init; }
+        /// <summary>The number <see cref="ScansInWindow"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? ScansInWindowSort { get; init; }
+        /// <summary>The number <see cref="TotalScans"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? TotalScansSort { get; init; }
+        /// <summary>The number <see cref="BlockAccesses"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? BlockAccessesSort { get; init; }
     }
 
     internal static IndexUsageRow IndexUsage(DarlingPgIndexUsageReader.PgIndexUsageRow row)
@@ -878,6 +1126,10 @@ internal static class PgDisplay
             IndexDefinition = row.IndexDefinition ?? "",
             IsInvalid = !row.IsValid,
             IsUnscanned = unscanned,
+            IndexSizeSort = Raw(row.IndexBytes),
+            ScansInWindowSort = Raw(row.ScansInWindow),
+            TotalScansSort = Raw(row.TotalScans),
+            BlockAccessesSort = Raw(row.BlocksHit + row.BlocksRead),
         };
     }
 
@@ -999,6 +1251,26 @@ internal static class PgDisplay
         /// Not a severity: nothing on this row is a trustworthy observation about the database, and painting
         /// it either healthy or critical would invent one.</summary>
         public bool StateUnknown { get; init; }
+        /// <summary>The number <see cref="LastQueryId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? LastQueryIdSort { get; init; }
+        /// <summary>The number <see cref="PeakHorizonAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakHorizonAgeSort { get; init; }
+        /// <summary>The number <see cref="PeakXminAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakXminAgeSort { get; init; }
+        /// <summary>The number <see cref="PeakXidAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakXidAgeSort { get; init; }
+        /// <summary>The number <see cref="PeakXactDuration"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakXactDurationSort { get; init; }
+        /// <summary>The number <see cref="PeakStateDuration"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakStateDurationSort { get; init; }
+        /// <summary>The number <see cref="PeakQueryDuration"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? PeakQueryDurationSort { get; init; }
+        /// <summary>The number <see cref="BackendAge"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public long? BackendAgeSort { get; init; }
+        /// <summary>The number <see cref="HorizonHoldShare"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? HorizonHoldShareSort { get; init; }
+        /// <summary>The number <see cref="IdleInTransactionShare"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
+        public double? IdleInTransactionShareSort { get; init; }
     }
 
     /// <summary>
@@ -1102,6 +1374,16 @@ internal static class PgDisplay
             IsSustainedHorizonHolder = sustained,
             IsLongIdleTransaction = longIdleTransaction,
             StateUnknown = unknown,
+            LastQueryIdSort = r.LastQueryId,
+            PeakHorizonAgeSort = Raw(r.PeakHorizonAge),
+            PeakXminAgeSort = Raw(r.PeakXminAge),
+            PeakXidAgeSort = Raw(r.PeakXidAge),
+            PeakXactDurationSort = Raw(r.PeakXactDurationMs),
+            PeakStateDurationSort = Raw(r.PeakStateDurationMs),
+            PeakQueryDurationSort = Raw(r.PeakQueryDurationMs),
+            BackendAgeSort = Raw(r.PeakBackendDurationMs),
+            HorizonHoldShareSort = r.SampleCount <= 0 ? null : r.HorizonHolderSamples / (double)r.SampleCount,
+            IdleInTransactionShareSort = r.SampleCount <= 0 ? null : r.IdleInTransactionSamples / (double)r.SampleCount,
         };
     }
 
@@ -1116,6 +1398,10 @@ internal static class PgDisplay
         /// expose it, or because its statistics family was reset inside the window, and both of those are
         /// "we do not know" rather than "nothing happened".</summary>
         public string Value { get; init; } = "";
+        /// <summary>The number <see cref="Value"/> is formatted from (#6104); null where the cell shows the dash.
+        /// The metrics are counts, milliseconds and bytes in one column, so this orders within one kind of
+        /// metric and across kinds by magnitude only.</summary>
+        public double? ValueSort { get; init; }
 
         public string Note { get; init; } = "";
     }
@@ -1199,15 +1485,15 @@ internal static class PgDisplay
         /* Three overloads rather than one taking a formatted string, so a caller cannot accidentally pass
            "0" where the value was null. The em dash is produced HERE, once, from an actual null. */
         static WriteStatRow Metric(string group, string metric, long? value, string note) =>
-            Row(group, metric, value?.ToString("N0", CultureInfo.CurrentCulture), note);
+            Row(group, metric, value?.ToString("N0", CultureInfo.CurrentCulture), value, note);
 
         static WriteStatRow MetricMs(string group, string metric, double? value, string note) =>
-            Row(group, metric, value?.ToString("N1", CultureInfo.CurrentCulture), note);
+            Row(group, metric, value?.ToString("N1", CultureInfo.CurrentCulture), value, note);
 
         static WriteStatRow MetricBytes(string group, string metric, decimal? value, string note) =>
-            Row(group, metric, value?.ToString("N0", CultureInfo.CurrentCulture), note);
+            Row(group, metric, value?.ToString("N0", CultureInfo.CurrentCulture), (double?)value, note);
 
-        static WriteStatRow Row(string group, string metric, string? formatted, string note) => new()
+        static WriteStatRow Row(string group, string metric, string? formatted, double? sortValue, string note) => new()
         {
             Group = group,
             Metric = metric,
@@ -1215,6 +1501,7 @@ internal static class PgDisplay
                counter or that its statistics family was reset inside the window - both "unknown", and both
                the opposite of "nothing happened". */
             Value = formatted ?? "\u2014",
+            ValueSort = sortValue,
             Note = note,
         };
     }
