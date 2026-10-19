@@ -147,7 +147,8 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         NpgsqlConnection connection, int lateRows, TimeSpan? intervalRefreshOffset, CancellationToken ct, int hours = 30)
     {
         var totalHours = hours;
-        var end = TimescaleSupport.AlignDown(DateTime.UtcNow, TimeSpan.FromHours(1)) - TimeSpan.FromHours(1);
+        /* #5608: the timeline ends at LiveClock.AnchoredEnd(), so its chunk layout is the same at any hour the test runs. */
+        var end = TimescaleSupport.AlignDown(LiveClock.AnchoredEnd(), TimeSpan.FromHours(1)) - TimeSpan.FromHours(1);
         var b0 = end - TimeSpan.FromHours(totalHours);
         var b1 = b0 + TimeSpan.FromHours(1);
 
@@ -167,12 +168,6 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
 
     private static string HeldLine(CapturingTestLogger logger)
         => logger.Lines.Single(l => l.Contains($"Retention policy for {Raw} HELD PAUSED", StringComparison.Ordinal));
-
-    private static async Task DisposeAsync(NpgsqlConnection connection, ScratchPostgres scratch)
-    {
-        await connection.DisposeAsync();
-        await scratch.DisposeAsync();
-    }
 
     /// <summary>
     /// The case #6071 measured, scaled down: late raw rows one bucket below both hourly consumers' floors. The pass
@@ -211,7 +206,8 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         }
         finally
         {
-            await DisposeAsync(connection, scratch);
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -251,7 +247,8 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         }
         finally
         {
-            await DisposeAsync(connection, scratch);
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -289,7 +286,8 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         }
         finally
         {
-            await DisposeAsync(connection, scratch);
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -329,7 +327,8 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         }
         finally
         {
-            await DisposeAsync(connection, scratch);
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -361,7 +360,8 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         }
         finally
         {
-            await DisposeAsync(connection, scratch);
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -390,7 +390,8 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         }
         finally
         {
-            await DisposeAsync(connection, scratch);
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 }
