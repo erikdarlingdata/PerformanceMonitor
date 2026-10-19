@@ -101,7 +101,8 @@ public sealed class PgCollectorSearchPathLiveTests
         var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
         var ownedAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = Database };
         /* No type loading: its catalog query compares oids, and on this unpinned connection each comparison runs the copy. */
-        var ownedMonitor = new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Monitor, ServerCompatibilityMode = ServerCompatibilityMode.NoTypeLoading };
+        var ownedMonitor = new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Monitor };
+        ownedMonitor["Server Compatibility Mode"] = "NoTypeLoading";   /* the keyword, not the obsolete property (CS0618) */
 
         var bodySucceeded = false;
         try
@@ -382,6 +383,123 @@ public sealed class PgCollectorSearchPathLiveTests
             await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// When pg_proc shows no Aurora function (measured on Aurora, #2340), the call that fails in pg_catalog with 42883 is
+    /// tried once in the pg_stat_statements extension's schema, the statement collector reads through it, and the
+    /// schema is remembered for the target. A same-named copy in public is never called.
+    /// </summary>
+    [Fact]
+    public async Task AuroraFunction_PgProcShowsNothing_FallsBackToTheStatementsExtensionSchema_AndRemembersIt()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var auroraAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = AuroraDatabase };
+        const string Unquoted = "Ext \"q\"";
+        var targetKey = "pm6143-aurora-fallback-" + Guid.NewGuid().ToString("N");
+
+        var bodySucceeded = false;
+        try
+        {
+            await ResetAsync(admin.ConnectionString, ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {AuroraDatabase}", ct);
+            /* The stand-in has Aurora's column list: the extension's view plus the six Aurora-only columns. */
+            await ExecAsync(auroraAdmin.ConnectionString, $"""
+                CREATE SCHEMA {ExtSchema};
+                CREATE EXTENSION pg_stat_statements SCHEMA {ExtSchema};
+                CREATE TABLE public.calls (what text NOT NULL);
+                CREATE VIEW {ExtSchema}.aurora_shape AS
+                SELECT s.*, 0::bigint AS storage_blks_read, 0::bigint AS orcache_blks_hit,
+                       0::float8 AS storage_blk_read_time, 0::float8 AS orcache_blk_read_time,
+                       0::bigint AS total_exec_peakmem, 0::bigint AS max_exec_peakmem
+                FROM {ExtSchema}.pg_stat_statements AS s;
+                CREATE FUNCTION {ExtSchema}.aurora_stat_statements(boolean) RETURNS SETOF {ExtSchema}.aurora_shape
+                LANGUAGE plpgsql AS $$
+                BEGIN INSERT INTO public.calls VALUES ('extension schema'); RETURN QUERY SELECT * FROM {ExtSchema}.aurora_shape; END $$;
+                CREATE FUNCTION public.aurora_stat_statements(boolean) RETURNS SETOF {ExtSchema}.aurora_shape
+                LANGUAGE plpgsql AS $$
+                BEGIN INSERT INTO public.calls VALUES ('public'); RETURN QUERY SELECT * FROM {ExtSchema}.aurora_shape; END $$;
+                GRANT INSERT ON public.calls TO PUBLIC;
+                ALTER DATABASE {AuroraDatabase} SET search_path = public, pg_catalog;
+                SELECT pg_catalog.count(*) FROM pg_catalog.pg_class;
+                """, ct);
+
+            var runtime = await RuntimeAsync(admin, AuroraDatabase, admin.Username!, ct);
+            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
+            await connection.OpenAsync(ct);
+
+            /* pg_proc rows: none, as measured on Aurora. pg_catalog fails with 42883, the extension's schema resolves. */
+            var empty = new Dictionary<string, string>(StringComparer.Ordinal);
+            var filled = await AuroraFunctionSchemaFallback.FillAsync(
+                connection, empty, new[] { "aurora_stat_statements" }, Unquoted, targetKey, null, ct);
+            Assert.Equal(Unquoted, filled["aurora_stat_statements"]);
+            Assert.Equal(Unquoted, AuroraFunctionSchemaFallback.Remembered(targetKey, "aurora_stat_statements", Unquoted));
+            Assert.Equal(0, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls", ct));
+
+            /* Collection reads through the extension's schema. */
+            var context = NewContext(new CollectorTargetInfo
+            {
+                Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = connection.PostgreSqlVersion.Major, IsAurora = true,
+            });
+            context.PgExtensionSchemas = new Dictionary<string, string>(StringComparer.Ordinal) { ["pg_stat_statements"] = Unquoted };
+            context.PgFunctionSchemas = filled;
+            var plan = PgStatementStatsCollector.Instance.BuildQuery(context);
+            Assert.Contains($"FROM {ExtSchema}.aurora_stat_statements(false)", plan.Text, StringComparison.Ordinal);
+            await using (var command = new NpgsqlCommand(plan.Text, connection))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
+            }
+
+            Assert.Equal(1, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls WHERE what = 'extension schema'", ct));
+            Assert.Equal(0, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls WHERE what = 'public'", ct));
+
+            /* Remembered: with the function gone, the target's answer is reused without testing again. A caller that
+               remembers nothing tests again, finds neither schema, and calls pg_catalog. Public is never chosen. */
+            await ExecAsync(auroraAdmin.ConnectionString, $"DROP FUNCTION {ExtSchema}.aurora_stat_statements(boolean)", ct);
+            Assert.Equal(Unquoted, (await AuroraFunctionSchemaFallback.FillAsync(
+                connection, empty, new[] { "aurora_stat_statements" }, Unquoted, targetKey, null, ct))["aurora_stat_statements"]);
+            var retested = await AuroraFunctionSchemaFallback.FillAsync(
+                connection, empty, new[] { "aurora_stat_statements" }, Unquoted, null, null, ct);
+            Assert.Equal("pg_catalog", CollectorContext.QuotePgFunctionSchema(retested, "aurora_stat_statements"));
+
+            /* With no extension there is nothing to choose between: nothing is tested, and the call goes to pg_catalog. */
+            Assert.Empty(await AuroraFunctionSchemaFallback.FillAsync(
+                connection, empty, new[] { "aurora_stat_statements" }, null, targetKey + "-none", null, ct));
+            Assert.Equal(0, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls WHERE what = 'public'", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// PgBouncer refuses the startup 'options' parameter with 08P01 "unsupported startup parameter: options". That
+    /// error at sign-in becomes a precondition that asks for a direct connection; other sign-in errors pass through.
+    /// </summary>
+    [Fact]
+    public void PoolerRejectionAtSignIn_BecomesAPreconditionThatAsksForADirectConnection()
+    {
+        var pgBouncer = new PostgresException("unsupported startup parameter: options", "FATAL", "FATAL", "08P01");
+        Assert.True(DarlingServerConnector.IsStartupParameterRejection(pgBouncer));
+        Assert.False(DarlingServerConnector.IsStartupParameterRejection(
+            new PostgresException("invalid length of startup packet", "FATAL", "FATAL", "08P01")));
+        Assert.False(DarlingServerConnector.IsStartupParameterRejection(
+            new PostgresException("password authentication failed for user \"m\"", "FATAL", "FATAL", "28P01")));
+
+        var message = DarlingServerConnector.PoolerPrecondition("pm6143-target", "it refused the sign-in: " + pgBouncer.MessageText, pgBouncer).Message;
+        Assert.StartsWith("precondition:", message, StringComparison.Ordinal);
+        Assert.Contains("unsupported startup parameter: options", message, StringComparison.Ordinal);
+        Assert.Contains("direct connection", message, StringComparison.Ordinal);
     }
 
     /// <summary>

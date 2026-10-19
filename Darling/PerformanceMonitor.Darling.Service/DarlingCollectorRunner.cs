@@ -1831,7 +1831,8 @@ AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
         ICollectorSchemaInfo definition,
         DbConnection targetConnection,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? targetKey = null)
     {
         context.PgExtensionSchemas = null;
         context.PgFunctionSchemas = null;
@@ -1880,8 +1881,17 @@ AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
         context.PgExtensionSchemas = schemas;
         if (readsFunctions)
         {
-            context.PgFunctionSchemas = CollectorContext.ChoosePgFunctionSchemas(
-                functions, schemas.TryGetValue("pg_stat_statements", out var statementsSchema) ? statementsSchema : null);
+            var statementsSchema = schemas.TryGetValue("pg_stat_statements", out var found) ? found : null;
+            /* #6143: a function pg_proc did not show is called in pg_catalog, or in the extension's schema when only
+               that one resolves (AuroraFunctionSchemaFallback); remembered per target. */
+            context.PgFunctionSchemas = await AuroraFunctionSchemaFallback.FillAsync(
+                targetConnection,
+                CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema),
+                CollectorContext.AuroraFunctionNames,
+                statementsSchema,
+                targetKey,
+                logger,
+                cancellationToken);
         }
 
         return true;
@@ -3008,7 +3018,7 @@ AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
                     /* #6143: an extension is created per database, in whatever schema that database chose, so a
                        collector that reads one rebuilds its query here, on this database's own connection, once
                        that database's extension schemas are known. Every other collector keeps the plan above. */
-                    if (await ResolvePgExtensionSchemasAsync(context, definition, dbConnection, _logger, dbToken))
+                    if (await ResolvePgExtensionSchemasAsync(context, definition, dbConnection, _logger, dbToken, ReadBinaryFileCacheKey(server)))
                     {
                         dbPlan = definition.BuildQuery(context);
                     }
@@ -3948,7 +3958,7 @@ AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
                 await ResolvePgFileSettingsReadableAsync(
                     context, definition.Name, targetConnection, server, _logger, cancellationToken);
                 /* #6143: same connection, same point: the schema of each extension the collector reads. */
-                await ResolvePgExtensionSchemasAsync(context, definition, targetConnection, _logger, cancellationToken);
+                await ResolvePgExtensionSchemasAsync(context, definition, targetConnection, _logger, cancellationToken, ReadBinaryFileCacheKey(server));
 
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
@@ -5256,7 +5266,7 @@ AND (n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
         await connection.OpenAsync(cancellationToken);
 
         /* #6143: built after the open, so the query names each extension by the schema read on this connection. */
-        await ResolvePgExtensionSchemasAsync(context, definition, connection, _logger, cancellationToken);
+        await ResolvePgExtensionSchemasAsync(context, definition, connection, _logger, cancellationToken, ReadBinaryFileCacheKey(server));
         var plan = definition.BuildQuery(context);
         using var command = CreateCollectorCommand(provider, plan, connection, commandTimeoutSeconds);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);

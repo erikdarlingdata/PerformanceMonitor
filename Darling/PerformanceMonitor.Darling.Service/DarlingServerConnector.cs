@@ -294,9 +294,30 @@ SELECT
             $"precondition: the monitoring session on PostgreSQL target '{serverName}' has search_path "
             + $"'{observedSearchPath}', not the 'pg_catalog, pg_temp' this service sends when it signs in, so nothing "
             + "is collected from it. The usual cause is a connection pooler that drops the startup 'options' "
-            + "parameter: in PgBouncer, remove 'options' from ignore_startup_parameters, or connect this server "
-            + "directly rather than through the pooler.");
+            + "parameter, as PgBouncer does when 'options' is listed in ignore_startup_parameters. Monitoring needs a "
+            + "direct connection to the PostgreSQL server: point the target at the server's own host and port.");
     }
+
+    /// <summary>
+    /// #6143: PgBouncer refuses a startup parameter it does not know with SQLSTATE 08P01 and "unsupported startup
+    /// parameter: options" (PgBouncer's own text, never translated). PostgreSQL itself accepts 'options', so this
+    /// error at sign-in means a pooler is in the way.
+    /// </summary>
+    internal static bool IsStartupParameterRejection(PostgresException ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+        return string.Equals(ex.SqlState, PostgresErrorCodes.ProtocolViolation, StringComparison.Ordinal)
+            && ex.MessageText.Contains("startup parameter", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>#6143: the message for a PostgreSQL target reached through a connection pooler.</summary>
+    internal static InvalidOperationException PoolerPrecondition(string serverName, string detail, Exception? inner = null) =>
+        new(
+            $"precondition: PostgreSQL target '{serverName}' is reached through a connection pooler ({detail}). "
+            + "Monitoring needs a direct connection to the PostgreSQL server, because a pooler cannot carry the "
+            + "search_path setting this service sends when it signs in. Point the target at the server's own host "
+            + "and port; on AWS, use the instance or cluster endpoint, not the RDS Proxy endpoint.",
+            inner);
 
     /// <summary>
     /// The Aurora probe (#2340), a SEPARATE statement because it decides by CALLING the marker function
@@ -343,7 +364,7 @@ SELECT
         {
             var schema = await ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", cancellationToken);
             using var command = new NpgsqlCommand(
-                string.Format(CultureInfo.InvariantCulture, PostgresAuroraProbeQueryText, schema), connection) { CommandTimeout = 15 };
+                PostgresAuroraProbeQueryText.Replace("{0}", schema, StringComparison.Ordinal), connection) { CommandTimeout = 15 };
             var version = await command.ExecuteScalarAsync(cancellationToken);
             return version is not null and not DBNull;
         }
@@ -382,8 +403,17 @@ SELECT
             }
         }
 
-        return CollectorContext.QuotePgFunctionSchema(
-            CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema), functionName);
+        /* #6143: when pg_proc shows nothing (measured on Aurora for a pg_monitor login, #2340), the call is tested in
+           pg_catalog and then in the extension's schema. Once per connection, so nothing is remembered. */
+        var chosen = await AuroraFunctionSchemaFallback.FillAsync(
+            connection,
+            CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema),
+            new[] { functionName },
+            statementsSchema,
+            targetKey: null,
+            logger: null,
+            cancellationToken);
+        return CollectorContext.QuotePgFunctionSchema(chosen, functionName);
     }
 
     /// <summary>
@@ -494,8 +524,22 @@ SELECT
         var connectionString = ResolveConnectionString(config, logger);
         var storageName = config.StorageName;
 
+        /* #6143: an RDS Proxy endpoint accepts only the startup parameters AWS lists, and 'options' is not one. */
+        var host = new NpgsqlConnectionStringBuilder(connectionString).Host;
+        if (RdsEndpoint.IsProxyHost(host))
+        {
+            throw PoolerPrecondition(config.DisplayName, $"'{host}' is an RDS Proxy endpoint");
+        }
+
         using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (IsStartupParameterRejection(ex))
+        {
+            throw PoolerPrecondition(config.DisplayName, $"it refused the sign-in: {ex.MessageText}", ex);
+        }
 
         using var command = new NpgsqlCommand(PostgresDetectionQueryText, connection) { CommandTimeout = 30 };
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
