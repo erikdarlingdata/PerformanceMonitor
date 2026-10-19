@@ -26,7 +26,7 @@ const RULES = {
     [/^INVALID index/, "Invalid"],
     [/^Backs the PRIMARY KEY/, "No, primary key"],
     [/^Backs a UNIQUE or EXCLUSION/, "No, constraint"],
-    [/^This index is the table's REPLICA IDENTITY/, "No, replica identity"],
+    [/^This index is the table's REPLICA/, "No, replica identity"],
     [/^Not enough history/, "Too early"],
     [/^In use/, "No, in use"],
     [/^No scans recorded/, "Candidate"],
