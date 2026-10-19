@@ -52,6 +52,7 @@ import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
+import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -5389,6 +5390,13 @@ const PG_WRITE_STATS = [
   { key: "postmaster_restarted", label: "Restarted in window", format: "bool", small: true },
 ];
 
+/* #6154: a column whose read writes a paragraph per row. The cell shows the short word `word(text)` gives, sorts and filters on it, and the
+   full text opens under it on a click (panels.js `detailKey`). What is true of every row goes in `hint`, the header tooltip. */
+function detailColumn(key, label, word, hint, extra) {
+  const short = (row) => word(row[key]);
+  return { key, label, hint, display: (row) => short(row) ?? "—", sortValue: short, detailKey: key, ...extra };
+}
+
 const PG_INDEX_BLOAT_COLUMNS = [
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
@@ -5397,7 +5405,8 @@ const PG_INDEX_BLOAT_COLUMNS = [
   { key: "avg_leaf_density", label: "Leaf Density %", format: "num1" },
   { key: "leaf_fragmentation", label: "Fragmentation %", format: "num1" },
   { key: "estimated_reclaimable_mb", label: "Reclaimable", format: "mb" },
-  { key: "skipped_reason", label: "Not Measured" },
+  detailColumn("skipped_reason", "Not Measured", indexSkipWord,
+    "Why no bloat figure could be estimated for this index. Blank means it was estimated. Click a reason for the full text."),
 ];
 
 /* n_distinct and correlation are the two the planner actually turns into a row estimate, so they lead.
@@ -5572,10 +5581,10 @@ const PG_LOGGING_AUDIT_COLUMNS = [
   { key: "unit", label: "Unit", small: true },
   { key: "source", label: "Source", small: true },
   { key: "change_needs", label: "Change needs", small: true },
-  { key: "unlocks", label: "Unlocks", wrap: true },
-  { key: "recommended", label: "Recommended", wrap: true },
-  { key: "cost_note", label: "Cost", wrap: true },
-  { key: "remedy", label: "Remedy", wrap: true },
+  { key: "unlocks", label: "Unlocks", clamp: true },
+  { key: "recommended", label: "Recommended", clamp: true },
+  { key: "cost_note", label: "Cost", clamp: true },
+  { key: "remedy", label: "Remedy", clamp: true },
 ];
 
 const PG_TOP_QUERY_COLUMNS = [
@@ -5622,7 +5631,7 @@ const PG_BLOCKING_CYCLE_COLUMNS = [
   { key: "application", label: "App", wrap: true },
   { key: "blocked_behind_count", label: "Queued Behind", format: "int" },
   { key: "blocked_behind_pids", label: "Queued PIDs", render: (row) => listCell(row.blocked_behind_pids) },
-  { key: "finding", label: "Finding", wrap: true },
+  { key: "finding", label: "Finding", clamp: true },
 ];
 
 const PG_AUTOVACUUM_COLUMNS = [
@@ -5680,14 +5689,13 @@ const PG_XMIN_COLUMNS = [
   { key: "samples", label: "Samples", format: "int" },
   { key: "pct_of_window_winning", label: "% of Window", format: "num1" },
   { key: "measured_at", label: "Measured", format: "time" },
-  { key: "remedy", label: "Remedy", wrap: true },
+  { key: "remedy", label: "Remedy", clamp: true },
 ];
 
 const PG_IO_COLUMNS = [
   { key: "backend_type", label: "Backend" },
   { key: "object_type", label: "Object" },
-  { key: "context", label: "Context" },
-  { key: "context_meaning", label: "Means", wrap: true },
+  { key: "context", label: "Context", hint: "Where the I/O came from, such as normal reads or vacuum. Click a context for what it covers.", detailKey: "context_meaning" },
   { key: "reads", label: "Reads", format: "int" },
   { key: "read_time_ms", label: "Read Time", format: "ms" },
   { key: "avg_read_ms", label: "Avg Read (ms)", format: "num2" },
@@ -5714,17 +5722,17 @@ const PG_DATABASE_COLUMNS = [
   { key: "temp_files", label: "Temp Files", format: "int" },
   { key: "temp_bytes", label: "Temp Bytes", format: "int" },
   { key: "avg_temp_file_bytes", label: "Avg Temp File (bytes)", format: "int" },
-  { key: "spill_finding", label: "Spills", wrap: true },
+  { key: "spill_finding", label: "Spills", clamp: true },
   { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
-  { key: "cache_finding", label: "Cache", wrap: true },
+  { key: "cache_finding", label: "Cache", clamp: true },
   { key: "deadlocks", label: "Deadlocks", format: "int" },
   { key: "xact_commit", label: "Commits", format: "int" },
   { key: "xact_rollback", label: "Rollbacks", format: "int" },
   { key: "rollback_pct", label: "Rollback %", format: "num2" },
-  { key: "rollback_finding", label: "Rollbacks", wrap: true },
+  { key: "rollback_finding", label: "Rollbacks", clamp: true },
   /* The reset evidence. Without it every total in the row is a lower bound and nothing on screen says so. */
   { key: "counters_were_reset", label: "Reset", format: "bool" },
-  { key: "reset_note", label: "Reset Note", wrap: true },
+  { key: "reset_note", label: "Reset Note", clamp: true },
   { key: "sample_count", label: "Samples", format: "int" },
   /* The one LEVEL in the row (V133): the window's peak of connected backends for this database, never
      differenced. Empty on a pre-V133 history rather than 0 — not sampled is not idle. Per-database peaks land
@@ -5748,22 +5756,23 @@ const PG_BLOAT_COLUMNS = [
   { key: "bloat_mb_estimate", label: "Bloat (est.)", format: "mb" },
   { key: "bloat_pct_estimate", label: "Bloat % (est.)", format: "num2" },
   { key: "estimate_suppressed", label: "Suppressed", format: "bool" },
-  { key: "estimate_suppression_reason", label: "Why Suppressed", wrap: true },
+  { key: "estimate_suppression_reason", label: "Why Suppressed", clamp: true },
   /* Measured, from the server's own counters - what a suppressed estimate degrades TO rather than to
      nothing. */
-  { key: "dead_tuple_pct", label: "Dead Tuple %", format: "num2" },
-  { key: "dead_tuple_finding", label: "Dead Tuples", wrap: true },
-  { key: "bloat_finding", label: "Finding", wrap: true },
+  { key: "dead_tuples", label: "Dead Tuples", format: "int", hint: "Rows deleted or updated and not yet cleaned up by vacuum. A count from the server's own statistics, not an estimate." },
+  { key: "dead_tuple_pct", label: "Dead Tuple %", format: "num2", hint: "Dead tuples as a share of live plus dead rows. Click a value for what it means for this table.", detailKey: "dead_tuple_finding" },
+  detailColumn("bloat_finding", "Finding", bloatVerdict,
+    "How large the estimated bloat is: under 20% low, 20% to 50% moderate, above that high. Click a verdict for what to do about it."),
   { key: "mods_since_analyze_pct_of_rows", label: "Modified Since Analyze %", format: "num1" },
   { key: "last_analyzed", label: "Last Analyzed", format: "time" },
   { key: "fillfactor", label: "Fill Factor", format: "int" },
-  { key: "fillfactor_note", label: "Fill Factor Note", wrap: true },
+  detailColumn("fillfactor_note", "Fill Factor Note", fillfactorNoteWord, "Set when the table keeps free space on purpose for in-place updates. Click for how that affects the estimate."),
   { key: "toast_bytes", label: "TOAST Bytes", format: "int" },
-  { key: "toast_note", label: "TOAST", wrap: true },
+  detailColumn("toast_note", "TOAST", toastNoteWord, "Set when the table stores large values out of line. The bloat estimate covers the main table only. Click for details."),
   { key: "index_bytes", label: "Index Bytes", format: "int" },
   { key: "heap_bytes_growth_in_window", label: "Heap Growth", format: "int" },
   { key: "pgstattuple_available", label: "pgstattuple", format: "bool" },
-  { key: "exact_measurement_command", label: "Measure It Exactly", wrap: true },
+  { key: "exact_measurement_command", label: "Measure It Exactly", clamp: true, mono: true },
   { key: "sample_count", label: "Samples", format: "int" },
 ];
 
@@ -5783,9 +5792,12 @@ const PG_INDEX_USAGE_COLUMNS = [
   { key: "scans_in_window", label: "Scans in Window", format: "int" },
   { key: "total_scans_since_stats_reset", label: "Lifetime Scans", format: "int" },
   { key: "last_scan", label: "Last Scan", format: "time" },
-  { key: "last_scan_note", label: "Last Scan Note", wrap: true },
-  { key: "droppability_finding", label: "Can It Go?", wrap: true },
-  { key: "cost_finding", label: "What It Costs", wrap: true },
+  detailColumn("last_scan_note", "Last Scan Note", lastScanNoteWord,
+    "Why the last-scan time is missing. PostgreSQL 16 and later record it; older versions do not. Click for the full note."),
+  detailColumn("droppability_finding", "Can It Go?", droppabilityVerdict,
+    "Whether the index could be dropped. Click a verdict for the reason and what to check first."),
+  detailColumn("cost_finding", "What It Costs", costFigure,
+    "The index size and its share of the table's heap. Click for what keeping it costs on every write."),
   /* The droppability facts, individually, so the grid can be sorted and filtered on them rather than only
      read as prose. supports_constraint is the one that most often makes a zero-scan index untouchable. */
   { key: "is_valid", label: "Valid", format: "bool" },
@@ -5880,8 +5892,8 @@ const PG_SESSION_STATE_COLUMNS = [
      text is stored anywhere: pg_stat_activity.query carries literal parameter values. */
   { key: "last_command_tag", label: "Command" },
   { key: "last_query_id", label: "Query ID", mono: true },
-  { key: "query_id_note", label: "Query ID Note", wrap: true },
-  { key: "finding", label: "Finding", wrap: true },
+  { key: "query_id_note", label: "Query ID Note", clamp: true },
+  { key: "finding", label: "Finding", clamp: true },
   /* Instance context from this backend's most recent sample: two idle-in-transaction sessions out of six
      connections is a different server from two out of four thousand. */
   { key: "idle_in_transaction_on_instance", label: "Idle In Xact (instance)", format: "int" },
