@@ -70,6 +70,8 @@ public static class InvestigationRules
         "delete_custom_alert_rule",
         "set_alert_threshold_override",
         "merge_deadlock_signatures",
+        "force_query_store_plan",
+        "unforce_query_store_plan",
     };
 
     /// <summary>What a valid agent id is (#5632 review round 2, L4).</summary>

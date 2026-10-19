@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>agent_actions_enabled</c>, a Level 3 request, that server's switch for that action, and that server's remediation login given
 /// as an <c>env:</c> or <c>file:</c> reference. A call that lacks one is refused with its own reason, and the refusal is journaled.
 /// <para><b>It takes no <c>DarlingMcpWritePolicy</c>.</b> <c>mcp.allowWrites</c> never bypasses it, and there is no flag that skips a
-/// check. <b>Nothing calls it yet</b>: step 7 (force and unforce), step 10 (evict a plan handle) and step 12 (kill) will. No tool, web
+/// check. <b>Step 7 calls it</b> (force and unforce); step 10 (evict a plan handle) and step 12 (kill) will. No tool, web
 /// route or <c>darling.json</c> key writes <c>config.config_server_actions</c>, so every switch reads off until a person turns one on.</para>
 /// </summary>
 internal static class ServerActionGate
@@ -33,6 +33,21 @@ internal static class ServerActionGate
     /// Null means the action may run; otherwise the refusal (already journaled).
     /// </summary>
     internal static async Task<AgentActionRefusal?> CheckAsync(
+        InvestigationRequestStore store,
+        NpgsqlDataSource ownerSource,
+        ILogger logger,
+        string tool,
+        string serverAction,
+        string? agentAction,
+        AgentActionTarget target,
+        CancellationToken cancellationToken) =>
+        (await AuthorizeAsync(store, ownerSource, logger, tool, serverAction, agentAction, target, cancellationToken)).Refusal;
+
+    /// <summary>
+    /// <see cref="CheckAsync"/>, answering with the <see cref="ServerActionPermit"/> when every condition holds (#5632, step 7): the one value a
+    /// server write takes as its first argument. The checks, the refusal journaling and the order are unchanged.
+    /// </summary>
+    internal static async Task<ServerActionDecision> AuthorizeAsync(
         InvestigationRequestStore store,
         NpgsqlDataSource ownerSource,
         ILogger logger,
@@ -51,7 +66,7 @@ internal static class ServerActionGate
         if (problem is not null)
         {
             await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, cancellationToken);
-            return problem;
+            return new ServerActionDecision(null, problem);
         }
 
         var hooks = new ServerActionHooks
@@ -59,6 +74,6 @@ internal static class ServerActionGate
             LoadLevels = (connection, _, ct) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, ct),
             ReadCredential = (serverId, ct) => store.ReadServerCredentialStateAsync(ownerSource, serverId, ct),
         };
-        return await store.CheckServerActionAsync(new ServerActionCall(tool, serverAction, action!, target), hooks, cancellationToken);
+        return await store.AuthorizeServerActionAsync(new ServerActionCall(tool, serverAction, action!, target), hooks, cancellationToken);
     }
 }

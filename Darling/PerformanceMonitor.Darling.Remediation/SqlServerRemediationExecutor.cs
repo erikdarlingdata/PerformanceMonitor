@@ -8,7 +8,9 @@
 
 using System;
 using System.Data;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -21,8 +23,9 @@ namespace PerformanceMonitor.Darling.Remediation;
 
 /// <summary>
 /// The server write code (#5632, step 6): force and unforce a Query Store plan, evict one plan handle and kill one session on ONE monitored
-/// SQL Server, each with a dry run. <b>Nothing calls this yet, and nothing registers a tool for it:</b> steps 7, 10 and 12 will. The service
-/// assembly does not reference this one.
+/// SQL Server, each with a dry run. <b>One class in the service calls the force and unforce methods</b> (#5632, step 7:
+/// <c>DarlingMcpPlanForceTools</c>); steps 10 and 12 will add the evict and the kill. <c>PlanForceNoWritePathTests</c> pins that no other
+/// service type touches this class, and that the service assembly holds none of the write statements: they live here.
 /// <para><b>No write runs without a passed gate check.</b> Every method takes a <see cref="ServerActionPermit"/> first, the value
 /// <see cref="InvestigationRequestStore.AuthorizeServerActionAsync"/> hands out only when the gate returned no refusal, and its constructor
 /// is internal to the Storage assembly. A permit is for one action, one server, and one object: a method refuses a permit issued for another
@@ -84,6 +87,85 @@ SELECT killed = @killed;";
     internal const string SessionMatchesSql =
         "SELECT matches = COUNT_BIG(*) FROM sys.dm_exec_sessions AS s WHERE s.session_id = @session_id AND s.login_time = @login_time OPTION(RECOMPILE);";
 
+    /// <summary>
+    /// The exact statement a force or an unforce runs, for a dry run to show: the database named the way <c>QUOTENAME</c> names it (a closing
+    /// bracket doubled), the ids as plain numbers. The write itself calls the procedure by its parameters on a connection to that database.
+    /// </summary>
+    public static string StatementFor(string database, long queryId, long planId, bool force)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        var procedure = force ? ForceSql : UnforceSql;
+        var quoted = "[" + database.Replace("]", "]]", StringComparison.Ordinal) + "]";
+        return string.Create(CultureInfo.InvariantCulture,
+            $"EXEC {quoted}.{procedure} @query_id = {queryId}, @plan_id = {planId};");
+    }
+
+    /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
+    internal const string PlanFactsSql =
+        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc " +
+        "FROM sys.query_store_plan AS p WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
+
+    /// <summary><see cref="PlanFactsSql"/> with the forcing type, for SQL Server 2022 and later.</summary>
+    internal const string PlanFactsWithTypeSql =
+        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc, p.plan_forcing_type_desc " +
+        "FROM sys.query_store_plan AS p WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
+
+    /// <summary>SQL Server 2022 and later say how a plan was forced (<c>plan_forcing_type_desc</c>: MANUAL or AUTO); earlier versions have no such column.</summary>
+    internal const string ForcingTypeColumnSql =
+        "SELECT has_type = CASE WHEN COL_LENGTH(N'sys.query_store_plan', N'plan_forcing_type_desc') IS NULL THEN 0 ELSE 1 END;";
+
+    /// <summary>
+    /// Reads, on the remediation connection and in the permit's database, which plan of the query is forced now and how, and the state of the
+    /// plan asked about. Read-only, and it needs the same permit a force does, so a sign-in with the remediation login still follows a passed gate.
+    /// </summary>
+    public async Task<PlanStateRead> ReadPlanStateAsync(ServerActionPermit permit, long queryId, long planId, CancellationToken ct)
+    {
+        const string name = "read_plan_state";
+        if (PermitRefusal(permit, ServerActionNames.ForcePlan, planId.ToString(CultureInfo.InvariantCulture), name, dryRun: true) is { } mismatch)
+            return PlanStateRead.From(mismatch, null);
+        var database = permit.Database;
+        if (string.IsNullOrWhiteSpace(database) || database.Length > 128 || ContainsControl(database))
+            return PlanStateRead.From(Log(RemediationResult.Refused(name, true, RemediationResult.Reasons.BadDatabase,
+                "A plan is forced in one named database. The permit names none, or names one that is not a database name.")), null);
+        if (queryId <= 0 || planId <= 0)
+            return PlanStateRead.From(Log(RemediationResult.Refused(name, true, RemediationResult.Reasons.PlanNotFound, "A query id and a plan id are positive numbers.")), null);
+
+        PlanForceState? state = null;
+        var result = await RunAsync(name, true, database, async (connection, secret) =>
+        {
+            bool hasType;
+            await using (var probe = Command(connection, ForcingTypeColumnSql))
+                hasType = Convert.ToInt32(await probe.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) == 1;
+
+            PlanRow? requested = null;
+            PlanRow? forced = null;
+            await using (var read = Command(connection, hasType ? PlanFactsWithTypeSql : PlanFactsSql))
+            {
+                read.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
+                read.Parameters.Add(new SqlParameter("@query_id", SqlDbType.BigInt) { Value = queryId });
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var row = new PlanRow(reader.GetInt64(0), reader.GetBoolean(1),
+                        reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+                        hasType ? (reader.IsDBNull(4) ? "unknown" : reader.GetString(4)) : "unknown");
+                    if (row.PlanId == planId)
+                        requested = row;
+                    if (row.IsForced)
+                        forced = row;
+                }
+            }
+
+            state = new PlanForceState(database, queryId, planId,
+                requested is null ? null : new RequestedPlanState(requested.PlanId, requested.IsForced, requested.FailureCount, requested.FailureReason),
+                forced is null ? null : new ForcedPlanState(forced.PlanId, forced.ForcingType, forced.FailureCount, forced.FailureReason));
+            return RemediationResult.Done(name, true, wrote: false, "Read the Query Store state of the query. Nothing was written.");
+        }, ct);
+        return PlanStateRead.From(result, state);
+    }
+
+    private sealed record PlanRow(long PlanId, bool IsForced, long? FailureCount, string? FailureReason, string ForcingType);
+
     public Task<RemediationResult> ForcePlanAsync(ServerActionPermit permit, long queryId, long planId, bool dryRun, CancellationToken ct) =>
         ForceOrUnforceAsync(permit, ServerActionNames.ForcePlan, "force_plan", queryId, planId, dryRun, force: true, ct);
 
@@ -126,14 +208,16 @@ SELECT killed = @killed;";
 
             if (dryRun)
                 return RemediationResult.Done(name, dryRun, wrote: false,
-                    $"Dry run: plan {planId} exists for query {queryId} and could be {(force ? "forced" : "unforced")}. Nothing was written.");
+                    $"Dry run: plan {planId} exists for query {queryId} and could be {(force ? "forced" : "unforced")}. Nothing was written.")
+                    with { Statement = StatementFor(database, queryId, planId, force) };
 
             await using var write = Command(connection, force ? ForceSql : UnforceSql);
             write.CommandType = CommandType.StoredProcedure;
             write.Parameters.Add(new SqlParameter("@query_id", SqlDbType.BigInt) { Value = queryId });
             write.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
             await write.ExecuteNonQueryAsync(ct);
-            return RemediationResult.Done(name, dryRun, wrote: true, $"Plan {planId} was {(force ? "forced" : "unforced")} for query {queryId} in {database}.");
+            return RemediationResult.Done(name, dryRun, wrote: true, $"Plan {planId} was {(force ? "forced" : "unforced")} for query {queryId} in {database}.")
+                with { Statement = StatementFor(database, queryId, planId, force) };
         }, ct);
     }
 
@@ -311,4 +395,36 @@ internal static class PlanHandleText
         bytes = Convert.FromHexString(text.AsSpan(2));
         return true;
     }
+}
+
+/// <summary>The plan asked about, as the server's Query Store holds it now.</summary>
+public sealed record RequestedPlanState(
+    [property: JsonPropertyName("plan_id")] long PlanId,
+    [property: JsonPropertyName("is_forced")] bool IsForced,
+    [property: JsonPropertyName("force_failure_count")] long? ForceFailureCount,
+    [property: JsonPropertyName("last_force_failure_reason")] string? LastForceFailureReason);
+
+/// <summary>The plan of the query that is forced now. <c>forcing_type</c> is MANUAL or AUTO on SQL Server 2022 and later, else "unknown".</summary>
+public sealed record ForcedPlanState(
+    [property: JsonPropertyName("plan_id")] long PlanId,
+    [property: JsonPropertyName("forcing_type")] string ForcingType,
+    [property: JsonPropertyName("force_failure_count")] long? ForceFailureCount,
+    [property: JsonPropertyName("last_force_failure_reason")] string? LastForceFailureReason);
+
+/// <summary>
+/// The server's own Query Store state for one query (#5632, step 7), the before and after image a force or an unforce journals. A null
+/// <see cref="ForcedPlan"/> means no plan of the query is forced; a null <see cref="RequestedPlan"/> means the plan is not among the query's rows.
+/// </summary>
+public sealed record PlanForceState(
+    [property: JsonPropertyName("database")] string Database,
+    [property: JsonPropertyName("query_id")] long QueryId,
+    [property: JsonPropertyName("plan_id")] long PlanId,
+    [property: JsonPropertyName("requested_plan")] RequestedPlanState? RequestedPlan,
+    [property: JsonPropertyName("forced_plan")] ForcedPlanState? ForcedPlan);
+
+/// <summary>What <see cref="SqlServerRemediationExecutor.ReadPlanStateAsync"/> found: the state, or the refusal or failure that stopped the read.</summary>
+public sealed record PlanStateRead(RemediationOutcome Outcome, string? Reason, string Message, PlanForceState? State)
+{
+    internal static PlanStateRead From(RemediationResult result, PlanForceState? state) =>
+        new(result.Outcome, result.Reason, result.Message, result.Outcome == RemediationOutcome.Done ? state : null);
 }

@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- #5632, step 6: the write code for agent actions on a monitored SQL Server, in its own assembly. The service
-       assembly does NOT reference this project (PlanForceNoWritePathTests keeps proving the service has no write path),
-       and nothing in this release calls it. Darling.Tests references it. -->
+  <!-- #5632, steps 6 and 7: the write code for agent actions on a monitored SQL Server, in its own assembly. The service
+       references this project (step 7) for ONE class, DarlingMcpPlanForceTools, which calls it for force_query_store_plan and
+       unforce_query_store_plan. PlanForceNoWritePathTests pins that no other service type touches it and that the service
+       assembly holds none of the write statements, which stay here. Darling.Tests references it too. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>

@@ -79,6 +79,8 @@ internal static class DarlingMcpWritePolicy
         "update_alert_settings",
         "set_alert_threshold_override",
         "merge_deadlock_signatures",
+        "force_query_store_plan",
+        "unforce_query_store_plan",
         "delete_notification_route",
         "set_notification_route_enabled",
         "set_notification_route_fallback",

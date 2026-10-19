@@ -1438,6 +1438,9 @@ LIMIT 1";
 
     private readonly MonitoredServerRegistryState _registryState;
 
+    /* #5632 step 7: where the worker publishes its store owner data source for the force and unforce tools. Null in a test-built worker. */
+    private readonly StoreOwnerSource? _ownerSource;
+
     /// <summary>
     /// True when another registration in the published registry carries this one's display name (ordinal), so
     /// its dedup key takes the store id. The population is the registry snapshot's enabled servers
@@ -1490,8 +1493,9 @@ LIMIT 1";
        and at each hourly flush); its own reads never go through admission. */
     private readonly ReadAdmission? _readAdmission;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null)
     {
+        _ownerSource = ownerSource;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _mcpTlsCertState = mcpTlsCertState;
@@ -2765,6 +2769,7 @@ LIMIT 1";
                 DarlingStoreConnection.WithApplicationName(
                     EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
         _postgres = postgres;
+        _ownerSource?.Publish(postgres);
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
            a moment — restarting, failing over, still coming up alongside this service — and a sibling
            instance holding the migration advisory lock both succeed seconds later; a rung that cannot

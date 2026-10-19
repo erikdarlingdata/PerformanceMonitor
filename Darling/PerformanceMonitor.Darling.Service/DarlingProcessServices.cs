@@ -44,6 +44,9 @@ internal static class DarlingProcessServices
        deliberately denied. */
     services.AddSingleton<MonitoredServerRegistryState>();
 
+    /* #5632 step 7: the worker's store owner data source, published for the one MCP tool that reads a remediation slot. */
+    services.AddSingleton<StoreOwnerSource>();
+
     /* #2953: the collector's startup verdict — the worker publishes it, the web host's /api/ping reads it, and
        neither touches the store to do so. A singleton for the same reason the three above are: the publisher and
        the reader are separate hosted services in one process, and the answer has to survive being asked at any

@@ -39,6 +39,12 @@ public static class AgentChangeKinds
     public const string CustomRule = "custom_rule";
     public const string ThresholdOverride = "threshold_override";
     public const string SignatureMerge = "signature_merge";
+
+    /// <summary>A Query Store plan forced on a monitored SQL Server (#5632, step 7). Not undoable in this step; step 9 adds the undo.</summary>
+    public const string PlanForce = "plan_force";
+
+    /// <summary>A Query Store plan unforced on a monitored SQL Server (#5632, step 7). Not undoable in this step.</summary>
+    public const string PlanUnforce = "plan_unforce";
 }
 
 /// <summary>A mute rule as <c>config.config_mute_rules</c> holds it. Also the wire shape of the mute tools' <c>mute_rule</c> object.</summary>

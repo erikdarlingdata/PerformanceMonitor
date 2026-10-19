@@ -29,6 +29,9 @@ public enum RemediationOutcome
 public sealed record RemediationResult(
     RemediationOutcome Outcome, string Action, bool DryRun, bool Wrote, string? Reason, string Message)
 {
+    /// <summary>The exact statement a force or unforce runs (or would run, on a dry run), with the database name quoted the way <c>QUOTENAME</c> quotes it. Null when the result is not about one.</summary>
+    public string? Statement { get; init; }
+
     public static class Reasons
     {
         public const string PermitMismatch = "permit_mismatch";

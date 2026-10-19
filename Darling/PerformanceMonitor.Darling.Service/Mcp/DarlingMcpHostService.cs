@@ -105,6 +105,9 @@ public sealed class DarlingMcpHostService : BackgroundService
        SELECT-carve fails that whole read by design). */
     private readonly MonitoredServerRegistryState _registryState;
 
+    /* #5632 step 7: the worker-published store owner data source the force and unforce tools read a remediation slot through. */
+    private readonly StoreOwnerSource _ownerSource;
+
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
@@ -151,8 +154,9 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// releases it; released by <see cref="ReleaseServerCertificate"/>.</summary>
     private DarlingWebTls.LoadedCertificate? _serverCertificate;
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, McpTlsCertificateState? mcpTlsCertState = null)
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, McpTlsCertificateState? mcpTlsCertState = null, StoreOwnerSource? ownerSource = null)
     {
+        _ownerSource = ownerSource ?? new StoreOwnerSource();
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _logger = logger;
@@ -744,7 +748,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache);
+            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource);
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -1099,8 +1103,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         AnalyzerConfig? analyzer,
         PerformanceMonitor.Analysis.IPlanFetcher? planFetcher,
         ILogger logger,
-        BaselineCache baselineCache)
+        BaselineCache baselineCache,
+        StoreOwnerSource? ownerSource = null)
     {
+        /* #5632 step 7: force_query_store_plan and unforce_query_store_plan take this as a service parameter. Empty until the worker publishes. */
+        services.AddSingleton<StoreOwnerSource>(ownerSource ?? new StoreOwnerSource());
         /* Register services that MCP tools need via dependency injection. */
         services.AddSingleton<NpgsqlDataSource>(postgres);
         /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */
@@ -1507,6 +1514,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpInvestigationTools>()
             .WithGeminiCompatibleTools<DarlingMcpThresholdOverrideTools>()
             .WithGeminiCompatibleTools<DarlingMcpSignatureMergeTools>()
+            /* #5632 step 7: force_query_store_plan and unforce_query_store_plan, behind the server action gate; ship off. */
+            .WithGeminiCompatibleTools<DarlingMcpPlanForceTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigTools>()
             .WithGeminiCompatibleTools<DarlingMcpHealthTools>()
             /* The cross-server fleet overview — get_fleet_overview (#1562) — the roll-up only the central
