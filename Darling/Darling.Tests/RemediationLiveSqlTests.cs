@@ -334,7 +334,10 @@ public sealed class RemediationLiveSqlTests
     /// <summary>A second session, opened by the test as the scratch login, with its session id and login time read from the server.</summary>
     private static async Task<(SqlConnection Victim, int SessionId, DateTime LoginTime)> OpenVictimAsync(Scratch scratch, CancellationToken ct)
     {
-        var victim = await OpenAsync(Builder(scratch.Login, scratch.Password, app: "PerformanceMonitorDarling-RemediationVictim"), ct);
+        /* No connection resiliency: with it the driver quietly reconnects after a kill, and the test could not see the session end. */
+        var victimBuilder = Builder(scratch.Login, scratch.Password, app: "PerformanceMonitorDarling-RemediationVictim");
+        victimBuilder.ConnectRetryCount = 0;
+        var victim = await OpenAsync(victimBuilder, ct);
         var sessionId = Convert.ToInt32(await ScalarAsync(victim, "SELECT @@SPID;", ct), CultureInfo.InvariantCulture);
         await using var admin = await OpenAsync(Admin(), ct);
         var loginTime = (DateTime)(await ScalarAsync(admin, $"SELECT login_time FROM sys.dm_exec_sessions WHERE session_id = {sessionId};", ct))!;
