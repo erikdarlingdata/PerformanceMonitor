@@ -77,8 +77,11 @@ public sealed class WatermarkReadFailureLogTests : IDisposable
         return duckDb;
     }
 
-    private static List<string> WatermarkLines(IEnumerable<string> log) =>
-        log.Where(line => line.Contains("[Watermark]", StringComparison.Ordinal)).ToList();
+    /* #6113: only the lines for the server this test reads for. The buffer is process-wide, so a failed watermark read for
+       another server in another test class is not this test's line. */
+    private static List<string> WatermarkLines(IEnumerable<string> log, string server) =>
+        log.Where(line => line.Contains("[Watermark]", StringComparison.Ordinal)
+            && line.Contains($"[{server}]", StringComparison.Ordinal)).ToList();
 
     [Fact]
     public async Task EachFailedRead_LogsOneWarn_NamingTheRead_TheTable_TheServer_AndTheExceptionType()
@@ -98,7 +101,7 @@ public sealed class WatermarkReadFailureLogTests : IDisposable
 
         AppLogger.DrainBufferedLines();
         var noWatermark = await reads.EachReturnsNoWatermarkAsync(serverId);
-        var lines = WatermarkLines(AppLogger.DrainBufferedLines());
+        var lines = WatermarkLines(AppLogger.DrainBufferedLines(), server.DisplayName);
 
         Assert.True(noWatermark);
         Assert.Equal(4, lines.Count);
@@ -123,7 +126,7 @@ public sealed class WatermarkReadFailureLogTests : IDisposable
 
         AppLogger.DrainBufferedLines();
         var noWatermark = await reads.EachReturnsNoWatermarkAsync(424242);
-        var lines = WatermarkLines(AppLogger.DrainBufferedLines());
+        var lines = WatermarkLines(AppLogger.DrainBufferedLines(), "server_id 424242");
 
         Assert.True(noWatermark);
         Assert.Equal(4, lines.Count);
@@ -138,7 +141,7 @@ public sealed class WatermarkReadFailureLogTests : IDisposable
 
         AppLogger.DrainBufferedLines();
         var watermark = await reads.FirstRunTimeAsync(424242);
-        var lines = WatermarkLines(AppLogger.DrainBufferedLines());
+        var lines = WatermarkLines(AppLogger.DrainBufferedLines(), "server_id 424242");
 
         Assert.Null(watermark);
         Assert.Empty(lines);
