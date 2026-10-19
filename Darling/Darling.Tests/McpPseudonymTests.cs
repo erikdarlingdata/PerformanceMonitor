@@ -25,7 +25,7 @@ public sealed class McpPseudonymTests
     [Theory]
     [InlineData("login", "CORP\\Alice", "login#5f484746")]
     [InlineData("login", "sa", "login#8f799a85")]
-    [InlineData("host", "APP-01", "host#a06e9ea5")]
+    [InlineData("host", "AppBox", "host#863ab665")]
     public void TheSharedVector_GivesTheSameThreePseudonymsInBothApps(string kind, string name, string expected)
     {
         Assert.Equal(expected, PseudonymTestKey.Key.Pseudonym(kind, name));

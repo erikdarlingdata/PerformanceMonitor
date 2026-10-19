@@ -56,7 +56,7 @@ public sealed class PseudonymKeyTests
     [Theory]
     [InlineData("login", "CORP\\Alice", "login#5f484746")]
     [InlineData("login", "sa", "login#8f799a85")]
-    [InlineData("host", "APP-01", "host#a06e9ea5")]
+    [InlineData("host", "AppBox", "host#863ab665")]
     public void TheSharedVector_GivesTheSameThreePseudonymsAsDarling(string kind, string name, string expected)
     {
         Assert.Equal(expected, SharedKey().Pseudonym(kind, name));
