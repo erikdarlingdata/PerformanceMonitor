@@ -471,8 +471,8 @@ public sealed class McpPayloadClockFrameDisciplineTests
         var liteAlreadyUtcFields = LiteAlreadyUtcToolSites.Sum(x => x.Properties.Length);
 
         Assert.Equal(4, liteAlreadyUtcFields);
-        Assert.Equal(16, darlingFields + liteAlreadyUtcFields);
-        Assert.Equal(16, liteFields + liteAlreadyUtcFields);
+        Assert.Equal(18, darlingFields + liteAlreadyUtcFields);
+        Assert.Equal(18, liteFields + liteAlreadyUtcFields);
     }
 
     /* ───────────────────────── the discriminators, both directions ───────────────────────── */

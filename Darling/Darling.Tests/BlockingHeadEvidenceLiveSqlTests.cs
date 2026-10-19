@@ -123,6 +123,10 @@ CREATE TABLE dbo.head_a (id integer NOT NULL PRIMARY KEY, v integer NOT NULL);
 CREATE TABLE dbo.head_b (id integer NOT NULL PRIMARY KEY, v integer NOT NULL);
 INSERT dbo.head_a (id, v) VALUES (1, 0);
 INSERT dbo.head_b (id, v) VALUES (1, 0);", ct);
+
+                /* The first transaction to touch a new database records 120 bytes of log even for a read (measured on SQL Server 2025), so a
+                   throwaway transaction here keeps head A's transaction a clean "wrote nothing" case. */
+                await RunAsync(setup, "BEGIN TRANSACTION; SELECT v FROM dbo.head_a WITH (HOLDLOCK, ROWLOCK) WHERE id = 1; ROLLBACK;", ct);
             }
 
             headA = new SqlConnection(scratch);
