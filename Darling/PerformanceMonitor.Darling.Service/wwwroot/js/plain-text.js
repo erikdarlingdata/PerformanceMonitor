@@ -56,6 +56,48 @@ export const MCP_TOOL_NAMES = [
 ];
 const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
 
+/** Every other MCP tool the service registers (the ones whose name does not start with get_): reads that act, and the write
+    tools. A message that names one tells a client what to call next; a web reader cannot call it. WebPlainTextTests checks
+    this list against the registry, like the get_ list above. */
+export const MCP_ACTION_TOOL_NAMES = [
+  "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan", "analyze_server",
+  "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
+  "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_query_tag",
+  "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule", "delete_custom_view", "delete_mute_rule",
+  "delete_notification_route", "delete_query_tag", "delete_query_tag_rule", "delete_server_tag", "describe_custom_view_catalog",
+  "edit_server", "evict_cached_plan", "find_database", "force_query_store_plan", "kill_session", "list_custom_alert_rules",
+  "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules", "list_query_tags",
+  "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "remove_server", "run_collectors_now",
+  "run_custom_view_panel", "set_alert_threshold_override", "set_mute_rule_enabled", "set_notification_route_enabled",
+  "set_notification_route_fallback", "submit_investigation_report", "test_custom_alert_rule", "test_query_tag_rule",
+  "unassign_query_tag", "unassign_server_tag", "unforce_query_store_plan", "update_alert_settings", "update_custom_alert_rule",
+  "update_custom_view", "update_mute_rule", "update_query_tag", "update_query_tag_rule", "update_server_tag",
+  "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests",
+];
+const ACTION_TOOL_SET = new Set(MCP_ACTION_TOOL_NAMES);
+
+/** The page's own word for the place a read shows, keyed by tool. A message that tells a client to call one of these reads
+    "the Replication tab" on the page. Only reads a tab really shows are here (server-tab-reach.js lists them); every other
+    tool name is not something the page has, so a sentence that still names one is dropped (withoutToolNames). */
+const PAGE_FOR_TOOLS = [
+  ["Collection Health", ["get_collection_health", "get_collection_log"]],
+  ["the Blocking tab", ["get_blocking", "get_blocking_stats", "get_blocking_trend", "get_blocked_process_xml", "get_deadlocks", "get_deadlock_detail", "get_deadlock_trend", "get_lock_wait_trend"]],
+  ["the Queries tab", ["get_active_queries", "get_query_store_top", "get_query_store_regressions", "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_query_trend", "get_query_heatmap"]],
+  ["the Wait Stats tab", ["get_wait_stats", "get_wait_trend", "get_waiting_tasks", "get_latch_stats", "get_spinlock_stats"]],
+  ["the File I/O tab", ["get_file_io_trend", "get_tempdb_trend"]],
+  ["the CPU tab", ["get_cpu_utilization"]],
+  ["the Memory tab", ["get_memory_grants", "get_memory_trend", "get_resource_semaphore"]],
+  ["the System Events tab", ["get_default_trace_events"]],
+  ["the Replication tab", ["get_pg_replication_slots", "get_pg_replication_stats"]],
+  ["the Vacuum tab", ["get_pg_autovacuum_health", "get_pg_session_states", "get_pg_wraparound_risk", "get_pg_xmin_horizon"]],
+  ["the Waits tab", ["get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_kernel_stats"]],
+  ["the I/O tab", ["get_pg_io_stats", "get_pg_io_trend", "get_pg_buffer_usage", "get_pg_write_stats"]],
+  ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats"]],
+  ["the Storage tab", ["get_pg_table_bloat", "get_pg_index_bloat", "get_pg_index_usage"]],
+  ["the Configuration tab", ["get_pg_server_config", "get_pg_server_config_changes"]],
+];
+const PAGE_FOR_TOOL = new Map(PAGE_FOR_TOOLS.flatMap(([page, tools]) => tools.map((t) => [t, page])));
+
 /** The label=value measurement labels the collectors write (the CollectorMeasurement labels). A lone label=value pair is
     rewritten only when its label is one of these; WebPlainTextTests checks the list against the collectors' source. */
 export const MEASUREMENT_LABELS = [
@@ -143,6 +185,96 @@ export function plainTextNamed(text) {
   return namedTokenText(text);
 }
 
+/** Whether a word is a tool the service registers, get_ or otherwise. */
+function isToolName(word) {
+  return TOOL_NAME_SET.has(word) || ACTION_TOOL_SET.has(word);
+}
+const TOOL_WORD = /(?<![\w.])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\w])/g;
+
+/** Splits at ". ", "! " and "? " when a capital letter, a quote or a bracket follows. */
+function sentencesOf(text) {
+  return text.split(/(?<=[.!?])\s+(?=[A-Z"'(\[])/);
+}
+
+/** Where the first registered tool name sits in `s`, or -1. */
+function firstToolAt(s) {
+  for (const m of s.matchAll(TOOL_WORD)) if (isToolName(m[0])) return m.index;
+  return -1;
+}
+
+/**
+ * Tool names, said the way the page says them (#6156). A person on the page has no tools to call, so a name never reaches
+ * them: a read a tab shows becomes that tab ("the Replication tab"), a collector becomes its display name ("the Trace Flags
+ * collector"), and a sentence that still points at any other tool (analyze_server, a get_ read no tab shows) is dropped,
+ * or only its trailing clause when the sentence says something before it ("...; audit_config reports those.").
+ * If that would leave nothing, the names are said as words instead, so the strip is never blank.
+ */
+function withoutToolNames(text) {
+  let t = text;
+
+  /* A collector name followed by the word "collector": its display name is its words, title-cased, as the tab titles are. */
+  t = t.replace(/(?<![\w.])((?:[Tt]he )?)([a-z][a-z0-9]*(?:_[a-z0-9]+)+) collector(?![\w])/g, (m, the, name) => the + toolWords(name) + " collector");
+  t = t.replace(/\bcollector '([a-z][a-z0-9]*(?:_[a-z0-9]+)+)'/g, (m, name) => "collector '" + toolWords(name) + "'");
+
+  /* A read a tab shows. Any other tool name stays here and is dropped below. */
+  t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m) => PAGE_FOR_TOOL.get(m) ?? m);
+
+  /* Two reads on one tab, named one after the other, are that tab once: "try the Queries tab or the Queries tab". */
+  t = t.replace(/\b(the (?:[A-Z][\w/]*\s)+tab)(?:, | or | and )\1/g, "$1");
+
+  if (firstToolAt(t) < 0) return t;
+
+  const kept = [];
+  for (const sentence of sentencesOf(t)) {
+    const at = firstToolAt(sentence);
+    if (at < 0) {
+      kept.push(sentence);
+      continue;
+    }
+    /* The clause the name sits in starts at the last "; " or dash before it. What stands before that clause is still worth
+       showing when it does not name a tool itself and is long enough to be a statement. */
+    const before = sentence.slice(0, at);
+    const cut = Math.max(before.lastIndexOf("; "), before.lastIndexOf(" — "), before.lastIndexOf(" – "), before.lastIndexOf(" - "));
+    const head = cut > 0 ? before.slice(0, cut).trimEnd() : "";
+    if (head.split(/\s+/).length >= 4 && firstToolAt(head) < 0) kept.push(head.replace(/[,;:]$/, "") + (/[.!?]$/.test(head) ? "" : "."));
+  }
+  const out = kept.join(" ").trim();
+  if (out !== "") return out;
+  return t.replace(TOOL_WORD, (m) => (isToolName(m) ? toolWords(m.replace(/^get_/, "")) : m));
+}
+
+/** Ordinary English words a message may write in capitals for emphasis ("DID execute", "NOT an all-clear"). Only these are
+    lower-cased. An acronym (SQL, CPU, WAL, XID, TLS), a state or setting (READ_ONLY, FATAL), a wait type, a SQL keyword and
+    a name the reader typed (a server, a database) are not here, so they are never touched; a word with an underscore or a
+    digit in it is not even looked at. */
+const EMPHASIS_WORDS = new Set((
+  "NOT AND OR BUT NO ANY ALL ONLY ALWAYS EVER NEVER EVERY NOTHING ONE TWO THREE FOUR FIRST LATEST NEWEST OLDEST OLDER LAST NEXT SAME " +
+  "OWN THIS THAT THESE THOSE WHOLE WITHOUT WITHIN BEFORE AFTER BOTH EITHER NEITHER OTHER ANOTHER STILL YET ALREADY ONCE THEN WHEN " +
+  "WHICH WHAT WHY WHO HAS HAVE HAD WAS WERE ARE BE DID DOES CAN CANNOT COULD WOULD MAY MUST SHOULD WILL ALSO TOO MORE MOST LESS " +
+  "FEWER WIDER NARROWER HIGHER LOWER WORSE WORST VERY ACTUALLY EXACTLY ITSELF ITS YOU YOUR OUR INSTEAD ABOVE BELOW BETWEEN INTO " +
+  "UNDER PAST EACH MEASURED ESTIMATED SAMPLED SAMPLE SAMPLES SUPPOSED DAILY HOURLY CAUSAL DIFFERENCE DIFFERENCES DIFFERENT " +
+  "SEPARATE RANK RANKED LINES REAL WRONG CORRECT NORMAL PARTIAL EXPECTED HERE ZERO SHORT BAD"
+).split(" "));
+
+/** Whether a token (a run without spaces) is all capitals, digits and underscores: ALTER, READ_ONLY, SQL. */
+function isCapsToken(token) {
+  return /^[A-Z][A-Z0-9_]+$/.test(token.replace(/^[^A-Za-z0-9_]+|[^A-Za-z0-9_]+$/g, ""));
+}
+
+/** A whole word of capitals that is an ordinary English word, said in lower case: "runs DID execute" -> "runs did execute".
+    A word that opens a sentence keeps its first capital. A word that stands next to another all-capitals word is part of a
+    statement or a permission name (ALTER ANY EVENT SESSION, IS NOT NULL) and is left as written. */
+function lowerEmphasisWords(text) {
+  return text.replace(/(?<![\w$.\/\\-])[A-Z]{2,}(?![\w$\/\\-])/g, (word, at) => {
+    if (!EMPHASIS_WORDS.has(word)) return word;
+    const prev = /(\S+) $/.exec(text.slice(0, at));
+    const next = /^ (\S+)/.exec(text.slice(at + word.length));
+    if ((prev && isCapsToken(prev[1])) || (next && isCapsToken(next[1]))) return word;
+    const lower = word.toLowerCase();
+    return at === 0 || /[.!?]\s+$/.test(text.slice(0, at)) ? lower[0].toUpperCase() + lower.slice(1) : lower;
+  });
+}
+
 /**
  * `text` with the internal names a web reader cannot use put into words. Text with none of them comes back unchanged.
  * Not a string (null, a number) comes back as it is.
@@ -216,9 +348,11 @@ export function plainText(text) {
   /* The system-health "events were captured, none qualified" closing. */
   t = t.replace(/so this is the healthy answer for this read rather than missing data/g, "so this is a normal result, not missing data");
 
-  /* A tool name: use get_collection_health -> use Collection Health. Only a real tool name; any other get_ word is the
-     reader's own text (an object, a server) and stays as written. */
-  t = t.replace(/(?<![\w.])get_([a-z0-9]+(?:_[a-z0-9]+)*)(?![\w])/g, (m, rest) => (TOOL_NAME_SET.has(m) ? toolWords(rest) : m));
+  /* A tool name is not something the page has (#6156): a read a tab shows becomes that tab, any other sentence that points at
+     a tool is dropped. Only a registered tool name counts; any other get_ word is the reader's own text (an object, a server)
+     and stays as written. Capitals used for emphasis come last, once the tool sentences are gone. */
+  t = withoutToolNames(t);
+  t = lowerEmphasisWords(t);
 
   return t;
 }

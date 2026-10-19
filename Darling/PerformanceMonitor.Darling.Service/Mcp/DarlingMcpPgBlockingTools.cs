@@ -134,8 +134,7 @@ public sealed class DarlingMcpPgBlockingTools
                     captures_with_blocking = captures.CapturesWithBlocking,
                     finding =
                         "Blocking was captured, but every participant was itself blocked — a lock cycle "
-                        + "(deadlock) rather than a chain with a root. There is no root blocker to name, "
-                        + "which is why these are reported separately.",
+                        + "(deadlock) rather than a chain with a root. There is no root blocker to name.",
                     cycles = cycleEntries,
                 }, McpHelpers.JsonOptions), notice);
             }
