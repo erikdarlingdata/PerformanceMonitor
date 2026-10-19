@@ -350,7 +350,8 @@ RETURNING route_id, server_id, server_name";
                 ["to"] = Iso(now),
                 ["forced_plan"] = forcedSince?.DeepClone(),
                 ["plans"] = sincePlans,
-                ["other_plans_ran"] = sincePlans.Any(p => p is JsonObject o && o["plan_id"] is JsonValue v && v.TryGetValue(out long id) && id != force.PlanId && o["variant_of_forced"] is null),
+                /* From the fact, not the shown list: with many variants listed first, another plan can fall off the list (#6160). */
+                ["other_plans_ran"] = fact is not null ? fact.OtherPlans.Count > 0 : sincePlans.Any(p => p is JsonObject o && o["plan_id"] is JsonValue v && v.TryGetValue(out long id) && id != force.PlanId && o["variant_of_forced"] is null),
                 ["variant_plans_ran"] = sincePlans.Any(p => p is JsonObject o && o["variant_of_forced"] is not null),
                 ["stats_complete"] = read.StatsComplete,
             },
