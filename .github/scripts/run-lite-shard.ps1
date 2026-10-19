@@ -106,44 +106,18 @@ else {
         $got = @(Get-ChildItem -Path $timingDir -Directory | ForEach-Object { $_.Name } | Sort-Object)
         if ($expected.Count -eq 0 -or ($expected -join ',') -ne ($got -join ',')) { throw "downloaded timing artifacts [$($got -join ', ')] are not the [$($expected -join ', ')] the gate pinned from run $TimingRun - failing this shard rather than cutting from different inputs than the other shards" }
 
-        # #6117: the cut and its guard run on one class listing. When they disagree (the packer failed, or reconcile finds
-        # the shard files and the class list apart), list the classes once more and cut once more before failing, so one
-        # bad listing on one runner cannot sink the leg alone; the retry is logged as a warning. The errors name which
-        # listing each side came from (--classes-source).
-        function Invoke-ShardCut([string[]] $classList, [string] $source) {
-            Set-Content -Path $classesFile -Value $classList -Encoding utf8NoBOM
-            Remove-Item -Force -Path (Join-Path $planDir 'shard-*.txt') -ErrorAction SilentlyContinue
-            $out = @(python .github/scripts/lite-shard-pack.py pack --classes $classesFile --shards $shards --out $planDir --timings $timingDir --classes-source $source)
-            $exit = $LASTEXITCODE
-            $out | ForEach-Object { Write-Host $_ }
-            if ($exit -ne 0) { return [pscustomobject]@{ Ok = $false; Output = $out; Why = 'the shard packer failed or could not prove its cut total' } }
-            # The guard again, on the very files this shard reads.
-            # Written to the host, not left on the pipeline: a function returns everything it prints.
-            $recOut = @(python .github/scripts/lite-shard-pack.py reconcile --classes $classesFile --shards $shards --out $planDir --classes-source $source)
-            $recExit = $LASTEXITCODE
-            $recOut | ForEach-Object { Write-Host $_ }
-            if ($recExit -ne 0) { return [pscustomobject]@{ Ok = $false; Output = $out; Why = 'the shard files are not exactly the discovered classes' } }
-            return [pscustomobject]@{ Ok = $true; Output = $out; Why = '' }
-        }
-        $cut = Invoke-ShardCut $classes 'listing 1 (the first dotnet run -list)'
-        if (-not $cut.Ok) {
-            $firstWhy = $cut.Why
-            Write-Host "::warning title=Lite shard cut retried::$firstWhy on listing 1 ($($classes.Count) classes); listing the classes again and cutting once more (#6117)."
-            $classes2 = @(Get-LiteClasses @())
-            if ($classes2.Count -eq 0) { throw 'the second class listing returned no classes - the shard would silently run nothing' }
-            $only1 = @($classes | Where-Object { $classes2 -notcontains $_ })
-            $only2 = @($classes2 | Where-Object { $classes -notcontains $_ })
-            Write-Host "listing 1: $($classes.Count) classes; listing 2: $($classes2.Count) classes; only in listing 1: [$($only1 -join ', ')]; only in listing 2: [$($only2 -join ', ')]"
-            $cut = Invoke-ShardCut $classes2 'listing 2 (the retry dotnet run -list)'
-            if (-not $cut.Ok) { throw "$($cut.Why) on both listings (the first: $firstWhy) - failing this shard" }
-            $classes = $classes2
-            Write-Host "::warning title=Lite shard cut needed the retry::the first cut failed ($firstWhy); the second listing cut cleanly. The two listings differed by $($only1.Count + $only2.Count) class(es)."
-        }
-        $packOutput = $cut.Output
+        # #6117: --classes-source names the listing the class file holds, so a reconcile mismatch says where each side came from.
+        $packOutput = @(python .github/scripts/lite-shard-pack.py pack --classes $classesFile --shards $shards --out $planDir --timings $timingDir --classes-source 'the dotnet run -list of this leg')
+        $packExit = $LASTEXITCODE
+        $packOutput | ForEach-Object { Write-Host $_ }
+        if ($packExit -ne 0) { throw 'the shard packer failed or could not prove its cut total - failing this shard rather than guessing' }
         # The packer itself falls back to the hash cut when the timings are unusable (missing, corrupt,
         # empty, all zero, or under 80% of this commit's classes); it says which it used, and so does
         # the notice below.
         $method = if (($packOutput -join ' ') -match 'shards by (\w+);') { $Matches[1] } else { 'an unreported method' }
+        # The guard again, on the very files this shard reads.
+        python .github/scripts/lite-shard-pack.py reconcile --classes $classesFile --shards $shards --out $planDir --classes-source 'the dotnet run -list of this leg'
+        if ($LASTEXITCODE -ne 0) { throw 'the shard files are not exactly the discovered classes - failing this shard' }
 
         $mine = @(Get-Content -Path (Join-Path $planDir "shard-$Shard.txt") | Where-Object { $_.Trim() })
         # A fingerprint of the whole plan, identical on every leg when they cut from the same inputs. Each
