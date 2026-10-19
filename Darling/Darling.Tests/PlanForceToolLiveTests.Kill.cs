@@ -211,8 +211,7 @@ public sealed partial class PlanForceToolLiveTests
             }
 
             var json = Parse(answer);
-            Assert.Equal("unknown", (string?)json["status"]);
-            Assert.Equal("outcome_unknown", (string?)json["reason"]);
+            Assert.Equal("outcome_unknown", (string?)json["status"]);
             Assert.Contains("may have been killed", (string?)json["message"], StringComparison.Ordinal);
             for (var i = 0; i < 50 && await SessionAliveAsync(c, victim); i++)
                 await Task.Delay(100, c.Ct);

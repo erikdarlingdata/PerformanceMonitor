@@ -116,10 +116,10 @@ public sealed class DarlingMcpPlanForceTools
         "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
         "On SQL Server the answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, wait_event, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back, except a session waiting for a synchronous standby, which has already committed. After a write, still_there says whether the backend was still there when read right after the signal. There is no undo. " +
         "Refusals: own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and kill_not_built_on_platform (Azure SQL Database). " +
-        "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason), failed, or unknown (reason outcome_unknown: the kill was sent and its reply was lost, so the session may have ended; read get_blocking or get_pg_session_states before trying again), with session, warnings, rollback and journal_id.")]
+        "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason), failed, or outcome_unknown (the kill was sent and its reply was lost, so the session may have ended; read get_blocking or get_pg_session_states before trying again), with session, warnings, rollback and journal_id.")]
     public static Task<string> KillSession(
         NpgsqlDataSource postgres,
-        [Description("SQL Server: the session id, blocking_session_id from get_blocking. PostgreSQL: the pid, root_pid from get_pg_blocking or pid from get_pg_session_states; it must agree with backend_id. Required on both.")] int? session_id = null,
+        [Description("SQL Server: the session id, blocking_session_id from get_blocking. PostgreSQL: the pid (root_pid from get_pg_blocking, pid from get_pg_session_states), matching backend_id. Required on both.")] int? session_id = null,
         [Description("SQL Server: the session's login time as get_blocking returns it (blocking_login_time, ISO 8601 UTC), required there. It must be the value you read, not a later one. PostgreSQL: leave it out.")] string? login_time = null,
         [Description("PostgreSQL: the session's backend_id exactly as get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns it, a string of digits (required there). SQL Server: leave it out.")] string? backend_id = null,
         [Description("Server name or display name.")] string? server_name = null,
@@ -657,11 +657,11 @@ public sealed class DarlingMcpPlanForceTools
     }
 
     /// <summary>
-    /// A kill whose statement was sent and whose reply was lost (#5632), on either engine: status <c>unknown</c>, nothing journaled as failed
+    /// A kill whose statement was sent and whose reply was lost (#5632), on either engine: status <c>outcome_unknown</c>, nothing journaled as failed
     /// (the call reads "result unknown" in the agent changes list), and the message says the session may have ended.
     /// </summary>
     private static string OutcomeUnknownAnswer(RemediationResult result, object? session, AgentActionResult journal) =>
-        Answer("unknown", result.Reason, result.Message + " There is no undo.", new { dry_run = false, session, journal_id = journal.CalledId });
+        Answer("outcome_unknown", null, result.Message + " There is no undo.", new { dry_run = false, session, journal_id = journal.CalledId });
 
     /// <summary>
     /// A refusal or a failure of the PostgreSQL kill. A reused pid answers nothing about the session that has it now: not its id, not its

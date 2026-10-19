@@ -499,8 +499,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             var json = Parse(answer);
-            Assert.Equal("unknown", (string?)json["status"]);
-            Assert.Equal("outcome_unknown", (string?)json["reason"]);
+            Assert.Equal("outcome_unknown", (string?)json["status"]);
             Assert.Contains("may have ended", (string?)json["message"], StringComparison.Ordinal);
             Assert.NotNull(json["journal_id"]);
             Assert.False(await c.AliveAsync(pid));
