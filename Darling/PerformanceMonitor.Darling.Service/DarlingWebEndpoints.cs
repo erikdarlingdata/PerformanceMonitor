@@ -1429,7 +1429,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                    (no confirm) answers the statement and the state and writes nothing; {"confirm": true, "statement": "<shown>"} writes. */
                 if ((await changes.GetAsync(id, context.RequestAborted))?.IsPlanChange == true)
                 {
-                    return await UndoPlanChangeAsync(context, changes, ownerSource, logger, id, login, stopwatch);
+                    if (!await changes.CanDecideAsync(context.RequestAborted))
+                    {
+                        return AgentChangeRefusedResult();
+                    }
+
+                    var (planBody, planStatus) = await UndoPlanChangeAsync(context, changes, ownerSource, logger, id, login);
+                    return DarlingWebStatementSweep.JsonText(planBody, "/api/agent-changes/{id}/undo", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, planStatus);
                 }
 
                 var result = await changes.UndoAsync(id, login, context.RequestAborted);
@@ -1497,17 +1503,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>
     /// A person's undo of a plan force or unforce (#5632, step 9). 200 <c>{status: "confirm", statement, state, message}</c> without a confirm
     /// (nothing written); 200 <c>{status: "undone", ...}</c> with <c>{"confirm": true}</c>; a refusal is 409 <c>{error, code}</c> (404 for
-    /// <c>not_found</c>); a server that took no write is 502. A viewer-role store is 403 before anything else, as the store kinds' undo answers it.
+    /// <c>not_found</c>); a server that took no write is 502. A viewer-role store is 403 before anything else, as the store kinds' undo answers it
+    /// (the route checks that, then sweeps what this returns).
     /// </summary>
-    private static async Task<IResult> UndoPlanChangeAsync(HttpContext context, AgentChangeUndo changes, StoreOwnerSource? ownerSource, ILogger logger,
-        long id, string login, Stopwatch stopwatch)
+    private static async Task<(JsonObject Body, int Status)> UndoPlanChangeAsync(HttpContext context, AgentChangeUndo changes, StoreOwnerSource? ownerSource, ILogger logger,
+        long id, string login)
     {
-        const string route = "/api/agent-changes/{id}/undo";
-        if (!await changes.CanDecideAsync(context.RequestAborted))
-        {
-            return AgentChangeRefusedResult();
-        }
-
         var confirm = false;
         string? shown = null;
         var raw = await ReadBodyAsync(context);
@@ -1517,7 +1518,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 if (JsonNode.Parse(raw) is not JsonObject body)
                 {
-                    return ErrorResult("Send {} or {\"confirm\": true, \"statement\": \"<the statement shown>\"}.", StatusCodes.Status400BadRequest);
+                    return (new JsonObject { ["error"] = "Send {} or {\"confirm\": true, \"statement\": \"<the statement shown>\"}." }, StatusCodes.Status400BadRequest);
                 }
 
                 confirm = body["confirm"] is JsonValue flag && flag.TryGetValue(out bool yes) && yes;
@@ -1525,24 +1526,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (JsonException)
             {
-                return ErrorResult("The request body is not valid JSON.", StatusCodes.Status400BadRequest);
+                return (new JsonObject { ["error"] = "The request body is not valid JSON." }, StatusCodes.Status400BadRequest);
             }
         }
 
         var answer = await Mcp.DarlingMcpPlanForceTools.UndoPlanChangeAsync(changes, ownerSource?.Read(), logger, id, login, confirm, shown, context.RequestAborted);
         if (answer.Succeeded)
         {
-            return DarlingWebStatementSweep.JsonText(answer.ToJson(), route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            return (answer.ToJson(), StatusCodes.Status200OK);
         }
 
-        var body2 = new JsonObject { ["error"] = answer.Message, ["code"] = answer.Code, ["status"] = answer.Status };
+        var refused = new JsonObject { ["error"] = answer.Message, ["code"] = answer.Code, ["status"] = answer.Status };
         if (answer.State is not null)
         {
-            body2["state"] = answer.State.DeepClone();
+            refused["state"] = answer.State.DeepClone();
         }
 
-        return DarlingWebStatementSweep.JsonText(body2, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted,
-            answer.Code == "not_found" ? StatusCodes.Status404NotFound
+        return (refused, answer.Code == "not_found" ? StatusCodes.Status404NotFound
             : answer.Code == "bad_login" ? StatusCodes.Status400BadRequest
             : answer.Status == PlanUndoAnswer.Failed ? StatusCodes.Status502BadGateway
             : StatusCodes.Status409Conflict);
