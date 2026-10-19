@@ -283,7 +283,8 @@
   "mcp_allow_investigations": false,
   // NO UI. How much collected data the MCP answers hand out: "full" (the default), "maskLiterals" (statement text keeps
   // its shape with every literal replaced) or "metadataOnly" (statement text, plans and input buffers are withheld, logins
-  // and host names are masked). Any other word keeps the MCP endpoint off and names the accepted words in the log.
+  // and host names are masked, each as the same login#xxxxxxxx or host#xxxxxxxx pseudonym in every answer; the key is kept in
+  // Windows Credential Manager as PerformanceMonitorLite_PseudonymKey and is never exported). Any other word keeps the MCP endpoint off and names the accepted words in the log.
   // Change it, then restart Lite.
   "mcp_data_detail": "full",
 

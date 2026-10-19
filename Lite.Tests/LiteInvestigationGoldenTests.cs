@@ -81,7 +81,7 @@ public sealed class LiteInvestigationGoldenTests
     {
         var brief = InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, At, FixedKey());
 
-        Assert.True("KEYED_BRIEF_SHA" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
+        Assert.True("A93E1CC9D8C35BA9DE65580E43F3DB5C5A64DE53D6C94C6538B4FC92344D98AF" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
         Assert.DoesNotContain("corp", brief, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("alice", brief, StringComparison.OrdinalIgnoreCase);
     }
