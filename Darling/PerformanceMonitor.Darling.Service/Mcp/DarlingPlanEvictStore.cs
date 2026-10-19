@@ -103,7 +103,7 @@ LIMIT $6";
     private static DateTime? Stamp(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetDateTime(ordinal);
 
     /// <summary>One collected row, with its time columns kept as times so the compile read compares them as times.</summary>
-    internal sealed record Row(PlanEvictStatementImage Image, DateTime? CreationTime);
+    internal sealed record Row(PlanEvictStatementImage Image, DateTime? CreationTime, DateTime? CollectionTime = null);
 
     private static Row ReadRow(NpgsqlDataReader reader)
     {
@@ -116,7 +116,7 @@ LIMIT $6";
         return new Row(new PlanEvictStatementImage(
             Text(reader, 0), Text(reader, 1), Text(reader, 2), Int(reader, 3), Int(reader, 4), Text(reader, 5), Time(creation),
             Long(reader, 7), executions, Time(Stamp(reader, 9)), Time(Stamp(reader, 10)),
-            Per(cpu, 1000.0), Per(elapsed, 1000.0), Per(reads, 1.0)), creation);
+            Per(cpu, 1000.0), Per(elapsed, 1000.0), Per(reads, 1.0)), creation, Stamp(reader, 10));
     }
 
     /// <summary>The statements Darling collected for the handle on the server in the last 24 hours, the latest row of each, at most <see cref="MaxStatements"/>.</summary>

@@ -181,7 +181,7 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     /// <summary>Which of the four conditions to leave out of the setup.</summary>
-    private enum Without { Nothing, Switch, Level, ActionsEnabled, CredentialSlot }
+    private enum Without { Nothing, Switch, Level, ActionsEnabled, CredentialSlot, EvictSwitch }
 
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, SqlScratch Sql, string Arg, Lines Log, CancellationToken Ct)
     {
@@ -218,6 +218,8 @@ public sealed partial class PlanForceToolLiveTests
             await PgExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', {level})", ct);
             if (without != Without.Switch)
                 await PgExecAsync(connection, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (7, 'force_plan', true, 'test')", ct);
+            if (without is not (Without.Switch or Without.EvictSwitch))
+                await PgExecAsync(connection, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (7, 'evict_plan', true, 'test')", ct);
 
             var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath };
             await using var source = NpgsqlDataSource.Create(builder.ConnectionString);

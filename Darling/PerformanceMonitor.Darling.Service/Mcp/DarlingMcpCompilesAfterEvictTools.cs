@@ -172,7 +172,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called' AND c.detail->>'kind' = '"
             : new List<DarlingPlanEvictStore.Row>();
         if (compiled.Count == 0)
         {
-            var seen = mine.OrderByDescending(r => r.Image.CollectionTime, StringComparer.Ordinal).First().Image;
+            var seen = mine.OrderByDescending(r => r.CollectionTime).First().Image;
             return new
             {
                 identity,

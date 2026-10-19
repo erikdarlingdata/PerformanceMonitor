@@ -258,16 +258,8 @@ SELECT killed = @killed;";
                 cached = reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
             }
 
-            if (edition == AzureSqlDatabaseEdition)
-                return RemediationResult.Refused(name, dryRun, EvictDegradeReasons.UnsupportedOnPlatform,
-                    "This server is an Azure SQL Database, which has no plan handle eviction. Nothing was run.") with { Statement = statement };
-            if (!granted)
-                return RemediationResult.Refused(name, dryRun, EvictDegradeReasons.PermissionDenied,
-                    "The remediation login does not hold ALTER SERVER STATE on this server, which evicting a plan needs. A person can grant it. Nothing was run.")
-                    with { Statement = statement };
-            if (cached is null or 0)
-                return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotCached,
-                    "That plan handle is not in the plan cache (it may have aged out). Nothing was run.") with { Statement = statement };
+            if (EvictRefusal(name, dryRun, edition, granted, cached, statement) is { } refusal)
+                return refusal;
             if (dryRun)
                 return RemediationResult.Done(name, dryRun, wrote: false, "Dry run: that plan handle is in the plan cache. Nothing was run.")
                     with { Statement = statement };
@@ -277,6 +269,25 @@ SELECT killed = @killed;";
             await evict.ExecuteNonQueryAsync(ct);
             return RemediationResult.Done(name, dryRun, wrote: true, "That plan handle was evicted from the plan cache.") with { Statement = statement };
         }, ct);
+    }
+
+    /// <summary>
+    /// The only refusals of an eviction, in the order the read batch gathered their facts: the engine has no plan handle eviction (Azure SQL
+    /// Database), the login lacks <c>ALTER SERVER STATE</c>, the handle is not cached now. Null when none applies. Pure, so a test needs no server.
+    /// </summary>
+    internal static RemediationResult? EvictRefusal(string name, bool dryRun, long? edition, bool granted, long? cached, string statement)
+    {
+        if (edition == AzureSqlDatabaseEdition)
+            return RemediationResult.Refused(name, dryRun, EvictDegradeReasons.UnsupportedOnPlatform,
+                "This server is an Azure SQL Database, which has no plan handle eviction. Nothing was run.") with { Statement = statement };
+        if (!granted)
+            return RemediationResult.Refused(name, dryRun, EvictDegradeReasons.PermissionDenied,
+                "The remediation login does not hold ALTER SERVER STATE on this server, which evicting a plan needs. A person can grant it. Nothing was run.")
+                with { Statement = statement };
+        if (cached is null or 0)
+            return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotCached,
+                "That plan handle is not in the plan cache (it may have aged out). Nothing was run.") with { Statement = statement };
+        return null;
     }
 
     /// <summary>
