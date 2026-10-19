@@ -71,8 +71,23 @@ public sealed class DarlingMcpQueryStoreRegressionsBudgetLiveTests
 
             var defaultJson = await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName);
             using var defaultParsed = JsonDocument.Parse(defaultJson);
-            Assert.Equal(30, defaultParsed.RootElement.GetProperty("regression_count").GetInt32());
+            /* #6128: regression_count is every regression that passed the gate, not the page; returned_count is the page. */
+            Assert.Equal(RegressedQueryCount, defaultParsed.RootElement.GetProperty("regression_count").GetInt32());
+            Assert.Equal(30, defaultParsed.RootElement.GetProperty("returned_count").GetInt32());
             Assert.True(defaultParsed.RootElement.GetProperty("truncated").GetBoolean());
+
+            var smallJson = await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, limit: 3);
+            using var smallParsed = JsonDocument.Parse(smallJson);
+            Assert.Equal(RegressedQueryCount, smallParsed.RootElement.GetProperty("regression_count").GetInt32());
+            Assert.Equal(3, smallParsed.RootElement.GetProperty("returned_count").GetInt32());
+            Assert.Equal(3, smallParsed.RootElement.GetProperty("regressions").GetArrayLength());
+            Assert.True(smallParsed.RootElement.GetProperty("truncated").GetBoolean());
+
+            var wideJson = await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, limit: 50);
+            using var wideParsed = JsonDocument.Parse(wideJson);
+            Assert.Equal(RegressedQueryCount, wideParsed.RootElement.GetProperty("regression_count").GetInt32());
+            Assert.Equal(RegressedQueryCount, wideParsed.RootElement.GetProperty("returned_count").GetInt32());
+            Assert.False(wideParsed.RootElement.GetProperty("truncated").GetBoolean());
 
             var defaultBytes = Encoding.UTF8.GetByteCount(defaultJson);
             _output.WriteLine($"get_query_store_regressions default call: {defaultBytes:N0} bytes (budget {McpResponseBudget.DefaultBytes:N0}), {RegressedQueryCount} planted {queryText.Length:N0}-char rows.");

@@ -1257,10 +1257,10 @@
                                     <!-- Affordances (advise-only): Open in Active Queries (incidents), Copy
                                          fix (when derivable), Ask AI. -->
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
-                                        <Button Content="Open in Active Queries" Padding="10,3" Margin="0,0,8,0"
+                                        <Button Content="{Binding OpenLinkLabel}" Padding="10,3" Margin="0,0,8,0"
                                                 Visibility="{Binding ShowOpenInActiveQueries, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="OpenInActiveQueries_Click"
-                                                ToolTip="Open this server's Active Queries scoped to the finding's time window"/>
+                                                ToolTip="{Binding OpenLinkToolTip}"/>
                                         <Button Content="Copy fix" Padding="10,3" Margin="0,0,8,0"
                                                 Visibility="{Binding ShowCopyFix, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="CopyFix_Click"

@@ -1893,7 +1893,8 @@ public partial class MainWindow : Window
                 insufficientData: analysisState?.InsufficientData == true,
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
-                windowEmptyMessage: analysisState?.Message).WithReplicaNote(replicaNote));
+                windowEmptyMessage: analysisState?.Message,
+                isPostgres: server.IsPostgres).WithReplicaNote(replicaNote));
 
         /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
            the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
@@ -2105,6 +2106,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #6134: the engine of the server the link opens decides the tab; a PostgreSQL server never gets a SQL Server one. */
+        var target = RecommendationDeepLink.Resolve(server.IsPostgres, card.Item.RootFactKey);
+        if (target == RecommendationLinkTarget.None)
+        {
+            RecommendationsStatusText.Text = "This PostgreSQL server has no view for that finding.";
+            return;
+        }
+
         var (fromUtc, toUtc) = card.DeepLinkWindowUtc();
         var serverTab = OpenServerTab(server);
         if (serverTab is null)
@@ -2114,7 +2123,14 @@ public partial class MainWindow : Window
 
         try
         {
-            await serverTab.DeepLinkToActiveQueriesAsync(fromUtc, toUtc);
+            if (target == RecommendationLinkTarget.SqlServerActiveQueries)
+            {
+                await serverTab.DeepLinkToActiveQueriesAsync(fromUtc, toUtc);
+            }
+            else
+            {
+                await serverTab.DeepLinkToPgActivityAsync(target, fromUtc, toUtc);
+            }
         }
         catch (Exception ex)
         {
