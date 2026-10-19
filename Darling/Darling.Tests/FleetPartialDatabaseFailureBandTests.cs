@@ -27,10 +27,6 @@ using Xunit;
 
 namespace Darling.Tests;
 
-/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The live tests here go through
-   CollectionHealthAggregateTests.OpenStoreAsync, which reaches DARLING_TEST_PG only to CREATE and DROP its own
-   database through ScratchPostgres and stops that database's TimescaleDB scheduler. */
-
 /// <summary>
 /// #4812: the fleet overview, <c>get_fleet_overview</c> and the Overview cards band a collector that lost half
 /// or more of its databases WARNING, the way its own Collection Health tab does. The per-server reads pass the
@@ -49,7 +45,7 @@ public class FleetPartialDatabaseFailureBandTests
 
     private static string Flat(string sql) => Regex.Replace(Regex.Replace(sql, @"--[^\r\n]*", string.Empty), @"\s+", " ");
 
-    private static string Note(int failed, int total) =>
+    internal static string Note(int failed, int total) =>
         string.Format(CultureInfo.InvariantCulture, PartialDatabaseFailureNote.Format, failed, total, "a, b, c", "boom");
 
     /* ───────────────────────────── the SQL and source shape ───────────────────────────── */
@@ -285,8 +281,20 @@ public class FleetPartialDatabaseFailureBandTests
             Assert.Equal("HEALTHY", DarlingFleetReader.MapFleetHealthRow(reader).HealthStatus);
         }
     }
+}
 
-    /* ───────────────────────────── live PostgreSQL (CI) ───────────────────────────── */
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The live tests here go through
+   CollectionHealthAggregateTests.OpenStoreAsync, which reaches DARLING_TEST_PG only to CREATE and DROP its own
+   database through ScratchPostgres and stops that database's TimescaleDB scheduler. #6099: split out of
+   FleetPartialDatabaseFailureBandTests, which runs in the guard stage; these four skip without a store, and the guard
+   job fails a skip. */
+
+/// <summary>
+/// The live half of #4812 (see <see cref="FleetPartialDatabaseFailureBandTests"/>): the fleet bands through the rollup and
+/// raw reads against a scratch store.
+/// </summary>
+public class FleetPartialDatabaseFailureBandLiveTests
+{
 
     /// <summary>Half-hour runs seeded per collector: 384, eight days. The read window starts seven days back, so the
     /// seed has to reach past it: then every hour from the window's first whole hour to the newest run holds a run,
@@ -336,7 +344,7 @@ CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
     /// <summary>The seed where only the NEWEST run's note differs: the first collector's newest run lost 3 of 4
     /// databases (WARNING in every read), the second's lost 1 of 4 (HEALTHY), the third never carried a note.</summary>
     private static Task SeedThreeCollectorsAsync(NpgsqlConnection connection, string[] collectors, CancellationToken ct) =>
-        SeedRunsAsync(connection, [new(collectors[0], Note(3, 4)), new(collectors[1], Note(1, 4)), new(collectors[2])], ct);
+        SeedRunsAsync(connection, [new(collectors[0], FleetPartialDatabaseFailureBandTests.Note(3, 4)), new(collectors[1], FleetPartialDatabaseFailureBandTests.Note(1, 4)), new(collectors[2])], ct);
 
     /// <summary>The three slowest-cadence collectors, so a newest run up to 140 minutes old is nowhere near STALE
     /// (the floor is four hours) and the band the test reads is the note's.</summary>
@@ -376,7 +384,7 @@ CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var collectors = SlowCollectors();
-        var seeded = new SeededCollector[] { new(collectors[0], Note(3, 4)), new(collectors[1], Note(1, 4)), new(collectors[2]) };
+        var seeded = new SeededCollector[] { new(collectors[0], FleetPartialDatabaseFailureBandTests.Note(3, 4)), new(collectors[1], FleetPartialDatabaseFailureBandTests.Note(1, 4)), new(collectors[2]) };
         await SeedRunsAsync(connection, seeded, ct);
 
         /* The Overview cards' read: the collector whose newest run lost 3 of 4 databases bands WARNING, the one that
@@ -494,8 +502,8 @@ CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
         {
             /* Run 2 is the :40 run of the hour before the newest run's hour: the LAST run of that hour, so that
                hour's bucket carries the note. Runs 0 and 1 (the newest hour) are clean and newer. */
-            new(collectors[0], Note(3, 4), NoteRun: 2),
-            new(collectors[1], Note(3, 4)),
+            new(collectors[0], FleetPartialDatabaseFailureBandTests.Note(3, 4), NoteRun: 2),
+            new(collectors[1], FleetPartialDatabaseFailureBandTests.Note(3, 4)),
             new(collectors[2]),
         };
         await SeedRunsAsync(connection, seeded, ct);
@@ -525,8 +533,8 @@ CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
         {
             /* Run 1 is the :10 run of the newest run's own hour and run 0 the :40 run after it, clean: one bucket
                holds both, and the bucket's newest run is the clean one, so it holds no note. */
-            new(collectors[0], Note(3, 4), NoteRun: 1),
-            new(collectors[1], Note(3, 4)),
+            new(collectors[0], FleetPartialDatabaseFailureBandTests.Note(3, 4), NoteRun: 1),
+            new(collectors[1], FleetPartialDatabaseFailureBandTests.Note(3, 4)),
             new(collectors[2]),
         };
         await SeedRunsAsync(connection, seeded, ct);
