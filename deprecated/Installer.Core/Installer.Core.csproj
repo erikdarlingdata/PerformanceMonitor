@@ -17,8 +17,10 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" />
     <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" VersionOverride="9.0.21" />
   </ItemGroup>
 
   <!-- Embed SQL scripts as assembly resources for Dashboard consumption -->
