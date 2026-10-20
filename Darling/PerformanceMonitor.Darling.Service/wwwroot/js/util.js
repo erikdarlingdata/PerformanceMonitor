@@ -674,6 +674,18 @@ export function fmtSize(v, unit, o) {
   const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? 1 : 0, per);
   return fixed(value, places) + " " + SIZE_UNITS[i];
 }
+/* A byte count in human units (B, KB, MB, GB; 1024-based). A null is the dash, never 0 bytes: 0 is a real answer. The table sorts
+   a column on the raw number, so "900 KB" sorts below "2.0 MB" whatever the text says. */
+export function fmtBytes(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  if (abs < 1024) return fmtInt(n) + " B";
+  if (abs < 1024 * 1024) return fmtNum(n / 1024, 1) + " KB";
+  if (abs < 1024 * 1024 * 1024) return fmtNum(n / (1024 * 1024), 1) + " MB";
+  return fmtNum(n / (1024 * 1024 * 1024), 1) + " GB";
+}
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
@@ -690,6 +702,7 @@ export const FORMATTERS = {
   pct: fmtPct,
   ms: fmtMs,
   mb: fmtMb,
+  bytes: fmtBytes,
   time: localTime,
   reltime: relTime,
   bool: fmtBool,

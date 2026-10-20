@@ -612,13 +612,46 @@ public class JobHistoryRow
     public DateTime? LastSuccessfulRun { get; set; }
     public bool IsLongRunning { get; set; }
 
-    /// <summary>run_datetime is the server's local wall clock; shown as-is (the time SSMS shows).</summary>
-    public string RunTimeLocal => RunDateTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
+    /// <summary>The clock of this run's server, stamped by the Job History tab from the read's clocks (#6137); null on a row nothing
+    /// stamped, which then reads as UTC wherever it must be converted.</summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>True when the list this row sits in holds runs of several servers (#6137), stamped by the Job History tab. Server time
+    /// cannot apply across servers, so every row of such a list reads in this machine's time (<see cref="PerformanceMonitor.Ui.MultiServerTime"/>).</summary>
+    public bool MixedServers { get; set; }
+
+    /// <summary><see cref="LastSuccessfulRun"/> as naive UTC through <see cref="Clock"/>: what its column sorts on, so runs of servers in
+    /// different zones order by when they happened (#6137).</summary>
+    public DateTime? LastSuccessfulRunUtc => LastSuccessfulRun is { } t ? (Clock ?? ServerClock.Utc).ToUtc(t) : null;
+
+    /// <summary>A server-clock time as the grid shows it (#6137): as-is (the time SSMS shows) in Server time for a list of one server,
+    /// else the instant on the one clock the header names: UTC, or this machine's time (also for Server time over several servers).</summary>
+    private string Shown(DateTime? serverWall, DateTime? utc)
+    {
+        if (serverWall is not { } wall)
+        {
+            return "";
+        }
+
+        var mode = PerformanceMonitor.Ui.MultiServerTime.EffectiveMode(ServerTimeHelper.CurrentDisplayMode, MixedServers);
+        if (mode == PerformanceMonitor.Ui.TimeDisplayMode.ServerTime)
+        {
+            return wall.ToString("yyyy-MM-dd HH:mm:ss");
+        }
+
+        var instant = utc ?? (Clock ?? ServerClock.Utc).ToUtc(wall);
+        var zone = mode == PerformanceMonitor.Ui.TimeDisplayMode.UTC ? TimeZoneInfo.Utc : TimeZoneInfo.Local;
+        return PerformanceMonitor.Ui.DisplayZone.ToDisplay(instant, zone).ToString("yyyy-MM-dd HH:mm:ss");
+    }
+
+    /// <summary>run_datetime is the server's local wall clock; shown as-is (the time SSMS shows) for one server in Server time, and
+    /// otherwise on the one clock the header names (#6137).</summary>
+    public string RunTimeLocal => Shown(RunDateTime, RunDateTimeUtc);
 
     /// <summary><see cref="LastSuccessfulRun"/> is <c>MAX(run_datetime)</c> over this job's successful
     /// step-0 rows, so it is the same server-local wall clock as <see cref="RunTimeLocal"/> and is shown
-    /// the same way — as-is, not converted to the display mode.</summary>
-    public string LastSuccessfulRunLocal => LastSuccessfulRun?.ToString("yyyy-MM-dd HH:mm:ss") ?? "Never";
+    /// the same way.</summary>
+    public string LastSuccessfulRunLocal => LastSuccessfulRun is null ? "Never" : Shown(LastSuccessfulRun, LastSuccessfulRunUtc);
 
     public string DurationFormatted => FormatDuration(RunDurationSeconds);
 

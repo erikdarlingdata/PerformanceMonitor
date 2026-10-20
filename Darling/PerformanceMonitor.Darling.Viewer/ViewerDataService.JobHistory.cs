@@ -17,6 +17,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -120,7 +121,13 @@ public sealed class ViewerJobHistoryRow
     public ServerClock? Clock { get; init; }
 
     private DateTime ForRowDisplay(DateTime naiveUtc) =>
-        ViewerTimeHelper.ConvertToDisplay(naiveUtc, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock);
+        ViewerTimeHelper.ConvertToDisplay(
+            naiveUtc, MultiServerTime.EffectiveMode(ViewerTimeHelper.CurrentDisplayMode, MixedServers), Clock ?? ViewerTimeHelper.ActiveServerClock);
+
+    /// <summary>True when the list this row sits in holds runs of several servers (#6137), set by
+    /// <see cref="ViewerDataService.GetJobHistoryAsync"/>: Server time cannot apply across servers, so every row of such a list
+    /// reads in the viewer's local time (<see cref="MultiServerTime"/>).</summary>
+    public bool MixedServers { get; set; }
 
     /// <summary><see cref="LastSuccessfulRunUtc"/> as the plain wall time, for the reason <see cref="RunTimeLocal"/> gives.</summary>
     public string LastSuccessfulRunLocal => LastSuccessfulRunUtc is { } t
@@ -205,7 +212,19 @@ public sealed partial class ViewerDataService
             rows.Add(ViewerJobHistoryRow.From(dto, ViewerTimeHelper.ClockForServerOrMachine(clocks, dto.ServerId, TimeZoneInfo.Local, nowUtc)));
         }
 
+        StampMixedServers(rows);
+
         return rows;
+    }
+
+    /// <summary>Marks every row of a list that holds several servers (#6137), so each reads on the one clock the header names.</summary>
+    internal static void StampMixedServers(List<ViewerJobHistoryRow> rows)
+    {
+        var mixed = MultiServerTime.IsMixed(rows.Select(r => r.ServerId));
+        foreach (var row in rows)
+        {
+            row.MixedServers = mixed;
+        }
     }
 
     /// <summary>

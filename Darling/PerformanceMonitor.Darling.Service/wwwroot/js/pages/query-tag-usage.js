@@ -18,6 +18,7 @@
 
 import { el, mount, clear, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum } from "../util.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
+import { plainText } from "../plain-text.js";
 import { relativeSpec } from "../time-range.js";
 import { orderServers, displayNameFor } from "../server-order.js";
 
@@ -112,25 +113,47 @@ export function sectionTable(block, onTag) {
   return el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, body)]);
 }
 
+/** "the last 24 hours", "the last 7 days", or "this time range" when the window is not a plain preset. */
+export function rangeText(hours) {
+  const h = Number(hours);
+  if (!(h > 0)) return "this time range";
+  if (h > 48 && h % 24 === 0) return "the last " + h / 24 + " days";
+  return "the last " + (h === 1 ? "hour" : h + " hours");
+}
+
+/** The read's own sentence for a section that is not plain data, in plain words: no status word in front of it. */
 function statusLine(block) {
-  if (!block || block.status === "ok" || !block.message) return null;
-  return el("div", { class: "muted", text: (block.status || "") + ": " + block.message });
+  if (!block || block.status === "ok" || block.status === "empty" || !block.message) return null;
+  return el("div", { class: "muted", text: plainText(block.message) });
+}
+
+/** A section with no rows in the window says so in one line; the table of zeros under it is not drawn. */
+function isEmptyBlock(block) {
+  return !!block && block.status === "empty";
 }
 
 /** One section: its heading, then one table (a server) or one table per server with the fleet line (Fleet). */
-export function sectionCard(section, block, onTag, servers = []) {
+export function sectionCard(section, block, onTag, range = "this time range", servers = []) {
   const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + block.source : "" })])];
   if (!block) {
     parts.push(emptyStrip("The read sent no " + section.title + " section."));
     return el("div", { class: "panel", "data-section": section.name }, parts);
   }
   if (section.name === "deadlocks") parts.push(el("div", { class: "muted", text: DEADLOCK_NOTE }));
+  if (isEmptyBlock(block) && !Array.isArray(block.servers)) {
+    parts.push(emptyStrip("None in " + range + "."));
+    return el("div", { class: "panel", "data-section": section.name }, parts);
+  }
   const note = statusLine(block);
   if (note) parts.push(note);
   if (Array.isArray(block.servers)) {
     for (const s of block.servers) {
       /* #6157: the heading is the display name of the server; the read names it by its connection key. */
       parts.push(el("h4", { text: displayNameFor(servers, s.server) }));
+      if (isEmptyBlock(s)) {
+        parts.push(emptyStrip("None in " + range + "."));
+        continue;
+      }
       const sn = statusLine(s);
       if (sn) parts.push(sn);
       parts.push(sectionTable(s, onTag));
@@ -247,12 +270,12 @@ export function renderQueryTagUsage(main) {
     const data = res.data || {};
     const kept = keptWindowStrip(res);
     const sections = Array.isArray(data.sections) ? data.sections : [];
-    if (res.kind === "empty" && sections.length === 0) return mount(body, [kept, emptyStrip(res.message)]);
-    const cards = SECTIONS.map((s) => sectionCard(s, sections.find((b) => b && b.section === s.name) || null, openTag, knownServers));
+    const range = rangeText(w.hours);
+    if (res.kind === "empty" && sections.length === 0) return mount(body, [kept, emptyStrip("None in " + range + ".")]);
+    const cards = SECTIONS.map((s) => sectionCard(s, sections.find((b) => b && b.section === s.name) || null, openTag, range, knownServers));
     mount(body, [
       kept,
-      res.kind === "empty" ? emptyStrip(res.message) : null,
-      noticeStrip("Each section is its own source and is never added to another: the plan cache and Query Store count the same executions, and procedures overlap both."),
+      noticeStrip("Each section counts from its own source, so sections are not added together: the plan cache and Query Store count the same executions, and procedures overlap both."),
       ...cards,
     ]);
   }

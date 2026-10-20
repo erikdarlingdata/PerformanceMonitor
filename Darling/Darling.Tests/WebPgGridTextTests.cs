@@ -80,8 +80,8 @@ public sealed class WebPgGridTextTests
         {
             Assert.True(cells[i].GetProperty("shown").GetString()!.Length <= 20, "the cell holds a short word");
             Assert.Equal(1, cells[i].GetProperty("hasDetails").GetInt32());
-            // The page may put a count word right ("1 sample(s)"), so the check is the sentence's start and that it is the whole paragraph.
-            Assert.StartsWith(droppability[i][..40], cells[i].GetProperty("detail").GetString());
+            // The page may put a count word right ("1 sample(s)"), so the check is the sentence's start and that it is the whole paragraph. The page lower-cases a capitalised emphasis word, so the start is compared without case (#6156).
+            Assert.StartsWith(droppability[i][..40], cells[i].GetProperty("detail").GetString(), StringComparison.OrdinalIgnoreCase);
             Assert.True(cells[i].GetProperty("detail").GetString()!.Length >= droppability[i].Length - 4);
         }
     }

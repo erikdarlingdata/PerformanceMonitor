@@ -102,6 +102,10 @@ public sealed class QueryStoreForcedPlansCollectorTests
         var generated = PgSchemaGenerator.CreateTable(QueryStoreForcedPlansCollector.Instance) + "\n\n" + PgSchemaGenerator.CreateIndex(QueryStoreForcedPlansCollector.Instance);
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        Assert.Equal(Norm(generated), Norm(rung));
+
+        /* V201 (#6160) appended four columns to the generated table; V195 is the table as it was created, so the generator's text minus those
+           four trailing columns is V195's (the columns' own types are checked against V201 on a live store, in ForcedPlanVariantRungTests). */
+        var withoutV201 = Norm(generated).Replace(", variant_plan_ids text, plan_guide_name text, plan_guide_enabled boolean, plan_guide_scope text", "", StringComparison.Ordinal);
+        Assert.Equal(withoutV201, Norm(rung));
     }
 }

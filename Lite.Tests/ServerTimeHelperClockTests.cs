@@ -341,7 +341,7 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     }
 
     /// <summary>
-    /// The label names the zone AT THE INSTANT it labels: a US Eastern clock reads "UTC-4:00" in July and "UTC-5:00"
+    /// The label names the zone AT THE INSTANT it labels: a US Eastern clock reads "UTC-04:00" in July and "UTC-05:00"
     /// in December, not the zone's standard name ("Eastern Standard Time" reads wrong on a July time) and not the
     /// offset in force now. The active clock is another one entirely, to show the label reads the clock it is given.
     /// </summary>
@@ -351,20 +351,20 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         var clock = Eastern();
         ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(540);
 
-        Assert.Equal("UTC-4:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 7, 1, 12, 0)));
-        Assert.Equal("UTC-5:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 12, 1, 12, 0)));
+        Assert.Equal("UTC-04:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 7, 1, 12, 0)));
+        Assert.Equal("UTC-05:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 12, 1, 12, 0)));
 
         /* The repeated hour: 05:30Z is still on daylight time, 06:30Z is not. */
-        Assert.Equal("UTC-4:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 11, 1, 5, 30)));
-        Assert.Equal("UTC-5:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 11, 1, 6, 30)));
+        Assert.Equal("UTC-04:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("UTC-05:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 11, 1, 6, 30)));
     }
 
     [Theory]
-    [InlineData(-300, "UTC-5:00")]
-    [InlineData(330, "UTC+5:30")]
-    [InlineData(-570, "UTC-9:30")]
-    [InlineData(-30, "UTC-0:30")]
-    [InlineData(0, "UTC+0:00")]
+    [InlineData(-300, "UTC-05:00")]
+    [InlineData(330, "UTC+05:30")]
+    [InlineData(-570, "UTC-09:30")]
+    [InlineData(-30, "UTC-00:30")]
+    [InlineData(0, "UTC+00:00")]
     public void GetTimezoneLabel_ServerMode_ShowsTheOffset_OfAFixedOffsetClock(int offsetMinutes, string expected)
     {
         Assert.Equal(
@@ -381,8 +381,8 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     {
         var clock = ServerClock.Resolve("India Standard Time", 330);
 
-        Assert.Equal("UTC+5:30", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 7, 1, 12, 0)));
-        Assert.Equal("UTC+5:30", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 12, 1, 12, 0)));
+        Assert.Equal("UTC+05:30", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 7, 1, 12, 0)));
+        Assert.Equal("UTC+05:30", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 12, 1, 12, 0)));
     }
 
     /// <summary>

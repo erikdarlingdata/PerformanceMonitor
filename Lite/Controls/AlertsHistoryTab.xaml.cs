@@ -117,7 +117,7 @@ public partial class AlertsHistoryTab : UserControl
 
         var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
         NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
         DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: the longer title widens its column
         /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
         _lastReadRowCount = alerts.Count;
@@ -206,8 +206,12 @@ public partial class AlertsHistoryTab : UserControl
         Func<int, ServerClock?>? openTabClock)
     {
         var chosen = new Dictionary<int, ServerClock>();
-        foreach (var row in rows)
+        var all = rows as IList<AlertHistoryRow> ?? rows.ToList();
+        /* #6137: a list of several servers reads on one clock, so each row is told whether it sits in such a list. */
+        var mixed = PerformanceMonitor.Ui.MultiServerTime.IsMixed(all.Select(r => r.ServerId));
+        foreach (var row in all)
         {
+            row.MixedServers = mixed;
             if (!chosen.TryGetValue(row.ServerId, out var clock))
             {
                 collected.TryGetValue(row.ServerId, out var own);

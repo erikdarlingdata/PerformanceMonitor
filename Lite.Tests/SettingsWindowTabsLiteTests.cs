@@ -52,9 +52,18 @@ public sealed class SettingsWindowTabsLiteTests : IDisposable
         }
     }
 
-    /// <summary>The window, with the tab write kept off the real settings.json: each write lands in <paramref name="writes"/>.</summary>
-    private SettingsWindow NewWindow(List<string>? writes = null)
+    /// <summary>The window, with the tab write kept off the real settings.json: each write lands in <paramref name="writes"/>.
+    /// #6175: the remembered tab (<see cref="App.SettingsWindowTab"/>) is process-wide, and a window another class closes
+    /// (ClippedTextTests walks to the last tab and closes one) writes it. So it is set here, inside the body that holds the
+    /// shared STA thread, never before the body is queued: set outside, it could be overwritten while this test waited its
+    /// turn. <paramref name="remembered"/> is the tab the window should find (none by default); null leaves it as it is.</summary>
+    private SettingsWindow NewWindow(List<string>? writes = null, string? remembered = "")
     {
+        if (remembered is not null)
+        {
+            App.SettingsWindowTab = remembered;
+        }
+
         var window = new SettingsWindow(new ScheduleManager(_configDir), new ServerManager(_configDir));
         window.PersistSelectedTab = name => writes?.Add(name);
         return window;
@@ -194,7 +203,6 @@ public sealed class SettingsWindowTabsLiteTests : IDisposable
     [Fact]
     public void TheWindowReopensOnTheLastTab_AndWritesItOnlyOnAChange()
     {
-        App.SettingsWindowTab = "";
         StaTestThread.Run(() =>
         {
             var writes = new List<string>();
@@ -205,7 +213,7 @@ public sealed class SettingsWindowTabsLiteTests : IDisposable
 
             Assert.Equal(new[] { "AccessTab" }, writes);
             Assert.Equal("AccessTab", App.SettingsWindowTab);
-            var second = NewWindow();
+            var second = NewWindow(remembered: null);
             Assert.Same(second.AccessTab, second.SettingsTabs.SelectedItem);
         });
     }
@@ -213,10 +221,9 @@ public sealed class SettingsWindowTabsLiteTests : IDisposable
     [Fact]
     public void ATabNameNoTabHasAnyMore_OpensTheFirstTab()
     {
-        App.SettingsWindowTab = "NoSuchTab";
         StaTestThread.Run(() =>
         {
-            var window = NewWindow();
+            var window = NewWindow(remembered: "NoSuchTab");
             /* Nothing selected yet (the tab strip takes its first tab when it shows) or the first tab: never another. */
             Assert.True(window.SettingsTabs.SelectedIndex <= 0, $"opened on tab {window.SettingsTabs.SelectedIndex}");
         });

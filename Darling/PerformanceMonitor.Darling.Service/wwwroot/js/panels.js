@@ -1270,7 +1270,7 @@ export function visibleColumns(cols, rows) {
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "bytes", "pct"].includes(c.format);
 }
 
 function cell(row, c) {
@@ -1295,7 +1295,7 @@ function cell(row, c) {
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
   if (c.statusSev) cls.push(sevClass(statusToSev(raw)));
   if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) cls.push(k); }
-  /* nullKey names another field of the SAME row that says why this one is empty (get_file_io_stats' size_note:
+  /* nullKey names another field of the same row that says why this one is empty (get_file_io_stats' size_note:
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
   const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
@@ -1323,7 +1323,7 @@ function cell(row, c) {
     ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
     : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
   if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
-  /* #6154: `detailKey` names a field of the SAME row that holds the long explanation. The cell shows only its short value and the
+  /* #6154: `detailKey` names a field of the same row that holds the long explanation. The cell shows only its short value and the
      explanation opens under it on a click (a <details>, so the keyboard works), so a row stays one line tall. Text that is the same
      for every row belongs in the column's `hint` (the header tooltip) instead. */
   if (c.detailKey) {

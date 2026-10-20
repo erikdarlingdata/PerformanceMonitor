@@ -278,4 +278,76 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
         Assert.Equal(ForcedPlanState.Working, DarlingForcedPlanStateReader.Classify(true, 0, null, false, true));
         Assert.Equal(ForcedPlanState.NotExercised, DarlingForcedPlanStateReader.Classify(true, 0, null, false, false));
     }
+
+    /// <summary>#6160: a variant of the forced plan running is the force running; it neither makes a force IGNORED nor hides a failure.</summary>
+    [Fact]
+    public void Classify_ACountedVariant_IsTheForceRunning()
+    {
+        Assert.Equal(ForcedPlanState.Working, DarlingForcedPlanStateReader.Classify(true, 0, null, false, false, variantPlanRan: true));
+        Assert.Equal(ForcedPlanState.Ignored, DarlingForcedPlanStateReader.Classify(true, 0, null, true, false, variantPlanRan: true));
+        Assert.Equal(ForcedPlanState.Failing, DarlingForcedPlanStateReader.Classify(true, 1, "NO_INDEX", false, false, variantPlanRan: true));
+        Assert.Equal(ForcedPlanState.Removed, DarlingForcedPlanStateReader.Classify(false, 0, null, false, false, variantPlanRan: true));
+    }
+
+    [Fact]
+    public async Task AVariantPlan_OfTheForcedPlan_IsListedApart_AndAFailingForceWithAGuide_StaysFailingAndNamesTheGuide()
+    {
+        await WithStoreAsync(async (rig, ct) =>
+        {
+            const string db = "VariantDb";
+            const string sql = @"INSERT INTO collect.query_store_forced_plans
+(collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
+ variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope)
+VALUES ($1,$2,$3,$4,$5,$6,$7,'MANUAL',$8,$9,$10,$11,$12,$13)";
+            foreach (var minutes in new[] { 0, 30, 60 })
+            {
+                var at = T0.AddMinutes(minutes);
+                await Exec(rig.Connection, ct, @"INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name)
+VALUES ($1,$2,$3,$4,$5)", CollectionIdGenerator.Next(), at, ServerId, ServerName, db);
+                /* Plan 11 of query 1: the engine runs it as variant 12 (and 13 is a real other plan). Plan 21 of query 2: failing, with a guide. */
+                await Exec(rig.Connection, ct, sql, CollectionIdGenerator.Next(), at, ServerId, ServerName, db, 11L, 1L, 0L, DBNull.Value, "12", DBNull.Value, DBNull.Value, DBNull.Value);
+                await Exec(rig.Connection, ct, sql, CollectionIdGenerator.Next(), at, ServerId, ServerName, db, 21L, 2L, 3L, "NO_INDEX", DBNull.Value, "pg_obj", false, "OBJECT");
+            }
+
+            await RanAsync(rig.Connection, ct, db, 1, 12, T0.AddMinutes(20), 8);
+            await RanAsync(rig.Connection, ct, db, 2, 22, T0.AddMinutes(20), 5);
+
+            var forces = await ReadAsync(rig, ct);
+            var working = forces[(db, 11)];
+            Assert.Equal(ForcedPlanState.Working, working.State);
+            Assert.Empty(working.OtherPlans);
+            var variant = Assert.Single(working.VariantPlans);
+            Assert.Equal(12, variant.PlanId);
+            Assert.Equal(8, variant.Executions);
+            Assert.Null(working.PlanGuide);
+
+            var failing = forces[(db, 21)];
+            Assert.Equal(ForcedPlanState.Failing, failing.State);
+            Assert.Equal(22, Assert.Single(failing.OtherPlans).PlanId);
+            Assert.Equal(new ForcedPlanGuide("pg_obj", false, "OBJECT"), failing.PlanGuide);
+
+            using var doc = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpForcedPlanTools.ForceNode(failing)));
+            Assert.Equal("FAILING", doc.RootElement.GetProperty("state").GetString());
+            Assert.Equal("pg_obj", doc.RootElement.GetProperty("plan_guide").GetProperty("name").GetString());
+            Assert.False(doc.RootElement.GetProperty("plan_guide").GetProperty("enabled").GetBoolean());
+
+            /* The Query Store history tool lists the same force with its variant and its guide. */
+            var asOf = AsOf.ToString("o", CultureInfo.InvariantCulture);
+            using (var history = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, db, 1, ServerName, 24, asOf, ct)))
+            {
+                var forced = Assert.Single(history.RootElement.GetProperty("forced_plans").EnumerateArray());
+                Assert.Equal("WORKING", forced.GetProperty("state").GetString());
+                Assert.Equal(12, Assert.Single(forced.GetProperty("variant_plans").EnumerateArray()).GetProperty("plan_id").GetInt64());
+            }
+
+            using (var history = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, db, 2, ServerName, 24, asOf, ct)))
+            {
+                var forced = Assert.Single(history.RootElement.GetProperty("forced_plans").EnumerateArray());
+                Assert.Equal("FAILING", forced.GetProperty("state").GetString());
+                Assert.Equal("pg_obj", forced.GetProperty("plan_guide").GetProperty("name").GetString());
+            }
+
+            return 0;
+        });
+    }
 }
