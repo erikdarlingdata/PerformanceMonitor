@@ -733,8 +733,25 @@ public sealed class PgCollectorSearchPathLiveTests
                 $"ALTER DATABASE {Database} SET search_path = lookalike, pg_catalog, public", ct);
 
             var runtime = await RuntimeAsync(admin, Database, Monitor, ct);
-            /* A string no other test opens through the provider, so its data source is new and this is its first connection. */
-            var withoutPin = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { Options = null, ApplicationName = "pm6143-first-statement" }.ConnectionString;
+            /* Both data sources are cached by connection string for the life of the process (ClearPools empties their
+               pools, not the cache), so a fresh GUID in each string makes every run build new ones and open a first
+               physical connection. */
+            var runId = Guid.NewGuid().ToString("N");
+
+            /* Control: a plain, unpinned connection with Npgsql's type loading on. Its pg_type read runs under the
+               database's search_path and fires the same-named operator, which proves this setup catches type loading. */
+            var controlString = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { Options = null, ApplicationName = $"pm6143-control-{runId}" }.ConnectionString;
+            await using (var control = new NpgsqlConnection(controlString))
+            {
+                await control.OpenAsync(ct);
+            }
+
+            Assert.True(
+                await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct) > 0,
+                "the control connection did not run the same-named operator, so this test would not notice type loading");
+            await ExecAsync(ownedAdmin.ConnectionString, "DELETE FROM lookalike.calls", ct);
+
+            var withoutPin = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { Options = null, ApplicationName = $"pm6143-first-statement-{runId}" }.ConnectionString;
 
             await using (var unpinned = PostgresTargetProvider.CreatePinnedConnection(withoutPin))
             {
@@ -745,7 +762,7 @@ public sealed class PgCollectorSearchPathLiveTests
 
             Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
 
-            var pinnedString = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { ApplicationName = "pm6143-first-statement-pinned" }.ConnectionString;
+            var pinnedString = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { ApplicationName = $"pm6143-first-statement-pinned-{runId}" }.ConnectionString;
             await using (var pinned = PostgresTargetProvider.CreatePinnedConnection(pinnedString))
             {
                 await pinned.OpenAsync(ct);

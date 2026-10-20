@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Linq;
 using Microsoft.Data.SqlClient;
 using Npgsql;
 
@@ -73,16 +75,35 @@ public static class RemediationConnection
     /// </summary>
     public const string PostgresSearchPathOption = "-c search_path=pg_catalog,pg_temp";
 
+    /// <summary>The statement that reads the search_path a PostgreSQL session actually has (#6143).</summary>
+    public const string PostgresSearchPathSql = "SELECT pg_catalog.current_setting('search_path')";
+
+    /// <summary>
+    /// #6143: the one rule for whether a PostgreSQL session has the search_path this product sends at sign-in
+    /// (<c>pg_catalog, pg_temp</c>). The service's monitoring connections (<c>DarlingServerConnector.EnsureSearchPathPinned</c>) and the kill
+    /// connection both use it. Only the whitespace PostgreSQL itself skips between schema names (<see cref="IsPgListSpace"/>) is ignored;
+    /// anything else must match, so other Unicode spaces, which are part of a schema name to PostgreSQL, are not accepted.
+    /// </summary>
+    public static bool IsPinnedSearchPath(string? observedSearchPath) =>
+        string.Equals(string.Concat((observedSearchPath ?? string.Empty).Where(c => !IsPgListSpace(c))), "pg_catalog,pg_temp", StringComparison.Ordinal);
+
+    /// <summary>The characters PostgreSQL's identifier-list parser skips (scanner_isspace).</summary>
+    public static bool IsPgListSpace(char c) => c is ' ' or '\t' or '\n' or '\r' or '\f';
+
     /// <summary>
     /// The remediation connection to a monitored PostgreSQL server (#5632): the same host and port as the service's PostgreSQL monitoring
     /// connection, and the same TLS mode (an Optional mode prefers TLS, a trusted certificate requires it, anything else verifies the
     /// certificate in full); the remediation login, a 15-second connect budget, a 30-second command budget, no pooled connection, and the
     /// application name that says so in <c>pg_stat_activity.application_name</c>.
-    /// <para>It differs from the monitoring connection in four ways, because its login can end sessions:</para>
+    /// <para>It differs from the monitoring connection in five ways, because its login can end sessions:</para>
     /// <list type="bullet">
     /// <item>It always opens the <c>postgres</c> database. pg_stat_activity and pg_terminate_backend are cluster-wide, so that is enough,
     /// and the settings of a database somebody else owns never apply to this connection.</item>
     /// <item>It sets <c>search_path</c> to <c>pg_catalog, pg_temp</c> at sign-in (<see cref="PostgresSearchPathOption"/>).</item>
+    /// <item>Npgsql's type loading is off (<c>Server Compatibility Mode=NoTypeLoading</c>), so its pg_type read does not run on the first open
+    /// and the first statement on the connection is the caller's own. The caller then reads the search_path (<see cref="PostgresSearchPathSql"/>)
+    /// and refuses to go on unless <see cref="IsPinnedSearchPath"/>. Npgsql then knows only built-in types, so every statement on this
+    /// connection reads built-in types only (or casts to text).</item>
     /// <item>It accepts SCRAM-SHA-256 sign-in only: a server that asks for a password in clear text or MD5, or asks for none, is refused
     /// before the password is sent.</item>
     /// <item>Unless the certificate is verified in full, it requires SCRAM channel binding, which ties the sign-in to the TLS session, so it
@@ -112,6 +133,9 @@ public static class RemediationConnection
         };
         if (server.Port > 0)
             builder.Port = server.Port;
+        /* The keyword, not the ServerCompatibilityMode property: that property is obsolete (CS0618), and a connection built from a string has
+           no data source to configure. Npgsql reads it as the same switch as EnableTypeLoading(false). */
+        builder["Server Compatibility Mode"] = "NoTypeLoading";
         return builder.ConnectionString;
     }
 }

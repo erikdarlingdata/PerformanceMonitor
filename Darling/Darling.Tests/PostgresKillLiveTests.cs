@@ -775,6 +775,125 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         return Convert.ToInt64(await command.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// What the type-loading and search_path tests add to <see cref="PlantSql"/>: an <c>=</c> for oid, which is what Npgsql's own pg_type read
+    /// compares, so a connection that loads types under the planted search_path records a call. It answers as the built-in operator does, so
+    /// that read still finishes.
+    /// </summary>
+    private const string PlantOidSql = """
+        CREATE FUNCTION planted.eq_oid(oid, oid) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+            AS $$ BEGIN INSERT INTO planted.calls DEFAULT VALUES; RETURN $1 OPERATOR(pg_catalog.=) $2; END $$;
+        CREATE OPERATOR planted.= (LEFTARG = oid, RIGHTARG = oid, FUNCTION = planted.eq_oid);
+        """;
+
+    /// <summary>Plants <see cref="PlantSql"/> and <see cref="PlantOidSql"/> in the postgres database as its owner, puts the planted schema first in the
+    /// database's search_path, runs <paramref name="body"/>, and removes all of it.</summary>
+    private static async Task WithPlantedDatabaseAsync(Ctx c, Func<Task> body)
+    {
+        var owner = "pmk_own_" + Guid.NewGuid().ToString("N")[..12];
+        await ExecAsync(c.Admin, $"CREATE ROLE \"{owner}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
+        await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{owner}\"", c.Ct);
+        try
+        {
+            await using (var asOwner = new NpgsqlConnection(c.Target.ConnectionString(owner, VictimPassword)))
+            {
+                await asOwner.OpenAsync(c.Ct);
+                await ExecAsync(asOwner, PlantSql, c.Ct);
+                await ExecAsync(asOwner, PlantOidSql, c.Ct);
+                await ExecAsync(asOwner, "ALTER DATABASE postgres SET search_path = planted, pg_catalog", c.Ct);
+            }
+
+            await body();
+        }
+        finally
+        {
+            await ExecAsync(c.Admin, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
+            await ExecAsync(c.Admin, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
+            await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
+            await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
+            await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+        }
+    }
+
+    /// <summary>#6143: the kill connection loads no types. Opened without the search_path option, as behind a pooler that drops it, against a
+    /// database whose search_path puts a planted <c>=</c> for oid first, the connection runs none of the planted schema. The control is the same
+    /// string with Npgsql's type loading left on, which does record calls, so the plant does catch what it is meant to catch.</summary>
+    [Fact]
+    public async Task TheKillConnection_LoadsNoTypes_SoAPlantedOperatorNeverRunsOnTheFirstOpen()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            await WithPlantedDatabaseAsync(c, async () =>
+            {
+                var server = new RemediationServer("127.0.0.1", EncryptMode: "Optional", TrustServerCertificate: true, Port: c.Target.Port);
+                var built = new NpgsqlConnectionStringBuilder(RemediationConnection.BuildPostgresConnectionString(server, new RemediationLogin(c.Roles.Remediation, c.Roles.Secret)))
+                {
+                    Options = null,
+                };
+
+                /* The type read compares oids many times, and each comparison records a row, so it runs far past the 30-second budget. */
+                var control = new NpgsqlConnectionStringBuilder(built.ConnectionString) { CommandTimeout = 600, Timeout = 120 };
+                control.Remove("Server Compatibility Mode");
+                await using (var withTypes = new NpgsqlConnection(control.ConnectionString))
+                {
+                    await withTypes.OpenAsync(c.Ct);
+                }
+
+                Assert.True(await CallsAsync(c) > 0, "the control connection did not run the planted operator, so this test would not notice type loading");
+                await ExecAsync(c.Admin, "TRUNCATE planted.calls", c.Ct);
+
+                await using (var connection = new NpgsqlConnection(built.ConnectionString))
+                {
+                    await connection.OpenAsync(c.Ct);
+                    await using var show = new NpgsqlCommand("SHOW search_path", connection);
+                    Assert.Contains("planted", (string?)await show.ExecuteScalarAsync(c.Ct), StringComparison.Ordinal);
+                }
+
+                Assert.Equal(0, await CallsAsync(c));
+            });
+        });
+    }
+
+    /// <summary>#6143: a kill connection whose server-side search_path is not the pinned one is refused before the facts are read, on a dry run and
+    /// on a kill. The sign-in option is dropped through the seam, the way a connection pooler drops it, so the database's planted setting applies.</summary>
+    [Fact]
+    public async Task AKillConnectionWithoutThePinnedSearchPath_IsRefused_BeforeAnyFactsRead_AndNothingIsKilled()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            /* The victim signs in before the plant: its own plain sign-in would load types under the planted search_path, slowly. */
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            await WithPlantedDatabaseAsync(c, async () =>
+            {
+                PostgresRemediationExecutor.ConnectionStringSeam.Value = static s => new NpgsqlConnectionStringBuilder(s) { Options = null }.ConnectionString;
+                try
+                {
+                    foreach (var dryRun in new[] { true, false })
+                    {
+                        var json = Parse(await c.Kill(id, dryRun));
+                        Assert.Equal("refused", (string?)json["status"]);
+                        Assert.Equal(RemediationResult.Reasons.SignInNotStrongEnough, (string?)json["reason"]);
+                        Assert.Contains("search_path", (string?)json["message"], StringComparison.Ordinal);
+                        Assert.Contains("planted", (string?)json["message"], StringComparison.Ordinal);
+                        Assert.Contains("Nothing was run", (string?)json["message"], StringComparison.Ordinal);
+                    }
+                }
+                finally
+                {
+                    PostgresRemediationExecutor.ConnectionStringSeam.Value = null;
+                }
+
+                Assert.True(await c.AliveAsync(pid));
+                Assert.Equal(0, await CallsAsync(c));
+                Assert.Equal(0, await c.JournalAsync("action_called"));
+
+                /* Without the seam the sign-in option applies, and the same call goes through. */
+                Assert.Equal("dry_run", (string?)Parse(await c.Kill(id, dryRun: true))["status"]);
+            });
+        });
+    }
+
     [Fact]
     public async Task AServerThatAsksForMd5_OrHasNoTls_IsRefused_WithWhatToChange_AndNothingIsKilled()
     {

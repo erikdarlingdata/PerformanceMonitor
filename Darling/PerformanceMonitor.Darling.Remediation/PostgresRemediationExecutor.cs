@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -127,6 +128,12 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
     internal static readonly AsyncLocal<Func<NpgsqlCommand, CancellationToken, Task<object?>>?> KillStatementSeam = new();
 
     /// <summary>
+    /// The test seam for the kill connection's string (#6143): null uses it as built. A test sets it, for its own async flow only, to change the
+    /// string, for example to drop the search_path option the way a connection pooler does, and so meet a server-side search_path that is not pinned.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<string, string>?> ConnectionStringSeam = new();
+
+    /// <summary>
     /// Kills one backend, only when it is still the backend the caller named: the same pid and the same start second. A dry run reads and decides and
     /// kills nothing. Every refusal comes before the kill statement, and a login that may not signal the target is refused, not tried.
     /// </summary>
@@ -150,7 +157,10 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
         try
         {
-            await using var connection = new NpgsqlConnection(RemediationConnection.BuildPostgresConnectionString(_server, login));
+            var connectionString = RemediationConnection.BuildPostgresConnectionString(_server, login);
+            if (ConnectionStringSeam.Value is { } seamString)
+                connectionString = seamString(connectionString);
+            await using var connection = new NpgsqlConnection(connectionString);
             var notOpened = await OpenAsync(connection, name, dryRun, login, ct);
             if (notOpened is not null)
                 return Log(notOpened);
@@ -231,6 +241,20 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
         try
         {
             await connection.OpenAsync(ct);
+
+            /* #6143: type loading is off, so this is the first statement on the connection. The sign-in sends search_path=pg_catalog,pg_temp; a
+               connection pooler can drop that option without an error, and then the server's own setting for the role or database applies. The
+               statements below rely on the pin, so a connection without it is not used. */
+            await using var searchPath = new NpgsqlCommand(RemediationConnection.PostgresSearchPathSql, connection) { CommandTimeout = 30 };
+            var observed = await searchPath.ExecuteScalarAsync(ct) as string;
+            if (!RemediationConnection.IsPinnedSearchPath(observed))
+            {
+                return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInNotStrongEnough,
+                    $"The remediation connection did not get the search_path this service sends when it signs in ('pg_catalog, pg_temp'): it has '{CleanSearchPath(observed)}'. "
+                    + "The usual cause is a connection pooler that drops the startup 'options' parameter, as PgBouncer does when 'options' is listed in ignore_startup_parameters. "
+                    + "The kill needs a direct connection to the PostgreSQL server: point the server entry at the server's own host and port. Nothing was run.");
+            }
+
             return null;
         }
         catch (PostgresException ex) when (ex.SqlState is "3D000" or "42501")
@@ -245,6 +269,13 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInNotStrongEnough,
                 $"The remediation connection did not sign in: {SqlServerRemediationExecutor.Scrub(ex.Message, login).TrimEnd('.')}. {SignInRule} Nothing was run.");
         }
+    }
+
+    /// <summary>What the server reported for search_path, without control characters and capped, since it reaches a message.</summary>
+    private static string CleanSearchPath(string? observed)
+    {
+        var text = new string((observed ?? string.Empty).Select(c => char.IsControl(c) ? ' ' : c).ToArray());
+        return text.Length > 200 ? text[..200] + "..." : text;
     }
 
     /// <summary>
