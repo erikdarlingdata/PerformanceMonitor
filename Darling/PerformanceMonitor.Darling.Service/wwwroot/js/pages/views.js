@@ -101,34 +101,41 @@ function viewRefreshControl(view, def, isNotebook, canEdit) {
 export async function renderViewList(main) {
   mount(main, [listHead(false, []), loadingStrip("Loading views…")]);
 
-  /* The fleet read rides along with the session + list because a DASHBOARD template is scoped to one server
-     and its picker needs the names. A failed fleet read is not fatal here: the notebook templates and every
-     other affordance still work, and the dashboard group says why it cannot offer itself. */
-  const [session, res, servers] = await Promise.all([api.getSession(), api.listViews(), loadServerNames()]);
+  /* #6243: the list needs only the session and the view list. The fleet read exists for the dashboard templates' server
+     picker, so the list is drawn the moment those two answer; a slow or hung fleet read used to hold the page on
+     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. */
+  const serversRead = loadServerNames();
+  const [session, res] = await Promise.all([api.getSession(), api.listViews()]);
   const canEdit = !!session.can_edit;
+  const ourHash = location.hash;
 
   if (res.kind === "error") {
-    mount(main, [listHead(canEdit, servers), errorStrip(res.message)]);
+    mount(main, [listHead(canEdit, []), errorStrip(res.message)]);
     return;
   }
 
   const views = Array.isArray(res.data) ? res.data : [];
-  const nodes = [listHead(canEdit, servers)];
+  const head = listHead(canEdit, []);
+  const nodes = [head];
 
   /* Empty list -> a real first-run hero that sells the feature (M4), not a bare strip. The hero carries its own
      New view + Import affordances (can_edit only), so the standalone import panel is only shown once views exist. */
   if (!views.length) {
-    nodes.push(firstRunHero(canEdit, servers));
-    mount(main, nodes);
+    nodes.push(firstRunHero(canEdit, []));
+  } else {
+    if (canEdit) nodes.push(importPanel());
+    nodes.push(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))));
+  }
+  mount(main, nodes);
+
+  const servers = await serversRead;
+  if (!servers.length || location.hash !== ourHash || main.firstChild !== head) return;
+  if (!views.length) {
+    mount(main, [listHead(canEdit, servers), firstRunHero(canEdit, servers)]);
     return;
   }
-
-  if (canEdit) {
-    nodes.push(importPanel());
-  }
-
-  nodes.push(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))));
-  mount(main, nodes);
+  /* Only the head holds the picker: swap it in place so the cards, and their own reads, are not rebuilt. */
+  main.replaceChild(listHead(canEdit, servers), head);
 }
 
 /* First-run hero (M4): a centered pitch + a prominent New view + a few starting-point ideas + the (secondary)

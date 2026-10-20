@@ -32,6 +32,11 @@ class FakeNode {
     if (i >= 0) this.children.splice(i, 1);
     return child;
   }
+  replaceChild(next, old) {
+    const i = this.children.indexOf(old);
+    if (i >= 0) this.children[i] = next;
+    return old;
+  }
   setAttribute(name, value) { this.attrs[name] = String(value); }
   focus() { globalThis.document.activeElement = this; }
   addEventListener(type, fn) { (this.handlers[type] ||= []).push(fn); }
@@ -290,6 +295,95 @@ try {
     release();
     await inFlight;
     out.lateRead = { views: [...calls.paintViewList], cached: ctx.api.last() !== null };
+  } else if (scenario === "write-refresh") {
+    // #6243: the shipped views-api.js write calls, against a stand-in service. The shell registers one listener; a create, an
+    // edit and a delete each tell it once (a refused write does not), and the sidebar the listener repaints follows the store.
+    const api = await load("views-api.js");
+    const store = [v(1, "First")];
+    const calls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const method = init.method || "GET";
+      calls.push(method + " " + url);
+      const reply = (status, body) => ({ ok: status < 400, status, text: async () => (body === undefined ? "" : JSON.stringify(body)) });
+      if (method === "GET") return reply(200, store.map((x) => ({ ...x })));
+      if (method === "POST") {
+        const b = JSON.parse(init.body);
+        if (!b.name) return reply(400, { error: "name is required" });
+        const made = v(store.length + 1, b.name, { folder: b.folder ?? null });
+        store.push(made);
+        return reply(201, made);
+      }
+      if (method === "PUT") {
+        const b = JSON.parse(init.body);
+        const row = store.find((x) => "/api/views/" + x.id === url);
+        row.folder = b.folder ?? null;
+        return reply(200, row);
+      }
+      store.splice(store.findIndex((x) => "/api/views/" + x.id === url), 1);
+      return reply(204);
+    };
+    const list = new FakeNode("div");
+    local.setStorage(globalThis.localStorage);
+    local.setSessionStorage(globalThis.sessionStorage);
+    let refreshes = 0;
+    const refresh = async () => {
+      refreshes++;
+      const res = await api.listViews();
+      side.paintViewList(list, as(res.data, "alice"), { can_edit: true, can_own: true }, null);
+    };
+    const lines = () => all(list, (n) => n.dataset.view !== undefined).map((n) => n.textContent);
+    const settle = () => new Promise((r) => setTimeout(r, 0));
+    api.onViewsChanged(refresh);
+    await refresh();
+    out.start = lines();
+    const before = refreshes;
+    const created = await api.createView({ name: "Brand new", definition: {} });
+    await settle();
+    out.afterCreate = lines();
+    out.createdKind = created.kind;
+    await api.updateView(2, { name: "Brand new", folder: "Moved", definition: {}, version: 1 });
+    await settle();
+    out.afterEdit = { lines: lines(), folder: store[1].folder };
+    await api.deleteView(1);
+    await settle();
+    out.afterDelete = lines();
+    const refused = await api.createView({ name: "", definition: {} });
+    await settle();
+    out.refusedKind = refused.kind;
+    out.refreshesFromWrites = refreshes - before;
+  } else if (scenario === "direct-load") {
+    // #6243: a direct load of #/views. The page's own reads are the session and the view list; the fleet read only fills the
+    // dashboard templates' server picker, so a fleet that is slow (or never answers) must not hold the list on "Loading views…".
+    globalThis.location.hash = "#/views";
+    const pageApi = await load("views-api.js");
+    const page = await load("pages/views.js");
+    let answerFleet = null;
+    const fleetBody = JSON.stringify({ cards: [{ server_id: 7, server_name: "SQL01", display_name: "SQL01" }] });
+    globalThis.fetch = (url) => {
+      const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+      if (url === "/api/session") return Promise.resolve(reply({ can_edit: true, can_own: false }));
+      if (url === "/api/views") return Promise.resolve(reply([v(1, "Zeta top level"), v(3, "CPU", { folder: "Ops" })]));
+      if (url === "/api/fleet") return new Promise((r) => { answerFleet = () => r({ ok: true, status: 200, text: async () => fleetBody }); });
+      return Promise.resolve(reply([]));
+    };
+    const main = new FakeNode("main");
+    const settle = () => new Promise((r) => setTimeout(r, 20));
+    const rendering = page.renderViewList(main);
+    await settle();
+    out.whileFleetPending = { loading: main.textContent.includes("Loading views"), hasViews: main.textContent.includes("Zeta top level") && main.textContent.includes("CPU") };
+    out.pickerBefore = main.textContent.includes("Server");
+    answerFleet();
+    await rendering;
+    out.afterFleet = { hasViews: main.textContent.includes("Zeta top level"), picker: main.textContent.includes("Server") };
+    // the page was left before the fleet answered: nothing is drawn over the new page
+    const left = new FakeNode("main");
+    const leaving = page.renderViewList(left);
+    await settle();
+    globalThis.location.hash = "#/fleet";
+    left.children = [new FakeNode("div", "another page")];
+    answerFleet();
+    await leaving;
+    out.leftPage = left.textContent;
   } else {
     throw new Error("unknown scenario " + scenario);
   }

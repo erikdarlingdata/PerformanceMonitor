@@ -99,19 +99,36 @@ export function getView(id) {
   return apiGet("/api/views/" + encodeURIComponent(id));
 }
 
+let viewsChangedListener = null;
+
+/**
+ * The shell registers the one function that re-reads the sidebar's view list (#6243). Every write below calls it once
+ * the service has accepted the change, so a create, an edit (a folder move included) and a delete all reach the sidebar
+ * the same way, whichever page made them, with no reload and no second refresh path.
+ */
+export function onViewsChanged(fn) {
+  viewsChangedListener = fn;
+}
+
+async function writeView(method, path, body) {
+  const res = await apiSend(method, path, body);
+  if (res.kind === "data" && viewsChangedListener) viewsChangedListener();
+  return res;
+}
+
 /** POST a new view {name, description?, definition} — 201 + the full view, or 400/409(dup)/403. */
 export function createView(body) {
-  return apiSend("POST", "/api/views", body);
+  return writeView("POST", "/api/views", body);
 }
 
 /** PUT an existing view {name, description?, definition, version} — 200 + the full view, or 400/404/409/403. */
 export function updateView(id, body) {
-  return apiSend("PUT", "/api/views/" + encodeURIComponent(id), body);
+  return writeView("PUT", "/api/views/" + encodeURIComponent(id), body);
 }
 
 /** DELETE a view — 204, or 404/403. */
 export function deleteView(id) {
-  return apiSend("DELETE", "/api/views/" + encodeURIComponent(id));
+  return writeView("DELETE", "/api/views/" + encodeURIComponent(id));
 }
 
 /**

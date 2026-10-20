@@ -55,7 +55,7 @@ import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
-import { getSession, listViews } from "./views-api.js";
+import { getSession, listViews, onViewsChanged } from "./views-api.js";
 import { paintViewList } from "./view-sidebar.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderManageTags } from "./pages/manage-tags.js";
@@ -737,6 +737,9 @@ function start() {
   initSeverityColorSettings(document.getElementById("viewer-settings"));
   onLocalChange(paintSidebar);
   onLocalChange(paintViewListNow);
+
+  /* #6243: a saved, created or deleted view reaches the sidebar at once, not on the next 60 s poll. */
+  onViewsChanged(refreshViewList);
 
   refreshSidebar();
   refreshViewList();
