@@ -210,4 +210,27 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         Assert.All(Database(doc, "appdb").GetProperty("files").EnumerateArray(), f => Assert.False(f.TryGetProperty(AzureSiblingDatabaseSize.RowNoteKey, out _)));
         Assert.Contains("one file", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
     }
+
+    /// <summary>#6178: a Hyperscale database whose log row is missing from the snapshot is known from the stored server properties
+    /// (<c>serverIsHyperscale</c>), so its data file still says its max size is a per-file cap. Without the stored fact the log row
+    /// is the only evidence, and a database whose log has a size is never Hyperscale.</summary>
+    [Fact]
+    public void AHyperscaleDataFileWithNoLogRow_IsKnownFromTheStoredProperties_AndOnlyThen()
+    {
+        var data = Row("hsdb", 1, "hsdb_data", "ROWS", 10_240, 315);
+        data.MaxSizeMb = 131_072;
+
+        using var unknown = JsonDocument.Parse(McpServerInfoTools.DatabaseSizesPayload("srv", new[] { data }));
+        Assert.False(Database(unknown, "hsdb").GetProperty("files")[0].TryGetProperty(AzureSiblingDatabaseSize.RowNoteKey, out _));
+        Assert.False(unknown.RootElement.TryGetProperty("note", out _));
+
+        using var stored = JsonDocument.Parse(McpServerInfoTools.DatabaseSizesPayload("srv", new[] { data }, serverIsHyperscale: true));
+        Assert.Equal(HyperscaleLogSize.DataFileMaxSizeNote,
+            Database(stored, "hsdb").GetProperty("files")[0].GetProperty(AzureSiblingDatabaseSize.RowNoteKey).GetString());
+        Assert.Equal(HyperscaleLogSize.DataFileCapNote, stored.RootElement.GetProperty("note").GetString());
+
+        var sizedLog = Row("hsdb", 2, "hsdb_log", "LOG", 1024, 10);
+        using var contradicted = JsonDocument.Parse(McpServerInfoTools.DatabaseSizesPayload("srv", new[] { data, sizedLog }, serverIsHyperscale: true));
+        Assert.All(Database(contradicted, "hsdb").GetProperty("files").EnumerateArray(), f => Assert.False(f.TryGetProperty(AzureSiblingDatabaseSize.RowNoteKey, out _)));
+    }
 }

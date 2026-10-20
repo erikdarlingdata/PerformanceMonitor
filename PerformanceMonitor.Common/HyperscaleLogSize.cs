@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Generic;
+using System.Linq;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -54,4 +57,34 @@ public static class HyperscaleLogSize
     /// told apart, so no other database gets the note.</summary>
     public static bool IsDataFileWithFileCap(string? fileType, bool databaseHasLogServiceFile, bool hasMaxSize) =>
         databaseHasLogServiceFile && hasMaxSize && string.Equals(fileType, "ROWS", System.StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>#6178: true when the stored server properties say the monitored database is on Hyperscale: the edition the
+    /// collector stores for Azure SQL Database reads "Azure SQL Database (Hyperscale)", and the service objective starts with
+    /// <c>HS_</c> (for example <c>HS_Gen5_4</c>). Either is enough. An empty read (no stored properties) is false.</summary>
+    public static bool IsHyperscaleTier(string? edition, string? serviceObjective) =>
+        (edition ?? string.Empty).Contains("Hyperscale", System.StringComparison.OrdinalIgnoreCase)
+        || (serviceObjective ?? string.Empty).StartsWith("HS_", System.StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>#6178: the databases in a size snapshot that are on Hyperscale. A database whose log file has no size is one (the
+    /// log service). When the stored server properties say Hyperscale (<paramref name="serverIsHyperscale"/>, see
+    /// <see cref="IsHyperscaleTier"/>), so is a database with no sized log file at all, which covers a snapshot whose log row is
+    /// missing. A database with a sized log file is never Hyperscale, because its log would have no size there.</summary>
+    public static HashSet<string> HyperscaleDatabases(
+        IEnumerable<(string Database, string? FileType, bool HasSize)> files, bool serverIsHyperscale)
+    {
+        var all = files.ToList();
+        var result = new HashSet<string>(all.Where(f => !f.HasSize).Select(f => f.Database));
+        if (serverIsHyperscale)
+        {
+            var sizedLog = new HashSet<string>(all
+                .Where(f => f.HasSize && string.Equals(f.FileType, "LOG", System.StringComparison.OrdinalIgnoreCase))
+                .Select(f => f.Database));
+            foreach (var database in all.Select(f => f.Database))
+            {
+                if (!sizedLog.Contains(database)) result.Add(database);
+            }
+        }
+
+        return result;
+    }
 }

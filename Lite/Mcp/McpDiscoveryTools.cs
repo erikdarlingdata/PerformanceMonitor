@@ -35,17 +35,10 @@ public sealed class McpDiscoveryTools
             {
                 /* #6178: no server has a list. When every server runs an engine that never writes one (Azure SQL Database), that is
                    not_collected, not a true negative. One server that could have had the list keeps the empty answer. */
-                var envelopes = new List<string?>();
-                if (searched.Count == 0)
-                {
-                    foreach (var (server, id) in servers)
-                    {
-                        envelopes.Add(await McpEngineCapability.NotCollectedStatusAsync(dataService, id, server.ServerName, "database_states"));
-                    }
-                }
-
-                /* One server that could have had the list (no envelope for it) keeps the empty answer below. */
-                var fleetNotCollected = envelopes.Count > 0 && envelopes.All(e => e is not null) ? envelopes[0] : null;
+                var fleet = servers.Select(s => (s.Id, s.Server.ServerName)).ToList();
+                var fleetNotCollected = searched.Count == 0
+                    ? await McpEngineCapability.FleetNotCollectedStatusAsync(dataService, fleet, "database_states")
+                    : null;
                 return fleetNotCollected ?? McpHelpers.Status(
                     "empty",
                     searched.Count == 0

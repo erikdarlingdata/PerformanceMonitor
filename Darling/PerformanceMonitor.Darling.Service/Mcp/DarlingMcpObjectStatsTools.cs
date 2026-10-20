@@ -630,7 +630,8 @@ public sealed class DarlingMcpObjectStatsTools
                     ?? McpHelpers.StatusForDatabase("unavailable", "No database size data available. The size collector may not have run yet.", databases.Describe());
             }
 
-            return DatabaseSizesPayload(resolved.ServerName, rows, databases.Describe());
+            var serverIsHyperscale = await DarlingEngineCapability.IsHyperscaleAsync(postgres, resolved.ServerId, cancellationToken);
+            return DatabaseSizesPayload(resolved.ServerName, rows, databases.Describe(), serverIsHyperscale);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -649,8 +650,12 @@ public sealed class DarlingMcpObjectStatsTools
     /// <paramref name="databaseEcho"/> (#5244) is the <c>database_name</c> echo: the name, "the chosen databases", or null for
     /// every database; the key is always written.
     /// </summary>
-    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DarlingObjectStatsReader.DatabaseSizeRow> rows, string? databaseEcho = null)
+    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DarlingObjectStatsReader.DatabaseSizeRow> rows, string? databaseEcho = null, bool serverIsHyperscale = false)
     {
+        /* #6178: a data file's max size is a per-file cap on Hyperscale. The stored server properties say so when the read has
+           them; a log file with no size says so in the rows (and is the fallback when the properties are missing). */
+        var hyperscaleDatabases = HyperscaleLogSize.HyperscaleDatabases(
+            rows.Select(r => (r.DatabaseName, (string?)r.FileTypeDesc, r.TotalSizeMb is not null)), serverIsHyperscale);
         var databases = rows
             .GroupBy(r => r.DatabaseName)
             .Select(g =>
@@ -666,8 +671,7 @@ public sealed class DarlingMcpObjectStatsTools
                 };
                 if (g.Any(r => r.IsAzureSiblingRow))
                     database[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
-                /* #6178: on Hyperscale (a log file with no size in this database) a data file's max size is a per-file cap. */
-                var hyperscale = g.Any(r => r.TotalSizeMb is null);
+                var hyperscale = hyperscaleDatabases.Contains(g.Key);
                 database["files"] = g.Select(r => FilePayload(r, hyperscale)).ToList();
                 return database;
             })
@@ -679,7 +683,9 @@ public sealed class DarlingMcpObjectStatsTools
            same words. */
         var note = AzureSiblingDatabaseSize.DatabaseSizesNote(
             hasLogServiceFile: rows.Any(r => r.TotalSizeMb is null),
-            hasSiblingRow: rows.Any(r => r.IsAzureSiblingRow));
+            hasSiblingRow: rows.Any(r => r.IsAzureSiblingRow),
+            hasHyperscaleDataFileCap: rows.Any(r => !r.IsAzureSiblingRow
+                && HyperscaleLogSize.IsDataFileWithFileCap(r.FileTypeDesc, hyperscaleDatabases.Contains(r.DatabaseName), r.MaxSizeMb is > 0)));
         if (note is not null)
         {
             return JsonSerializer.Serialize(new

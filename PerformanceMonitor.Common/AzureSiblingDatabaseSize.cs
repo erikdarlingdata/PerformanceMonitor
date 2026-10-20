@@ -113,10 +113,13 @@ public static class AzureSiblingDatabaseSize
     /// size, and <see cref="LogNote"/> when it holds a sibling row. When both apply the two sit side by side, the
     /// Hyperscale sentence first. Lite and Darling both build the note here, so the two payloads say the same
     /// words.</summary>
-    public static string? DatabaseSizesNote(bool hasLogServiceFile, bool hasSiblingRow)
+    public static string? DatabaseSizesNote(bool hasLogServiceFile, bool hasSiblingRow, bool hasHyperscaleDataFileCap = false)
     {
         if (hasLogServiceFile && hasSiblingRow) return HyperscaleLogSize.Note + " " + LogNote;
         if (hasLogServiceFile) return HyperscaleLogSize.Note;
+        /* #6178: Hyperscale known from the stored server properties while the log row is missing: only the data file cap applies. */
+        if (hasHyperscaleDataFileCap && hasSiblingRow) return HyperscaleLogSize.DataFileCapNote + " " + LogNote;
+        if (hasHyperscaleDataFileCap) return HyperscaleLogSize.DataFileCapNote;
         return hasSiblingRow ? LogNote : null;
     }
 

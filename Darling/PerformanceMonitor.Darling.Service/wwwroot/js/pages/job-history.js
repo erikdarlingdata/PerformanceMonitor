@@ -100,7 +100,7 @@ function serverRows(data) {
 /** #6178: the sentence for a server whose engine is Azure SQL Database, which has no SQL Agent, so no job will ever match. The service
     says "not_collected" and names the engine for it; any other answer keeps its own sentence. */
 const AZURE_NO_AGENT_LINE = "Azure SQL Database has no SQL Agent, so it has no job history.";
-function noAgentLine(res) {
+export function noAgentLine(res) {
   return res && res.status === "not_collected" && /runs on Azure SQL Database \(EngineEdition 5\)/.test(String(res.message || "")) ? AZURE_NO_AGENT_LINE : null;
 }
 
