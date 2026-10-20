@@ -389,6 +389,20 @@ if (args.Length > 0 && DarlingCliCommands.IsSetCollectorRunAtVerb(args[0]))
     return await DarlingCliCommands.SetCollectorRunAtAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verbs: --set-collector-frequency <collector> <minutes|default> and --set-collector-retention <collector> <days|default>, each with
+   [--server <name>] [--config <path>] (#6227) — set or clear one value of a collector's schedule row, fleet-wide or for one server, and
+   print the rows read back. Same shape and posture as --set-collector-run-at directly above: no SQL of their own (they execute the
+   command plane's plan), trailing arguments parsed STRICTLY inside the verb. */
+if (args.Length > 0 && DarlingCliCommands.IsSetCollectorFrequencyVerb(args[0]))
+{
+    return await DarlingCliCommands.SetCollectorColumnAsync(PerformanceMonitor.Darling.Storage.CollectorScheduleColumn.FrequencyMinutes, args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+if (args.Length > 0 && DarlingCliCommands.IsSetCollectorRetentionVerb(args[0]))
+{
+    return await DarlingCliCommands.SetCollectorColumnAsync(PerformanceMonitor.Darling.Storage.CollectorScheduleColumn.RetentionDays, args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --drop-xe-sessions <server-name> [--dry-run] [--config <path>] | --print-sql (#4732) — drop the Extended
    Events sessions (the deadlock and blocked-process ring buffers, and the opt-in long-query completions one)
    Darling created on a server this service still monitors (run just before the server is removed; after removal,

@@ -836,13 +836,18 @@ GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 DO $do$
 BEGIN
    IF pg_catalog.to_regclass('config.config_collector_schedules') IS NOT NULL THEN
-      GRANT INSERT, UPDATE, DELETE ON config.config_collector_schedules TO mcp;
+      REVOKE INSERT, UPDATE, DELETE ON config.config_collector_schedules FROM mcp;
+      GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+      GRANT UPDATE (enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
    ELSE
       RAISE WARNING 'config.config_collector_schedules was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
    END IF;
 
    IF pg_catalog.to_regclass('config.config_collector_run_times') IS NOT NULL THEN
-      GRANT INSERT, UPDATE, DELETE ON config.config_collector_run_times TO mcp;
+      REVOKE INSERT, UPDATE, DELETE ON config.config_collector_run_times FROM mcp;
+      GRANT INSERT (server_id, collector_name, run_at_minute) ON config.config_collector_run_times TO mcp;
+      GRANT UPDATE (run_at_minute) ON config.config_collector_run_times TO mcp;
+      GRANT DELETE ON config.config_collector_run_times TO mcp;
    ELSE
       RAISE WARNING 'config.config_collector_run_times was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
    END IF;

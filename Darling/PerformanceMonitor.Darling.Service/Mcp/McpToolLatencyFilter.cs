@@ -110,6 +110,9 @@ public sealed class McpToolLatencyFilter
             /* #5793: who made the call, worked out once here so the recorder only ever sees the finished string. The
                composed-panel tool records itself through the shared runner, which reads it from the ambient value. */
             var caller = CallerOf(request);
+
+            /* Set for every tool, not just the composed panel: a write tool names its caller in its own log line. */
+            ReadCaller.SetAmbientMcpCaller(caller);
             if (string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
             {
                 ReadCaller.SetAmbientMcpCaller(caller);
@@ -139,7 +142,21 @@ public sealed class McpToolLatencyFilter
                 return await ServeCachedAsync(admission, next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
             }
 
-            var answer = await RunReadAsync(next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
+            CallToolResult answer;
+            try
+            {
+                answer = await RunReadAsync(next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && DarlingMcpWritePolicy.IsWrite(toolName))
+            {
+                LogWriteCall(toolName, caller, "failed");
+                throw;
+            }
+
+            if (DarlingMcpWritePolicy.IsWrite(toolName))
+            {
+                LogWriteCall(toolName, caller, answer.IsError == true ? "error" : "completed");
+            }
 
             /* A successful write, or a successful unanchored analyze_server (it stores findings, D5), makes every cached
                answer stored before it unreachable. */
@@ -150,6 +167,12 @@ public sealed class McpToolLatencyFilter
 
             return answer;
         };
+
+    /// <summary>One Information line for every call of a write tool: the tool, the caller and the outcome, and never the arguments (a
+    /// write tool can take a webhook URL or a credential). A write tool that changes a collector schedule also logs what it changed,
+    /// from inside the tool.</summary>
+    private void LogWriteCall(string toolName, string caller, string outcome) =>
+        _logger?.LogInformation("MCP write tool {Tool} called by {Caller}: {Outcome}", toolName, caller, outcome);
 
     /// <summary>The read itself: admission, then the tool, recording the outcome. A cached read runs it once for every
     /// caller waiting on it, under the flight's token.</summary>

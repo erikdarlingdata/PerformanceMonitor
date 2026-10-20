@@ -104,10 +104,10 @@ public static class CollectorScheduleOverlay
 
         var schedule = CollectorSchedulePresets.BuildDefaultSchedule();
 
-        ApplyScope(schedule, allOverrides.Where(o => o.ServerId is null));
+        ApplyScope(schedule, allOverrides.Where(o => o.ServerId is null), serverId is null);
         if (serverId is int sid)
         {
-            ApplyScope(schedule, allOverrides.Where(o => o.ServerId == sid));
+            ApplyScope(schedule, allOverrides.Where(o => o.ServerId == sid), true);
         }
 
         ApplyRunTimes(schedule, runTimes.Where(r => r.ServerId == serverId));
@@ -137,7 +137,7 @@ public static class CollectorScheduleOverlay
         }
     }
 
-    private static void ApplyScope(List<CollectorScheduleEditItem> schedule, IEnumerable<CollectorScheduleRow> scopeRows)
+    private static void ApplyScope(List<CollectorScheduleEditItem> schedule, IEnumerable<CollectorScheduleRow> scopeRows, bool editedScope)
     {
         foreach (var row in scopeRows)
         {
@@ -165,7 +165,16 @@ public static class CollectorScheduleOverlay
                 item.DatabasesText = FormatDatabases(row.Databases);
             }
 
-            item.Enabled = row.Enabled;
+            /* V205 (#6227): a NULL enabled is "inherit", so it leaves the value the lower layer set. On the scope being edited it
+               is remembered, so the Save writes NULL back instead of freezing what it inherits. */
+            if (row.Enabled is bool enabled)
+            {
+                item.Enabled = enabled;
+            }
+            else if (editedScope)
+            {
+                item.EnabledInherited = true;
+            }
         }
     }
 
@@ -291,7 +300,7 @@ public static class CollectorScheduleOverlay
             /* A blank scope on a fleet row writes NULL, not an empty array: at fleet level there is
                no lower layer to opt back out of, and NULL is this table's "column not overridden". */
             rows.Add(new CollectorScheduleRow(
-                null, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
+                null, item.Name, item.FrequencyMinutes, item.RetentionDays, item.EnabledInherited ? null : item.Enabled,
                 databases.Count > 0 ? databases : null));
         }
 
@@ -316,7 +325,7 @@ public static class CollectorScheduleOverlay
             /* #4938: the run time does not ride these rows (ToRunTimeChanges writes it to its own table), so this Save
                carries no run time and leaves every one as it was. */
             .Select(item => new CollectorScheduleRow(
-                serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
+                serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.EnabledInherited ? null : item.Enabled,
                 ParseDatabases(item.DatabasesText)))
             .ToList();
     }

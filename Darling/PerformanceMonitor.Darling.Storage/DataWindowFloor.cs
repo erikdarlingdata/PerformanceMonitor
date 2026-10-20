@@ -361,7 +361,7 @@ public static class DataWindowFloor
                    server's first collection is where coverage starts; a row older than it moves the answer earlier. */
                 var horizon = collector is null
                     ? days.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                    : $"COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{collector}' AND o.retention_days >= 1 LIMIT 1), {days.ToString(System.Globalization.CultureInfo.InvariantCulture)})";
+                    : $"COALESCE((SELECT LEAST(o.retention_days, {CollectorScheduleDefaults.MaxRetentionDays}) FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{collector}' AND o.retention_days >= 1 LIMIT 1), {days.ToString(System.Globalization.CultureInfo.InvariantCulture)})";
                 coverage = $"GREATEST($3 - make_interval(days => {horizon}), s.created_date)";
             }
             else

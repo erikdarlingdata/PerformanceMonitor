@@ -23,7 +23,27 @@ public sealed class CollectorScheduleEditItem
 {
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
-    public bool Enabled { get; set; } = true;
+    private bool _enabled = true;
+
+    /// <summary>The effective enabled state. Changing it in the grid is an explicit choice, so it clears
+    /// <see cref="EnabledInherited"/>.</summary>
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            if (_enabled != value)
+            {
+                _enabled = value;
+                EnabledInherited = false;
+            }
+        }
+    }
+
+    /// <summary>True when the edited scope's own row holds NULL for enabled (V205, #6227: "inherit the fleet row, then the
+    /// shipped default"), as the MCP tools write it. <see cref="Enabled"/> then shows the value it inherits, and a Save writes
+    /// NULL back until the cell is changed, so a Save that never touched the cell does not freeze the inherited state.</summary>
+    public bool EnabledInherited { get; set; }
     public int FrequencyMinutes { get; set; }
     public int RetentionDays { get; set; }
 

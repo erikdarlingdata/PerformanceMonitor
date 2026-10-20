@@ -1906,6 +1906,19 @@ ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetica
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetical_index_encrypted_password text;";
 
     /// <summary>
+    /// V205 (#6227): <c>config.config_collector_schedules.enabled</c> may be NULL, which reads "inherit": the fleet-wide row's value
+    /// for a server's row, then the collector's shipped default. A row the schedule tools create to set only a frequency or a
+    /// retention then stores no enabled state of its own, so a later fleet-wide disable still reaches that server; before, such a row
+    /// stored <c>enabled</c> explicitly and the fleet-wide value never reached it. Dropping NOT NULL is catalog-only, the DEFAULT TRUE
+    /// stays (a row inserted without the column is explicit, as every row was), and existing rows keep their values. The service
+    /// and the viewer read NULL as "inherit" (<c>ScheduleOverride.Enabled</c> was already nullable and layers with <c>??</c>). An older
+    /// build reads the column as a plain boolean and fails on a NULL, so before rolling back past this rung set every NULL to the value
+    /// it inherits, or delete those rows. Idempotent.
+    /// </summary>
+    private const string V205Sql = @"
+ALTER TABLE config.config_collector_schedules ALTER COLUMN enabled DROP NOT NULL;";
+
+    /// <summary>
     /// V204 (#6214): shared folders, personal views and an owner on the saved custom views and notebooks (both are
     /// <c>config.custom_views</c> rows). Four columns: <c>folder</c> (NULL is the top level; the writers store it trimmed, empty as NULL,
     /// at most 100 characters, no control characters, and a check holds the same rule), <c>personal</c> (default false, so every existing
@@ -2344,6 +2357,7 @@ $rung$;";
         new Migration(202, "ag-primary-replica", V202Sql),
         new Migration(203, "hypothetical-index-login", V203Sql),
         new Migration(204, "custom-view-folders", V204Sql),
+        new Migration(205, "collector-enabled-inherit", V205Sql),
     };
 
     /// <summary>

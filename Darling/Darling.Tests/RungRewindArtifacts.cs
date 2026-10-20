@@ -404,6 +404,18 @@ BEGIN
         ALTER TABLE config.custom_views ADD CONSTRAINT custom_views_name_key UNIQUE (name);
     END IF;
 END $$;"),
+
+        // /// V205 (#6227): the collector schedule rows may hold a NULL enabled state. The rewind turns every NULL into TRUE and puts NOT NULL
+        // back, so a re-run of V205 drops it again. Safe on a store that never had the table.
+        new(205, "hasInheritableCollectorEnabled",
+            @"
+DO $$
+BEGIN
+    IF to_regclass('config.config_collector_schedules') IS NOT NULL THEN
+        UPDATE config.config_collector_schedules SET enabled = TRUE WHERE enabled IS NULL;
+        ALTER TABLE config.config_collector_schedules ALTER COLUMN enabled SET NOT NULL;
+    END IF;
+END $$;"),
     ];
 
     /// <summary>

@@ -96,13 +96,13 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
         var server = (string?)args["server_name"];
         return (string)undo["tool"]! switch
         {
-            "enable_collector" => DarlingMcpCollectorScheduleTools.EnableCollector(source, collector, server, ct),
-            "disable_collector" => DarlingMcpCollectorScheduleTools.DisableCollector(source, collector, server, ct),
+            "enable_collector" => DarlingMcpCollectorScheduleTools.EnableCollector(source, collector, server, cancellationToken: ct),
+            "disable_collector" => DarlingMcpCollectorScheduleTools.DisableCollector(source, collector, server, cancellationToken: ct),
             "set_collector_frequency" => DarlingMcpCollectorScheduleTools.SetCollectorFrequency(
-                source, collector, (int?)args["frequency_minutes"], (bool?)args["clear"] ?? false, server, ct),
+                source, collector, (int?)args["frequency_minutes"], (bool?)args["clear"] ?? false, server, cancellationToken: ct),
             "set_collector_retention" => DarlingMcpCollectorScheduleTools.SetCollectorRetention(
-                source, collector, (int?)args["retention_days"], (bool?)args["clear"] ?? false, server, ct),
-            "set_collector_run_at" => DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, collector, (string)args["run_at"]!, server, ct),
+                source, collector, (int?)args["retention_days"], (bool?)args["clear"] ?? false, server, cancellationToken: ct),
+            "set_collector_run_at" => DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, collector, (string)args["run_at"]!, server, cancellationToken: ct),
             var other => throw new InvalidOperationException($"unexpected undo tool {other}"),
         };
     }
@@ -114,7 +114,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
         {
             Assert.True((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
 
-            var disabled = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, "WAIT_STATS", null, ct));
+            var disabled = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, "WAIT_STATS", null, cancellationToken: ct));
             Assert.Equal("changed", (string?)disabled["status"]);
             Assert.Equal(Delta, (string?)disabled["collector"]);
             Assert.Equal("fleet-wide", (string?)disabled["scope"]);
@@ -123,7 +123,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal("enable_collector", (string?)disabled["undo"]!["tool"]);
 
             /* A server's own row wins over the fleet row, and the fleet-wide answer names no server for it. */
-            var serverOn = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "sched-alpha", ct));
+            var serverOn = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "sched-alpha", cancellationToken: ct));
             Assert.Equal("changed", (string?)serverOn["status"]);
             Assert.True((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
             Assert.False((await RunnerSeesAsync(source, Delta, ServerB, ct)).Enabled);
@@ -133,7 +133,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal("changed", (string?)undone["status"]);
             Assert.False((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
 
-            var enabled = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, null, ct));
+            var enabled = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, null, cancellationToken: ct));
             Assert.True((await RunnerSeesAsync(source, Delta, ServerB, ct)).Enabled);
 
             /* The undo of the fleet enable is a disable, and the one of the fleet disable put it back on. */
@@ -154,11 +154,11 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
         await WithStoreAsync(async (source, owner, ct) =>
         {
             /* A collector that ships OFF stays off when a frequency or retention is set on it, fleet-wide or per server. */
-            var freq = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, ShipsOff, 7, false, null, ct));
+            var freq = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, ShipsOff, 7, false, null, cancellationToken: ct));
             Assert.Equal("changed", (string?)freq["status"]);
             Assert.Null((int?)freq["previous"]!["frequency_minutes"]);
             Assert.Equal(7, (int?)freq["current"]!["frequency_minutes"]);
-            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, ShipsOff, 11, false, "sched-beta", ct));
+            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, ShipsOff, 11, false, "sched-beta", cancellationToken: ct));
             Assert.Equal("changed", (string?)retention["status"]);
 
             var runnerFleet = await RunnerSeesAsync(source, ShipsOff, ServerA, ct);
@@ -170,8 +170,8 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal(7, runnerServer.FrequencyMinutes);
 
             /* A server row created under a fleet row that is OFF is created OFF too. */
-            await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, null, ct);
-            await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Delta, 5, false, "sched-alpha", ct);
+            await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, null, cancellationToken: ct);
+            await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Delta, 5, false, "sched-alpha", cancellationToken: ct);
             Assert.False((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
 
             /* The read lists what is stored, fleet-wide and per server, with the code default beside it. */
@@ -198,7 +198,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.False(afterUndo.Enabled);
 
             /* Clear is its own call, and a clear with nothing stored writes nothing. */
-            var cleared = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, null, true, "sched-beta", ct));
+            var cleared = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, null, true, "sched-beta", cancellationToken: ct));
             Assert.Equal("unchanged", (string?)cleared["status"]);
             Assert.Equal(0, await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerB} AND collector_name = '{Delta}'", ct));
         });
@@ -209,12 +209,12 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
     {
         await WithStoreAsync(async (source, owner, ct) =>
         {
-            var fleet = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "02:30", null, ct));
+            var fleet = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "02:30", null, cancellationToken: ct));
             Assert.Equal("changed", (string?)fleet["status"]);
             Assert.Equal("default", (string?)fleet["undo"]!["arguments"]!["run_at"]);
             Assert.Equal(150, (await RunnerSeesAsync(source, Daily, ServerA, ct)).RunAtMinute);
 
-            var server = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "none", "sched-beta", ct));
+            var server = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "none", "sched-beta", cancellationToken: ct));
             Assert.Equal("changed", (string?)server["status"]);
             Assert.Null((await RunnerSeesAsync(source, Daily, ServerB, ct)).RunAtMinute);
             Assert.Equal(150, (await RunnerSeesAsync(source, Daily, ServerA, ct)).RunAtMinute);
@@ -235,8 +235,8 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal(0, await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_run_times", ct));
 
             /* A second set to the same time says so. */
-            await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "04:00", null, ct);
-            var again = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "04:00", null, ct));
+            await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "04:00", null, cancellationToken: ct);
+            var again = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "04:00", null, cancellationToken: ct));
             Assert.Equal("unchanged", (string?)again["status"]);
         });
     }
@@ -246,15 +246,15 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
     {
         await WithStoreAsync(async (source, owner, ct) =>
         {
-            var unknown = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, "no_such_collector", null, ct));
-            var negative = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Daily, -1, false, null, ct));
-            var pastCap = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, CollectorDeltaCalculator.MaxDeltaFrequencyMinutes + 1, false, null, ct));
-            var neither = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Daily, null, false, null, ct));
-            var both = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 3, true, null, ct));
-            var zeroDays = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 0, false, null, ct));
-            var badTime = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "25:99", null, ct));
-            var tooOften = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Delta, "02:00", null, ct));
-            var noServer = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(source, Daily, "no-such-server", ct));
+            var unknown = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, "no_such_collector", null, cancellationToken: ct));
+            var negative = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Daily, -1, false, null, cancellationToken: ct));
+            var pastCap = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, CollectorDeltaCalculator.MaxDeltaFrequencyMinutes + 1, false, null, cancellationToken: ct));
+            var neither = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Daily, null, false, null, cancellationToken: ct));
+            var both = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 3, true, null, cancellationToken: ct));
+            var zeroDays = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 0, false, null, cancellationToken: ct));
+            var badTime = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "25:99", null, cancellationToken: ct));
+            var tooOften = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Delta, "02:00", null, cancellationToken: ct));
+            var noServer = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(source, Daily, "no-such-server", cancellationToken: ct));
             var readUnknown = Parse(await DarlingMcpCollectorScheduleTools.GetCollectorSchedules(source, "no_such_collector", null, ct));
 
             foreach (var refusal in new[] { unknown, negative, pastCap, neither, both, zeroDays, badTime, tooOften, noServer, readUnknown })
@@ -292,7 +292,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal(45, (int?)row["retention_days"]);
 
             /* A tool write after the viewer's keeps the viewer's other column. */
-            await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Daily, 60, false, null, ct);
+            await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Daily, 60, false, null, cancellationToken: ct);
             var runner = await RunnerSeesAsync(source, Daily, ServerA, ct);
             Assert.Equal(60, runner.FrequencyMinutes);
             Assert.Equal(45, runner.RetentionDays);

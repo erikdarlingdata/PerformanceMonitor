@@ -93,7 +93,7 @@ internal static class DarlingCollectorRunTimeReader
                     reader.GetString(1),
                     reader.IsDBNull(2) ? null : reader.GetInt32(2),
                     reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                    reader.GetBoolean(4)));
+                    reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
             }
         }
 

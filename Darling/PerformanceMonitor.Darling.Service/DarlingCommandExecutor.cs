@@ -554,6 +554,16 @@ WHERE status = 'in_progress'
         var successStatus = enabled ? "collector enabled" : "collector disabled";
         var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
 
+        /* V205 (#6227): inherit = true puts the row's enabled flag back to NULL, which reads "the fleet-wide row's value, else the shipped
+           default", so a later fleet-wide enable or disable reaches this scope again. It is the same command for either verb: the flag
+           it would have set is not written. A row that is not there is left alone. */
+        if (TryReadBool(command.ArgsJson, "inherit") == true)
+        {
+            return serverId is int inheritId
+                ? StoreWrite(CollectorScheduleSql.InheritServerEnabled, new object?[] { inheritId, collectorName }, "collector enabled state set to inherit")
+                : StoreWrite(CollectorScheduleSql.InheritFleetEnabled, new object?[] { collectorName }, "collector enabled state set to inherit (fleet-wide)");
+        }
+
         if (serverId is int scopedId)
         {
             return StoreWrite(
@@ -665,8 +675,8 @@ WHERE status = 'in_progress'
     /// <para>The name goes through the catalog like the other collector commands, and the value through
     /// <see cref="CollectorScheduleBounds"/>, the bounds the Viewer's schedule editor enforces: nothing about either is
     /// re-decided here. The statements are <see cref="CollectorScheduleSql"/>'s, and write ONE column: the enabled flag, the other
-    /// column and the database scope on an existing row are kept. A row this creates carries the enabled state the scope already
-    /// resolves to, so setting a frequency never switches a collector on or off. Clearing a column on a row that is not there
+    /// column and the database scope on an existing row are kept. A row this creates stores a NULL enabled state (V205, "inherit"), so setting a frequency never switches a
+    /// collector on or off and a later fleet-wide enable or disable still reaches it. Clearing a column on a row that is not there
     /// writes nothing.</para>
     /// </summary>
     private static CommandPlan ResolveCollectorColumn(ClaimedCommand command, CollectorScheduleColumn column)
@@ -710,7 +720,6 @@ WHERE status = 'in_progress'
         }
 
         var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
-        var shipsOn = CollectorScheduleDefaults.All[collectorName].DefaultEnabled;
         var what = frequency ? "collector frequency" : "collector retention";
 
         if (clear)
@@ -721,8 +730,8 @@ WHERE status = 'in_progress'
         }
 
         return serverId is int scopedId
-            ? StoreWrite(CollectorScheduleSql.SetServerColumn(column), new object?[] { scopedId, collectorName, value, shipsOn }, what + " set")
-            : StoreWrite(CollectorScheduleSql.SetFleetColumn(column), new object?[] { collectorName, value, shipsOn }, what + " set (fleet-wide)");
+            ? StoreWrite(CollectorScheduleSql.SetServerColumn(column), new object?[] { scopedId, collectorName, value }, what + " set")
+            : StoreWrite(CollectorScheduleSql.SetFleetColumn(column), new object?[] { collectorName, value }, what + " set (fleet-wide)");
     }
 
     /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>
@@ -904,6 +913,12 @@ WHERE status = 'in_progress'
     {
         var value = TryReadProperty(json, names);
         return value.HasValue && value.Value.ValueKind == JsonValueKind.Number && value.Value.TryGetInt32(out var i) ? i : null;
+    }
+
+    private static bool? TryReadBool(string? json, params string[] names)
+    {
+        var value = TryReadProperty(json, names);
+        return value.HasValue && value.Value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.Value.GetBoolean() : null;
     }
 
     private static JsonElement? TryReadProperty(string? json, string[] names)

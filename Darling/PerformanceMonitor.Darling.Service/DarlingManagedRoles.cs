@@ -1524,8 +1524,17 @@ GRANT DELETE ON {config}.query_tag_map TO {mcp};
 --    two-column config_service grant above covers; the tables are SELECT-able by mcp already. The tools are served only with
 --    mcp.allowWrites and a token, and are never offered to an investigation agent. Provisioning re-runs every start, so no migration
 --    rung carries this.
-GRANT INSERT, UPDATE, DELETE ON {config}.config_collector_schedules TO {mcp};
-GRANT INSERT, UPDATE, DELETE ON {config}.config_collector_run_times TO {mcp};
+--    The grants are by column, the narrowest the tools' statements need: the override rows take an INSERT of the five columns the tools
+--    set and an UPDATE of the three values they change (never the database scope, never a DELETE: no tool removes a row, and the
+--    Viewer's delete-and-reinsert Save runs as the owner). The run times take their one value column and a DELETE (set_collector_run_at
+--    deletes the row for default). The table-level grants an earlier provisioning gave are revoked first, so a re-run narrows them.
+REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_schedules FROM {mcp};
+GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
+GRANT UPDATE (enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
+REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_run_times FROM {mcp};
+GRANT INSERT (server_id, collector_name, run_at_minute) ON {config}.config_collector_run_times TO {mcp};
+GRANT UPDATE (run_at_minute) ON {config}.config_collector_run_times TO {mcp};
+GRANT DELETE ON {config}.config_collector_run_times TO {mcp};
 -- #3450: the web dashboard's dedicated mute-rule endpoints (POST/PATCH/PUT/DELETE under /api/mute-rules) run
 --    as the least-privilege viewer role -- the web host's ONLY store identity -- so viewer gets the SAME
 --    single-table config_mute_rules write mcp holds above, the shape of the custom_views/custom_alert_rules

@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -58,25 +59,29 @@ public sealed class DarlingMcpCollectorScheduleTools
 
     /// <summary>One requested change. <see cref="Number"/> is the frequency or retention; <see cref="Clear"/> asks for the column to
     /// go back to the next level; <see cref="RunAt"/> is the run time as typed.</summary>
-    private sealed record Edit(Change Kind, string Tool, string? Collector, string? Server, int? Number, bool Clear, string? RunAt);
+    private sealed record Edit(Change Kind, string Tool, string? Collector, string? Server, int? Number, bool Clear, string? RunAt, bool Inherit = false);
 
     [McpServerTool(Name = "disable_collector"), Description(
-        "Stops one collector: sets its enabled flag to false, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes and data already collected stays. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent. Read the current state with get_collector_schedules; collector names are in get_collection_health.")]
+        "Stops one collector: sets its enabled flag to false, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes and data already collected stays. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Read the current state with get_collector_schedules; collector names are in get_collection_health.")]
     public static Task<string> DisableCollector(
         NpgsqlDataSource postgres,
         [Description("Collector name, as get_collection_health reports it.")] string collector_name,
         [Description("Optional server name or display name. Omit to change the fleet-wide row.")] string? server_name = null,
+        [Description("True to put the row's enabled flag back to 'inherited' (the fleet-wide value for a server, else the shipped default) instead of setting it, so a later fleet-wide change reaches it again.")] bool inherit = false,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ApplyAsync(postgres, new Edit(Change.Disable, "disable_collector", collector_name, server_name, null, false, null), cancellationToken);
+        ApplyAsync(postgres, new Edit(Change.Disable, "disable_collector", collector_name, server_name, null, false, null, inherit), logger, cancellationToken);
 
     [McpServerTool(Name = "enable_collector"), Description(
-        "Starts one collector: sets its enabled flag to true, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes. A collector that ships off (opt-in) is switched on by this. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "Starts one collector: sets its enabled flag to true, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes. A collector that ships off (opt-in) is switched on by this. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Needs mcp.allowWrites; never offered to an investigation agent.")]
     public static Task<string> EnableCollector(
         NpgsqlDataSource postgres,
         [Description("Collector name, as get_collection_health reports it.")] string collector_name,
         [Description("Optional server name or display name. Omit to change the fleet-wide row.")] string? server_name = null,
+        [Description("True to put the row's enabled flag back to 'inherited' (the fleet-wide value for a server, else the shipped default) instead of setting it, so a later fleet-wide change reaches it again.")] bool inherit = false,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ApplyAsync(postgres, new Edit(Change.Enable, "enable_collector", collector_name, server_name, null, false, null), cancellationToken);
+        ApplyAsync(postgres, new Edit(Change.Enable, "enable_collector", collector_name, server_name, null, false, null, inherit), logger, cancellationToken);
 
     [McpServerTool(Name = "set_collector_frequency"), Description(
         "Sets, or clears, how often one collector runs, in minutes (0 = once when the server loads), fleet-wide (no server_name) or for ONE server. clear=true removes the override so the next level applies (the fleet row for a server, else the code default). Same bounds as the Viewer's schedule editor: not negative, and a delta-family collector accepts at most the delta cap. Only frequency changes; the enabled flag and retention on the row are kept, and a new row never switches a collector on or off. The answer gives the previous value and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent.")]
@@ -86,8 +91,9 @@ public sealed class DarlingMcpCollectorScheduleTools
         [Description("Minutes between runs, 0 or more. Omit when clear is true.")] int? frequency_minutes = null,
         [Description("True to clear the override instead of setting a value.")] bool clear = false,
         [Description("Optional server name or display name. Omit to change the fleet-wide row.")] string? server_name = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ApplyAsync(postgres, new Edit(Change.Frequency, "set_collector_frequency", collector_name, server_name, frequency_minutes, clear, null), cancellationToken);
+        ApplyAsync(postgres, new Edit(Change.Frequency, "set_collector_frequency", collector_name, server_name, frequency_minutes, clear, null), logger, cancellationToken);
 
     [McpServerTool(Name = "set_collector_run_at"), Description(
         "Sets, stops or clears the time of day a collector that runs once a day or less often starts, fleet-wide (no server_name) or for ONE server. run_at is HH:MM (24-hour, the monitored server's own clock), 'none' (on a server: do not use the fleet's time) or 'default' (clear this row's time so the next level applies). A time on a collector that runs more often than daily is refused. Only the run time changes. The answer gives the previous value and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent.")]
@@ -96,8 +102,9 @@ public sealed class DarlingMcpCollectorScheduleTools
         [Description("Collector name, as get_collection_health reports it.")] string collector_name,
         [Description("HH:MM, 'none' or 'default'.")] string run_at,
         [Description("Optional server name or display name. Omit to change the fleet-wide row.")] string? server_name = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ApplyAsync(postgres, new Edit(Change.RunAt, "set_collector_run_at", collector_name, server_name, null, false, run_at), cancellationToken);
+        ApplyAsync(postgres, new Edit(Change.RunAt, "set_collector_run_at", collector_name, server_name, null, false, run_at), logger, cancellationToken);
 
     [McpServerTool(Name = "set_collector_retention"), Description(
         "Sets, or clears, how many days one collector's data is kept, fleet-wide (no server_name) or for ONE server. clear=true removes the override so the next level applies (the fleet row for a server, else the code default). Same bound as the Viewer's schedule editor: at least 1 day. Only retention changes; the enabled flag and frequency on the row are kept, and a new row never switches a collector on or off. A shorter retention lets the next purge delete older rows. The answer gives the previous value and the exact call that undoes it. Needs mcp.allowWrites; never offered to an investigation agent.")]
@@ -107,11 +114,12 @@ public sealed class DarlingMcpCollectorScheduleTools
         [Description("Days to keep, 1 or more. Omit when clear is true.")] int? retention_days = null,
         [Description("True to clear the override instead of setting a value.")] bool clear = false,
         [Description("Optional server name or display name. Omit to change the fleet-wide row.")] string? server_name = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ApplyAsync(postgres, new Edit(Change.Retention, "set_collector_retention", collector_name, server_name, retention_days, clear, null), cancellationToken);
+        ApplyAsync(postgres, new Edit(Change.Retention, "set_collector_retention", collector_name, server_name, retention_days, clear, null), logger, cancellationToken);
 
     [McpServerTool(Name = "get_collector_schedules"), Description(
-        "Lists the schedule overrides stored for one collector, or for every collector: enabled, frequency_minutes, retention_days, run_at and the database scope, fleet-wide or per server. A server's own value wins over the fleet-wide one, column by column; a missing value means the next level applies, and the code default applies where there is no row. With collector_name the answer also gives that collector's code default. Use it before and after disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention. Read only.")]
+        "Lists the schedule overrides stored for one collector, or for every collector: enabled, frequency_minutes, retention_days, run_at and the database scope, fleet-wide or per server. A server's own value wins over the fleet-wide one, column by column; a missing value means the next level applies, and the code default applies where there is no row; an enabled flag stored as NULL shows as inherited. With collector_name the answer also gives that collector's code default. Use it before and after disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention. Read only.")]
     public static async Task<string> GetCollectorSchedules(
         NpgsqlDataSource postgres,
         [Description("Optional collector name. Omit to list every collector that has an override.")] string? collector_name = null,
@@ -184,7 +192,7 @@ public sealed class DarlingMcpCollectorScheduleTools
     /// <summary>One scope's view of a collector: its schedule row and its run-time row, either of which may be absent.</summary>
     private sealed record Entry(
         int? ServerId, string Collector, string? ServerLabel, bool? Enabled, int? FrequencyMinutes, int? RetentionDays,
-        IReadOnlyList<string>? Databases, int? RunAtMinute);
+        IReadOnlyList<string>? Databases, int? RunAtMinute, bool HasScheduleRow = true);
 
     private static List<Entry> Merge(
         IReadOnlyList<DarlingCliCommands.CollectorScheduleReadbackRow> rows, IReadOnlyList<DarlingCliCommands.CollectorRunTimeReadbackRow> runTimes)
@@ -201,7 +209,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         {
             if (!rows.Any(r => r.ServerId == time.ServerId && string.Equals(r.CollectorName, time.CollectorName, StringComparison.OrdinalIgnoreCase)))
             {
-                entries.Add(new Entry(time.ServerId, time.CollectorName, time.ServerLabel, null, null, null, null, time.RunAtMinute));
+                entries.Add(new Entry(time.ServerId, time.CollectorName, time.ServerLabel, null, null, null, null, time.RunAtMinute, false));
             }
         }
 
@@ -217,7 +225,8 @@ public sealed class DarlingMcpCollectorScheduleTools
         ["collector"] = e.Collector,
         ["scope"] = e.ServerId is null ? "fleet-wide" : "server",
         ["server"] = e.ServerId is null ? null : e.ServerLabel ?? $"server_id {e.ServerId}",
-        ["enabled"] = e.Enabled,
+        /* V205 (#6227): a schedule row whose enabled flag is NULL inherits (the fleet-wide row, then the shipped default). */
+        ["enabled"] = e.Enabled is bool enabled ? enabled : e.HasScheduleRow ? "inherited" : null,
         ["frequency_minutes"] = e.FrequencyMinutes,
         ["retention_days"] = e.RetentionDays,
         ["run_at"] = e.RunAtMinute is int m ? RunAtText(m) : null,
@@ -251,9 +260,19 @@ public sealed class DarlingMcpCollectorScheduleTools
         {
             case Change.Enable:
                 type = "enable_collector";
+                if (edit.Inherit)
+                {
+                    args["inherit"] = true;
+                }
+
                 break;
             case Change.Disable:
                 type = "disable_collector";
+                if (edit.Inherit)
+                {
+                    args["inherit"] = true;
+                }
+
                 break;
             case Change.Frequency:
                 type = "set_collector_frequency";
@@ -272,7 +291,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         return new ClaimedCommand(0, type, serverId, JsonSerializer.Serialize(args), "mcp");
     }
 
-    private static async Task<string> ApplyAsync(NpgsqlDataSource postgres, Edit edit, CancellationToken cancellationToken)
+    private static async Task<string> ApplyAsync(NpgsqlDataSource postgres, Edit edit, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -280,6 +299,11 @@ public sealed class DarlingMcpCollectorScheduleTools
             if (canonical is null)
             {
                 return Refuse(edit.Tool, "unknown_collector", UnknownCollectorMessage(edit.Collector ?? string.Empty));
+            }
+
+            if (edit.Inherit && edit.Kind is not (Change.Enable or Change.Disable))
+            {
+                return Refuse(edit.Tool, "invalid", "inherit only applies to enable_collector and disable_collector. Nothing was changed.");
             }
 
             if (edit.Kind is Change.Frequency or Change.Retention && edit.Clear == edit.Number.HasValue)
@@ -327,13 +351,66 @@ public sealed class DarlingMcpCollectorScheduleTools
 
             var rowsAfter = await DarlingCliCommands.ReadCollectorScheduleRowsAsync(postgres, canonical, cancellationToken);
             var timesAfter = await DarlingCliCommands.ReadCollectorRunTimeRowsAsync(postgres, canonical, cancellationToken);
-            return Describe(edit, canonical, scope, rowsBefore, timesBefore, rowsAfter, timesAfter);
+            var answer = Describe(edit, canonical, scope, rowsBefore, timesBefore, rowsAfter, timesAfter);
+            LogWrite(logger, edit, canonical, scope, rowsBefore, timesBefore, rowsAfter, timesAfter);
+            return answer;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(edit.Tool, ex);
         }
     }
+
+    /// <summary>One log line per schedule write: the tool, the collector, the scope, the value before and after, and the caller the
+    /// request filter worked out (<see cref="ReadCaller.AmbientMcpCaller"/>: the client name and version the connection sent). Written
+    /// at Information, after the write, from the rows read before and after it, so the line says what the store held and not what was
+    /// asked for.</summary>
+    private static void LogWrite(
+        ILogger? logger, Edit edit, string collector, DarlingCliCommands.CollectorScope scope,
+        IReadOnlyList<DarlingCliCommands.CollectorScheduleReadbackRow> rowsBefore, IReadOnlyList<DarlingCliCommands.CollectorRunTimeReadbackRow> timesBefore,
+        IReadOnlyList<DarlingCliCommands.CollectorScheduleReadbackRow> rowsAfter, IReadOnlyList<DarlingCliCommands.CollectorRunTimeReadbackRow> timesAfter)
+    {
+        if (logger is null)
+        {
+            return;
+        }
+
+        var serverId = scope.ServerId;
+        var rowBefore = rowsBefore.FirstOrDefault(r => r.ServerId == serverId);
+        var rowAfter = rowsAfter.FirstOrDefault(r => r.ServerId == serverId);
+        string before;
+        string after;
+        switch (edit.Kind)
+        {
+            case Change.Enable:
+            case Change.Disable:
+                before = EnabledText(rowBefore);
+                after = EnabledText(rowAfter);
+                break;
+            case Change.Frequency:
+                before = NumberText(rowBefore, rowBefore?.FrequencyMinutes);
+                after = NumberText(rowAfter, rowAfter?.FrequencyMinutes);
+                break;
+            case Change.Retention:
+                before = NumberText(rowBefore, rowBefore?.RetentionDays);
+                after = NumberText(rowAfter, rowAfter?.RetentionDays);
+                break;
+            default:
+                before = timesBefore.FirstOrDefault(t => t.ServerId == serverId)?.RunAtMinute is int bm ? RunAtText(bm) : "none stored";
+                after = timesAfter.FirstOrDefault(t => t.ServerId == serverId)?.RunAtMinute is int am ? RunAtText(am) : "none stored";
+                break;
+        }
+
+        logger.LogInformation(
+            "MCP schedule write {Tool}{Inherit}: collector {Collector}, scope {Scope}, before {Before}, after {After}, caller {Caller}",
+            edit.Tool, edit.Inherit ? " (inherit)" : string.Empty, collector, scope.Label, before, after, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
+    }
+
+    private static string EnabledText(DarlingCliCommands.CollectorScheduleReadbackRow? row) =>
+        row is null ? "no row" : row.Enabled is bool b ? (b ? "enabled" : "disabled") : "inherited";
+
+    private static string NumberText(DarlingCliCommands.CollectorScheduleReadbackRow? row, int? value) =>
+        row is null ? "no row" : value is int v ? v.ToString(System.Globalization.CultureInfo.InvariantCulture) : "not set";
 
     /// <summary>The answer: what changed, what it was, the call that undoes it, and anything the caller should know. Pure over the rows
     /// read before and after, so a test can drive it.</summary>
@@ -353,7 +430,8 @@ public sealed class DarlingMcpCollectorScheduleTools
         var undoArgs = new JsonObject { ["collector_name"] = collector };
         if (serverId is not null)
         {
-            undoArgs["server_name"] = scope.Label;
+            /* The storage name, not the label: the label is "Display (ServerName)", which the server resolver does not accept. */
+            undoArgs["server_name"] = scope.ServerName ?? scope.Label;
         }
 
         object? previous;
@@ -368,25 +446,46 @@ public sealed class DarlingMcpCollectorScheduleTools
             case Change.Disable:
             {
                 var wanted = edit.Kind == Change.Enable;
-                /* The state the scope resolved to before: its own row, else (for a server) the fleet row, else the code default. */
+                /* The state the scope resolved to before: its own row, else (for a server) the fleet row, else the code default. A NULL
+                   enabled flag (V205) inherits, so it falls through like a missing row. */
                 var effectiveBefore = rowBefore?.Enabled ?? (serverId is null ? null : fleetBefore?.Enabled) ?? def.DefaultEnabled;
-                previous = new { enabled = rowBefore?.Enabled, effective_enabled = effectiveBefore };
+                previous = new { enabled = rowBefore?.Enabled, inherited = rowBefore is not null && rowBefore.Enabled is null, effective_enabled = effectiveBefore };
+                /* The undo puts back what the row held: an explicit true or false, or "inherited" (no explicit value). */
+                tool = rowBefore?.Enabled is bool was ? (was ? "enable_collector" : "disable_collector") : (effectiveBefore ? "enable_collector" : "disable_collector");
+                if (rowBefore?.Enabled is null)
+                {
+                    undoArgs["inherit"] = true;
+                }
+
+                if (edit.Inherit)
+                {
+                    var effectiveAfter = (serverId is null ? null : rowsAfter.FirstOrDefault(r => r.ServerId is null)?.Enabled) ?? def.DefaultEnabled;
+                    current = new { enabled = rowAfter?.Enabled, inherited = rowAfter is not null && rowAfter.Enabled is null, effective_enabled = effectiveAfter };
+                    what = $"{collector} enabled state now inherits {scopeText}; it resolves to {(effectiveAfter ? "enabled" : "disabled")} ({(serverId is null ? "the code default" : "the fleet-wide row's value, else the code default")}).";
+                    changed = rowBefore?.Enabled is not null;
+                    if (rowBefore is null)
+                    {
+                        notes.Add($"There was no {(serverId is null ? "fleet-wide" : "server")} row, so nothing was written.");
+                    }
+
+                    break;
+                }
+
                 current = new { enabled = rowAfter?.Enabled };
                 what = $"{collector} is now {(wanted ? "enabled" : "disabled")} {scopeText}.";
-                changed = effectiveBefore != wanted || rowBefore is null;
-                tool = effectiveBefore ? "enable_collector" : "disable_collector";
+                changed = rowBefore?.Enabled != wanted;
                 if (rowBefore is null)
                 {
-                    notes.Add($"There was no {(serverId is null ? "fleet-wide" : "server")} row; one was created. Before it, the collector resolved to {(effectiveBefore ? "enabled" : "disabled")} here ({(serverId is null || fleetBefore is null ? "the code default" : "the fleet-wide row")}), and the undo call writes that state as an explicit value.");
+                    notes.Add($"There was no {(serverId is null ? "fleet-wide" : "server")} row; one was created. Before it, the collector resolved to {(effectiveBefore ? "enabled" : "disabled")} here ({(serverId is null || fleetBefore is null ? "the code default" : "the fleet-wide row")}), and the row now stores an explicit value that wins over any later fleet-wide change. inherit=true puts it back.");
                 }
 
                 if (serverId is null)
                 {
-                    var own = rowsAfter.Where(r => r.ServerId is not null && r.Enabled != wanted)
+                    var own = rowsAfter.Where(r => r.ServerId is not null && r.Enabled is bool theirs && theirs != wanted)
                         .Select(r => r.ServerLabel ?? $"server_id {r.ServerId}").ToList();
                     if (own.Count > 0)
                     {
-                        notes.Add($"These servers have their own enabled value, which wins over the fleet-wide one: {string.Join(", ", own)}.");
+                        notes.Add($"These servers have their own enabled value, which wins over the fleet-wide one: {string.Join(", ", own)}. enable_collector / disable_collector with inherit=true and a server_name puts a server back on the fleet-wide value.");
                     }
                 }
 
