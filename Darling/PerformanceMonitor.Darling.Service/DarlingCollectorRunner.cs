@@ -2967,6 +2967,15 @@ public sealed class DarlingCollectorRunner
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
+                    /* #6182: procedure_stats' plan phase on Azure SQL Database. #5449 moved the plan out of the main query into a second
+                       query and wired that into the server-scoped path only, so every procedure this loop read was stored with a NULL
+                       plan and get_procedure_plan_xml found nothing for any of them. The same query, for this database's rows, on this
+                       database's own connection after its reader is disposed, inside the same budget and the same SQL slice. */
+                    if ((object)batch is List<ProcedureStatsCollector.Row> planBatch)
+                    {
+                        await RunProcedureStatsDatabasePlanPhaseAsync(perDbProvider, dbConnection, server, context, planBatch, dbToken);
+                    }
+
                     /* #6009: procedure_stats' module phase on Azure SQL Database, where this loop is the collector's path: this database's
                        watched modules, on this database's own connection, after its reader is disposed. Sends nothing when no module of
                        this database is watched. Inside the slice, so its time counts as this database's SQL time. */
@@ -8033,11 +8042,12 @@ RETURNING s.state_key";
     /// command at a time on the connection), as the deferred fetch does. A failed query ships every row without plans and
     /// marks them all skipped, so the reuse pass counts no miss and caches nothing; the plans are fetched again next
     /// cycle. A stop or the item budget expiring is not a phase failure and propagates. Returns the phase's milliseconds,
-    /// 0 when no query ran.
+    /// 0 when no query ran. A null <paramref name="mainReader"/> is a caller whose main reader is already disposed (the
+    /// Azure SQL Database per-database loop, see <see cref="RunProcedureStatsDatabasePlanPhaseAsync"/>).
     /// </summary>
     internal async Task<long> RunProcedureStatsPlanPhaseAsync(
         ITargetProvider provider,
-        DbDataReader mainReader,
+        DbDataReader? mainReader,
         DbConnection targetConnection,
         ServerRuntime server,
         CollectorContext context,
@@ -8051,7 +8061,11 @@ RETURNING s.state_key";
             return 0;
         }
 
-        await mainReader.CloseAsync();
+        if (mainReader is not null)
+        {
+            await mainReader.CloseAsync();
+        }
+
         var watch = Stopwatch.StartNew();
         Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>? results = null;
         try
@@ -8072,6 +8086,41 @@ RETURNING s.state_key";
 
         ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, results);
         return Math.Max(1L, watch.ElapsedMilliseconds);
+    }
+
+    /// <summary>
+    /// #6182: procedure_stats' plan phase for ONE database of an Azure SQL Database collection. That target is read per
+    /// database (<c>ProcedureStatsCollector.RunsPerDatabase</c>), through a loop that opens a connection per database and
+    /// never reaches the server-scoped branch that runs <see cref="RunProcedureStatsPlanPhaseAsync"/>, so until now no
+    /// procedure it read was stored with a plan. Azure always runs procedure_stats in Off mode (no identity columns, no deferred
+    /// fetch), so the plan phase renders the plans itself and there is no reuse pass: this stamps what it rendered as the
+    /// server-scoped Off mode does. The whole phase is one target query, so its time is also the run's target time for
+    /// <c>plan_fetch</c>. A failed query ships this database's rows without plans and does not fail the run (the phase's own
+    /// rule); a stop or the item budget expiring propagates. Sends nothing when the run captures no plans (a gated cycle) or
+    /// the database returned no rows.
+    /// </summary>
+    internal async Task RunProcedureStatsDatabasePlanPhaseAsync(
+        ITargetProvider provider,
+        DbConnection databaseConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<ProcedureStatsCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0 || !ProcedureStatsCollector.PlanPhaseApplies(context))
+        {
+            return;
+        }
+
+        var planPhaseMs = await RunProcedureStatsPlanPhaseAsync(provider, null, databaseConnection, server, context, rows, cancellationToken);
+        if (planPhaseMs <= 0)
+        {
+            return;
+        }
+
+        StampProcedureStatsOffPlanPhase(context, rows, planPhaseMs);
+        context.PerItemPlanTargetMs = planPhaseMs;
+        context.PerItemPlanIdsAttempted = rows.Count(row => !row.PlanPhaseSkipped);
     }
 
     /// <summary>#6009: a server's watch list and when it was read, so the databases of one Azure SQL Database collection share one store read.</summary>
