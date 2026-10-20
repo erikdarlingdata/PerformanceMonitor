@@ -156,6 +156,9 @@ function blankModel() {
     name: "",
     description: "",
     enabled: true,
+    expiresAt: "",
+    expiresOriginal: null,
+    expired: false,
     metric: scalarMetricModel(),
     windowHours: DEFAULT_WINDOW_HOURS,
     op: "gt",
@@ -186,7 +189,20 @@ function seededModel(seed) {
 
 /** A stored rule ({name, description, enabled, definition}) -> the editor model. */
 function ruleToModel(rule) {
-  return definitionToModel(rule.definition || {}, rule.name, rule.description, rule.enabled !== false);
+  const model = definitionToModel(rule.definition || {}, rule.name, rule.description, rule.enabled !== false);
+  /* #6235: the optional expiry. The input holds whole minutes in UTC, so the stored instant is kept whole in expiresOriginal and sent
+     back untouched when the input still shows it: re-saving an already-expired rule must not be read as moving its expiry. */
+  model.expiresOriginal = rule.expires_at_utc || null;
+  model.expiresAt = rule.expires_at_utc ? String(rule.expires_at_utc).slice(0, 16) : "";
+  model.expired = rule.expired === true;
+  return model;
+}
+
+/** The expiry the save sends: the stored instant when the input is unchanged, else the typed UTC minute, else null (no expiry). */
+function expiryForSave(model) {
+  if (!model.expiresAt) return null;
+  if (model.expiresOriginal && String(model.expiresOriginal).slice(0, 16) === model.expiresAt) return model.expiresOriginal;
+  return model.expiresAt + ":00Z";
 }
 
 /** A rule DEFINITION (+ name/description/enabled) -> the editor model. Shared by the load path and the template
@@ -201,6 +217,9 @@ function definitionToModel(def, name, description, enabled) {
     name: name || "",
     description: description || "",
     enabled: enabled !== false,
+    expiresAt: "",
+    expiresOriginal: null,
+    expired: false,
     metric: { ...descToComposedPanel(metricJson), shape: "scalar", groupBy: [], hours: null },
     windowHours: typeof metricJson.hours === "number" ? metricJson.hours : DEFAULT_WINDOW_HOURS,
     op: normalizeOp(pred.op),
@@ -388,6 +407,19 @@ function buildAlertEditor(main, ctx) {
     model.enabled = enabledBox.checked;
   });
 
+  /* #6235: the optional expiry, in UTC. Empty means the rule never expires; after it the rule stops evaluating and is marked expired. */
+  const expiresInput = el("input", { class: "editor-input", type: "datetime-local", "aria-label": "Rule expires (UTC)" });
+  expiresInput.value = model.expiresAt;
+  expiresInput.addEventListener("input", () => {
+    model.expiresAt = expiresInput.value;
+  });
+  const expiresHint = el("div", {
+    class: "muted",
+    text: model.expired
+      ? "This rule has expired and is not evaluated. Move the expiry later or clear it to turn it back on."
+      : "UTC. Leave empty for a rule that does not expire.",
+  });
+
   const saveStatus = el("div", { class: "save-status" });
   const previewBox = el("div", { class: "alert-preview" });
   const saveBtn = el("button", { class: "btn primary", type: "button", text: ctx.editingId != null ? "Save changes" : "Create rule" });
@@ -468,6 +500,7 @@ function buildAlertEditor(main, ctx) {
       name: model.name.trim(),
       description: model.description ? model.description : null,
       enabled: model.enabled,
+      expires_at_utc: expiryForSave(model),
       definition: modelToDefinition(model),
     };
 
@@ -501,6 +534,7 @@ function buildAlertEditor(main, ctx) {
       field("Name", nameInput),
       field("Description", descInput),
       field("Enabled", enabledBox, "field-enabled"),
+      field("Expires (UTC)", el("div", {}, [expiresInput, expiresHint]), "field-expires"),
     ]),
     el("h3", { class: "section-title", text: "Metric" }),
     el("div", { class: "panel-editor card" }, [metricBody]),

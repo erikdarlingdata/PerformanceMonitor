@@ -60,7 +60,9 @@ public sealed class DarlingMcpCustomAlertTools
     [McpServerTool(Name = "list_custom_alert_rules"), Description(
         "Lists every saved custom alert rule as a lightweight summary - id, name, description, whether it is " +
         "enabled, version, who/when it was last updated, and when it last fired (last_fired, an ISO-8601 UTC " +
-        "instant, or null if the rule has never fired). No definition body. Use the id with " +
+        "instant, or null if the rule has never fired), plus expires_at_utc (an ISO-8601 UTC instant, or null for a rule that never " +
+        "expires) and expired (true once that instant has passed: an expired rule is not evaluated and does not fire, and is turned " +
+        "back on by moving or clearing its expiry with update_custom_alert_rule). No definition body. Use the id with " +
         "get_custom_alert_rule to fetch a rule's full spec, or with update_custom_alert_rule / " +
         "delete_custom_alert_rule.")]
     public static async Task<string> ListCustomAlertRules(NpgsqlDataSource postgres)
@@ -79,7 +81,8 @@ public sealed class DarlingMcpCustomAlertTools
 
     [McpServerTool(Name = "get_custom_alert_rule"), Description(
         "Gets one saved custom alert rule in full, including its definition JSON (the metric + predicate + " +
-        "optional hysteresis/scope/cadence) plus name, description, enabled, and version. Get the id from " +
+        "optional hysteresis/scope/cadence) plus name, description, enabled, version, and expires_at_utc / expired (see " +
+        "list_custom_alert_rules). Get the id from " +
         "list_custom_alert_rules. Use the returned version when calling update_custom_alert_rule (optimistic " +
         "concurrency).")]
     public static async Task<string> GetCustomAlertRule(
@@ -151,7 +154,8 @@ public sealed class DarlingMcpCustomAlertTools
         "returns {status:\"conflict\", ...}. The rule is stamped as MCP-authored. A rule created enabled starts " +
         "being evaluated on the next sweep; pass enabled=false to stage it paused. With 100 rules already enabled " +
         "fleet-wide, an enabled create is refused as {status:\"invalid\", ...}; paused rules do not count, so " +
-        "enabled=false still saves.")]
+        "enabled=false still saves. Optional expires_at_utc (a future ISO-8601 UTC instant) makes it a short-term watch that stops " +
+        "evaluating on its own; the answer says when it expires, and a past expiry is refused.")]
     public static async Task<string> CreateCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The rule name - unique across all rules, max 200 characters.")] string name,
@@ -160,15 +164,22 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("Whether the rule is active. Default true (it evaluates on the next sweep); false stages it paused.")] bool enabled = true,
         [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        [Description("Optional expiry: an ISO-8601 UTC instant in the future (for example 2026-08-01T00:00:00Z). After it the rule stops evaluating. Omit for a rule that does not expire.")] string? expires_at_utc = null)
     {
         if (DarlingAgentActionSeat.IsGated(agentSeat))
         {
-            return await DarlingMcpAgentActions.CreateCustomRuleAsync(agentSeat!, postgres, logger, agent_action, name, definition, description, enabled);
+            return await DarlingMcpAgentActions.CreateCustomRuleAsync(agentSeat!, postgres, logger, agent_action, name, definition, description, enabled, expires_at_utc);
         }
 
         try
         {
+            var (expiry, expiryError) = ResolveCreateExpiry(expires_at_utc);
+            if (expiryError is not null)
+            {
+                return Outcome("invalid", expiryError);
+            }
+
             var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
             if (parsed is null || error is not null)
             {
@@ -176,10 +187,10 @@ public sealed class DarlingMcpCustomAlertTools
             }
 
             var store = new CustomAlertRuleStore(postgres);
-            var result = await store.CreateAsync(name, description, definition, enabled, DarlingWebEndpoints.McpEditorPrincipal);
+            var result = await store.CreateAsync(name, description, definition, enabled, DarlingWebEndpoints.McpEditorPrincipal, expiresAtUtc: expiry);
             return result switch
             {
-                CustomAlertRuleResult.Ok ok => DarlingWebEndpoints.BuildFullRuleNode(ok.Rule!).ToJsonString(McpHelpers.JsonOptions),
+                CustomAlertRuleResult.Ok ok => RuleAnswer(ok.Rule!),
                 CustomAlertRuleResult.Conflict conflict => Outcome("conflict", conflict.Message),
                 CustomAlertRuleResult.Invalid invalid => Outcome("invalid", invalid.Message),
                 _ => Outcome("error", "Could not create the rule."),
@@ -192,7 +203,7 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [McpServerTool(Name = "update_custom_alert_rule"), Description(
-        "Agent arm: needs agent_action, request's server only. Partial update of an existing rule: send only the fields to change (name, description, definition, enabled); an " +
+        "Agent arm: needs agent_action, request's server only. Partial update of an existing rule: send only the fields to change (incl. expires_at_utc); an " +
         "omitted field keeps its current value. description ALSO accepts an empty string \"\" to clear it (vocabulary " +
         "shared with update_custom_view). An invalid definition changes nothing. Pass the " +
         "'version' last read from get_custom_alert_rule: a mismatch returns {status:\"conflict\"} rather than overwriting. " +
@@ -200,7 +211,7 @@ public sealed class DarlingMcpCustomAlertTools
         "its cap. " +
         "<<GUIDE>> " +
         "Updates an existing custom alert rule in place - a PARTIAL update: send only the fields you want to " +
-        "change (name, description, definition, enabled), and every field you omit keeps its current value " +
+        "change (name, description, definition, enabled, expires_at_utc), and every field you omit keeps its current value " +
         "(omitting description does NOT clear it). To CLEAR the description, send it as an empty string \"\" - " +
         "the one write vocabulary shared with update_custom_view: omitted = unchanged, empty = cleared. Provide at " +
         "least one field. A new definition is VALIDATED " +
@@ -212,7 +223,12 @@ public sealed class DarlingMcpCustomAlertTools
         "Enabling a rule (enabled:true, whether it is a fresh transition or re-saving one already on) is refused with " +
         "{status:\"invalid\"} once the fleet-wide enabled-rule count is at its 100 cap (\"Enabled custom alert rule limit " +
         "(100) reached. Disable or delete another rule before enabling this one.\"); leaving a rule disabled, or setting " +
-        "it disabled, never counts against that cap and is never refused for it.")]
+        "it disabled, never counts against that cap and is never refused for it. " +
+        "expires_at_utc is the rule's optional expiry: an ISO-8601 UTC instant sets or moves it (it must be in the future when you " +
+        "change it), an empty string \"\" clears it so the rule never expires, and omitting it keeps the current one. A rule past " +
+        "its expiry is EXPIRED: it is not evaluated and does not fire, and enabled:true on its own does not revive it. Turn it " +
+        "back on by sending a later expires_at_utc, or \"\", with the rule's current version; the answer to any update of an " +
+        "expired rule says this and repeats the call.")]
     public static async Task<string> UpdateCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The id of the rule to update (from list_custom_alert_rules).")] long rule_id,
@@ -223,18 +239,19 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("Whether the rule is active. Omit to keep the current enabled state; false pauses it, true resumes it.")] bool? enabled = null,
         [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        [Description("The rule's expiry: an ISO-8601 UTC instant in the future moves it, an empty string \"\" clears it (the rule never expires), omit to keep the current one. Moving or clearing it is how an expired rule is turned back on.")] string? expires_at_utc = null)
     {
         if (DarlingAgentActionSeat.IsGated(agentSeat))
         {
-            return await DarlingMcpAgentActions.UpdateCustomRuleAsync(agentSeat!, postgres, logger, agent_action, rule_id, version, name, definition, description, enabled);
+            return await DarlingMcpAgentActions.UpdateCustomRuleAsync(agentSeat!, postgres, logger, agent_action, rule_id, version, name, definition, description, enabled, expires_at_utc);
         }
 
         try
         {
-            if (name is null && definition is null && description is null && enabled is null)
+            if (name is null && definition is null && description is null && enabled is null && expires_at_utc is null)
             {
-                return Outcome("invalid", "Provide at least one field to change (name, description, definition, or enabled).");
+                return Outcome("invalid", "Provide at least one field to change (name, description, definition, enabled, or expires_at_utc).");
             }
 
             /* A new definition is validated BEFORE any store hit (TryParse is pure), so a bad one returns
@@ -258,6 +275,12 @@ public sealed class DarlingMcpCustomAlertTools
             }
 
             var row = currentOk.Rule;
+            var (expiry, expiryError) = ResolveUpdateExpiry(expires_at_utc, row.ExpiresAtUtc);
+            if (expiryError is not null)
+            {
+                return Outcome("invalid", expiryError);
+            }
+
             var result = await store.UpdateAsync(
                 rule_id,
                 name ?? row.Name,
@@ -265,10 +288,11 @@ public sealed class DarlingMcpCustomAlertTools
                 definition ?? row.DefinitionJson,
                 enabled ?? row.Enabled,
                 version,
-                DarlingWebEndpoints.McpEditorPrincipal);
+                DarlingWebEndpoints.McpEditorPrincipal,
+                expiry);
             return result switch
             {
-                CustomAlertRuleResult.Ok ok => DarlingWebEndpoints.BuildFullRuleNode(ok.Rule!).ToJsonString(McpHelpers.JsonOptions),
+                CustomAlertRuleResult.Ok ok => RuleAnswer(ok.Rule!, row.ExpiresAtUtc, expires_at_utc is not null),
                 CustomAlertRuleResult.NotFound => Outcome("not_found", $"No custom alert rule with id {rule_id}."),
                 CustomAlertRuleResult.Conflict conflict => Outcome("conflict", conflict.Message),
                 CustomAlertRuleResult.Invalid invalid => Outcome("invalid", invalid.Message),
@@ -778,6 +802,90 @@ public sealed class DarlingMcpCustomAlertTools
         }
 
         return Task.FromResult(new JsonObject { ["templates"] = templates }.ToJsonString(McpHelpers.JsonOptions));
+    }
+
+    /// <summary>
+    /// The expiry of a CREATE (#6235): omitted or empty means the rule does not expire; otherwise an ISO-8601 UTC instant that must be in
+    /// the future. Shared by the MCP create tool, its agent arm and the web create route, so the three refuse the same way.
+    /// </summary>
+    internal static (DateTime? Expiry, string? Error) ResolveCreateExpiry(string? sent)
+    {
+        if (string.IsNullOrWhiteSpace(sent))
+        {
+            return (null, null);
+        }
+
+        var (parsed, parseError) = CustomAlertExpiry.Parse(sent, "expires_at_utc");
+        if (parseError is not null)
+        {
+            return (null, parseError);
+        }
+
+        var past = CustomAlertExpiry.RefusePast(parsed, DateTime.UtcNow, "expires_at_utc");
+        return past is not null ? (null, past) : (parsed, null);
+    }
+
+    /// <summary>
+    /// The expiry of an UPDATE (#6235), in the vocabulary the description uses: <c>null</c> keeps <paramref name="current"/>, empty
+    /// clears it, anything else is an ISO-8601 UTC instant. A value that is NOT a change (the rule's own stored expiry sent back) is
+    /// never refused, so re-saving an already-expired rule still works; a new value must be in the future.
+    /// </summary>
+    internal static (DateTime? Expiry, string? Error) ResolveUpdateExpiry(string? sent, DateTime? current)
+    {
+        if (sent is null)
+        {
+            return (current, null);
+        }
+
+        if (string.IsNullOrWhiteSpace(sent))
+        {
+            return (null, null);
+        }
+
+        var (parsed, parseError) = CustomAlertExpiry.Parse(sent, "expires_at_utc");
+        if (parseError is not null)
+        {
+            return (null, parseError);
+        }
+
+        if (parsed == current)
+        {
+            return (parsed, null);
+        }
+
+        var past = CustomAlertExpiry.RefusePast(parsed, DateTime.UtcNow, "expires_at_utc");
+        return past is not null ? (null, past) : (parsed, null);
+    }
+
+    /// <summary>
+    /// The answer to a create or an update (#6235): the stored rule, plus a note when the rule carries an expiry. A rule with a future
+    /// expiry says when it expires and the call that keeps it; an EXPIRED rule says it is not evaluated and the exact call that turns it
+    /// back on (a later expiry, or an empty one; <c>enabled:true</c> alone does not). On an update that changed the expiry the answer also
+    /// gives the previous value and the call that restores it.
+    /// </summary>
+    internal static string RuleAnswer(CustomAlertRule rule, DateTime? previousExpiry = null, bool expiryTouched = false)
+    {
+        var node = DarlingWebEndpoints.BuildFullRuleNode(rule);
+        var now = DateTime.UtcNow;
+        var next = rule.Version;
+        if (rule.IsExpiredAt(now))
+        {
+            node["note"] = $"This rule expired at {CustomAlertExpiry.Format(rule.ExpiresAtUtc)}: it is not evaluated and does not fire. enabled:true alone does not turn it back on. " +
+                $"To turn it back on, call update_custom_alert_rule with rule_id={rule.Id}, version={next} and expires_at_utc set to a later UTC instant, or \"\" to clear the expiry.";
+        }
+        else if (rule.ExpiresAtUtc is not null)
+        {
+            node["note"] = $"This rule expires at {CustomAlertExpiry.Format(rule.ExpiresAtUtc)}; after that it stops evaluating (it is kept, not deleted). " +
+                $"To keep it, call update_custom_alert_rule with rule_id={rule.Id}, version={next} and expires_at_utc set to a later UTC instant, or \"\" for no expiry.";
+        }
+
+        if (expiryTouched && previousExpiry != rule.ExpiresAtUtc)
+        {
+            node["previous_expires_at_utc"] = CustomAlertExpiry.Format(previousExpiry);
+            node["undo"] = $"update_custom_alert_rule(rule_id={rule.Id}, version={next}, expires_at_utc=\"{CustomAlertExpiry.Format(previousExpiry) ?? string.Empty}\")";
+        }
+
+        return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>

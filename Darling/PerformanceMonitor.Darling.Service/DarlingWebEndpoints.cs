@@ -981,11 +981,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
+            var (createExpiry, createExpiryError) = Mcp.DarlingMcpCustomAlertTools.ResolveCreateExpiry(request.ExpiresAtText);
+            if (createExpiryError is not null)
+            {
+                return ErrorResult(createExpiryError, StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
                the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
             var result = await store.CreateAsync(
                 request.Name, request.Description, request.DefinitionJson, request.Enabled,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, expiresAtUtc: createExpiry,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
@@ -1022,10 +1029,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
+            /* #6235: a full replace, so an absent expiry clears it. A value that is in the past is refused only when it is a CHANGE: an
+               editor that re-saves an already-expired rule sends its old expiry back, and that must still save. */
+            var existing = await store.GetAsync(id, context.RequestAborted);
+            if (existing is not CustomAlertRuleResult.Ok { Rule: { } existingRule })
+            {
+                return AlertNotFoundResult();
+            }
+
+            var (updateExpiry, updateExpiryError) = Mcp.DarlingMcpCustomAlertTools.ResolveUpdateExpiry(
+                request.ExpiresAtText ?? string.Empty, existingRule.ExpiresAtUtc);
+            if (updateExpiryError is not null)
+            {
+                return ErrorResult(updateExpiryError, StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — see the create route's comment above. */
             var result = await store.UpdateAsync(
                 id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, expiresAtUtc: updateExpiry,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
@@ -7294,7 +7317,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// definition as raw JSON text (re-serialized from the parsed node), <c>enabled</c> (defaults true when the
     /// key is absent, matching create's default and a full-replace PUT), and version (present only on updates).
     /// The definition's STRUCTURE is validated separately by <see cref="CustomAlertRuleDefinition.TryParse"/>.</summary>
-    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version);
+    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version, string? ExpiresAtText = null);
 
     /// <summary>Parses an alert create/update body into an <see cref="AlertWriteRequest"/>, or a caller-facing
     /// error. Mirrors <see cref="ParseViewBodyAsync"/>, adding the <c>enabled</c> field alert rules carry.</summary>
@@ -7345,7 +7368,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             version = v;
         }
 
-        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version), null);
+        /* #6235: the optional expiry. Absent, null or empty means the rule does not expire (a full-replace PUT clears it, like every
+           other field the editor sends); anything else is parsed by the store call below, so a bad value is a 400, not a throw. */
+        string? expiresText = null;
+        if (obj["expires_at_utc"] is JsonValue expiresValue)
+        {
+            if (!expiresValue.TryGetValue<string>(out var expiresString))
+            {
+                return (null, $"'expires_at_utc' must be {CustomAlertExpiry.Spelling}, or null for a rule that does not expire.");
+            }
+
+            expiresText = string.IsNullOrWhiteSpace(expiresString) ? null : expiresString;
+        }
+
+        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version, expiresText), null);
     }
 
     /// <summary>Extracts just the embedded <c>definition</c> object from a body as raw JSON text — the
@@ -7413,7 +7449,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// shape.</summary>
     internal static JsonObject BuildFullRuleNode(CustomAlertRule rule) =>
         JsonSerializer.SerializeToNode(new CustomAlertRuleImage(rule.Id, rule.Name, rule.Description, JsonNode.Parse(rule.DefinitionJson),
-            rule.Enabled, rule.Version, rule.CreatedAt, rule.UpdatedAt, rule.UpdatedBy))!.AsObject();
+            rule.Enabled, rule.Version, rule.CreatedAt, rule.UpdatedAt, rule.UpdatedBy,
+            CustomAlertExpiry.Format(rule.ExpiresAtUtc), rule.IsExpiredAt(DateTime.UtcNow)))!.AsObject();
 
     /// <summary>The bare-array list wire shape (no definition body), carrying <c>enabled</c> so the list can
     /// badge a paused rule without fetching each full definition — plus <c>last_fired</c> (#3360), the naive-UTC
@@ -7435,6 +7472,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["updated_at"] = rule.UpdatedAt,
                 ["updated_by"] = rule.UpdatedBy,
                 ["last_fired"] = rule.LastFired,
+                ["expires_at_utc"] = CustomAlertExpiry.Format(rule.ExpiresAtUtc),
+                ["expired"] = rule.IsExpiredAt(DateTime.UtcNow),
             });
         }
 
