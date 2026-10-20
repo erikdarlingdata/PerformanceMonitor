@@ -71,7 +71,7 @@ public sealed class DarlingMcpQuietWindowTools
         "starts_at_utc and a state of active, upcoming or expired. starts_at is an optional ISO-8601 UTC timestamp: set it ahead of " +
         "planned work and the window mutes nothing until that moment (state upcoming); omit it to start now. ends_at is required, an " +
         "ISO-8601 UTC timestamp that must be in the future and after starts_at; an end that is not after the start is refused and nothing is " +
-        "written. server_name scopes the window to one monitored server (its display name; keyed on the server's store id, so a renamed " +
+        "written. A window lasts at most 7 days (ends_at minus the start), the longest finite choice the Viewer offers. server_name scopes the window to one monitored server (its display name; keyed on the server's store id, so a renamed " +
         "server does not escape it); OMIT it and the window mutes EVERY alert on EVERY server, so say so to the person who asked. " +
         "Repeating the same call is safe: an identical window already in force answers already_exists with its id. The running service " +
         "applies the window on its next collection sweep, when the write's config_version bump makes it reload its mute cache. " +
@@ -188,7 +188,7 @@ public sealed class DarlingMcpQuietWindowTools
 
     [McpServerTool(Name = "clear_quiet_window"), Description(
         "Ends a quiet window NOW by its rule id (from set_quiet_window or get_mute_rules): the window's mute rule is deleted, so alerts it was holding back are delivered again. Changes shared alert configuration the service delivers on. Refuses any rule that is not a quiet window (an ordinary mute with a metric or pattern is not touched). Returns the window as it was and the set_quiet_window call that restores it.<<GUIDE>>" +
-        "Clears one quiet window by rule_id, whether it is active or still upcoming. Only a rule with the shape of a quiet window (an end " +
+        "Clears one quiet window by rule_id, whether it is active or still upcoming. Only a rule with the shape of a quiet window that set_quiet_window wrote (the \"Quiet window\" reason, an end " +
         "time, a server scope or none, and no metric, pattern, source or client application) is cleared; any other rule id answers " +
         "invalid and is left alone, so this cannot delete an ordinary mute. Answer: {status:\"cleared\", rule_id, previous:{scope, " +
         "starts_at_utc, ends_at_utc, state, reason}, undo:{tool:\"set_quiet_window\", arguments:{...}}}; the undo carries the same server, " +
