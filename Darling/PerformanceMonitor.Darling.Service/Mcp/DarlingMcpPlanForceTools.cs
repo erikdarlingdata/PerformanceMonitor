@@ -59,7 +59,7 @@ public sealed class DarlingMcpPlanForceTools
         "<<GUIDE>>" +
         "Call get_plan_force_precheck first and weigh its warnings; it only warns. This tool blocks only a call that cannot do anything: plan_not_found (the plan is not among that query's Query Store rows) or plan_already_forced. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_force) with the plan that was forced before and how (forcing_type MANUAL or AUTO on SQL Server 2022 and later, else unknown), so the way back is known. " +
-        "After a write, check with get_forced_plans. Nothing in Darling unforces on its own: unforce_query_store_plan is the way back, and a person can undo a force from the Agent changes list. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id.")]
+        "After a write, check with get_forced_plans. Nothing in Darling unforces on its own: unforce_query_store_plan is the way back, and a person can undo a force from the Agent changes list. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: the tool and arguments that put the change back (undoing a force that replaced an AUTO force says that forcing it again makes it manual).")]
     public static Task<string> ForceQueryStorePlan(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
@@ -77,7 +77,7 @@ public sealed class DarlingMcpPlanForceTools
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
         "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
-        "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id.")]
+        "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: force_query_store_plan with the same plan.")]
     public static Task<string> UnforceQueryStorePlan(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
@@ -94,7 +94,7 @@ public sealed class DarlingMcpPlanForceTools
     [McpServerTool(Name = "evict_cached_plan"), Description(
         "Agent arm, SQL Server only: evicts ONE plan handle from the monitored server's plan cache, so the next run compiles a new plan. Dry run by default: returns the exact statement, what Darling collected for that handle and any warnings, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's evict_plan switch and remediation login (with ALTER SERVER STATE); ships off. " +
         "<<GUIDE>>" +
-        "plan_handle is the 0x hex text that get_top_queries_by_cpu and get_procedure_stats return. It evicts every statement of the batch that handle covers; the answer says how many Darling collected. There is no undo: an evicted plan cannot be put back, and the next run compiles a new plan. " +
+        "plan_handle is the 0x hex text that get_top_queries_by_cpu and get_procedure_stats return. It evicts every statement of the batch that handle covers; the answer says how many Darling collected. There is no undo: an evicted plan cannot be put back, and the next run compiles a new plan, so a done answer carries undo null. " +
         "This tool blocks only a call that cannot do anything: bad_plan_handle, evict_unsupported_on_platform (Azure SQL Database), evict_permission_denied (the login lacks ALTER SERVER STATE) or plan_not_cached. A batch of several statements, or a handle Darling never collected, is a warning, not a refusal. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_evict) with the statements Darling collected for the handle. " +
         "After a write, wait for the next query_stats collection (about a minute), then call get_compiles_after_evict with the journal_id to see whether the next compile used the same plan shape. Answers status dry_run, done, refused (reason) or failed, with statement, before, warnings and journal_id.")]
@@ -289,7 +289,7 @@ public sealed class DarlingMcpPlanForceTools
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 return WithWarnings(Answer("done", null,
                     $"Plan {plan_id} was {(force ? "forced" : "unforced")} for query {query_id} in {beforeState.Database}. Check with get_forced_plans.",
-                    new { dry_run = false, statement, before = beforeState, after, journal_id = result.CalledId }),
+                    new { dry_run = false, statement, before = beforeState, after, undo = AgentPlanUndoBuilder.For(force, resolved.ServerName, beforeState.Database, query_id, plan_id, beforeState.ForcedPlan?.PlanId, beforeState.ForcedPlan?.ForcingType), journal_id = result.CalledId }),
                     result, afterNotRead ? "The state after the change was not read; check with get_forced_plans." : null);
             }
             catch (PlanForceWriteException ex)
@@ -394,8 +394,8 @@ public sealed class DarlingMcpPlanForceTools
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 return WithWarnings(Answer("done", null,
-                    "The plan was evicted from the plan cache. There is no undo; the next run compiles a new plan. Wait for the next query_stats collection (about a minute), then call get_compiles_after_evict with this journal_id.",
-                    new { dry_run = false, statement, before, warnings, journal_id = result.CalledId }), result);
+                    "The plan was evicted from the plan cache. There is nothing to put back: the next run compiles a new plan. Wait for the next query_stats collection (about a minute), then call get_compiles_after_evict with this journal_id.",
+                    new { dry_run = false, statement, before, warnings, undo = (AgentPlanUndo?)null, journal_id = result.CalledId }), result);
             }
             catch (PlanForceWriteException ex)
             {

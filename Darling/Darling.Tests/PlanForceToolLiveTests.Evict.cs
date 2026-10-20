@@ -160,6 +160,8 @@ VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
             var json = Parse(answer);
             Assert.Equal("done", (string?)json["status"]);
             Assert.False(await IsCachedAsync(c.Sql, cached.PlanHandle, c.Ct));
+            Assert.True(json.ContainsKey("undo"), "an eviction answers undo, and it is null");
+            Assert.Null(json["undo"]);
 
             var called = Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Equal(EvictKind, (string?)called["kind"]);

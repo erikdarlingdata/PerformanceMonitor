@@ -266,6 +266,11 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
             Assert.Null(json["before"]!["forced_plan"]);
             Assert.Equal(planA, (long)json["after"]!["forced_plan"]!["plan_id"]!);
+            Assert.Equal("unforce_query_store_plan", (string?)json["undo"]!["tool"]);
+            Assert.Equal(planA, (long)json["undo"]!["arguments"]!["plan_id"]!);
+            Assert.Equal(query, (long)json["undo"]!["arguments"]!["query_id"]!);
+            Assert.Equal((string?)json["before"]!["database"], (string?)json["undo"]!["arguments"]!["database_name"]);
+            Assert.False(string.IsNullOrWhiteSpace((string?)json["undo"]!["arguments"]!["server_name"]));
 
             var called = Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Equal(ForceKind, (string?)called["kind"]);
@@ -299,6 +304,8 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
             Assert.Equal(planA, (long)json["before"]!["forced_plan"]!["plan_id"]!);
             Assert.Null(json["after"]!["forced_plan"]);
+            Assert.Equal("force_query_store_plan", (string?)json["undo"]!["tool"]);
+            Assert.Equal(planA, (long)json["undo"]!["arguments"]!["plan_id"]!);
 
             var called = Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Equal(UnforceKind, (string?)called["kind"]);
@@ -323,6 +330,9 @@ public sealed partial class PlanForceToolLiveTests
             var old = json["before"]!["forced_plan"]!;
             Assert.Equal(planA, (long)old["plan_id"]!);
             Assert.Equal(await c.Sql.HasForcingTypeColumnAsync(c.Ct) ? "MANUAL" : "unknown", (string?)old["forcing_type"]);
+            Assert.Equal("force_query_store_plan", (string?)json["undo"]!["tool"]);
+            Assert.Equal(planA, (long)json["undo"]!["arguments"]!["plan_id"]!);
+            Assert.Null(json["undo"]!["note"]);
             var called = Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Equal(planA, (long)called["before"]!["forced_plan"]!["plan_id"]!);
         });
