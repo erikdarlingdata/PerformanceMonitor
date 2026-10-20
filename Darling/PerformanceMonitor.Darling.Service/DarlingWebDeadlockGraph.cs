@@ -75,10 +75,25 @@ public static class DarlingWebDeadlockGraph
             Put(node, "isolation_level", p.IsolationLevel);
             Put(node, "proc_name", p.ProcName);
             Put(node, "status", p.Status);
-            /* #6205: the execution-stack sql_handles in stack order (the zero handle already dropped), so the page's
-               detail pane can show them for a plan-cache lookup. Omitted when the process has none. */
-            var handles = p.StackFrames.Select(f => f.SqlHandle).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            if (handles.Count > 0) node["sql_handles"] = handles;
+            /* #6205: every execution-stack frame with a usable sql_handle, in stack order (the all-zero handle already
+               dropped), each with its own statement range, so the page's detail pane can show them for a plan-cache
+               lookup. Omitted when the process has none. */
+            if (p.StackFrames.Count > 0)
+            {
+                node["sql_frames"] = p.StackFrames.Select(f =>
+                {
+                    var frame = new Dictionary<string, object?>
+                    {
+                        ["position"] = f.Position,
+                        ["sql_handle"] = f.SqlHandle,
+                        ["stmt_start"] = f.StmtStart,
+                        ["stmt_end"] = f.StmtEnd,
+                    };
+                    Put(frame, "proc_name", f.ProcName);
+                    if (f.Line != null) frame["line"] = f.Line;
+                    return frame;
+                }).ToList();
+            }
             /* #4348: judged WHOLE, before the cut. The web sweep after this sees only the first SqlTextCap
                characters, and a statement named by what follows them would pass as an innocent prefix. */
             var sqlText = SensitiveStatements.Text(p.SqlText) ?? "";

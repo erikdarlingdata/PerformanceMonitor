@@ -661,14 +661,15 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
     }
 
     /// <summary>
-    /// The execution-stack sql_handles of <paramref name="node"/>, one per line in stack order (#6205): the text the
-    /// Properties panel shows and its Copy button puts on the clipboard. <c>null</c> when the process has none (the
-    /// all-zero dynamic-SQL handle is already dropped by the parser).
+    /// Every execution-stack frame of <paramref name="node"/> that has a sql_handle, one line each in stack order, with
+    /// its own statement offsets, procedure and line (#6205): the text the Properties panel shows and its Copy button
+    /// puts on the clipboard. <c>null</c> when the process has none (the all-zero dynamic-SQL handle is already
+    /// dropped by the parser).
     /// </summary>
     internal static string? SqlHandlesToCopy(DeadlockProcessNode? node)
     {
         if (node == null || node.StackFrames.Count == 0) return null;
-        return string.Join(Environment.NewLine, node.StackFrames.Select(f => f.SqlHandle).Distinct(StringComparer.OrdinalIgnoreCase));
+        return string.Join(Environment.NewLine, node.StackFrames.Select(f => f.Describe()));
     }
 
     /// <summary>
@@ -677,6 +678,10 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
     /// button is shown only while a host is listening and the process has a usable sql_handle.
     /// </summary>
     public event Action<DeadlockProcessNode>? ViewCachedPlanRequested;
+
+    private const string HandleHint =
+        "Frame 1 is the statement that was running; later frames are its callers. A handle covers a whole batch or " +
+        "procedure: find the statement in sys.dm_exec_query_stats by sql_handle plus statement_start_offset / statement_end_offset.";
 
     private void ShowProperties(DeadlockProcessNode node)
     {
@@ -742,12 +747,21 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
             handleHeading.Children.Add(new TextBlock
             {
                 Text = node.StackFrames.Count == 1 ? "SQL Handle" : "SQL Handles (stack order)",
+                ToolTip = HandleHint,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = MutedBrush,
                 FontSize = 11,
                 VerticalAlignment = VerticalAlignment.Center
             });
             PropertiesContent.Children.Add(handleHeading);
+            PropertiesContent.Children.Add(new TextBlock
+            {
+                Text = HandleHint,
+                Foreground = MutedBrush,
+                FontSize = 10,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 4)
+            });
             PropertiesContent.Children.Add(new TextBox
             {
                 Text = handlesText,

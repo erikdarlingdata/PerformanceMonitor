@@ -101,8 +101,13 @@ public sealed class WebDeadlockGraphBehaviourTests
     public void ClickingACard_ShowsItsSqlHandlesInStackOrderAsText_AndNothingWhenThereAreNone()
     {
         var r = Run("sqlHandles");
-        /* #6205: the handles come before the statement, one per line, in the order the page was sent them. */
-        Assert.Equal(new[] { "0x0300AA\n0x0300BB", "update dbo.t set a = 1" },
+        /* #6205: the handles come before the statement, one frame per line, in the order the page was sent them,
+           each with its own statement range, and procedure and line only when the frame has them. */
+        Assert.Equal(new[]
+            {
+                "1 (running)  0x0300AA  stmtstart 20, stmtend 140  dbo.Inner line 9\n3 (caller)  0x0300BB  stmtstart 0, stmtend -1",
+                "update dbo.t set a = 1",
+            },
             r.GetProperty("pres").EnumerateArray().Select(t => t.GetString()).ToArray());
         Assert.Equal(new[] { "SQL handles (stack order):" },
             r.GetProperty("labels").EnumerateArray().Select(t => t.GetString()).ToArray());

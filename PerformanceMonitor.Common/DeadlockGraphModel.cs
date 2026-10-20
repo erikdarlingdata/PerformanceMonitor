@@ -127,10 +127,11 @@ namespace PerformanceMonitor.Common
         public string Status { get; init; } = string.Empty;
 
         /// <summary>
-        /// The <c>sqlhandle</c> of each execution-stack frame, in stack order (#6205): the keys that locate this
-        /// process's statement in the plan cache. The all-zero handle SQL Server writes for dynamic SQL and
-        /// system contexts is left out (no plan can be recovered from it), and a frame that repeats an earlier one
-        /// (same handle and statement range) shows once. Empty when the stack has no usable handle.
+        /// Every execution-stack frame that carries a usable <c>sqlhandle</c>, in stack order (#6205), each with its
+        /// own statement range, procedure and line: the keys that locate this process's statements in the plan cache.
+        /// The first frame of the stack is the statement that was running; the frames after it are its callers. A
+        /// frame whose handle is all zeros (dynamic SQL, system contexts: no plan can be recovered from it) is left
+        /// out, but still counts in <see cref="DeadlockStackFrame.Position"/>. Empty when no frame has a usable handle.
         /// </summary>
         public IReadOnlyList<DeadlockStackFrame> StackFrames { get; init; } = Array.Empty<DeadlockStackFrame>();
 
@@ -147,11 +148,24 @@ namespace PerformanceMonitor.Common
     /// self-edge the layout draws as a small self-loop.
     /// </summary>
     /// <summary>
-    /// One execution-stack frame of a deadlock process that carries a usable <c>sqlhandle</c> (#6205): the handle
-    /// plus the <c>stmtstart</c>/<c>stmtend</c> byte offsets a plan lookup needs (<c>-1</c> end means "to the end
-    /// of the batch", as in SQL Server's own graphs).
+    /// One execution-stack frame of a deadlock process that carries a usable <c>sqlhandle</c> (#6205). A handle
+    /// covers a whole batch or procedure, so it names the statement only together with its <c>stmtstart</c> and
+    /// <c>stmtend</c> byte offsets (a missing start reads as 0 and a missing end as -1, "to the end of the batch",
+    /// as sp_HumanEventsBlockViewer reads them). <see cref="Position"/> is the 1-based place in the whole stack:
+    /// 1 is the statement that was running, higher numbers are its callers.
     /// </summary>
-    public sealed record DeadlockStackFrame(string SqlHandle, int StmtStart, int StmtEnd);
+    public sealed record DeadlockStackFrame(
+        int Position, string SqlHandle, int StmtStart, int StmtEnd, string ProcName = "", int? Line = null)
+    {
+        /// <summary>The one-line text the Properties panel shows and copies for this frame.</summary>
+        public string Describe()
+        {
+            var text = $"{Position} ({(Position == 1 ? "running" : "caller")})  {SqlHandle}  stmtstart {StmtStart}, stmtend {StmtEnd}";
+            if (!string.IsNullOrEmpty(ProcName)) text += "  " + ProcName;
+            if (Line != null) text += " line " + Line;
+            return text;
+        }
+    }
 
     public sealed class DeadlockWaitEdge
     {

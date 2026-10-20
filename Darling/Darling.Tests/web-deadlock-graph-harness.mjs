@@ -81,16 +81,19 @@ switch (process.argv[3]) {
   }
   case "sqlHandles": {
     const g = graph();
-    g.processes[1].sql_handles = ["0x0300AA", "0x0300BB"];
+    g.processes[1].sql_frames = [
+      { position: 1, sql_handle: "0x0300AA", stmt_start: 20, stmt_end: 140, proc_name: "dbo.Inner", line: 9 },
+      { position: 3, sql_handle: "0x0300BB", stmt_start: 0, stmt_end: -1 },
+    ];
     const cell = mod.deadlockGraphCell("srv", { dedup_key: "k1", deadlock_time: "2026-01-01T00:00:00Z", graph: g });
     open(cell);
     const nodes = cell.all((n) => n.hasClass("dlg-node"));
     nodes[1].fire("click");
     out.pres = cell.tags("pre").map((n) => n.textContent);
-    out.labels = cell.all((n) => n.hasClass("dlg-prop")).map((n) => n.textContent).filter((t) => t.includes("handle"));
+    out.labels = cell.all((n) => n.hasClass("dlg-prop")).map((n) => n.textContent).filter((t) => t.includes("handle") && t.endsWith(":"));
     nodes[0].fire("click");
     out.presNoHandles = cell.tags("pre").map((n) => n.textContent);
-    out.labelsNoHandles = cell.all((n) => n.hasClass("dlg-prop")).map((n) => n.textContent).filter((t) => t.includes("handle"));
+    out.labelsNoHandles = cell.all((n) => n.hasClass("dlg-prop")).map((n) => n.textContent).filter((t) => t.includes("handle") && t.endsWith(":"));
     break;
   }
   case "hostile": {

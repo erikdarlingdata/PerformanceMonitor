@@ -255,9 +255,10 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// The execution-stack frames that carry a usable <c>sqlhandle</c>, in stack order (#6205), each with its
-        /// <c>stmtstart</c>/<c>stmtend</c>. A missing <c>stmtend</c> reads as <c>-1</c> (to the end of the batch).
-        /// A frame with no handle, or the all-zero handle SQL Server writes for dynamic SQL and system contexts, is
-        /// skipped; a frame identical to an earlier one is listed once.
+        /// <c>stmtstart</c>/<c>stmtend</c> (a missing start reads as 0 and a missing end as -1, to the end of the
+        /// batch), <c>procname</c> and <c>line</c>. A frame with no handle, or a handle whose hex digits are all
+        /// zeros (the sentinel SQL Server writes for dynamic SQL and system contexts, of any length), is skipped but
+        /// still counts in <see cref="DeadlockStackFrame.Position"/>. Every other frame is listed, repeats included.
         /// </summary>
         internal static IReadOnlyList<DeadlockStackFrame> ExtractStackFrames(XElement proc)
         {
@@ -266,17 +267,19 @@ namespace PerformanceMonitor.Common
                 return Array.Empty<DeadlockStackFrame>();
 
             var frames = new List<DeadlockStackFrame>();
+            var position = 0;
             foreach (var frame in stack.Elements("frame"))
             {
+                position++;
                 var handle = frame.Attribute("sqlhandle")?.Value?.Trim();
                 if (string.IsNullOrEmpty(handle) || IsZeroSqlHandle(handle))
                     continue;
 
                 var start = int.TryParse(frame.Attribute("stmtstart")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) ? s : 0;
                 var end = int.TryParse(frame.Attribute("stmtend")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var e) ? e : -1;
-                var item = new DeadlockStackFrame(handle, start, end);
-                if (!frames.Contains(item))
-                    frames.Add(item);
+                var procName = frame.Attribute("procname")?.Value;
+                int? line = int.TryParse(frame.Attribute("line")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var l) ? l : null;
+                frames.Add(new DeadlockStackFrame(position, handle, start, end, procName ?? string.Empty, line));
             }
             return frames;
         }
