@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
 using System.Diagnostics;
@@ -37,10 +38,11 @@ public class CollectorHealthEntry
 
     /*
      * Set when a collector hits a non-transient permission error
-     * (SQL errors 229 / 297 / 300). The scheduler skips the collector
-     * for the rest of the app session so we don't churn the log with
-     * identical denials every interval. Cleared on app restart — if
-     * permissions get granted later, the next launch retries once.
+     * (SQL errors 229 / 297 / 300), cleared by its next success. While the
+     * same denial repeats the scheduler tries the collector less often
+     * (RefusedCollectorBackoff, #6186) so we don't churn the log with
+     * identical denials every interval, and never stops trying for good:
+     * a permission granted later is picked up at the next try.
      */
     public bool IsPermissionRestricted { get; set; }
 
@@ -409,6 +411,7 @@ public partial class RemoteCollectorService
             var keys = _collectorHealth.Keys.Where(k => k.ServerId == serverId).ToList();
             foreach (var key in keys)
                 _collectorHealth.Remove(key);
+            _refusedBackoffs.TryRemove(serverId, out _);
         }
     }
 
@@ -425,6 +428,8 @@ public partial class RemoteCollectorService
                 .ToList();
             foreach (var key in keys)
                 _collectorHealth.Remove(key);
+            foreach (var backedOffServer in _refusedBackoffs.Keys.Where(k => !activeServerIds.Contains(k)).ToList())
+                _refusedBackoffs.TryRemove(backedOffServer, out _);
         }
     }
 
@@ -449,16 +454,22 @@ public partial class RemoteCollectorService
             {
                 entry.LastSuccessTime = DateTime.UtcNow;
                 entry.ConsecutiveErrors = 0;
+                entry.IsPermissionRestricted = false;
+                GetRefusedBackoff(serverId).Record(collectorName, refused: false, null, DateTime.UtcNow, TimeSpan.Zero);
             }
             else if (status == "PERMISSIONS")
             {
                 /* Permission errors are not transient — don't count as failures
                    (which would show FAILING) but don't count as success either.
                    Record the error message so the user can see what's wrong,
-                   and flag the collector so the scheduler stops retrying for
-                   the rest of the app session. */
+                   and flag the collector so the scheduler backs off from it
+                   (#6186): the same denial run after run is tried less often,
+                   up to hourly, and the first success or a different answer
+                   restores the normal interval. */
                 entry.LastErrorMessage = errorMessage;
                 entry.IsPermissionRestricted = true;
+                GetRefusedBackoff(serverId).Record(
+                    collectorName, refused: true, errorMessage, DateTime.UtcNow, RefusalInterval(serverId, collectorName));
             }
             else if (status == "YIELDED")
             {
@@ -482,13 +493,40 @@ public partial class RemoteCollectorService
             {
                 entry.LastErrorMessage = errorMessage;
                 entry.ConsecutiveErrors++;
+                /* A different answer from the server: the refusal streak ends. */
+                GetRefusedBackoff(serverId).Record(collectorName, refused: false, null, DateTime.UtcNow, TimeSpan.Zero);
             }
         }
     }
 
+    /* #6186: per server, the collectors the server keeps refusing with the same answer and when each is tried next. In memory:
+       a restart tries every collector once at its normal interval. */
+    private readonly ConcurrentDictionary<int, RefusedCollectorBackoff> _refusedBackoffs = new();
+
+    internal RefusedCollectorBackoff GetRefusedBackoff(int serverId) =>
+        _refusedBackoffs.GetOrAdd(serverId, static _ => new RefusedCollectorBackoff());
+
+    /// <summary>The collector's normal interval on this server, for its refusal backoff; one minute when the schedule does not say.</summary>
+    private TimeSpan RefusalInterval(int serverId, string collectorName)
+    {
+        var minutes = _scheduleManager is not null && _serverManager is not null
+            ? _scheduleManager.GetFrequencyForStorageServer(_serverManager, serverId, collectorName)
+            : null;
+        return TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(minutes ?? 1));
+    }
+
     /// <summary>
-    /// Returns true if a collector has hit a permission denial this session
-    /// and should be skipped without re-running. See <see cref="CollectorHealthEntry.IsPermissionRestricted"/>.
+    /// #6186: true while a collector the server has refused with the same answer run after run is waiting out its backoff, so
+    /// the sweep skips it without a run or a log row. False after the wait, and after its first success or a different answer.
+    /// </summary>
+    internal bool IsCollectorBackedOff(int serverId, string collectorName) =>
+        _refusedBackoffs.TryGetValue(serverId, out var backoff)
+        && backoff.Streak(collectorName) > RefusedCollectorBackoff.FreeRefusals
+        && backoff.IsBackedOff(collectorName, DateTime.UtcNow, RefusalInterval(serverId, collectorName));
+
+    /// <summary>
+    /// Returns true if a collector's last run was a permission denial, until its next success.
+    /// See <see cref="CollectorHealthEntry.IsPermissionRestricted"/>.
     /// </summary>
     private bool IsCollectorPermissionRestricted(int serverId, string collectorName)
     {
@@ -787,11 +825,11 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            // Skip collectors that have already hit a non-transient permission denial
-            // this session. Flag is in-memory — next app start retries once (see #857).
-            if (IsCollectorPermissionRestricted(GetServerId(server), collectorName))
+            // Back off collectors the server keeps refusing with the same permission denial (#857, #6186):
+            // tried less often, not every interval, and never stopped for good.
+            if (IsCollectorBackedOff(GetServerId(server), collectorName))
             {
-                AppLogger.Debug("Collector", $"Skipping collector '{collectorName}' for server '{server.DisplayName}' - permission denied this session");
+                AppLogger.Debug("Collector", $"Skipping collector '{collectorName}' for server '{server.DisplayName}' - permission denied repeatedly, backing off");
                 return;
             }
 

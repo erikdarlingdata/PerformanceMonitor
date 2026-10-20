@@ -523,11 +523,12 @@ ORDER BY COALESCE(s.display_name, c.name)";
 
     /// <summary>The stored connection settings (host, port, engine, database, read-only intent, auth, username, encrypt mode,
     /// trust certificate, multi-subnet failover), whether the stored blob is the one a row carries, and whether the row holds a
-    /// remediation secret, for one server id ($1 id, $2 the row's blob). Reads the two secret columns only to compare them
+    /// remediation or hypothetical-index login secret (#6170), for one server id ($1 id, $2 the row's blob). Reads the two secret columns only to compare them
     /// and test for a value, in the write's own transaction: an <c>admin</c>-role write, like the upsert it guards.</summary>
     public const string MonitoredServerStoredReachSql = @"
 SELECT host, COALESCE(port, 0), engine, database, read_only_intent, auth, username, encrypt_mode, trust_server_certificate,
-       multi_subnet_failover, COALESCE(encrypted_password = $2, false), COALESCE(remediation_encrypted_password, '') <> ''
+       multi_subnet_failover, COALESCE(encrypted_password = $2, false),
+       (COALESCE(remediation_encrypted_password, '') <> '' OR COALESCE(hypothetical_index_encrypted_password, '') <> '')
 FROM config_monitored_servers
 WHERE server_id = $1";
 

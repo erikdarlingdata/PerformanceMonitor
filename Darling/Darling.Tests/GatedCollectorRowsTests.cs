@@ -263,7 +263,9 @@ public sealed class GatedCollectorRowsLiveTests
         var map = new SortedDictionary<string, string>(StringComparer.Ordinal);
         foreach (var p in doc.RootElement.EnumerateObject())
         {
-            if (p.Name is "collectors" or "collection_health_age_seconds") continue;
+            /* collectors_returned / collectors_total (#6180) count the collectors array itself, gated rows included, so they
+               move with it exactly as the array does; the test below holds them to the array's own length instead. */
+            if (p.Name is "collectors" or "collectors_returned" or "collectors_total" or "collection_health_age_seconds") continue;
             map[p.Name] = p.Value.GetRawText();
         }
 
@@ -390,6 +392,13 @@ public sealed class GatedCollectorRowsLiveTests
 
                     // sweep_pressure, alert_read_health, the counts note, stored_caveats and every other key.
                     Assert.Equal(Rollups(without), Rollups(withGated));
+                    foreach (var answer in new[] { withGated, without })
+                    {
+                        var served = answer.RootElement.GetProperty("collectors").GetArrayLength();
+                        Assert.Equal(served, answer.RootElement.GetProperty("collectors_returned").GetInt32());
+                        Assert.Equal(served, answer.RootElement.GetProperty("collectors_total").GetInt32());
+                    }
+
                     Assert.Single(withGated.RootElement.GetProperty("stored_caveats").EnumerateArray());
                     Assert.Single(without.RootElement.GetProperty("stored_caveats").EnumerateArray());
                 }

@@ -146,8 +146,10 @@ public sealed class AwsPerServerRoleRungTests
         var grants = System.Text.RegularExpressions.Regex.Matches(
             script, @"GRANT SELECT \([^;]*?\)\s+ON config\.config_monitored_servers TO (viewer|mcp);",
             System.Text.RegularExpressions.RegexOptions.Singleline);
-        Assert.Equal(2, grants.Count);
-        foreach (System.Text.RegularExpressions.Match grant in grants)
+        /* The later single-column grants a rung adds behind its own column guard (V203's login name) are not the carve itself. */
+        var carve = grants.Where(g => g.Value.Contains("server_id", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, carve.Count);
+        foreach (System.Text.RegularExpressions.Match grant in carve)
         {
             var uncommented = grant.Value;
             Assert.Contains("aws_role_arn", uncommented, StringComparison.Ordinal);

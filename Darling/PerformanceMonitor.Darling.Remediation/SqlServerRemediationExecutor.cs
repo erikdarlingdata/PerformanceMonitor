@@ -33,28 +33,36 @@ namespace PerformanceMonitor.Darling.Remediation;
 /// action, another server, another database or another object, before it reads the secret or opens a connection.</para>
 /// <para><b>The sign-in</b> is the server's remediation login: its name, and the secret read from the <c>env:</c> or <c>file:</c> reference when
 /// the action runs. The secret reaches the connection string and nothing else: every message that leaves here has it removed first.</para>
-/// <para>This class is SQL Server only. The PostgreSQL kill (<c>pg_terminate_backend</c>) is <see cref="PostgresRemediationExecutor"/>. Azure SQL Database kill is not built.</para>
+/// <para>This class is SQL Server only. The PostgreSQL kill (<c>pg_terminate_backend</c>) is <see cref="PostgresRemediationExecutor"/>. An Azure SQL Database's kill is <see cref="KillAzureSessionAsync"/>: it connects to the session's own database.</para>
 /// </summary>
-public sealed class SqlServerRemediationExecutor
+public sealed partial class SqlServerRemediationExecutor
 {
     private readonly int _serverId;
     private readonly RemediationServer _server;
     private readonly string? _userName;
     private readonly string? _secretSlot;
+    private readonly string? _monitoringUserName;
     private readonly ILogger _logger;
 
     /// <param name="serverId">The monitored server's id; a permit issued for another server is refused.</param>
     /// <param name="server">How to reach it (host, TLS and certificate settings).</param>
     /// <param name="remediationUserName">The server's remediation login name.</param>
     /// <param name="remediationSecretSlot">The server's secret slot: an <c>env:</c> or <c>file:</c> reference. A stored password is refused.</param>
+    /// <param name="monitoringUserName">
+    /// The server's monitoring login name (the <c>username</c> of its entry). A kill counts a session as Darling's own only when its program name
+    /// starts with <c>PerformanceMonitorDarling</c> AND its login is this one or the remediation login (any client can set its own program name).
+    /// <b>When this is null (a Windows-authenticated entry has no SQL login name) the program name alone decides.</b> The fallback is in
+    /// <see cref="KillSql"/> and <see cref="AzureKillSql"/>, where an unset <c>@monitoring_login</c> counts every Darling-named session as Darling's.
+    /// </param>
     public SqlServerRemediationExecutor(int serverId, RemediationServer server, string? remediationUserName, string? remediationSecretSlot,
-        ILogger? logger = null)
+        ILogger? logger = null, string? monitoringUserName = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         _serverId = serverId;
         _server = server;
         _userName = remediationUserName;
         _secretSlot = remediationSecretSlot;
+        _monitoringUserName = string.IsNullOrWhiteSpace(monitoringUserName) ? null : monitoringUserName.Trim();
         _logger = logger ?? NullLogger.Instance;
     }
 
@@ -89,9 +97,10 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
 
     /// <summary>
     /// The one kill batch (#5632, step 12), for a dry run and a write alike (<c>@dry</c>). It reads the session's facts, then decides in this order
-    /// and stops at the first that applies: the engine is an Azure SQL Database (<c>kill_not_built_on_platform</c>), the session is this connection's
+    /// and stops at the first that applies: the engine is an Azure SQL Database (<c>azure_sql_database</c>: its kill is <see cref="AzureKillSql"/>, in the session's own database), the session is this connection's
     /// own (<c>own_session</c>), no such session (<c>session_gone</c>), a different <c>login_time</c> (<c>session_reused</c>: the id was reused),
-    /// not a user session (<c>not_user_session</c>), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
+    /// not a user session (<c>not_user_session</c>), a session of Darling itself (a program name that starts with <c>PerformanceMonitorDarling</c> AND the monitoring
+    /// or the remediation login, or the remediation login with any program name: <c>tool_login_session</c>; with no monitoring login known, the program name alone), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
     /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
     /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
@@ -115,7 +124,7 @@ DECLARE @command nvarchar(32) = NULL;
 DECLARE @percent real = NULL;
 DECLARE @rollback_read bit = 1;
 IF @edition = 5
-    SET @outcome = 'kill_not_built_on_platform';
+    SET @outcome = 'azure_sql_database';
 ELSE
 BEGIN
     SELECT
@@ -148,6 +157,13 @@ BEGIN
         SET @outcome = 'session_reused';
     ELSE IF @is_user = 0
         SET @outcome = 'not_user_session';
+    ELSE IF UPPER(@login_name) = UPPER(SUSER_SNAME())
+         OR
+         (
+             @program_name COLLATE Latin1_General_100_CI_AS LIKE N'PerformanceMonitorDarling%'
+             AND (@monitoring_login IS NULL OR UPPER(@login_name) = UPPER(@monitoring_login))
+         )
+        SET @outcome = 'tool_login_session';
     ELSE IF ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY CONNECTION'), 0) <> 1
         SET @outcome = 'kill_permission_denied';
     ELSE IF @dry = 1
@@ -381,6 +397,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = sessionId });
             command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = DateTime.SpecifyKind(loginTime, DateTimeKind.Unspecified) });
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dryRun });
+            command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = (object?)_monitoringUserName ?? DBNull.Value });
             try
             {
                 return await ReadKillAnswerAsync(command, name, dryRun, sessionId, ct);
@@ -388,9 +405,9 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             catch (Exception ex) when (!dryRun && IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested))
             {
                 /* The batch was sent and its reply was lost: the server may have run the KILL. Never reported as failed (#5632). */
-                var detail = secret.Length == 0 ? ex.Message : ex.Message.Replace(secret, "***", StringComparison.Ordinal);
+                var detail = ErrorText(ex, secret);
                 return RemediationResult.Unknown(name,
-                    $"The kill batch for session {sessionId} was sent, but its reply was lost ({ex.GetType().Name}: {detail}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again.");
+                    $"The kill batch for session {sessionId} was sent, but its reply was lost ({detail}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again.");
             }
         }, ct);
     }
@@ -414,7 +431,8 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         _ => true,
     };
 
-    private static async Task<RemediationResult> ReadKillAnswerAsync(SqlCommand command, string name, bool dryRun, int sessionId, CancellationToken ct)
+    private static async Task<RemediationResult> ReadKillAnswerAsync(SqlCommand command, string name, bool dryRun, int sessionId, CancellationToken ct,
+        string? database = null)
     {
         {
             await using var reader = !dryRun && KillBatchSeam.Value is { } seam ? await seam(command, ct) : await command.ExecuteReaderAsync(ct);
@@ -423,7 +441,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             var outcome = reader.IsDBNull(0) ? null : reader.GetString(0);
             var found = !reader.IsDBNull(1) && Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture) == 1;
             KillSessionFacts? facts = null;
-            if (found && outcome is not (KillOutcomes.OwnSession or KillOutcomes.NotBuiltOnPlatform))
+            if (found && outcome is not (KillOutcomes.OwnSession or KillOutcomes.ToolLoginSession or KillOutcomes.SessionInOtherDatabase))
             {
                 facts = new KillSessionFacts(sessionId,
                     reader.IsDBNull(2) ? null : reader.GetDateTime(2),
@@ -439,7 +457,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
             double? percent = reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
             var rollbackRead = reader.IsDBNull(12) || Convert.ToInt64(reader.GetValue(12), CultureInfo.InvariantCulture) == 1;
-            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent, rollbackRead);
+            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent, rollbackRead, database);
         }
     }
 
@@ -447,14 +465,32 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     /// Turns the kill batch's outcome into the executor's answer. Pure, so a test needs no server. An outcome the batch does not name is a failure,
     /// never a kill: only <c>killed</c> says <see cref="RemediationResult.Wrote"/>. A kill whose rollback read failed (<paramref name="rollbackRead"/>
     /// false) is still a kill, with no <see cref="RemediationResult.Rollback"/>, as PostgreSQL's kill answers a still-there read that failed.
+    /// <paramref name="database"/> is set for the Azure SQL Database kill (<see cref="AzureKillSql"/>): its outcomes and grants are worded for it.
     /// </summary>
     internal static RemediationResult KillAnswer(string name, bool dryRun, int sessionId, string? outcome, KillSessionFacts? facts, string? rollbackCommand, double? percent,
-        bool rollbackRead = true)
+        bool rollbackRead = true, string? database = null)
     {
+        var azure = database is not null;
         var result = outcome switch
         {
-            KillOutcomes.NotBuiltOnPlatform => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillNotBuiltOnPlatform,
-                "Killing a session is not built for Azure SQL Database. Nothing was run."),
+            KillOutcomes.AzureSqlDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.DatabaseRequired,
+                "This server answered as an Azure SQL Database, but Darling has not recorded its engine edition yet (Darling records it when its collector connects to the server, which has not happened yet or has not happened since the server became an Azure SQL Database), so this call went the SQL Server way and database_name was not used. Call kill_session again after the next collection; then pass database_name, the database the session is in. Nothing was run."),
+            KillOutcomes.NotAzureSqlDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotAzureSqlDatabase,
+                "The server answered as an engine that is not an Azure SQL Database, so the Azure kill was not run. Nothing was run."),
+            KillOutcomes.WrongDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.WrongDatabase,
+                $"The connection did not land in database {database}, so nothing there was checked. Nothing was run."),
+            KillOutcomes.NotPrimary => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotPrimary,
+                $"Database {database} is not read-write on this connection, so this is not its primary. The kill runs only on the primary; a session on a named replica or a read-only secondary cannot be reached from it. Nothing was run."),
+            KillOutcomes.ViewStateDenied => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.ViewStatePermissionDenied,
+                $"The remediation login's user in database {database} does not hold VIEW DATABASE STATE, so it cannot see other sessions there. A person can run GRANT VIEW DATABASE STATE TO <user> in {database}. Nothing was run."),
+            KillOutcomes.SessionInOtherDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionInOtherDatabase,
+                $"Session {sessionId} is connected to another database, not {database}. Nothing was run."),
+            KillOutcomes.ToolLoginSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.ToolLoginSession,
+                $"Session {sessionId} belongs to Darling itself (its program name and its login say it is Darling's, it has no login name, or it is the remediation login's), which this tool never kills. Nothing was run."),
+            KillOutcomes.SessionGone when azure => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionGone,
+                $"Session {sessionId} was not found on the primary of database {database}. It is gone, or it is on a named replica or a read-only secondary, which this tool does not reach. Nothing was run."),
+            KillOutcomes.PermissionDenied when azure => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
+                $"The remediation login's user in database {database} does not hold KILL DATABASE CONNECTION, which killing a session there needs. A person can run GRANT KILL DATABASE CONNECTION TO <user> in {database}. Nothing was run."),
             KillOutcomes.OwnSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.OwnSession,
                 $"Session {sessionId} is the remediation connection's own session. Nothing was run."),
             KillOutcomes.SessionGone => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionGone,
@@ -471,8 +507,12 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             _ => RemediationResult.Failed(name, dryRun, "The server returned an answer to the session check that this code does not know. Nothing is known to have run."),
         };
 
-        /* A reused id answers nothing about the session that has it now (#5632). */
-        result = result with { Session = outcome == KillOutcomes.SessionReused ? null : facts };
+        /* A reused id answers nothing about the session that has it now, and neither does a refusal about the tool's own session or a session in
+           another database: those facts are not the session the caller was allowed to ask about (#5632). */
+        result = result with
+        {
+            Session = outcome is KillOutcomes.SessionReused or KillOutcomes.OwnSession or KillOutcomes.ToolLoginSession or KillOutcomes.SessionInOtherDatabase ? null : facts,
+        };
         if (outcome == KillOutcomes.Killed && !rollbackRead)
         {
             result = result with { Message = $"Session {sessionId} was killed. Whether a rollback is running was not read; read get_blocking to see its locks clear." };
@@ -523,11 +563,11 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         {
             /* 18456 is a failed sign-in; 4060 is a database the login cannot open. */
             var reason = ex.Number is 18456 or 4060 ? RemediationResult.Reasons.SignInFailed : null;
-            return Log(RemediationResult.Failed(name, dryRun, Scrub(ex.Message, login), reason));
+            return Log(RemediationResult.Failed(name, dryRun, ErrorText(ex, login), reason));
         }
         catch (Exception ex)
         {
-            return Log(RemediationResult.Failed(name, dryRun, Scrub(ex.GetType().Name + ": " + ex.Message, login)));
+            return Log(RemediationResult.Failed(name, dryRun, ErrorText(ex, login)));
         }
     }
 
@@ -569,7 +609,13 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
 /// <summary>What the kill batch answers (#5632, step 12). The batch is <see cref="SqlServerRemediationExecutor.KillSql"/>.</summary>
 internal static class KillOutcomes
 {
-    internal const string NotBuiltOnPlatform = "kill_not_built_on_platform";
+    internal const string AzureSqlDatabase = "azure_sql_database";
+    internal const string NotAzureSqlDatabase = "not_azure_sql_database";
+    internal const string WrongDatabase = "wrong_database";
+    internal const string NotPrimary = "not_primary";
+    internal const string ViewStateDenied = "view_state_permission_denied";
+    internal const string SessionInOtherDatabase = "session_in_other_database";
+    internal const string ToolLoginSession = "tool_login_session";
     internal const string OwnSession = "own_session";
     internal const string SessionGone = "session_gone";
     internal const string SessionReused = "session_reused";

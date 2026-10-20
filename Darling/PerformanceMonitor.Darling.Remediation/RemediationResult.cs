@@ -65,7 +65,14 @@ public sealed record RemediationResult(
         public const string NotUserSession = "not_user_session";
         public const string KillPermissionDenied = "kill_permission_denied";
         public const string NotPermitted = "not_permitted";
-        public const string KillNotBuiltOnPlatform = "kill_not_built_on_platform";
+        public const string DatabaseRequired = "database_required";
+        public const string NotAzureSqlDatabase = "not_azure_sql_database";
+        public const string WrongDatabase = "wrong_database";
+        public const string NotPrimary = "not_primary";
+        public const string ViewStatePermissionDenied = "view_state_permission_denied";
+        public const string SessionInOtherDatabase = "session_in_other_database";
+        public const string ToolLoginSession = "tool_login_session";
+        public const string DatabaseUnavailable = "database_unavailable";
         public const string LoginMissing = "login_missing";
         public const string SecretSlotMissing = "secret_slot_missing";
         public const string StoredPassword = "stored_password_refused";

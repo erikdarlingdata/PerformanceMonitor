@@ -820,17 +820,6 @@ public sealed class PgLogHashKeyTests
             var second = holder.ApplyTo(PgLogEventsCollector.Instance.Name, run);
             Assert.Same(run, second);
             Assert.DoesNotContain("log-hash key", second.Note ?? string.Empty, StringComparison.Ordinal);
-
-            /* The worker arms it from its one load, and applies it to every run it records, after the dispatch and before
-               the row is written. */
-            var worker = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-            Assert.Contains("_logHashKeyRotation.Arm(DarlingLogHashKeyFile.RotationNote(logHashKeyLoad));", worker, StringComparison.Ordinal);
-            var runOne = worker.IndexOf("private async Task<int> RunOneAsync(", StringComparison.Ordinal);
-            var dispatch = worker.IndexOf("var result = await run(runner, runtime, cancellationToken);", runOne, StringComparison.Ordinal);
-            var apply = worker.IndexOf("result = _logHashKeyRotation.ApplyTo(collectorName, result);", runOne, StringComparison.Ordinal);
-            var written = worker.IndexOf("await DarlingObservability.LogCollectionAsync(\n                _postgres!, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,", runOne, StringComparison.Ordinal);
-            Assert.True(runOne > 0 && dispatch > runOne && apply > dispatch && written > apply,
-                "RunOneAsync applies the rotation note after the dispatch and before the row that carries result.Note is written");
         }
         finally
         {

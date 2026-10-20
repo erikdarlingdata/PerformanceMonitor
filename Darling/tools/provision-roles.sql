@@ -635,6 +635,19 @@ GRANT SELECT (fallback_route_id, previous_signing_key_until) ON config.config_no
 $v193r$;
    END IF;
 END $$;
+-- V203 (#6170): the hypothetical-index login's NAME, on the registry. Non-secret, like remediation_username; the password
+-- column (hypothetical_index_encrypted_password) is deliberately NOT granted. Guarded on the column, so a store below V203
+-- still commits the rest of the carve instead of failing on a column it does not have yet.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'hypothetical_index_username' AND NOT attisdropped) THEN
+      EXECUTE $v203$
+GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO viewer;
+$v203$;
+   END IF;
+END $$;
 
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
@@ -721,6 +734,19 @@ $v193$;
       EXECUTE $v193r$
 GRANT SELECT (fallback_route_id, previous_signing_key_until) ON config.config_notification_routes TO mcp;
 $v193r$;
+   END IF;
+END $$;
+-- V203 (#6170): the hypothetical-index login's NAME, on the registry. Non-secret, like remediation_username; the password
+-- column (hypothetical_index_encrypted_password) is deliberately NOT granted. Guarded on the column, so a store below V203
+-- still commits the rest of the carve instead of failing on a column it does not have yet.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'hypothetical_index_username' AND NOT attisdropped) THEN
+      EXECUTE $v203$
+GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO mcp;
+$v203$;
    END IF;
 END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
@@ -893,7 +919,8 @@ BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> '',
+          s.trust_server_certificate, s.multi_subnet_failover,
+          (COALESCE(s.remediation_encrypted_password, '') <> '' OR COALESCE((to_jsonb(s) ->> 'hypothetical_index_encrypted_password'), '') <> ''),
           s.aws_role_arn, s.aws_external_id
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
@@ -975,8 +1002,9 @@ BEGIN
       OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
       OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
 
-   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
-   -- set and changed on the service host, and a new main password does not replace it.
+   -- A row that holds a remediation secret, or a hypothetical-index login secret (#6170), is not moved from here,
+   -- whatever else the call sends: that secret is set and changed on the service host, and a new main password
+   -- does not replace it.
    IF v_connection_changed AND v_remediation_held THEN
       RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
       RETURN;
@@ -1147,6 +1175,7 @@ AS $rules$
 DECLARE
    v_reference_main boolean;
    v_reference_remediation boolean;
+   v_reference_hypothetical boolean;
    v_held boolean;
    v_moved boolean;
 BEGIN
@@ -1159,12 +1188,16 @@ BEGIN
 
    v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
    v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+   -- #6170: the hypothetical-index login's password column is held to the same rule as the remediation one.
+   -- It is read through to_jsonb, not by name, so this function also runs on a store below V203 that does not have the columns
+   -- yet (a script run before the service migrated it): the value is then NULL and these checks do nothing.
+   v_reference_hypothetical := COALESCE(left((to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password'), 4) = 'env:' OR left((to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password'), 5) = 'file:', false);
 
    IF TG_OP = 'INSERT' THEN
       -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
       -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
       -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
-      IF v_reference_main OR v_reference_remediation THEN
+      IF v_reference_main OR v_reference_remediation OR v_reference_hypothetical THEN
          v_held := false;
          BEGIN
             PERFORM 1
@@ -1172,6 +1205,7 @@ BEGIN
             WHERE s.server_id = NEW.server_id
               AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
               AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+              AND (NOT v_reference_hypothetical OR (to_jsonb(s) ->> 'hypothetical_index_encrypted_password') = (to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password'))
             FOR UPDATE OF s;
             v_held := FOUND;
          EXCEPTION WHEN insufficient_privilege THEN
@@ -1188,7 +1222,8 @@ BEGIN
 
    -- An update never sets a reference.
    IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
-      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password)
+      OR (v_reference_hypothetical AND (to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password') IS DISTINCT FROM (to_jsonb(OLD) ->> 'hypothetical_index_encrypted_password')) THEN
       RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
    END IF;
 
@@ -1208,10 +1243,14 @@ BEGIN
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
    -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
-   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
-      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
-      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
-      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   -- The hypothetical-index login's secret (#6170) goes with its login name in the same way.
+   IF (COALESCE(OLD.remediation_encrypted_password, '') <> ''
+       AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+       AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username))
+      OR (COALESCE((to_jsonb(OLD) ->> 'hypothetical_index_encrypted_password'), '') <> ''
+       AND (to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password') IS NOT DISTINCT FROM (to_jsonb(OLD) ->> 'hypothetical_index_encrypted_password')
+       AND (v_moved OR (to_jsonb(NEW) ->> 'hypothetical_index_username') IS DISTINCT FROM (to_jsonb(OLD) ->> 'hypothetical_index_username'))) THEN
+      RAISE EXCEPTION '%', 'This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
    END IF;
 
    IF v_moved

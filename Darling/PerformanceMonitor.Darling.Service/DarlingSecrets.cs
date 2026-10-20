@@ -260,6 +260,32 @@ public static class DarlingSecrets
     }
 
     /// <summary>
+    /// Resolves the password of a server's hypothetical-index login (#6170) from <c>hypotheticalIndexEncryptedPassword</c>: an
+    /// <c>env:</c>/<c>file:</c> reference only, read through <see cref="ResolveStoredReference"/> like every other server secret, so a
+    /// reference held in the store that names one of this service's own configuration files or secrets is refused before it resolves
+    /// (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>, #5240), unless darling.json declares that same reference for this
+    /// server (<see cref="MonitoredServer.HypotheticalIndexEncryptedPasswordDeclaredByFile"/>). Anything that is not a reference is refused
+    /// with a sentence that does not repeat it. Throws <see cref="InvalidOperationException"/> with a message that names the setting and no
+    /// path or variable. The value is returned as it is read, never trimmed (#6170).
+    /// </summary>
+    public static string ResolveHypotheticalIndexPassword(MonitoredServer server)
+    {
+        if (server is null)
+        {
+            throw new ArgumentNullException(nameof(server));
+        }
+
+        var reference = server.HypotheticalIndexEncryptedPassword;
+        var setting = $"servers['{server.DisplayName}'].hypotheticalIndexEncryptedPassword";
+        if (string.IsNullOrWhiteSpace(reference) || !DarlingSecretSource.IsReference(reference))
+        {
+            throw new InvalidOperationException($"{setting}: only an env:NAME or file:path reference is accepted, never a stored password.");
+        }
+
+        return ResolveStoredReference(reference, setting, server.HypotheticalIndexEncryptedPasswordDeclaredByFile);
+    }
+
+    /// <summary>
     /// Resolves the SMTP password held in <c>smtp.encryptedPassword</c> by the same dispatch as a server's: a reference,
     /// then a sealed value, then DPAPI on Windows when declared or pinned (#5366).
     /// </summary>

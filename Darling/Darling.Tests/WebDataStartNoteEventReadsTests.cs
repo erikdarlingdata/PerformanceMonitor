@@ -244,7 +244,8 @@ public sealed class WebDataStartNoteEventReadsTests
 
         var blocking = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpBlockingTools.cs");
         Assert.Contains("order = \"event_time_desc\"", blocking, StringComparison.Ordinal);
-        Assert.Contains("oldest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.EventTime))", blocking, StringComparison.Ordinal);
+        /* get_blocked_process_xml's oldest_returned_event_time is checked by calling the tool, not by its source text:
+           McpResponseBudget6180LiveTests.BlockedProcessXml_Default_KeepsWholeReportsThatFit_AndListsTheRest (#6180). */
         var longQueries = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpLongQueryTools.cs");
         Assert.Contains("order = \"duration_ms_desc\"", longQueries, StringComparison.Ordinal);
         var trace = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDefaultTraceTools.cs");

@@ -94,7 +94,9 @@ internal sealed class FleetGateStats
     }
 
     /// <summary>
-    /// Records one collector slot that ran (#4732), and how many slots it stepped over on the way. Called where a
+    /// Records one collector slot the grid served (#4732), and how many slots it stepped over on the way. A slot the
+    /// refusal backoff then held back from running (#6186) is counted like any other: the gate measures whether the
+    /// sweep loop keeps cadence, not whether the collector ran. Called where a
     /// collector's due time advances on the grid, with <see cref="SkipCreditFloor.Skipped"/> for that step (the slots
     /// stepped over that came due while the sweep loop was running); 0 for a run on time.
     /// </summary>

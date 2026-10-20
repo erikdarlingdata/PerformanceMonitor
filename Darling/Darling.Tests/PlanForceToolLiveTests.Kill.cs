@@ -18,6 +18,7 @@ using Microsoft.Data.SqlClient;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
@@ -34,16 +35,23 @@ public sealed partial class PlanForceToolLiveTests
     /// <summary>A second session on the test SQL Server, with the id and login time the server itself holds for it.</summary>
     private sealed record Victim(SqlConnection Connection, int SessionId, DateTime LoginLocal);
 
-    private static async Task<Victim> OpenVictimAsync(Ctx c)
+    /// <summary>
+    /// A session to kill. By default it is the test server's admin login with an ordinary program name: the remediation login is the scratch one, and
+    /// Darling's own sessions (its program name, its remediation login) are refused (#5632). <paramref name="asRemediationLogin"/> signs in as that login.
+    /// </summary>
+    private static async Task<Victim> OpenVictimAsync(Ctx c, string program = VictimProgram, bool asRemediationLogin = false)
     {
         /* No connection resiliency: with it the driver quietly reconnects after a kill, and the test could not see the session end. */
         var builder = new SqlConnectionStringBuilder(c.Sql.Admin(c.Sql.Database).ConnectionString)
         {
-            UserID = c.Sql.Login,
-            Password = c.Sql.Password,
             ConnectRetryCount = 0,
-            ApplicationName = "PerformanceMonitorDarling-KillVictim",
+            ApplicationName = program,
         };
+        if (asRemediationLogin)
+        {
+            builder.UserID = c.Sql.Login;
+            builder.Password = c.Sql.Password;
+        }
         var connection = await OpenAsync(builder, c.Ct);
         var id = Convert.ToInt32(await ScalarAsync(connection, "SELECT @@SPID;", c.Ct), CultureInfo.InvariantCulture);
         await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
@@ -77,6 +85,8 @@ public sealed partial class PlanForceToolLiveTests
         return Convert.ToInt64(await command.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture) > 0;
     }
 
+    private const string VictimProgram = "pm5632_victim";
+
     private static Task<string> KillAsync(Ctx c, int session, string? loginTime, bool dryRun, string server = "srv-7") =>
         DarlingMcpPlanForceTools.RunKillAsync(c.Source, c.Source, c.Log, server, session, loginTime, null, c.Arg, dryRun, c.Ct);
 
@@ -91,8 +101,8 @@ public sealed partial class PlanForceToolLiveTests
             var answer = await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: true);
             var json = Parse(answer);
             Assert.Equal("dry_run", (string?)json["status"]);
-            Assert.Equal(c.Sql.Login, (string?)json["session"]!["login_name"]);
-            Assert.Equal("PerformanceMonitorDarling-KillVictim", (string?)json["session"]!["program_name"]);
+            Assert.Equal(Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER"), (string?)json["session"]!["login_name"]);
+            Assert.Equal(VictimProgram, (string?)json["session"]!["program_name"]);
             Assert.Equal(victim.LoginLocal.AddMinutes(-offset).ToString("o", CultureInfo.InvariantCulture), (string?)json["session"]!["login_time"]);
             Assert.Empty(json["warnings"]!.AsArray());
             Assert.True(await SessionAliveAsync(c, victim));
@@ -100,6 +110,49 @@ public sealed partial class PlanForceToolLiveTests
             var parameter = typeof(DarlingMcpPlanForceTools).GetMethod(nameof(DarlingMcpPlanForceTools.KillSession))!.GetParameters().Single(p => p.Name == "dry_run");
             Assert.True((bool)parameter.DefaultValue!);
             AssertNoSecret(c, answer);
+        });
+    }
+
+    /// <summary>
+    /// #5632: a session of Darling itself is never killed, dry run or real: one whose program name starts with PerformanceMonitorDarling AND whose
+    /// login is the monitoring login, and another session of the remediation login with any program name. The refusal returns no facts about the
+    /// session, and journals nothing. The monitoring login's name alone is not a reason to refuse, so an ordinary session of the same login stays
+    /// killable; and an ordinary login with Darling's program name is not Darling's either.
+    /// </summary>
+    [Fact]
+    public async Task ASessionOfDarlingsProgram_OrOfTheRemediationLogin_IsRefused_WithNoFacts_AndNothingIsKilled()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var adminLogin = Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER")!;
+
+            /* The server entry's monitoring login is the test server's admin login, the one the victims sign in as. */
+            await PgExecAsync(c.Connection, $"UPDATE config.config_monitored_servers SET username = '{adminLogin.Replace("'", "''", StringComparison.Ordinal)}' WHERE server_id = 7", c.Ct);
+            foreach (var (program, remediation) in new[] { ("PerformanceMonitorDarling-Collector", false), (VictimProgram, true) })
+            {
+                var victim = await OpenVictimAsync(c, program, remediation);
+                using var _ = victim.Connection;
+                foreach (var dry in new[] { true, false })
+                {
+                    var json = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: dry));
+                    Assert.Equal("refused", (string?)json["status"]);
+                    Assert.Equal(RemediationResult.Reasons.ToolLoginSession, (string?)json["reason"]);
+                    Assert.Null(json["session"]);
+                    Assert.True(await SessionAliveAsync(c, victim));
+                }
+            }
+
+            /* The same program name from a login that is not the monitoring login is an ordinary session: the dry run reaches the end. */
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET username = 'pm5632_someone_else' WHERE server_id = 7", c.Ct);
+            var ordinary = await OpenVictimAsync(c, "PerformanceMonitorDarling-Collector");
+            using var _ordinary = ordinary.Connection;
+            var ordinaryJson = Parse(await KillAsync(c, ordinary.SessionId, UtcText(ordinary, offset), dryRun: true));
+            Assert.Equal("dry_run", (string?)ordinaryJson["status"]);
+            Assert.NotNull(ordinaryJson["session"]);
+            Assert.True(await SessionAliveAsync(c, ordinary));
+
+            Assert.Equal(0, await JournalActionRowsAsync(c));
         });
     }
 
@@ -138,7 +191,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("kill_session", (string?)called["tool"]);
             Assert.Equal(victim.SessionId.ToString(CultureInfo.InvariantCulture), (string?)called["target"]!["id"]);
             Assert.Equal(7, (int)called["target"]!["server_id"]!);
-            Assert.Equal(c.Sql.Login, (string?)called["before"]!["session"]!["login_name"]);
+            Assert.Equal(Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER"), (string?)called["before"]!["session"]!["login_name"]);
             Assert.True((long)called["before"]!["session"]!["log_bytes_used"]! > 0);
             var done = Assert.Single(await RowsAsync(c, "action_done"));
             Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);
@@ -339,6 +392,53 @@ public sealed partial class PlanForceToolLiveTests
             Assert.True(await SessionAliveAsync(c, victim));
             Assert.Equal(0, await JournalActionRowsAsync(c));
             Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'bad_backend_id'", c.Ct));
+        });
+    }
+
+    /// <summary>
+    /// #5632: a target the registry records as an Azure SQL Database (engine edition 5) takes the Azure arm. The database is required, never
+    /// master, never one the entry excludes, and must be the entry's database or one Darling collected a blocking row from; each refusal comes
+    /// before any connection, kills nothing and journals no action. A database that passes is opened, and the batch checks the engine again:
+    /// this test server is not an Azure SQL Database, so it answers not_azure_sql_database and kills nothing.
+    /// </summary>
+    [Fact]
+    public async Task AnAzureTarget_NeedsADatabaseItKnows_AndTheBatchChecksTheEngineAgain()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            await PgExecAsync(c.Connection, "UPDATE collect.servers SET sql_engine_edition = 5 WHERE server_id = 7", c.Ct);
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET username = 'monitor_login', excluded_databases = ARRAY['Archive'] WHERE server_id = 7", c.Ct);
+
+            async Task<JsonNode> Azure(string? database) =>
+                Parse(await DarlingMcpPlanForceTools.RunKillAsync(c.Source, c.Source, c.Log, "srv-7", victim.SessionId, UtcText(victim, offset), null, c.Arg,
+                    dry_run: false, c.Ct, database));
+
+            Assert.Equal(RemediationResult.Reasons.DatabaseRequired, (string?)(await Azure(null))["reason"]);
+            Assert.Equal(RemediationResult.Reasons.DatabaseRequired, (string?)(await Azure("master"))["reason"]);
+            Assert.Equal(DarlingMcpPlanForceTools.AzureDatabaseExcluded, (string?)(await Azure("archive"))["reason"]);
+            Assert.Equal(DarlingMcpPlanForceTools.AzureDatabaseUnknown, (string?)(await Azure(c.Sql.Database))["reason"]);
+
+            /* A blocking row from the database names it as one the target holds. */
+            await using (var insert = new NpgsqlCommand(
+                "INSERT INTO collect.dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, "
+                + "wait_time_ms, lock_mode, blocking_status, blocked_sql_text, blocking_sql_text, contentious_object) "
+                + "VALUES ($1, $2, 7, 'srv-7', $2, $3, 999, $4, 10, '', 'sleeping', '', '', '')", c.Connection) { CommandTimeout = 60 })
+            {
+                insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DateTime.UtcNow.Ticks, NpgsqlDbType = NpgsqlDbType.Bigint });
+                insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlDbType.Timestamp });
+                insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = c.Sql.Database, NpgsqlDbType = NpgsqlDbType.Text });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = victim.SessionId, NpgsqlDbType = NpgsqlDbType.Integer });
+                await insert.ExecuteNonQueryAsync(c.Ct);
+            }
+
+            var reached = await Azure(c.Sql.Database);
+            Assert.Equal("refused", (string?)reached["status"]);
+            Assert.Equal(RemediationResult.Reasons.NotAzureSqlDatabase, (string?)reached["reason"]);
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
         });
     }
 

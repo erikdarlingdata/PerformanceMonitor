@@ -194,6 +194,8 @@ public static class DarlingManagedRoles
                    learns a server is armed at all: the phase-1 surface exists when this is non-null, so a
                    `viewer` seat that could not read it would see no surface on an armed server. */
                 "remediation_username",
+                /* V203 (#6170): the hypothetical-index login's LOGIN NAME. Non-secret on the same reasoning as `remediation_username`. */
+                "hypothetical_index_username",
                 /* V169 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
                    ID is stored with it. Non-secret: an account id is an identifier, not a credential, and the
                    viewer has to be able to SHOW which role a target uses. The flag lets it show that an
@@ -208,7 +210,7 @@ public static class DarlingManagedRoles
             /* aws_external_id (V169, #5452) is write-only for these roles. AWS does not treat an external ID as
                a secret, but a role that trusts a whole account plus an external ID is only as closed as that ID
                is private, so it is named here rather than left unclassified. */
-            SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id" }),
+            SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id", "hypothetical_index_encrypted_password" }),
 
         new ViewerSecretTableAcl(
             "config_command",
@@ -2491,7 +2493,8 @@ BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> '',
+          s.trust_server_certificate, s.multi_subnet_failover,
+          (COALESCE(s.remediation_encrypted_password, '') <> '' OR COALESCE((to_jsonb(s) ->> 'hypothetical_index_encrypted_password'), '') <> ''),
           s.aws_role_arn, s.aws_external_id
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
@@ -2573,8 +2576,9 @@ BEGIN
       OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
       OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
 
-   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
-   -- set and changed on the service host, and a new main password does not replace it.
+   -- A row that holds a remediation secret, or a hypothetical-index login secret (#6170), is not moved from here,
+   -- whatever else the call sends: that secret is set and changed on the service host, and a new main password
+   -- does not replace it.
    IF v_connection_changed AND v_remediation_held THEN
       RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
       RETURN;
@@ -2803,6 +2807,7 @@ AS $rules$
 DECLARE
    v_reference_main boolean;
    v_reference_remediation boolean;
+   v_reference_hypothetical boolean;
    v_held boolean;
    v_moved boolean;
 BEGIN
@@ -2815,12 +2820,16 @@ BEGIN
 
    v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
    v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+   -- #6170: the hypothetical-index login's password column is held to the same rule as the remediation one.
+   -- It is read through to_jsonb, not by name, so this function also runs on a store below V203 that does not have the columns
+   -- yet (a script run before the service migrated it): the value is then NULL and these checks do nothing.
+   v_reference_hypothetical := COALESCE(left((to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password'), 4) = 'env:' OR left((to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password'), 5) = 'file:', false);
 
    IF TG_OP = 'INSERT' THEN
       -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
       -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
       -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
-      IF v_reference_main OR v_reference_remediation THEN
+      IF v_reference_main OR v_reference_remediation OR v_reference_hypothetical THEN
          v_held := false;
          BEGIN
             PERFORM 1
@@ -2828,6 +2837,7 @@ BEGIN
             WHERE s.server_id = NEW.server_id
               AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
               AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+              AND (NOT v_reference_hypothetical OR (to_jsonb(s) ->> 'hypothetical_index_encrypted_password') = (to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password'))
             FOR UPDATE OF s;
             v_held := FOUND;
          EXCEPTION WHEN insufficient_privilege THEN
@@ -2844,7 +2854,8 @@ BEGIN
 
    -- An update never sets a reference.
    IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
-      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password)
+      OR (v_reference_hypothetical AND (to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password') IS DISTINCT FROM (to_jsonb(OLD) ->> 'hypothetical_index_encrypted_password')) THEN
       RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
    END IF;
 
@@ -2864,10 +2875,14 @@ BEGIN
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
    -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
-   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
-      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
-      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
-      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   -- The hypothetical-index login's secret (#6170) goes with its login name in the same way.
+   IF (COALESCE(OLD.remediation_encrypted_password, '') <> ''
+       AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+       AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username))
+      OR (COALESCE((to_jsonb(OLD) ->> 'hypothetical_index_encrypted_password'), '') <> ''
+       AND (to_jsonb(NEW) ->> 'hypothetical_index_encrypted_password') IS NOT DISTINCT FROM (to_jsonb(OLD) ->> 'hypothetical_index_encrypted_password')
+       AND (v_moved OR (to_jsonb(NEW) ->> 'hypothetical_index_username') IS DISTINCT FROM (to_jsonb(OLD) ->> 'hypothetical_index_username'))) THEN
+      RAISE EXCEPTION '%', 'This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
    END IF;
 
    IF v_moved
@@ -2903,7 +2918,8 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
     /// included, which this connection could not replace), nothing is run and nothing is warned, and no lock is taken on
     /// the table. The check and the command run under the provisioning advisory lock (#5560,
     /// <see cref="ProvisioningLockKey"/>), so two services starting against one store do not both replace the function
-    /// at once. Returns whether the rules are in place.
+    /// at once. The two <c>edit_monitored_server</c> overloads are part of the rules (#6170): a store that holds them from an
+    /// older script keeps a version that does not know the hypothetical-index pair, so they are replaced the same way. Returns whether the rules are in place.
     /// </summary>
     public static async Task<bool> EnsureServerPasswordRulesAsync(
         NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
@@ -2923,9 +2939,12 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
             await ExecuteSerializedAsync(connection, async (transaction, token) =>
             {
                 alreadyInPlace = await ServerPasswordRulesAreInPlaceAsync(connection, transaction, token);
+                /* #6170: the edit function is part of the same rules (it answers the host change before the trigger is reached),
+                   and a store whose script was not re-run keeps the version that knows only the remediation column. */
+                alreadyInPlace &= await EditMonitoredServerFunctionsAreCurrentAsync(connection, transaction, token);
                 return alreadyInPlace
                     ? null
-                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection, transaction)
+                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config") + BuildEditMonitoredServerFunctionsSql("config"), connection, transaction)
                     {
                         CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
                     };
@@ -2996,6 +3015,76 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
                 NormalizeRulesText(stored),
                 NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
                 StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await RecoverFromReadAsync(transaction);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Both <c>config.edit_monitored_server</c> overloads (#5240, #5452), the 17-argument function first and then the wrapper
+    /// over it: what a self-managed store replaces on every start (<see cref="EnsureServerPasswordRulesAsync"/>), because
+    /// <c>CREATE OR REPLACE</c> keeps the grants the script made. The same text is in <c>tools/provision-roles.sql</c>.
+    /// </summary>
+    internal static string BuildEditMonitoredServerFunctionsSql(string config) =>
+        BuildEditMonitoredServerFunctionSql(config) + BuildEditMonitoredServerLegacyWrapperSql(config);
+
+    /// <summary>
+    /// Whether the <c>config.edit_monitored_server</c> overloads of a store are the ones this build writes (#6170): body text
+    /// (full-line comments and spacing set aside) and the pinned search path, for both. A store that holds neither overload
+    /// has no edit function to replace (the script was never run there) and answers true. A store that holds one, or an
+    /// older body, answers false. A read that fails answers false, so the caller falls back to replacing them.
+    /// </summary>
+    internal static async Task<bool> EditMonitoredServerFunctionsAreCurrentAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
+            var present = 0;
+            foreach (var (signature, builder) in new (string, Func<string, string>)[]
+            {
+                (EditMonitoredServerSignature, BuildEditMonitoredServerFunctionSql),
+                (EditMonitoredServerLegacySignature, BuildEditMonitoredServerLegacyWrapperSql),
+            })
+            {
+                await using var read = new NpgsqlCommand(
+                    "SELECT p.prosrc, p.proconfig FROM pg_catalog.pg_proc AS p WHERE p.oid = pg_catalog.to_regprocedure(@signature)", connection, transaction)
+                {
+                    CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+                };
+                read.Parameters.AddWithValue("signature", "config.edit_monitored_server(" + signature + ")");
+                await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    continue;
+                }
+
+                present++;
+                var stored = reader.GetString(0);
+                var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+                if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var built = builder("config");
+                const string quote = "$fn$";
+                var open = built.IndexOf(quote, StringComparison.Ordinal);
+                var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+                if (open < 0 || close < 0
+                    || !string.Equals(
+                        NormalizeRulesText(stored),
+                        NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return present is 0 or 2;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

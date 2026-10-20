@@ -147,6 +147,42 @@ public sealed class StoreConfigProviderConnectionMatchTests
         Assert.True(row.RemediationEncryptedPasswordDeclaredByFile);
     }
 
+    [Fact]
+    public void TheEqualRow_GetsTheHypotheticalIndexDeclaredMark()
+    {
+        var entry = Entry();
+        entry.HypotheticalIndexUsername = "checker";
+        entry.HypotheticalIndexEncryptedPassword = DeclaredReference;
+        entry.HypotheticalIndexEncryptedPasswordDeclaredByFile = true;
+        var row = RowLike(entry, null);
+        row.HypotheticalIndexUsername = "checker";
+        row.HypotheticalIndexEncryptedPassword = DeclaredReference;
+
+        StoreConfigProvider.MarkSlotsTheFileDeclares(row, new DarlingConfig { Servers = [entry] });
+
+        Assert.True(row.HypotheticalIndexEncryptedPasswordDeclaredByFile);
+    }
+
+    [Theory]
+    [InlineData("other-checker")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void ARowWithAnotherHypotheticalIndexUsername_GetsNoDeclaredMark(string? rowUsername)
+    {
+        /* #6170: the reference is declared for one login; a row that names another (or none) is not it. */
+        var entry = Entry();
+        entry.HypotheticalIndexUsername = "checker";
+        entry.HypotheticalIndexEncryptedPassword = DeclaredReference;
+        entry.HypotheticalIndexEncryptedPasswordDeclaredByFile = true;
+        var row = RowLike(entry, null);
+        row.HypotheticalIndexUsername = rowUsername;
+        row.HypotheticalIndexEncryptedPassword = DeclaredReference;
+
+        StoreConfigProvider.MarkSlotsTheFileDeclares(row, new DarlingConfig { Servers = [entry] });
+
+        Assert.False(row.HypotheticalIndexEncryptedPasswordDeclaredByFile);
+    }
+
     [Theory]
     [InlineData("other-fixer")]
     [InlineData("")]

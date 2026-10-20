@@ -126,6 +126,10 @@ internal static class DiagnosticsBundle
         "MonitoredServer.PlanForceBotEnabled",
         "MonitoredServer.RemediationUsername",
         "MonitoredServer.RemediationEncryptedPassword",
+        /* #6170: the hypothetical-index login's name is a login, its password slot a reference to a secret; the bundle seeds the name
+           into the name set instead of projecting either. */
+        "MonitoredServer.HypotheticalIndexUsername",
+        "MonitoredServer.HypotheticalIndexEncryptedPassword",
         /* #5452: the AWS roles a deployment may use, the role a server assumes and its external ID are an account's
            identifiers and a secret. The bundle seeds all three into the name set instead of projecting them. */
         "DarlingConfig.AllowedAwsRoles",
@@ -427,6 +431,7 @@ internal static class DiagnosticsBundle
             aliaser.AddName(AliasKind.Database, server.Database);
             aliaser.AddName(AliasKind.Login, server.Username);
             aliaser.AddName(AliasKind.Login, server.RemediationUsername);
+            aliaser.AddName(AliasKind.Login, server.HypotheticalIndexUsername);
             foreach (var excluded in server.ExcludedDatabases ?? new List<string>())
             {
                 aliaser.AddName(AliasKind.Database, excluded);

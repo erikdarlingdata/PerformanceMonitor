@@ -471,6 +471,19 @@ public sealed class AgentLevel2StoreGrantLiveTests
             await ExecAsync(owner, script, ct);
             Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct));
 
+            /* #6170: the store's password-rules trigger and the edit function the script made must also run on a store that does not
+               have the V203 columns yet (a script run before the service migrated it): a viewer add and a viewer edit both go through. */
+            Assert.Equal("False", await ScalarAsync(owner,
+                "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'config.config_monitored_servers'::regclass AND attname = 'hypothetical_index_username' AND NOT attisdropped)", ct));
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(owner, "SET ROLE viewer", ct);
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5911, 'behind-v203', 'host-b')", ct);
+            Assert.Equal("saved", await ScalarAsync(owner,
+                "SELECT outcome FROM config.edit_monitored_server(5911, (SELECT modified_at FROM config.config_monitored_servers WHERE server_id = 5911), "
+                + "ARRAY['name'], 'behind-v203-renamed', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", ct));
+            await ExecAsync(owner, "RESET ROLE", ct);
+            await ExecAsync(owner, "DELETE FROM config.config_monitored_servers WHERE server_id = 5911", ct);
+
             /* The rung lands (the migrator recreates the missing table), and a re-run of the script grants the matrix. */
             await ExecAsync(owner, "DELETE FROM darling_schema_version WHERE version >= " + PgMigrations.Scripts.Single(m => m.Name == "agent-level-2-store").Version.ToString(CultureInfo.InvariantCulture), ct);
             await PgMigrations.MigrateAsync(owner, ct);

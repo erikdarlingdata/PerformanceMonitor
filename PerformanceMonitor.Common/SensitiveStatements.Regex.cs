@@ -549,7 +549,12 @@ public static partial class SensitiveStatements
 
     /// <summary>True when <paramref name="text"/> is named by the filter, including a timed-out judgement.
     /// Null or empty is false.</summary>
-    public static bool Names(string? text) => !string.IsNullOrEmpty(text) && Judge(text) != Verdict.Clean;
+    public static bool Names(string? text) => Names(text, s_judge);
+
+    /// <summary><see cref="Names(string?)"/> through a judge the caller hands in (#6200), so a test can run it with a
+    /// timeout no load can trip.</summary>
+    internal static bool Names(string? text, Lazy<Func<string, Verdict>> shared) =>
+        !string.IsNullOrEmpty(text) && JudgeShared(shared, text) != Verdict.Clean;
 
     /// <summary>
     /// <see cref="PlaceholderText"/> when <paramref name="text"/> is named, or when it contains <c>&amp;</c>

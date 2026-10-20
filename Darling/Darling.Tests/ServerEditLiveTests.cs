@@ -307,11 +307,11 @@ public sealed class ServerEditLiveTests : IDisposable
             Assert.Equal("arn:aws:iam::123456789012:role/a|tenant-1234",
                 await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', aws_role_arn, aws_external_id) FROM config_monitored_servers WHERE server_id = 5192", ct));
 
-            /* Every other column is still updatable: the grant names each column of the table but the three AWS ones. */
+            /* Every other column is still updatable: the grant names each column of the table but the three AWS ones and the two hypothetical-index login ones (#6170, set on the service host). */
             await ExecAsync(rig.Mcp, "UPDATE config_monitored_servers SET name = 'alpha-92b', is_enabled = TRUE, excluded_databases = ARRAY['model'] WHERE server_id = 5192", ct);
             var columns = await ScalarAsync<string>(rig.Owner,
                 "SELECT string_agg(attname, ',' ORDER BY attname) FROM pg_attribute WHERE attrelid = 'config.config_monitored_servers'::regclass "
-                + "AND attnum > 0 AND NOT attisdropped AND attname NOT IN ('aws_role_arn', 'aws_external_id', 'aws_external_id_set')", ct);
+                + "AND attnum > 0 AND NOT attisdropped AND attname NOT IN ('aws_role_arn', 'aws_external_id', 'aws_external_id_set', 'hypothetical_index_username', 'hypothetical_index_encrypted_password')", ct);
             Assert.Equal(
                 string.Join(',', DarlingManagedRoles.McpMonitoredServerUpdateColumns.Split(',', StringSplitOptions.TrimEntries).Order(StringComparer.Ordinal)),
                 columns);
