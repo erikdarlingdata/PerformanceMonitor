@@ -336,6 +336,91 @@ public sealed class DarlingDeltaSeederTests
     }
 
     /// <summary>
+    /// #6212: the store's cells are nullable and other tests plant rows that fill only the columns they read
+    /// (a wait_stats row with just its delta columns, a pg_statement_stats row with no query id). Such a row for
+    /// ANOTHER server, newest in the window, used to throw out of the family's read, so every server lost its
+    /// restart continuity and a seeding test failed whenever one sat in the store beside it. The strays here are
+    /// planted in the same transaction-free way, newer than the real rows, and the real rows must still seed.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_SeedFromStore_ARowWithNullCells_DoesNotCostOtherServersTheirBaseline_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live delta-seeding test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
+            await DeleteStrayRowsAsync(connection, TestContext.Current.CancellationToken);
+
+            var now = WholeSecond(DateTime.UtcNow);
+            var older = now.AddMinutes(-4);
+            var latest = now.AddMinutes(-2);
+            await InsertWaitStatsRowAsync(connection, latest, waitingTasks: 40, waitTimeMs: 5000, signalWaitTimeMs: 800);
+            await PgStatementAsync(connection, older, 11, 16384, 10, true, 100, 1234.9, 50);
+            await PgStatementAsync(connection, latest, 11, 16384, 10, true, 120, 1500.7, 60);
+
+            /* Strays for a different server, NEWER than the real rows: the only columns set are the ones a
+               reader of that table would need, so every counter and id is NULL. */
+            var stray = DateTime.SpecifyKind(now.AddMinutes(-1), DateTimeKind.Unspecified);
+            foreach (var sql in new[]
+            {
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) " +
+                    $"VALUES (1, $1, {StrayServerId}, 'stray', NULL, 1, 1)",
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type) " +
+                    $"VALUES (2, $1, {StrayServerId}, 'stray', 'STRAY_WAIT')",
+                "INSERT INTO pg_statement_stats (collection_id, collection_time, server_id, server_name, calls) " +
+                    $"VALUES (1, $1, {StrayServerId}, 'stray', 1)",
+                "INSERT INTO pg_wait_stats (collection_id, collection_time, server_id, server_name, waits) " +
+                    $"VALUES (1, $1, {StrayServerId}, 'stray', 1)",
+            })
+            {
+                using var cmd = new NpgsqlCommand(sql, connection);
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, stray);
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+
+            var deltas = new DarlingDeltaCalculator();
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                await deltas.SeedFromStoreAsync(postgres, null, TestContext.Current.CancellationToken);
+            }
+
+            const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+            Assert.Equal(100, deltas.CalculateDelta(TestServerId, "wait_stats_time", TestWaitType, 5100, now, Gap));
+            Assert.Equal(10, deltas.CalculateDelta(TestServerId, "pg_statement_stats_calls", "11|16384|10|1", 130, now, Gap));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteTestRowsAsync(cleanup, cleanupCt);
+                await DeleteFamilyRowsAsync(cleanup, cleanupCt);
+                await DeleteStrayRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    private const int StrayServerId = -565656;
+
+    private static async Task DeleteStrayRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        foreach (var table in new[] { "wait_stats", "pg_wait_stats", "pg_statement_stats" })
+        {
+            using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = {StrayServerId}", connection);
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    /// <summary>
     /// The evidence no local green run can give: that the cutoff actually keeps TimescaleDB OFF the
     /// rest of the hypertable. Which relations a query reads is invisible to a test that only checks
     /// the values it returns — the unbounded form returned the same baselines, it just read every

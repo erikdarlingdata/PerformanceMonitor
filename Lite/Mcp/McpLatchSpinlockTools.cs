@@ -70,7 +70,7 @@ public sealed class McpLatchSpinlockTools
                snapshot's population. */
             var rows = await dataService.GetLatchStatsSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "latch_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "latch_stats")
                     ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
             var truncated = rows.Count > limit;
@@ -78,7 +78,7 @@ public sealed class McpLatchSpinlockTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #3541 A10: hours_back here is the span SEARCHED for the newest snapshot (its description says
                    so); the snapshot's own clock and its distance from the anchor are what make that honest. */
@@ -140,7 +140,7 @@ public sealed class McpLatchSpinlockTools
             /* #3653: limit + 1 fetched, the extra row read as truncation — see get_latch_stats. */
             var rows = await dataService.GetSpinlockStatsSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "spinlock_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "spinlock_stats")
                     ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
             var truncated = rows.Count > limit;
@@ -148,7 +148,7 @@ public sealed class McpLatchSpinlockTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 age_seconds = McpLatestSnapshotStamp.AgeSeconds(rows[0].CollectionTime, windowEnd),

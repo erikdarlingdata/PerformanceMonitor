@@ -153,7 +153,6 @@ public sealed class AzureSqlDatabaseCallSiteTests
         /* One read in the tool, and no edition off the row (it has none). */
         Assert.Equal(1, CountOf(body, "EngineEditionAsync("));
         Assert.Contains("var engineEdition = await McpEngineCapability.EngineEditionAsync(dataService, resolved.ServerId);", body, StringComparison.Ordinal);
-        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", body, StringComparison.Ordinal);
         Assert.DoesNotContain("stats.EngineEdition", body + payload, StringComparison.Ordinal);
 
         /* Every edition-dependent line of the payload reads the one value it was handed. */

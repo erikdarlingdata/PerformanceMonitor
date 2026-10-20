@@ -35,7 +35,7 @@ public sealed class McpWaitTools
             var rows = await dataService.GetWaitStatsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats")
                     ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
             }
 
@@ -63,7 +63,7 @@ public sealed class McpWaitTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: where the data starts, always present (false and null when the store covered the window). No
                    effective_hours_back: this payload carries a page `truncated`. */
@@ -111,7 +111,7 @@ public sealed class McpWaitTools
                     wants somebody to look at collection, and widening will never fill it. Same words as
                     Darling's twin.
                 */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats");
                 if (gated != null)
                 {
                     return gated;
@@ -120,15 +120,15 @@ public sealed class McpWaitTools
                 return await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No wait types recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+                        $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 wait_types = types
             }, McpHelpers.JsonOptions);
@@ -170,7 +170,7 @@ public sealed class McpWaitTools
                    the miss path, so either order keeps the property that matters — but a permanently gated
                    engine takes this branch on every call, forever, and the probe below could never tell it
                    anything. Asking first makes that case one query instead of two. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats");
                 if (gated != null)
                 {
                     return gated;
@@ -197,7 +197,7 @@ public sealed class McpWaitTools
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             return TrendPayloads.WaitTrend(
-                resolved.ServerName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                resolved.DisplayName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
                 budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
         catch (Exception ex)
@@ -253,7 +253,7 @@ public sealed class McpWaitTools
                 /* #5244: a filtered miss still asks whether the collector ever ran first (never collected stays
                    not_collected), and only then says the CHOSEN database had none, in Darling's words: it is not a
                    verdict on the databases nobody read. */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks")
                     ?? McpHelpers.Status("empty",
                         database == null
                             ? "No waiting tasks captured in the specified time range."
@@ -285,7 +285,7 @@ public sealed class McpWaitTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3541 A3: the envelope was bare — server and rows, no window, no count, no bound. Now the
                    span requested, the page described as a page, and the span the page covers, on Darling's
                    names. */

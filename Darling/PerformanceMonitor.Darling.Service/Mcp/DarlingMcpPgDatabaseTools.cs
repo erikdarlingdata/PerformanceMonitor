@@ -361,7 +361,7 @@ public sealed class DarlingMcpPgDatabaseTools
         ILogger? logger, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_database_stats", cancellationToken);
+            postgres, serverId, displayName, "pg_database_stats", cancellationToken);
         if (gated != null)
         {
             return gated;

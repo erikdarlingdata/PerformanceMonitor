@@ -135,7 +135,7 @@ public sealed class DarlingMcpPlanCorrectionTools
 
             if (tuning.Count == 0 && rows.Count == 0)
             {
-                return McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_correction", cancellationToken), databaseFilter.Describe())
+                return McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "plan_correction", cancellationToken), databaseFilter.Describe())
                     ?? McpHelpers.StatusForDatabase("empty",
                         !databaseFilter.IsAll
                             ? $"No plan correction data found{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)}."
@@ -177,7 +177,7 @@ public sealed class DarlingMcpPlanCorrectionTools
 
             var payload = new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor. No effective_hours_back: this payload carries a page `truncated`, and the census holds that key
                    apart from the window floor, so the reach is the instant. */

@@ -78,9 +78,9 @@ public sealed class DarlingMcpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status("empty",
-                        $"No statement CPU for {resolved.ServerName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
+                        $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
                         + "Procedure stats are not a substitute, because they count the same work.",
                         new { statements_window = planRoute.Disclosure });
             }
@@ -125,7 +125,7 @@ public sealed class DarlingMcpWhoDroveItTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 server_cpu_ms = Math.Round(serverCpuUs / 1000.0, 1),
                 cpu_source = planRoute.Hourly ? "collect.query_stats_io_hourly (hourly rollup)" : "collect.query_stats",
@@ -194,9 +194,9 @@ public sealed class DarlingMcpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                     ?? McpHelpers.Status("empty",
-                        $"No active-query snapshots for {resolved.ServerName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
+                        $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
                         notice.AsHints());
             }
 
@@ -231,7 +231,7 @@ public sealed class DarlingMcpWhoDroveItTools
 
             var node = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -313,15 +313,15 @@ public sealed class DarlingMcpWhoDroveItTools
             if (page.Count == 0)
             {
                 var anySnapshots = notice.EffectiveStart is not null || notice.WindowTruncated;
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                     ?? McpHelpers.Status("empty",
-                        $"No capture in the last {hours_back} hour(s) on {resolved.ServerName} had {min_sessions} or more sessions running the same query_hash. "
+                        $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
                         notice.AsHints());
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */
-            var blockingGate = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "dmv_blocking_snapshot", cancellationToken);
+            var blockingGate = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "dmv_blocking_snapshot", cancellationToken);
             Dictionary<DateTime, DateTime> nearest = [];
             var pairsBySnapshot = new Dictionary<DateTime, List<DarlingWhoDroveItReader.BlockingPair>>();
             if (blockingGate is null)
@@ -376,7 +376,7 @@ public sealed class DarlingMcpWhoDroveItTools
 
             var node = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,

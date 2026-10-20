@@ -39,7 +39,7 @@ public sealed partial class DarlingMcpFinOpsTools
             .ToList();
 
     private static async Task<string> ReadDatabaseResourcesAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
     {
         /* The cutoff is taken before the rollup probe, the viewer's order. */
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
@@ -49,9 +49,9 @@ public sealed partial class DarlingMcpFinOpsTools
         if (rows.Count == 0)
         {
             /* The view reads two collectors, so it is not_collected only when both are gated. */
-            var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", ct);
+            var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", ct);
             if (gated is not null
-                && await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", ct) is not null)
+                && await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "file_io_stats", ct) is not null)
             {
                 return gated;
             }
@@ -66,7 +66,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         return JsonSerializer.Serialize(new
         {
-            server = resolved.ServerName,
+            server = resolved.DisplayName,
             view = DatabaseResourcesView,
             hours_back = hoursBack,
             database_count = ordered.Count,

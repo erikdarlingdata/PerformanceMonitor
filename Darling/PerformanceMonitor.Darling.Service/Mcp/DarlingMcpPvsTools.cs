@@ -78,7 +78,7 @@ public sealed class DarlingMcpPvsTools
                     if (serverRows.Count > 0)
                     {
                         return McpHelpers.StatusForDatabase("empty",
-                            $"No PVS rows for {DarlingMcpObjectStatsTools.DescribeScope(databaseFilter)} on {resolved.ServerName} in the snapshot taken at "
+                            $"No PVS rows for {DarlingMcpObjectStatsTools.DescribeScope(databaseFilter)} on {resolved.DisplayName} in the snapshot taken at "
                             + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
                             + $"{(databaseFilter.Names.Count == 1 ? "name" : "names")}: the filter matches exactly, and a database with no row at that "
                             + "snapshot looks identical to one that does not exist.",
@@ -87,7 +87,7 @@ public sealed class DarlingMcpPvsTools
                 }
 
                 return McpHelpers.WithDatabase(
-                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats", cancellationToken),
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pvs_stats", cancellationToken),
                            databaseFilter.Describe())
                     ?? McpHelpers.StatusForDatabase("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
@@ -167,7 +167,7 @@ public sealed class DarlingMcpPvsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database_name = databaseFilter.Describe(),
                 as_of = rows[0].CollectionTime.ToString("o"),
                 databases,

@@ -96,7 +96,7 @@ public sealed class DarlingMcpAgTools
             var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null) return error;
             serverIdFilter = resolved.ServerId;
-            resolvedName = resolved.ServerName;
+            resolvedName = resolved.DisplayName;
         }
 
         try

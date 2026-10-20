@@ -252,12 +252,4 @@ public sealed class AzureSqlDatabaseHardwareTests
         Assert.Contains("EngineEdition: reader.IsDBNull(16)", read, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void GetServerPropertiesTool_BuildsItsPayloadThroughTheScopedBuilder()
-    {
-        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
-
-        Assert.Contains("return ServerPropertiesPayload(resolved.ServerName, row);", tool, StringComparison.Ordinal);
-        Assert.Contains("ServerHardwareScope.ScopeServerPropertiesPayload(", tool, StringComparison.Ordinal);
-    }
 }

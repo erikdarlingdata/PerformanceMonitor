@@ -508,7 +508,7 @@ public sealed partial class DarlingMcpServerAdminTools
             return affected > 0
                 ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
                 : Outcome("not_found",
-                    $"'{resolved.ServerName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
+                    $"'{resolved.DisplayName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
         catch (Exception ex)
         {

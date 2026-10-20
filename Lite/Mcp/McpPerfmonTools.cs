@@ -27,7 +27,7 @@ public sealed class McpPerfmonTools
             var rows = await dataService.GetLatestPerfmonStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "perfmon_stats")
                     ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
             }
 
@@ -47,7 +47,7 @@ public sealed class McpPerfmonTools
 
             /* #3541 A10: captured_at is taken from the unfiltered snapshot, so a filter that matches nothing still says when.
                #6180: the page is cut to the shared response target (see TrendPayloads.PerfmonLatestReply). */
-            return TrendPayloads.PerfmonLatestReply(resolved.ServerName, rows[0].CollectionTime.ToString("o"), result);
+            return TrendPayloads.PerfmonLatestReply(resolved.DisplayName, rows[0].CollectionTime.ToString("o"), result);
         }
         catch (Exception ex)
         {
@@ -86,7 +86,7 @@ public sealed class McpPerfmonTools
                    the miss path, so either order keeps the property that matters — but a permanently gated
                    engine takes this branch on every call, forever, and neither the probe nor the PLE branch
                    below could tell it anything. Asking first makes that case one query instead of two. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "perfmon_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "perfmon_stats");
                 if (gated != null)
                 {
                     return gated;
@@ -132,7 +132,7 @@ public sealed class McpPerfmonTools
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             return TrendPayloads.PerfmonTrend(
-                resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                resolved.DisplayName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
                 budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside);
         }
         catch (Exception ex)

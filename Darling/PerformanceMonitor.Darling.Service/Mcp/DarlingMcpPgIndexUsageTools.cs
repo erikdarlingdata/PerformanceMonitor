@@ -408,7 +408,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_index_usage_stats", cancellationToken);
+            postgres, serverId, displayName, "pg_index_usage_stats", cancellationToken);
         if (gated != null)
         {
             return gated;

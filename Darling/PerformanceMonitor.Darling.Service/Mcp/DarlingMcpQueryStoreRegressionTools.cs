@@ -112,14 +112,14 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, cancellationToken);
+                return await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, cancellationToken);
 
             var truncated = rows.Count > limit;
             var shown = rows.Take(limit);
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* The window floor, always present (false and null when the store covered the baseline). No effective_hours_back:
                    this payload carries a page `truncated`, and the census holds that key apart for the window floor, so the reach

@@ -62,13 +62,13 @@ public sealed class McpLongQueryTools
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
                 var unmet = McpHelpers.WithDatabase(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions"), database)
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "long_query_completions"), database)
                     /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
                        the schedule, which is the wrong place when the collector IS enabled and its session
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
                     ?? McpHelpers.WithDatabase(
-                        await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions"), database);
+                        await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "long_query_completions"), database);
                 if (unmet != null)
                 {
                     return unmet;
@@ -130,7 +130,7 @@ public sealed class McpLongQueryTools
 
             return McpQueryTools.WithTagFilter(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: where the store's data starts, always present (false and null when the store covered the
                    window). The floor is the earlier of the coverage probe and the oldest event this page shows: a

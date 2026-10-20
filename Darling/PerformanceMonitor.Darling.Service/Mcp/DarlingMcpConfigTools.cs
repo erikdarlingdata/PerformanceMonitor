@@ -48,14 +48,14 @@ public sealed class DarlingMcpConfigTools
         {
             var snapshot = await DarlingCurrentConfigReader.GetLatestServerConfigAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No server configuration data available. The config collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3541 A10: the connect-time capture this "current" configuration is as of. */
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 setting_count = snapshot.Count,
@@ -104,7 +104,7 @@ public sealed class DarlingMcpConfigTools
         {
             var snapshot = await DarlingCurrentConfigReader.GetLatestDatabaseConfigAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database configuration data available. The config collector may not have run yet.");
@@ -145,7 +145,7 @@ public sealed class DarlingMcpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = result.Count,
                 databases = result
@@ -179,12 +179,12 @@ public sealed class DarlingMcpConfigTools
         {
             var snapshot = await DarlingCurrentConfigReader.GetLatestTraceFlagsAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "trace_flags", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "trace_flags", cancellationToken)
                     ?? EmptyTraceFlagsStatus(await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, null, cancellationToken));
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 trace_flag_count = snapshot.Count,
                 trace_flags = snapshot.Rows.Select(r => new

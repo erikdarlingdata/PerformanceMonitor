@@ -76,11 +76,11 @@ public sealed class DarlingMcpHealthTools
             if (summary.HasNoData)
                 return McpHelpers.Status(
                     "unavailable",
-                    $"No data available for {resolved.ServerName}. The collector may not have run yet.");
+                    $"No data available for {resolved.DisplayName}. The collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 cpu_percent = summary.CpuPercent,
                 /* #3541 A10: each latest figure carries ITS OWN clock. last_collection below is the newest
                    collection of ANY collector — a live collection log beside a dead CPU collector made a
@@ -151,7 +151,7 @@ public sealed class DarlingMcpHealthTools
             if (row.DataState == DailySummaryDataState.Purged)
                 return McpHelpers.Status(
                     "unavailable",
-                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.ServerName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
+                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.DisplayName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
                     new
                     {
                         summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
@@ -165,12 +165,12 @@ public sealed class DarlingMcpHealthTools
             if (!row.HasData)
                 return McpHelpers.Status(
                     "empty",
-                    $"No data collected for {resolved.ServerName} on {row.SummaryDate:yyyy-MM-dd}.",
+                    $"No data collected for {resolved.DisplayName} on {row.SummaryDate:yyyy-MM-dd}.",
                     new { summary_date = row.SummaryDate.ToString("yyyy-MM-dd"), overall_health = row.HealthBand.ToString() });
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                 /* #3653 (A15/A16, one vocabulary): overall_health and health_band are the SAME band and now
                    carry the SAME spelling — the enum token (Healthy / Warning / Critical / NoData), which is
@@ -285,17 +285,17 @@ public sealed class DarlingMcpHealthTools
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"No collected days for {resolved.ServerName} between {fromDate:yyyy-MM-dd} and {lastDay:yyyy-MM-dd}. A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
+                        $"No collected days for {resolved.DisplayName} between {fromDate:yyyy-MM-dd} and {lastDay:yyyy-MM-dd}. A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
                         new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") })
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No collector runs have EVER been recorded for {resolved.ServerName}, so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
+                        $"No collector runs have EVER been recorded for {resolved.DisplayName}, so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
                         new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") });
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 days_back,
                 /* The bounds the read actually used, echoed back: with an anchor in play, a caller cannot
                    otherwise tell which days they were given from the days they got. */

@@ -87,7 +87,7 @@ ORDER BY server_name";
     /// degrades to an informative error string here — the tools' always-return-a-string
     /// contract holds instead of surfacing the MCP SDK's generic invocation error.
     /// </summary>
-    public static async Task<((int ServerId, string ServerName) resolved, string? error)> ResolveOrErrorAsync(
+    public static async Task<((int ServerId, string ServerName, string DisplayName) resolved, string? error)> ResolveOrErrorAsync(
         NpgsqlDataSource postgres,
         string? serverName,
         CancellationToken cancellationToken = default)
@@ -98,7 +98,7 @@ ORDER BY server_name";
             return (default, fault);
         }
 
-        var answer = ResolveOrError(servers, serverName);
+        var answer = ResolveOrErrorForAnswer(servers, serverName);
         if (answer.error is null)
         {
             /* #5097: the slow-read record names the server a read resolved; one site covers every server-scoped tool. */
@@ -116,26 +116,11 @@ ORDER BY server_name";
     /// <c>DisplayName</c>, which is what <c>list_servers</c> shows the caller as the server's name. A row with no display name
     /// falls back to the storage name.
     /// </summary>
-    public static async Task<((int ServerId, string ServerName, string DisplayName) resolved, string? error)> ResolveOrErrorForAnswerAsync(
+    public static Task<((int ServerId, string ServerName, string DisplayName) resolved, string? error)> ResolveOrErrorForAnswerAsync(
         NpgsqlDataSource postgres,
         string? serverName,
-        CancellationToken cancellationToken = default)
-    {
-        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
-        if (fault is not null)
-        {
-            return (default, fault);
-        }
-
-        var answer = ResolveOrErrorForAnswer(servers, serverName);
-        if (answer.error is null)
-        {
-            ReadScope.NoteServer(answer.resolved.ServerId);
-            DarlingWebFailureLog.NoteResolvedServer(answer.resolved.ServerName);
-        }
-
-        return answer;
-    }
+        CancellationToken cancellationToken = default) =>
+        ResolveOrErrorAsync(postgres, serverName, cancellationToken);
 
     /// <summary>The pure half of <see cref="ResolveOrErrorForAnswerAsync"/>, over an already-read registry.</summary>
     internal static ((int ServerId, string ServerName, string DisplayName) resolved, string? error) ResolveOrErrorForAnswer(
@@ -148,8 +133,40 @@ ORDER BY server_name";
         }
 
         var row = servers.FirstOrDefault(s => s.ServerId == resolved.ServerId);
-        var display = row is null || string.IsNullOrWhiteSpace(row.DisplayName) ? resolved.ServerName : row.DisplayName!;
-        return ((resolved.ServerId, resolved.ServerName, display), null);
+        return ((resolved.ServerId, resolved.ServerName, AnswerNameOf(servers, row)), null);
+    }
+
+    /// <summary>
+    /// The name an answer shows for a server (#6179): the display name when exactly one enabled registry row carries it, otherwise the
+    /// connection key. Two registrations can share a display name (a blank name falls back to the host, so two Azure SQL Database
+    /// entries on one logical server with different <c>database</c> values both read as the host); the key is the one value that
+    /// names exactly one of them, so a caller who passes the answer's <c>server</c> back as <c>server_name</c> reaches that server
+    /// rather than the "matches N monitored servers" refusal. A row with no display name shows its key.
+    /// </summary>
+    internal static string AnswerNameOf(IReadOnlyList<RegisteredServer> servers, RegisteredServer? row)
+    {
+        if (row is null)
+        {
+            return string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(row.DisplayName))
+        {
+            return row.ServerName;
+        }
+
+        var display = row.DisplayName!;
+        var holders = 0;
+        foreach (var s in servers)
+        {
+            if (string.Equals(s.DisplayName?.Trim(), display.Trim(), StringComparison.OrdinalIgnoreCase)
+                || (string.IsNullOrWhiteSpace(s.DisplayName) && string.Equals(s.ServerName, display, StringComparison.OrdinalIgnoreCase)))
+            {
+                holders++;
+            }
+        }
+
+        return holders == 1 ? display : row.ServerName;
     }
 
     /// <summary>
@@ -220,7 +237,7 @@ ORDER BY server_name";
     /// auto-selection an omitted name gets on a single-server store. The sentinel has to be asked for by
     /// name, so no ordinary call can land on it by accident.</para>
     /// </summary>
-    public static async Task<((int ServerId, string ServerName) resolved, string? error)>
+    public static async Task<((int ServerId, string ServerName, string DisplayName) resolved, string? error)>
         ResolveOrErrorWithFleetSentinelAsync(
             NpgsqlDataSource postgres,
             string? serverName,
@@ -232,7 +249,7 @@ ORDER BY server_name";
            real server is a perfectly ordinary answer. */
         if (IsFleetSentinelName(serverName))
         {
-            return ((DarlingObservability.FleetServerId, DarlingObservability.FleetServerName), null);
+            return ((DarlingObservability.FleetServerId, DarlingObservability.FleetServerName, DarlingObservability.FleetServerName), null);
         }
 
         var (resolved, error) = await ResolveOrErrorAsync(postgres, serverName, cancellationToken).ConfigureAwait(false);
@@ -415,7 +432,7 @@ ORDER BY server_name";
     /// Resolves a server AND the fingerprint name for it, in one registry read — the incident readers that
     /// accept a <c>dedup_key</c> need both, and reading the registry twice could disagree with itself.
     /// </summary>
-    public static async Task<((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName) resolved, string? error)>
+    public static async Task<((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName, string DisplayName) resolved, string? error)>
         ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName, CancellationToken cancellationToken = default)
     {
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
@@ -428,7 +445,7 @@ ORDER BY server_name";
     }
 
     /// <summary>The pure half of <see cref="ResolveWithFingerprintNameAsync"/>, over an already-read registry.</summary>
-    internal static ((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName) resolved, string? error)
+    internal static ((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName, string DisplayName) resolved, string? error)
         ResolveWithFingerprintName(IReadOnlyList<RegisteredServer> servers, string? serverName)
     {
         var (resolved, error) = ResolveOrError(servers, serverName);
@@ -444,7 +461,7 @@ ORDER BY server_name";
         var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row, shared);
         var legacyFingerprintName = row is null ? null : LegacyFingerprintNameOf(row, shared);
 
-        return ((resolved.ServerId, resolved.ServerName, fingerprintName, legacyFingerprintName), null);
+        return ((resolved.ServerId, resolved.ServerName, fingerprintName, legacyFingerprintName, AnswerNameOf(servers, row)), null);
     }
 
     /// <summary>Reads the enabled rows from the servers registry.</summary>

@@ -50,7 +50,7 @@ public sealed class McpAnalysisTools
             {
                 return JsonSerializer.Serialize(new
                 {
-                    server = resolved.ServerName,
+                    server = resolved.DisplayName,
                     status = "insufficient_data",
                     message = analysisService.InsufficientDataMessage
                 }, McpHelpers.JsonOptions);
@@ -168,7 +168,7 @@ public sealed class McpAnalysisTools
                serializer call, same bytes — and a JsonObject with collection_caveats appended last otherwise. */
             return JsonSerializer.Serialize(collection.Attach(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 status = "findings",
                 finding_count = findings.Count,
                 analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
@@ -340,7 +340,7 @@ public sealed class McpAnalysisTools
                    after configuration alone knows audit_config still has it. */
                 return McpHelpers.Status(
                     "unavailable",
-                    $"The collector observed none of the requested window for {resolved.ServerName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
+                    $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when each collector last succeeded." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
@@ -392,7 +392,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(collection.Attach(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 total_facts = facts.Count,
                 shown = result.Count,
                 filters = new { source, min_severity },
@@ -496,10 +496,10 @@ public sealed class McpAnalysisTools
                 */
                 return McpHelpers.Status(
                     "unavailable",
-                    $"No analysis facts were collected for {resolved.ServerName} in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed. Fact collection needs collected data in the window it scores; check that collection covered both periods (get_collection_log) before drawing any conclusion from this comparison.",
+                    $"No analysis facts were collected for {resolved.DisplayName} in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed. Fact collection needs collected data in the window it scores; check that collection covered both periods (get_collection_log) before drawing any conclusion from this comparison.",
                     new
                     {
-                        server = resolved.ServerName,
+                        server = resolved.DisplayName,
                         baseline_start = baselineStart.ToString("o"),
                         baseline_end = baselineEnd.ToString("o"),
                         comparison_start = comparisonStart.ToString("o"),
@@ -558,7 +558,7 @@ public sealed class McpAnalysisTools
             var factRows = comparison.Rows.Select(r => r.ToPayload()).ToList();
             return McpResponseBudget.FitPrefix(factRows.Count, factCount => JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* Null when both windows produced facts at full coverage — the ordinary case, where
                    nothing needs saying. */
                 caveat,
@@ -784,10 +784,10 @@ public sealed class McpAnalysisTools
             {
                 /* Same engine question get_server_config asks on its miss: an engine that never collects
                    server_config (Azure SQL Database) gets the permanent-gap answer, not "may not have run yet". */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config")
                     ?? JsonSerializer.Serialize(new
                     {
-                        server = resolved.ServerName,
+                        server = resolved.DisplayName,
                         status = "no_config_data",
                         message = "No configuration data found. The config collector may not have run yet."
                     }, McpHelpers.JsonOptions);
@@ -795,7 +795,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 edition = editionName,
                 edition_note = editionNote,
                 total_physical_memory_mb = totalMemoryMb > 0 ? totalMemoryMb : (double?)null,
@@ -947,7 +947,7 @@ public sealed class McpAnalysisTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 finding_count = groups.Count,
                 total_finding_count = totalFindingCount,
                 total_occurrences = findings.Count,

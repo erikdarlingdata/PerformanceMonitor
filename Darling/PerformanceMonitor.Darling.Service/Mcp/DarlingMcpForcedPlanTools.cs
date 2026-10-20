@@ -106,7 +106,7 @@ public sealed class DarlingMcpForcedPlanTools
             var where = scope is null ? "" : $" for {(databases.Names.Count == 1 ? "database '" + scope + "'" : scope)}";
             if (read.Captures.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store_forced_plans", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store_forced_plans", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         $"No forced-plan capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_forced_plans collector has not run in it, " +
                         "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).");
@@ -116,7 +116,7 @@ public sealed class DarlingMcpForcedPlanTools
             {
                 return JsonSerializer.Serialize(new Dictionary<string, object?>
                 {
-                    ["server"] = resolved.ServerName,
+                    ["server"] = resolved.DisplayName,
                     ["status"] = "empty",
                     ["message"] = $"No plan is forced{where} in the newest capture of each database in the window. Captured databases are listed.",
                     ["as_of"] = Format(windowEnd),
@@ -132,7 +132,7 @@ public sealed class DarlingMcpForcedPlanTools
             var listed = truncated ? ordered.Take(MaxListed).ToList() : ordered;
             return JsonSerializer.Serialize(new Dictionary<string, object?>
             {
-                ["server"] = resolved.ServerName,
+                ["server"] = resolved.DisplayName,
                 ["as_of"] = Format(windowEnd),
                 ["hours_back"] = hours_back,
                 ["total_forces"] = ordered.Count,

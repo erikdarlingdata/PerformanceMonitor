@@ -422,7 +422,8 @@ public sealed class DarlingMcpToolsTests
             using (var doc = JsonDocument.Parse(findingsJson))
             {
                 var root = doc.RootElement;
-                Assert.Equal(TestServerName, root.GetProperty("server").GetString());
+                /* #6179: the answer names the server by its registry display name, not the storage key. */
+                Assert.Equal(TestServerDisplay, root.GetProperty("server").GetString());
                 Assert.Equal(1, root.GetProperty("finding_count").GetInt32());
                 /* #2000: finding_count is DEDUPED groups; total_occurrences is raw rows; a read
                    nowhere near the window-covering cap carries a present-but-null truncation_note. */
@@ -590,14 +591,14 @@ public sealed class DarlingMcpToolsTests
                 analysisService, postgres, "mcp-e2e", 24);
             using (var doc = JsonDocument.Parse(partialJson))
             {
-                Assert.Equal(TestServerName, doc.RootElement.GetProperty("server").GetString());
+                Assert.Equal(TestServerDisplay, doc.RootElement.GetProperty("server").GetString());
             }
 
             var displayJson = await DarlingMcpTools.GetAnalysisFindings(
                 analysisService, postgres, TestServerDisplay, 24);
             using (var doc = JsonDocument.Parse(displayJson))
             {
-                Assert.Equal(TestServerName, doc.RootElement.GetProperty("server").GetString());
+                Assert.Equal(TestServerDisplay, doc.RootElement.GetProperty("server").GetString());
             }
 
             var unknown = await DarlingMcpTools.GetAnalysisFindings(

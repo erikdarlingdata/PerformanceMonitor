@@ -174,7 +174,7 @@ public sealed class DarlingMcpThresholdOverrideTools
             return JsonSerializer.Serialize(new
             {
                 status = clear ? "cleared" : "ok",
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 server_id = resolved.ServerId,
                 key = wire,
                 database = database,

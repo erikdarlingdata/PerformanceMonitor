@@ -71,9 +71,9 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? McpHelpers.Status("empty",
-                        $"No statement CPU for {resolved.ServerName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
+                        $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
                         + "Procedure stats are not a substitute, because they count the same work.",
                         notice.AsHints());
             }
@@ -108,7 +108,7 @@ public sealed class McpWhoDroveItTools
 
             var node = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -184,9 +184,9 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_snapshots")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots")
                     ?? McpHelpers.Status("empty",
-                        $"No active-query snapshots for {resolved.ServerName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
+                        $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
                         notice.AsHints());
             }
 
@@ -221,7 +221,7 @@ public sealed class McpWhoDroveItTools
 
             var node = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -285,15 +285,15 @@ public sealed class McpWhoDroveItTools
 
             if (page.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_snapshots")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots")
                     ?? McpHelpers.Status("empty",
-                        $"No capture in the last {hours_back} hour(s) on {resolved.ServerName} had {min_sessions} or more sessions running the same query_hash. "
+                        $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
                         notice.AsHints());
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */
-            var blockingGate = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "dmv_blocking_snapshot");
+            var blockingGate = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "dmv_blocking_snapshot");
             Dictionary<DateTime, DateTime> nearest = [];
             var pairsBySnapshot = new Dictionary<DateTime, List<LocalDataService.BlockingPair>>();
             if (blockingGate is null)
@@ -348,7 +348,7 @@ public sealed class McpWhoDroveItTools
 
             var node = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,

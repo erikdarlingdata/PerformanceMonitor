@@ -277,7 +277,7 @@ public sealed partial class DarlingMcpFinOpsTools
     }
 
     private static async Task<string> ReadIndexAnalysisAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit,
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit,
         string? databaseName, bool fullText, CancellationToken ct, ILogger? logger = null)
     {
         if (hoursBack != 24)
@@ -291,12 +291,12 @@ public sealed partial class DarlingMcpFinOpsTools
         if (result.DatabaseRollups.Count == 0)
         {
             notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
-                postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", ct);
+                postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", ct);
         }
 
         /* #5633 review (finding D): a page with rows or without names the databases the read left out, in the envelope. */
         return McpHelpers.WithDatabasesLeftOut(
-            BuildIndexAnalysisPayload(resolved.ServerName, result, limit, databaseName, fullText, notCollected, read.SnapshotTimes, read.OmittedDatabases?.Count ?? 0),
+            BuildIndexAnalysisPayload(resolved.DisplayName, result, limit, databaseName, fullText, notCollected, read.SnapshotTimes, read.OmittedDatabases?.Count ?? 0),
             read.OmittedDatabases)!;
     }
 }

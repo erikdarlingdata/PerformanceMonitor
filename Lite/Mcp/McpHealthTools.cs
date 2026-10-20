@@ -45,12 +45,12 @@ public sealed class McpHealthTools
             {
                 return McpHelpers.Status(
                     "unavailable",
-                    $"No data available for {resolved.ServerName}. The collector may not have run yet.");
+                    $"No data available for {resolved.DisplayName}. The collector may not have run yet.");
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 cpu_percent = summary.CpuPercent,
                 /* #3541 A10: each latest figure carries ITS OWN clock. last_collection below is the newest
                    collection of ANY collector — a live collection log beside a dead CPU collector made a
@@ -95,7 +95,7 @@ public sealed class McpHealthTools
             if (row is { DataState: DailySummaryDataState.Purged })
                 return McpHelpers.Status(
                     "unavailable",
-                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.ServerName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
+                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.DisplayName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
                     new
                     {
                         summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
@@ -111,13 +111,13 @@ public sealed class McpHealthTools
                 var missDate = row?.SummaryDate ?? date ?? DateTime.UtcNow.Date;
                 return McpHelpers.Status(
                     "empty",
-                    $"No data collected for {resolved.ServerName} on {missDate:yyyy-MM-dd}.",
+                    $"No data collected for {resolved.DisplayName} on {missDate:yyyy-MM-dd}.",
                     new { summary_date = missDate.ToString("yyyy-MM-dd"), overall_health = row?.HealthBand.ToString() });
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                 /* #3653 (A15/A16, one vocabulary): overall_health and health_band are the SAME band and now
                    carry the SAME spelling — the enum token (Healthy / Warning / Critical / NoData), which is
@@ -225,17 +225,17 @@ public sealed class McpHealthTools
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"No collected days for {resolved.ServerName} between {fromDate:yyyy-MM-dd} and {lastDay:yyyy-MM-dd}. A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
+                        $"No collected days for {resolved.DisplayName} between {fromDate:yyyy-MM-dd} and {lastDay:yyyy-MM-dd}. A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
                         new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") })
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No collector runs have EVER been recorded for {resolved.ServerName}, so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
+                        $"No collector runs have EVER been recorded for {resolved.DisplayName}, so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
                         new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") });
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 days_back,
                 /* The bounds the read actually used, echoed back: with an anchor in play, a caller cannot
                    otherwise tell which days they were given from the days they got. */
@@ -582,7 +582,7 @@ public sealed class McpHealthTools
             var collectorRows = result.ToList();
             return McpResponseBudget.FitPrefix(collectorRows.Count, collectorCount => JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3453: the build-attribution read, and deliberately the same block Darling's twin
                    carries - the two SKUs' descriptions are pinned byte-identical, so a block the shared
                    text documents has to exist on both or the text lies to one SKU's callers. On this SKU
@@ -1137,7 +1137,7 @@ public sealed class McpHealthTools
                 {
                     return McpHelpers.Status(
                         "unavailable",
-                        $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that collection is running and that the server is enabled; get_collection_health will be equally empty until it does.");
+                        $"No collector runs have EVER been recorded for {resolved.DisplayName}. This is not an empty window — collection has not run at all for this server. Check that collection is running and that the server is enabled; get_collection_health will be equally empty until it does.");
                 }
 
                 var emptyNotice = await NoticeAsync(emptyAnswer: true);
@@ -1146,7 +1146,7 @@ public sealed class McpHealthTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
+                        $"No collector runs on {resolved.DisplayName} in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
                         emptyNotice.AsHints());
                 }
 
@@ -1154,7 +1154,7 @@ public sealed class McpHealthTools
                     "empty",
                     McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s)",
+                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {hours} hour(s)",
                         coveredClaim: ". This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs."),
                     emptyNotice.AsHints());
             }
@@ -1192,7 +1192,7 @@ public sealed class McpHealthTools
             var cut = pageCount < rows.Count;
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* The span REQUESTED, and no longer the only span reported -- see the two timestamps. */
                 hours_back = hours,
                 /* #4966: where the run log starts, always present (false and null when the log covered the window). No
@@ -1417,7 +1417,7 @@ public sealed class McpHealthTools
                     Both empty is two facts, and the wrong one is the REASSURING one -- "nothing was
                     waiting" reads as all-clear and stops a caller looking. Same words as Darling's twin.
                 */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks");
                 if (gated != null)
                 {
                     return gated;
@@ -1427,15 +1427,15 @@ public sealed class McpHealthTools
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"Nothing was waiting on {resolved.ServerName} in the last {hours} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                        $"Nothing was waiting on {resolved.DisplayName} in the last {hours} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No waiting-task samples have EVER been recorded for {resolved.ServerName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
+                        $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back = hours,
                 database_name = filter?[0],
                 waiting_tasks = waits.Select(w => new
@@ -1519,7 +1519,7 @@ public sealed class McpHealthTools
                 /* The denominator is whether we LOOKED, not whether we ever FOUND anything: these are
                    edge tables, and a healthy server that never blocked has no rows to find. Same words
                    as Darling's twin. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "blocked_process_report");
                 if (gated != null)
                 {
                     return gated;
@@ -1537,20 +1537,20 @@ public sealed class McpHealthTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: database == null
-                                ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s)"
-                                : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours} hour(s)",
+                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours} hour(s)"
+                                : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
+                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
             }
 
             var notice = await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd);
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back = hours,
                 /* #4966: where this server's blocking data starts for the window, always present (false and null when the
                    store covered it). ONE notice for the two series, from the later of the two series' floors. No
